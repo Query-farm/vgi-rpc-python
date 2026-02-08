@@ -419,12 +419,12 @@ def _wait_for_http(port: int, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5.0)
             # Any response (even 404) means the server is up
             del resp
             return
-        except httpx.ConnectError:
-            time.sleep(0.05)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            time.sleep(0.1)
     raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
 
 
