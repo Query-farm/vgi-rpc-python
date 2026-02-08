@@ -198,6 +198,7 @@ class TestFromException:
 
     def test_long_traceback_truncated(self) -> None:
         """Traceback longer than _MAX_TRACEBACK_CHARS is truncated."""
+
         # Create a deeply nested call to produce a long traceback
         def recursive(n: int) -> None:
             if n <= 0:
