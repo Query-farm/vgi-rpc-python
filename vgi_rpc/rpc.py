@@ -53,8 +53,8 @@ State-Based Stream Model
 -------------------------
 Server stream and bidi stream methods return ``ServerStream[S]`` or
 ``BidiStream[S]`` where ``S`` is a state object with explicit ``produce()``
-or ``process()`` methods.  This replaces generators and enables future HTTP
-transport where state must be serialized between requests.
+or ``process()`` methods.  State objects extend ``ArrowSerializableDataclass``
+so they can be serialized between requests (required for HTTP transport).
 
 Out-of-Band Logging
 -------------------
@@ -439,7 +439,7 @@ def _get_param_defaults(protocol: type, method_name: str) -> dict[str, Any]:
 def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
     """Introspect a Protocol class and return RpcMethodInfo for each method.
 
-    Skips dunder methods and non-callable attributes.
+    Skips underscore-prefixed names and non-callable attributes.
     """
     result: dict[str, RpcMethodInfo] = {}
 
@@ -510,6 +510,7 @@ def _validate_implementation(
         TypeError: If one or more validation errors are found.  The
             message lists every problem so the developer can fix them
             all in one pass.
+
     """
     errors: list[str] = []
 
@@ -541,9 +542,7 @@ def _validate_implementation(
                 inspect.Parameter.VAR_POSITIONAL,
                 inspect.Parameter.VAR_KEYWORD,
             ):
-                errors.append(
-                    f"'{name}()' has required parameter '{param_name}' not defined in {protocol.__name__}"
-                )
+                errors.append(f"'{name}()' has required parameter '{param_name}' not defined in {protocol.__name__}")
 
     if errors:
         impl_name = type(implementation).__name__
@@ -1003,10 +1002,8 @@ class RpcServer:
         try:
             method_name, kwargs = _read_request(transport.reader)
         except pa.lib.ArrowInvalid as exc:
-            try:
+            with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
-            except (BrokenPipeError, OSError):
-                pass
             raise
         info = self._methods.get(method_name)
         if info is None:

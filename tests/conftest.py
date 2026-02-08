@@ -12,7 +12,22 @@ from pathlib import Path
 import httpx
 import pytest
 
+from vgi_rpc.rpc import SubprocessTransport
+
+_SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
 _SERVE_FIXTURE_HTTP = str(Path(__file__).parent / "serve_fixture_http.py")
+
+
+def _worker_cmd() -> list[str]:
+    """Return the command to launch the test RPC worker subprocess.
+
+    Prefers the installed ``vgi-rpc-test-worker`` entry point; falls back
+    to running the fixture script directly.
+    """
+    entry_point = shutil.which("vgi-rpc-test-worker")
+    if entry_point:
+        return [entry_point]
+    return [sys.executable, _SERVE_FIXTURE]
 
 
 def _http_worker_cmd() -> list[str]:
@@ -56,3 +71,11 @@ def http_server_port() -> Iterator[int]:
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def subprocess_worker() -> Iterator[SubprocessTransport]:
+    """Spawn a single subprocess worker for the entire test session."""
+    transport = SubprocessTransport(_worker_cmd())
+    yield transport
+    transport.close()

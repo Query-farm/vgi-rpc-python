@@ -32,13 +32,17 @@ Tests should complete in 30 seconds or less ALWAYS!
 
 ## Architecture
 
-### Three modules, one package (`vgi_rpc/`)
+### Core modules (`vgi_rpc/`)
 
 - **`rpc.py`** — The RPC framework. Defines the wire protocol, method types (UNARY, SERVER_STREAM, BIDI_STREAM), and the core classes: `RpcServer`, `RpcConnection`, `RpcTransport`, `PipeTransport`. Introspects Protocol classes via `rpc_methods()` to extract `RpcMethodInfo` (schemas, method type). Client gets a typed proxy from `RpcConnection`; server dispatches via `RpcServer.serve()`.
 
 - **`utils.py`** — Arrow serialization layer. `ArrowSerializableDataclass` mixin auto-generates `ARROW_SCHEMA` from dataclass field annotations and provides `serialize()`/`deserialize_from_batch()`. Handles type inference from Python types to Arrow types (including generics, Enum, Optional, nested dataclasses). Also provides low-level IPC stream read/write helpers.
 
 - **`log.py`** — Structured log messages (`Message` with `Level` enum). Messages are serialized out-of-band as zero-row batches with metadata keys `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`. Server methods can accept an optional `emit_log: EmitLog` parameter injected by the framework.
+
+- **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.bidi_state`, `vgi_rpc.log_level`, etc.) and provides encoding, decoding, merging, and key-stripping utilities used by `rpc.py`, `http.py`, and `utils.py`.
+
+- **`http.py`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport using Starlette (server) and httpx (client). Exposes `make_asgi_app()` to serve an `RpcServer` as an ASGI app, and `http_connect()` for the client side. Bidi streaming is stateless: each exchange carries serialized `BidiStreamState` in Arrow custom metadata.
 
 ### Wire protocol
 

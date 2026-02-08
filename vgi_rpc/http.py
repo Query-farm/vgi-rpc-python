@@ -107,10 +107,8 @@ class _HttpRpcApp:
         resp_buf = BytesIO()
 
         transport = PipeTransport(req_buf, resp_buf)
-        try:
+        with contextlib.suppress(pa.lib.ArrowInvalid):
             await asyncio.to_thread(self._server.serve_one, transport)
-        except pa.lib.ArrowInvalid:
-            pass  # Error already written to resp_buf by serve_one
 
         return Response(content=resp_buf.getvalue(), media_type=_ARROW_CONTENT_TYPE)
 
@@ -239,9 +237,9 @@ class _HttpRpcApp:
         output_schema = self._bidi_output_schemas.get(method_name)
         if output_schema is None:
             resp_buf = BytesIO()
-            exc = RuntimeError(f"No output schema cached for method '{method_name}'")
+            err = RuntimeError(f"No output schema cached for method '{method_name}'")
             with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
-                _write_error_batch(writer, _EMPTY_SCHEMA, exc)
+                _write_error_batch(writer, _EMPTY_SCHEMA, err)
             return resp_buf.getvalue()
 
         # Strip vgi_rpc.bidi_state from metadata visible to process()

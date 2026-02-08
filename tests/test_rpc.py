@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import contextlib
-import shutil
-import sys
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Annotated, Protocol
 
 import pyarrow as pa
@@ -33,6 +30,7 @@ from vgi_rpc.rpc import (
     ServerStream,
     ServerStreamState,
     StreamSession,
+    SubprocessTransport,
     _RpcProxy,
     connect,
     describe_rpc,
@@ -42,6 +40,8 @@ from vgi_rpc.rpc import (
     serve_pipe,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
+
+from .conftest import _worker_cmd
 
 type RpcProxyType = _RpcProxy | _HttpProxy
 
@@ -379,23 +379,6 @@ def rpc_server_transport(
         assert not thread.is_alive(), "Server thread did not terminate"
 
 
-# ---------------------------------------------------------------------------
-# Helpers: subprocess worker command
-# ---------------------------------------------------------------------------
-
-_SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
-def _worker_cmd() -> list[str]:
-    """Return the command to launch the test RPC worker subprocess.
-
-    Prefers the installed ``vgi-rpc-test-worker`` entry point; falls back
-    to running the fixture script directly.
-    """
-    entry_point = shutil.which("vgi-rpc-test-worker")
-    if entry_point:
-        return [entry_point]
-    return [sys.executable, _SERVE_FIXTURE]
-
-
 @contextlib.contextmanager
 def http_conn(port: int, on_log: Callable[[Message], None] | None = None) -> Iterator[_HttpProxy]:
     """Yield an HTTP proxy connected to a shared server on *port*."""
@@ -413,7 +396,11 @@ ConnFactory = Callable[..., contextlib.AbstractContextManager[RpcProxyType]]
 
 
 @pytest.fixture(params=["pipe", "subprocess", "http"])
-def make_conn(request: pytest.FixtureRequest, http_server_port: int) -> ConnFactory:
+def make_conn(
+    request: pytest.FixtureRequest,
+    http_server_port: int,
+    subprocess_worker: SubprocessTransport,
+) -> ConnFactory:
     """Return a factory that creates an RPC connection context manager."""
 
     def factory(
@@ -422,7 +409,12 @@ def make_conn(request: pytest.FixtureRequest, http_server_port: int) -> ConnFact
         if request.param == "pipe":
             return rpc_conn(on_log=on_log)
         elif request.param == "subprocess":
-            return connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
+
+            @contextlib.contextmanager
+            def _conn() -> Iterator[_RpcProxy]:
+                yield _RpcProxy(RpcFixtureService, subprocess_worker, on_log)
+
+            return _conn()
         else:
             return http_conn(http_server_port, on_log=on_log)
 

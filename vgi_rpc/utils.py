@@ -5,17 +5,14 @@ VGI protocol, reducing code duplication between client and worker.
 
 KEY FUNCTIONS
 -------------
-serialize_record_batch(batch, batch_type, metadata) : Serialize with batch type
-deserialize_record_batch(data) : Deserialize and validate type
-read_single_record_batch(stream, context) : Read and validate
-validate_single_row_batch(batch, class_name, required_fields, custom_metadata) : Validate batch and verify batch type
-get_batch_type(metadata) : Extract batch type from metadata
+serialize_record_batch(destination, batch, custom_metadata) : Serialize to stream
+serialize_record_batch_bytes(batch, custom_metadata) : Serialize to bytes
+deserialize_record_batch(data) : Deserialize from bytes
+read_single_record_batch(stream, context) : Read and validate single batch
 
 KEY CLASSES
 -----------
-RecordBatchState : Wrapper for RecordBatch implementing Serializable protocol.
-    Use this in distributed functions for storing/collecting state across workers.
-
+ArrowSerializableDataclass : Mixin for dataclasses with automatic Arrow IPC serialization.
 IPCError : Exception raised on IPC communication errors
 
 """
@@ -97,20 +94,16 @@ def serialize_record_batch(
     batch: pa.RecordBatch,
     custom_metadata: pa.KeyValueMetadata | None = None,
 ) -> None:
-    """Serialize a RecordBatch to bytes in Arrow IPC stream format.
+    """Serialize a RecordBatch to an Arrow IPC stream.
 
     Uses RecordBatchStreamWriter to produce a complete IPC stream with
-    schema, batch, and end-of-stream marker. The batch type is automatically
-    added to the metadata for validation on deserialization.
+    schema, batch, and end-of-stream marker.
 
     Args:
         destination: The destination to write to (must support binary writes,
-        e.g., stdout pipe, BufferedWriter).
+            e.g., stdout pipe, BufferedWriter).
         batch: The RecordBatch to serialize.
         custom_metadata: Optional additional metadata to include.
-
-    Returns:
-        Complete Arrow IPC stream bytes including EOS marker.
 
     """
     with ipc.RecordBatchStreamWriter(destination, batch.schema) as writer:
@@ -132,12 +125,10 @@ def serialize_record_batch_bytes(
     """Serialize a RecordBatch to bytes in Arrow IPC stream format.
 
     Uses RecordBatchStreamWriter to produce a complete IPC stream with
-    schema, batch, and end-of-stream marker. The batch type is automatically
-    added to the metadata for validation on deserialization.
+    schema, batch, and end-of-stream marker.
 
     Args:
         batch: The RecordBatch to serialize.
-        batch_type: The type of batch being serialized (required for validation).
         custom_metadata: Optional additional metadata to include.
 
     Returns:
@@ -154,19 +145,15 @@ def deserialize_record_batch(
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Deserialize bytes back to a RecordBatch with custom metadata.
 
-    Validates that the batch type in metadata matches the expected type.
-
     Args:
         data: Bytes containing a serialized RecordBatch in Arrow IPC stream format.
-        expected_type: The expected batch type (required for validation).
 
     Returns:
         Tuple of (RecordBatch, custom_metadata). The custom_metadata may be None
         if no custom metadata was attached to the batch.
 
     Raises:
-        IPCError: If more than a single batch is found, or no batches are found.
-        ValueError: If the batch type doesn't match expected_type.
+        IPCError: If no batches are found in the data.
 
     """
     with ipc.open_stream(pa.BufferReader(data)) as reader:
@@ -197,15 +184,14 @@ def read_single_record_batch(
             BufferedReader). Type is Any to accommodate runtime reassignment
             of stdin/stdout to binary mode.
         context: Description for error messages (e.g., "invocation", "init_input").
-        expected_type: If provided, validate that the batch type matches.
 
     Returns:
         Tuple of (RecordBatch, custom_metadata). The custom_metadata may be None
         if no custom metadata was attached to the batch.
 
     Raises:
-        IPCError: If more than a single batch is found, or no batches are found.
-        ValueError: If expected_type is provided and batch type doesn't match.
+        IPCError: If more than a single batch is found, no batches are found,
+            or reading fails.
 
     """
     try:
@@ -255,17 +241,14 @@ def _validate_single_row_batch(
         data: The RecordBatch to validate.
         class_name: Name of the class being deserialized (for error messages).
         required_fields: Optional list of field names that must be present.
-        custom_metadata: Optional custom metadata from the batch (for batch
-            type validation).
-        expected_type: If provided, validate that the batch's type
-            matches this value.
+        custom_metadata: Optional custom metadata from the batch.
 
     Returns:
         The first (and only) row as a dictionary.
 
     Raises:
-        ValueError: If the batch is empty, has multiple rows, is missing
-            required fields, or has wrong batch type.
+        ValueError: If the batch is empty, has multiple rows, or is missing
+            required fields.
 
     """
     if data.num_rows == 0:
@@ -517,7 +500,7 @@ class ArrowSerializableDataclass:
     - Basic types: str, bytes, int, float, bool
     - Generic types: list[T], dict[K, V], frozenset[T]
     - NewType: unwraps to underlying type (e.g., NewType("Id", bytes) -> binary)
-    - Enum: serializes as dictionary-encoded string via .value
+    - Enum: serializes as dictionary-encoded string via .name
     - ArrowSerializableDataclass: serializes as struct
 
     Optional fields (annotated with `| None`) are marked as nullable.
@@ -538,11 +521,13 @@ class ArrowSerializableDataclass:
         """Convert instance to a dictionary for Arrow batch construction.
 
         Handles special type conversions:
+        - pa.Schema -> bytes (via serialize())
+        - pa.RecordBatch -> bytes (via IPC stream)
+        - ArrowSerializableDataclass -> dict (serialize nested dataclass)
+        - Enum -> .name (serialize as the enum member's name)
         - frozenset -> list (Arrow doesn't support sets)
         - dict -> list of tuples (for map types)
-        - Enum -> .value (serialize as the enum's value)
-        - ArrowSerializableDataclass -> dict (serialize nested dataclass)
-        - list[Enum] or list[ArrowSerializableDataclass] -> list of values/dicts
+        - list elements -> recursively converted
 
         """
         row: dict[str, Any] = {}
@@ -597,13 +582,10 @@ class ArrowSerializableDataclass:
         return value
 
     def _serialize(self) -> pa.RecordBatch:
-        """Serialize this instance a batch type and a record Batch.
+        """Serialize this instance to a single-row RecordBatch.
 
         Returns:
-            A tuple of the pa.RecordBatch and the BatchType
-
-        Raises:
-            ValueError: If Meta.batch_type is not defined on the class.
+            A pa.RecordBatch containing one row with the instance's field values.
 
         """
         row_dict = self._to_row_dict()
@@ -618,9 +600,6 @@ class ArrowSerializableDataclass:
             dest: The destination to write to (must support binary writes,
                 e.g., stdout pipe, BufferedWriter).
 
-        Raises:
-            ValueError: If Meta.batch_type is not defined on the class.
-
         """
         serialize_record_batch(dest, self._serialize())
 
@@ -629,9 +608,6 @@ class ArrowSerializableDataclass:
 
         Returns:
             Arrow IPC stream bytes containing a single-row RecordBatch.
-
-        Raises:
-            ValueError: If Meta.batch_type is not defined on the class.
 
         """
         return serialize_record_batch_bytes(self._serialize())
@@ -652,8 +628,7 @@ class ArrowSerializableDataclass:
             Deserialized instance of this class.
 
         Raises:
-            ValueError: If the batch is invalid (wrong row count, missing fields,
-                or wrong batch type).
+            ValueError: If the batch is invalid (wrong row count or missing fields).
 
         """
         # Get required fields (those without defaults) from dataclass definition.
@@ -792,8 +767,7 @@ class ArrowSerializableDataclass:
             Deserialized instance of this class.
 
         Raises:
-            ValueError: If the batch is invalid (wrong row count, missing fields,
-                wrong batch type, or Meta.batch_type is not defined).
+            ValueError: If the batch is invalid (wrong row count or missing fields).
 
         """
         return cls.deserialize_from_batch(*deserialize_record_batch(data))

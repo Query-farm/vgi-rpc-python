@@ -1,8 +1,9 @@
 """Logging utilities for VGI functions.
 
 This module provides Level and Message for emitting diagnostic information
-during function processing. Log messages are attached to output metadata and
-transmitted to the client alongside output batches.
+during RPC method processing. Log messages are transmitted to the client as
+zero-row batches with log metadata, interleaved with data batches in the
+IPC stream.
 
 CONVENIENCE CONSTRUCTORS
 ------------------------
@@ -23,7 +24,7 @@ the full traceback:
     try:
         risky_operation()
     except Exception as e:
-        yield Message.from_exception(e)  # Includes traceback
+        emit_log(Message.from_exception(e))  # Includes traceback
 
 KEY CLASSES
 -----------
@@ -69,11 +70,10 @@ class Level(Enum):
 
 
 class Message:
-    """Log message that can be yielded from process() directly or via Result.
+    """Log message emitted during RPC method processing.
 
-    Message allows functions to emit diagnostic information during batch
-    processing. Messages are attached to the output metadata and transmitted
-    to the client alongside the output batch.
+    Messages are emitted via the ``emit_log`` callback or ``OutputCollector.log()``
+    and transmitted to the client as zero-row batches with log metadata.
 
     Attributes:
         level: Severity level indicating the nature of the message.
@@ -170,8 +170,7 @@ class Message:
             New dict containing original entries plus:
             - vgi_rpc.log_level: The Level value (e.g., "INFO", "EXCEPTION")
             - vgi_rpc.log_message: The human-readable message text
-            - vgi_rpc.log_extra: JSON string with {correlation_id, invocation_id,
-                pid, ...extra kwargs}
+            - vgi_rpc.log_extra: JSON string with {pid, ...extra kwargs}
 
         """
         result = dict(metadata) if metadata else {}

@@ -50,7 +50,7 @@ def decode_metadata(
 
 
 def merge_metadata(
-    *metadata_dicts: pa.KeyValueMetadata | dict[bytes, bytes] | None,
+    *metadata_dicts: pa.KeyValueMetadata | dict[bytes, bytes] | dict[str, str] | None,
 ) -> pa.KeyValueMetadata | None:
     """Merge multiple metadata objects into one.
 
