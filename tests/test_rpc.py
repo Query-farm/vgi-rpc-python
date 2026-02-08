@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import shutil
-import subprocess
 import sys
 import threading
-import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Protocol
 
-import httpx
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
@@ -387,9 +384,6 @@ def rpc_server_transport(
 # ---------------------------------------------------------------------------
 
 _SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
-_SERVE_FIXTURE_HTTP = str(Path(__file__).parent / "serve_fixture_http.py")
-
-
 def _worker_cmd() -> list[str]:
     """Return the command to launch the test RPC worker subprocess.
 
@@ -402,54 +396,11 @@ def _worker_cmd() -> list[str]:
     return [sys.executable, _SERVE_FIXTURE]
 
 
-def _http_worker_cmd() -> list[str]:
-    """Return the command to launch the test HTTP RPC worker subprocess.
-
-    Prefers the installed ``vgi-rpc-test-http-worker`` entry point; falls back
-    to running the fixture script directly.
-    """
-    entry_point = shutil.which("vgi-rpc-test-http-worker")
-    if entry_point:
-        return [entry_point]
-    return [sys.executable, _SERVE_FIXTURE_HTTP]
-
-
-def _wait_for_http(port: int, timeout: float = 5.0) -> None:
-    """Poll until the HTTP server is accepting connections."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5.0)
-            # Any response (even 404) means the server is up
-            del resp
-            return
-        except (httpx.ConnectError, httpx.ConnectTimeout):
-            time.sleep(0.1)
-    raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
-
-
 @contextlib.contextmanager
-def http_conn(on_log: Callable[[Message], None] | None = None) -> Iterator[_HttpProxy]:
-    """Spawn an HTTP server subprocess and yield a connected proxy."""
-    proc = subprocess.Popen(
-        _http_worker_cmd(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        # Read the PORT:<n> line
-        line = proc.stdout.readline().decode().strip()
-        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
-        port = int(line.split(":", 1)[1])
-
-        _wait_for_http(port)
-
-        with http_connect(RpcFixtureService, f"http://127.0.0.1:{port}", on_log=on_log) as proxy:
-            yield proxy
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
+def http_conn(port: int, on_log: Callable[[Message], None] | None = None) -> Iterator[_HttpProxy]:
+    """Yield an HTTP proxy connected to a shared server on *port*."""
+    with http_connect(RpcFixtureService, f"http://127.0.0.1:{port}", on_log=on_log) as proxy:
+        yield proxy
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +413,7 @@ ConnFactory = Callable[..., contextlib.AbstractContextManager[RpcProxyType]]
 
 
 @pytest.fixture(params=["pipe", "subprocess", "http"])
-def make_conn(request: pytest.FixtureRequest) -> ConnFactory:
+def make_conn(request: pytest.FixtureRequest, http_server_port: int) -> ConnFactory:
     """Return a factory that creates an RPC connection context manager."""
 
     def factory(
@@ -473,7 +424,7 @@ def make_conn(request: pytest.FixtureRequest) -> ConnFactory:
         elif request.param == "subprocess":
             return connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
         else:
-            return http_conn(on_log=on_log)
+            return http_conn(http_server_port, on_log=on_log)
 
     return factory
 
@@ -1868,3 +1819,90 @@ class TestConvenienceFunctions:
 
         with pytest.raises(TypeError, match="Expected a Protocol class or RpcServer"):
             run_server("not a class")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Malformed input handling
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedInput:
+    """Tests for graceful handling of malformed Arrow IPC data.
+
+    Uses ``serve_one`` directly with ``BytesIO`` buffers so the tests are
+    transport-agnostic — the same code path runs for pipe, subprocess, and
+    HTTP transports.
+    """
+
+    def test_garbage_bytes_returns_rpc_error(self) -> None:
+        """serve_one writes an RpcError response when given garbage bytes."""
+        from io import BytesIO
+
+        from pyarrow import ipc
+
+        from vgi_rpc.rpc import PipeTransport, _dispatch_log_or_error, _drain_stream
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        req_buf = BytesIO(b"garbage bytes here")
+        resp_buf = BytesIO()
+        transport = PipeTransport(req_buf, resp_buf)
+
+        with pytest.raises(pa.lib.ArrowInvalid):
+            server.serve_one(transport)
+
+        # Error response was written before the raise
+        resp_buf.seek(0)
+        reader = ipc.open_stream(resp_buf)
+        with pytest.raises(RpcError, match="ArrowInvalid"):
+            while True:
+                batch, cm = reader.read_next_batch_with_custom_metadata()
+                _dispatch_log_or_error(batch, cm)
+        _drain_stream(reader)
+
+    def test_empty_body_returns_rpc_error(self) -> None:
+        """serve_one writes an RpcError response when given an empty body."""
+        from io import BytesIO
+
+        from pyarrow import ipc
+
+        from vgi_rpc.rpc import PipeTransport, _dispatch_log_or_error, _drain_stream
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        req_buf = BytesIO(b"")
+        resp_buf = BytesIO()
+        transport = PipeTransport(req_buf, resp_buf)
+
+        with pytest.raises(pa.lib.ArrowInvalid):
+            server.serve_one(transport)
+
+        resp_buf.seek(0)
+        reader = ipc.open_stream(resp_buf)
+        with pytest.raises(RpcError):
+            while True:
+                batch, cm = reader.read_next_batch_with_custom_metadata()
+                _dispatch_log_or_error(batch, cm)
+        _drain_stream(reader)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Invalid bidi state (HTTP transport)
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidBidiState:
+    """Tests for corrupted bidi state over HTTP transport."""
+
+    def test_corrupted_state_raises(self, http_server_port: int) -> None:
+        """Corrupted bidi state bytes cause RpcError on next exchange."""
+        with http_conn(http_server_port) as proxy:
+            session = proxy.transform(factor=2.0)
+
+            # First exchange succeeds — proves session is valid
+            out = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0]})))
+            assert out.batch.column("value").to_pylist() == [2.0]
+
+            # Corrupt the state bytes
+            session._state_bytes = b"garbage"
+
+            with pytest.raises(RpcError, match="Failed to deserialize bidi state"):
+                session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [2.0]})))

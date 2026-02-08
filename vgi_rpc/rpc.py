@@ -484,6 +484,75 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
 
 
 # ---------------------------------------------------------------------------
+# Implementation validation
+# ---------------------------------------------------------------------------
+
+
+def _format_signature(info: RpcMethodInfo) -> str:
+    """Format a protocol method signature for error messages."""
+    params = ", ".join(f"{n}: {getattr(t, '__name__', str(t))}" for n, t in info.param_types.items())
+    return f"{info.name}({params})"
+
+
+def _validate_implementation(
+    protocol: type,
+    implementation: object,
+    methods: Mapping[str, RpcMethodInfo],
+) -> None:
+    """Validate that *implementation* conforms to *protocol*.
+
+    Checks that every method declared in the protocol exists on the
+    implementation, is callable, and has a compatible parameter list.
+    The special ``emit_log`` parameter is allowed on implementations
+    even when not present in the protocol.
+
+    Raises:
+        TypeError: If one or more validation errors are found.  The
+            message lists every problem so the developer can fix them
+            all in one pass.
+    """
+    errors: list[str] = []
+
+    for name, info in methods.items():
+        method = getattr(implementation, name, None)
+
+        if method is None:
+            errors.append(f"missing method {_format_signature(info)}")
+            continue
+
+        if not callable(method):
+            errors.append(f"'{name}' exists but is not callable")
+            continue
+
+        impl_sig = inspect.signature(method)
+        impl_params = {k: v for k, v in impl_sig.parameters.items() if k != "self"}
+        proto_param_names = set(info.param_types.keys())
+
+        for param_name in proto_param_names:
+            if param_name not in impl_params:
+                errors.append(f"'{name}()' missing parameter '{param_name}'")
+
+        for param_name, param in impl_params.items():
+            if param_name in proto_param_names:
+                continue
+            if param_name == "emit_log":
+                continue
+            if param.default is inspect.Parameter.empty and param.kind not in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                errors.append(
+                    f"'{name}()' has required parameter '{param_name}' not defined in {protocol.__name__}"
+                )
+
+    if errors:
+        impl_name = type(implementation).__name__
+        header = f"{impl_name} does not implement {protocol.__name__}:"
+        detail = "\n".join(f"  - {e}" for e in errors)
+        raise TypeError(f"{header}\n{detail}")
+
+
+# ---------------------------------------------------------------------------
 # IPC stream helpers
 # ---------------------------------------------------------------------------
 
@@ -890,6 +959,7 @@ class RpcServer:
         self._protocol = protocol
         self._impl = implementation
         self._methods = rpc_methods(protocol)
+        _validate_implementation(protocol, implementation, self._methods)
 
         # Detect which impl methods accept an `emit_log` parameter.
         self._emit_log_methods: set[str] = set()
@@ -918,12 +988,26 @@ class RpcServer:
         while True:
             try:
                 self.serve_one(transport)
-            except (EOFError, StopIteration, pa.ArrowInvalid):
+            except (EOFError, StopIteration, pa.lib.ArrowInvalid):
                 break
 
     def serve_one(self, transport: RpcTransport) -> None:
-        """Handle a single RPC call (any method type) over the given transport."""
-        method_name, kwargs = _read_request(transport.reader)
+        """Handle a single RPC call (any method type) over the given transport.
+
+        Raises:
+            pa.lib.ArrowInvalid: If the incoming data is not valid Arrow IPC.
+                An error response is written to *transport* before raising so
+                the client can read a structured ``RpcError``.
+
+        """
+        try:
+            method_name, kwargs = _read_request(transport.reader)
+        except pa.lib.ArrowInvalid as exc:
+            try:
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+            except (BrokenPipeError, OSError):
+                pass
+            raise
         info = self._methods.get(method_name)
         if info is None:
             _write_error_stream(transport.writer, _EMPTY_SCHEMA, AttributeError(f"Unknown method: {method_name}"))

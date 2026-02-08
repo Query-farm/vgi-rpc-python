@@ -107,7 +107,10 @@ class _HttpRpcApp:
         resp_buf = BytesIO()
 
         transport = PipeTransport(req_buf, resp_buf)
-        await asyncio.to_thread(self._server.serve_one, transport)
+        try:
+            await asyncio.to_thread(self._server.serve_one, transport)
+        except pa.lib.ArrowInvalid:
+            pass  # Error already written to resp_buf by serve_one
 
         return Response(content=resp_buf.getvalue(), media_type=_ARROW_CONTENT_TYPE)
 
@@ -125,7 +128,10 @@ class _HttpRpcApp:
         def _do_init() -> bytes:
             return self._bidi_init_sync(method_name, info, body)
 
-        result_bytes = await asyncio.to_thread(_do_init)
+        try:
+            result_bytes = await asyncio.to_thread(_do_init)
+        except pa.lib.ArrowInvalid as exc:
+            return Response(f"Invalid Arrow IPC payload: {exc}", status_code=400)
         return Response(content=result_bytes, media_type=_ARROW_CONTENT_TYPE)
 
     async def bidi_exchange_endpoint(self, request: Request) -> Response:
@@ -142,7 +148,10 @@ class _HttpRpcApp:
         def _do_exchange() -> bytes:
             return self._bidi_exchange_sync(method_name, info, body)
 
-        result_bytes = await asyncio.to_thread(_do_exchange)
+        try:
+            result_bytes = await asyncio.to_thread(_do_exchange)
+        except pa.lib.ArrowInvalid as exc:
+            return Response(f"Invalid Arrow IPC payload: {exc}", status_code=400)
         return Response(content=result_bytes, media_type=_ARROW_CONTENT_TYPE)
 
     # --- Sync helpers (run in thread) ---
@@ -218,7 +227,14 @@ class _HttpRpcApp:
 
         state_bytes = custom_metadata.get(BIDI_STATE_KEY)
         assert state_bytes is not None  # already checked above
-        state = state_cls.deserialize_from_bytes(state_bytes)
+        try:
+            state = state_cls.deserialize_from_bytes(state_bytes)
+        except Exception as exc:
+            resp_buf = BytesIO()
+            err = RuntimeError(f"Failed to deserialize bidi state: {exc}")
+            with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
+                _write_error_batch(writer, _EMPTY_SCHEMA, err)
+            return resp_buf.getvalue()
 
         output_schema = self._bidi_output_schemas.get(method_name)
         if output_schema is None:

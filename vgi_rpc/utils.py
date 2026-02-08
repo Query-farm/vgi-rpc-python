@@ -568,6 +568,12 @@ class ArrowSerializableDataclass:
                 writer.write_batch(value)
             return sink.getvalue().to_pybytes()
 
+        # Handle nested ArrowSerializableDataclass -> dict (must precede the
+        # generic serialize_to_bytes check because every ASDataclass has that method,
+        # but struct fields need a dict, not IPC bytes).
+        if isinstance(value, ArrowSerializableDataclass):
+            return value._to_row_dict()
+
         # Handle objects with serialize_to_bytes() method (e.g., Arguments)
         if hasattr(value, "serialize_to_bytes") and callable(value.serialize_to_bytes):
             return value.serialize_to_bytes()
@@ -575,10 +581,6 @@ class ArrowSerializableDataclass:
         # Handle Enum -> .name (always uppercase, consistent across all enum types)
         if isinstance(value, Enum):
             return value.name
-
-        # Handle nested ArrowSerializableDataclass -> dict
-        if isinstance(value, ArrowSerializableDataclass):
-            return value._to_row_dict()
 
         # Handle frozenset -> list
         if isinstance(value, frozenset):
