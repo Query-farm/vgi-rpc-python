@@ -78,7 +78,7 @@ import sys
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from io import BufferedReader, IOBase
+from io import IOBase
 from types import MappingProxyType
 from typing import (
     Annotated,
@@ -826,7 +826,7 @@ class SubprocessTransport:
             bufsize=0,
         )
         assert self._proc.stdout is not None
-        self._reader: IOBase = BufferedReader(self._proc.stdout)  # type: ignore[arg-type]
+        self._reader: IOBase = os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False)
 
     @property
     def proc(self) -> subprocess.Popen[bytes]:

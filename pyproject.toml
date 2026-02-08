@@ -50,6 +50,9 @@ warn_unused_ignores = true
 module = "structlog.*"
 ignore_missing_imports = true
 
+[tool.ty.rules]
+unused-type-ignore-comment = "ignore"  # these comments are required by mypy
+
 [tool.ty.environment]
 python-version = "3.13"
 

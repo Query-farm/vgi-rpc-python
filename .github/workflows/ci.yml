@@ -50,7 +50,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check (mypy)
-        run: uv run mypy vgi/
+        run: uv run mypy vgi_rpc/
 
       - name: Type check (ty)
-        run: uv run ty check vgi/
+        run: uv run ty check vgi_rpc/
