@@ -32,10 +32,12 @@ from vgi_rpc.rpc import (
     ServerStream,
     ServerStreamState,
     StreamSession,
-    SubprocessTransport,
+    connect,
     describe_rpc,
     make_pipe_pair,
     rpc_methods,
+    run_server,
+    serve_pipe,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
@@ -349,17 +351,8 @@ def rpc_conn(
     """Start a server thread, yield a proxy, and clean up on exit."""
     if impl is None:
         impl = RpcFixtureServiceImpl()
-    client_transport, server_transport = make_pipe_pair()
-    server = RpcServer(protocol, impl)
-    thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
-    thread.start()
-    try:
-        with RpcConnection(protocol, client_transport, on_log=on_log) as proxy:
-            yield proxy
-    finally:
-        client_transport.close()
-        thread.join(timeout=5)
-        assert not thread.is_alive(), "Server thread did not terminate"
+    with serve_pipe(protocol, impl, on_log=on_log) as proxy:
+        yield proxy
 
 
 @contextlib.contextmanager
@@ -418,8 +411,7 @@ def make_conn(request: pytest.FixtureRequest) -> ConnFactory:
         if request.param == "pipe":
             return rpc_conn(on_log=on_log)
         else:
-            transport = SubprocessTransport(_worker_cmd())
-            return RpcConnection(RpcFixtureService, transport, on_log=on_log)
+            return connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
 
     return factory
 
@@ -1754,3 +1746,61 @@ class TestStateSerializationRoundTrip:
         restored = FailBidiMidState.deserialize_from_bytes(state_bytes)
         assert restored.count == 1
         assert restored.factor == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Convenience functions (run_server, connect, serve_pipe)
+# ---------------------------------------------------------------------------
+
+
+class TestConvenienceFunctions:
+    """Tests for run_server, connect, and serve_pipe convenience APIs."""
+
+    def test_serve_pipe_unary(self) -> None:
+        """serve_pipe yields a working proxy for unary calls."""
+        with serve_pipe(RpcFixtureService, RpcFixtureServiceImpl()) as svc:
+            assert svc.add(a=1.0, b=2.0) == pytest.approx(3.0)
+
+    def test_serve_pipe_stream(self) -> None:
+        """serve_pipe yields a working proxy for server stream calls."""
+        with serve_pipe(RpcFixtureService, RpcFixtureServiceImpl()) as svc:
+            batches = list(svc.generate(count=3))
+            assert len(batches) == 3
+
+    def test_serve_pipe_bidi(self) -> None:
+        """serve_pipe yields a working proxy for bidi stream calls."""
+        with serve_pipe(RpcFixtureService, RpcFixtureServiceImpl()) as svc, svc.transform(factor=2.0) as session:
+            out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
+            assert out.batch.column("value").to_pylist() == [10.0]
+
+    def test_serve_pipe_on_log(self) -> None:
+        """serve_pipe forwards log messages to the on_log callback."""
+        logs: list[Message] = []
+        with serve_pipe(RpcFixtureService, RpcFixtureServiceImpl(), on_log=logs.append) as svc:
+            svc.greet_with_logs(name="Alice")
+        assert len(logs) == 2
+        assert logs[0].level == Level.INFO
+
+    def test_connect_unary(self) -> None:
+        """Connect yields a working proxy for unary calls over subprocess."""
+        with connect(RpcFixtureService, _worker_cmd()) as svc:
+            assert svc.add(a=3.0, b=4.0) == pytest.approx(7.0)
+
+    def test_connect_on_log(self) -> None:
+        """Connect forwards log messages to the on_log callback."""
+        logs: list[Message] = []
+        with connect(RpcFixtureService, _worker_cmd(), on_log=logs.append) as svc:
+            svc.greet_with_logs(name="Bob")
+        assert len(logs) == 2
+
+    def test_run_server_type_errors(self) -> None:
+        """run_server raises TypeError on invalid argument combinations."""
+        with pytest.raises(TypeError, match="implementation is required"):
+            run_server(RpcFixtureService)
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        with pytest.raises(TypeError, match="implementation must be None"):
+            run_server(server, RpcFixtureServiceImpl())
+
+        with pytest.raises(TypeError, match="Expected a Protocol class or RpcServer"):
+            run_server("not a class")  # type: ignore[arg-type]

@@ -42,6 +42,11 @@ import pyarrow as pa
 import structlog
 from pyarrow import ipc
 
+__all__ = [
+    "ArrowSerializableDataclass",
+    "ArrowType",
+]
+
 # IPC debug logging - enable with VGI_IPC_DEBUG=1
 _IPC_DEBUG = os.environ.get("VGI_IPC_DEBUG", "").lower() in ("1", "true", "yes")
 # IPC stats logging - enable with VGI_IPC_STATS=1 for aggregate stream stats

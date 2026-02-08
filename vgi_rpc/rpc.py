@@ -75,6 +75,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -125,9 +126,12 @@ __all__ = [
     "ServerStreamState",
     "StreamSession",
     "SubprocessTransport",
+    "connect",
     "describe_rpc",
     "make_pipe_pair",
     "rpc_methods",
+    "run_server",
+    "serve_pipe",
     "serve_stdio",
 ]
 
@@ -1266,6 +1270,103 @@ class RpcConnection:
     def __exit__(self, *args: Any) -> None:
         """Close the transport."""
         self._transport.close()
+
+
+# ---------------------------------------------------------------------------
+# Convenience functions
+# ---------------------------------------------------------------------------
+
+
+def run_server(protocol_or_server: type | RpcServer, implementation: object | None = None) -> None:
+    """Serve RPC requests over stdin/stdout.
+
+    This is the recommended entry point for subprocess workers.  Accepts
+    either a ``(protocol, implementation)`` pair or a pre-built ``RpcServer``.
+
+    Args:
+        protocol_or_server: A Protocol class (requires *implementation*) or
+            an already-constructed ``RpcServer``.
+        implementation: The implementation object.  Required when
+            *protocol_or_server* is a Protocol class; must be ``None`` when
+            passing an ``RpcServer``.
+
+    Raises:
+        TypeError: On invalid argument combinations.
+
+    """
+    if isinstance(protocol_or_server, RpcServer):
+        if implementation is not None:
+            raise TypeError("implementation must be None when passing an RpcServer")
+        server = protocol_or_server
+    elif isinstance(protocol_or_server, type):
+        if implementation is None:
+            raise TypeError("implementation is required when passing a Protocol class")
+        server = RpcServer(protocol_or_server, implementation)
+    else:
+        raise TypeError(f"Expected a Protocol class or RpcServer, got {type(protocol_or_server).__name__}")
+    serve_stdio(server)
+
+
+@contextlib.contextmanager
+def connect(
+    protocol: type,
+    cmd: list[str],
+    *,
+    on_log: Callable[[Message], None] | None = None,
+) -> Iterator[_RpcProxy]:
+    """Connect to a subprocess RPC server.
+
+    Context manager that spawns a subprocess, yields a typed proxy, and
+    cleans up on exit.
+
+    Args:
+        protocol: The Protocol class defining the RPC interface.
+        cmd: Command to spawn the subprocess worker.
+        on_log: Optional callback for log messages from the server.
+
+    Yields:
+        A typed RPC proxy supporting all methods defined on *protocol*.
+
+    """
+    transport = SubprocessTransport(cmd)
+    try:
+        with RpcConnection(protocol, transport, on_log=on_log) as proxy:
+            yield proxy
+    finally:
+        transport.close()
+
+
+@contextlib.contextmanager
+def serve_pipe(
+    protocol: type,
+    implementation: object,
+    *,
+    on_log: Callable[[Message], None] | None = None,
+) -> Iterator[_RpcProxy]:
+    """Start an in-process pipe server and yield a typed client proxy.
+
+    Useful for tests and demos — no subprocess needed.  A background thread
+    runs ``RpcServer.serve()`` on the server side of a pipe pair.
+
+    Args:
+        protocol: The Protocol class defining the RPC interface.
+        implementation: The implementation object.
+        on_log: Optional callback for log messages from the server.
+
+    Yields:
+        A typed RPC proxy supporting all methods defined on *protocol*.
+
+    """
+    client_transport, server_transport = make_pipe_pair()
+    server = RpcServer(protocol, implementation)
+    thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+    thread.start()
+    try:
+        with RpcConnection(protocol, client_transport, on_log=on_log) as proxy:
+            yield proxy
+    finally:
+        client_transport.close()
+        thread.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------

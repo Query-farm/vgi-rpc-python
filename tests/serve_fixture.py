@@ -8,13 +8,12 @@ RPC requests over stdin/stdout.
 """
 
 from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
-from vgi_rpc.rpc import RpcServer, serve_stdio
+from vgi_rpc.rpc import run_server
 
 
 def main() -> None:
     """Serve the RPC fixture service over stdin/stdout."""
-    server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-    serve_stdio(server)
+    run_server(RpcFixtureService, RpcFixtureServiceImpl())
 
 
 if __name__ == "__main__":
