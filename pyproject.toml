@@ -1,0 +1,94 @@
+[project]
+name = "vgi-rpc"
+version = "0.1.0"
+description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
+readme = "README.md"
+requires-python = ">=3.12.4"
+dependencies = ["pyarrow", "structlog"]
+
+[project.optional-dependencies]
+dev = [
+  "mypy",
+  "pyarrow-stubs",
+  "pytest",
+  "pytest-cov",
+  "pytest-examples",
+  "pytest-mypy",
+  "pytest-ruff",
+  "pytest-xdist",
+  "ruff",
+]
+
+[project.scripts]
+vgi-rpc-test-worker = "tests.serve_fixture:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+ignore = [
+  "D203", # incompatible with D211 (no-blank-line-before-class)
+  "D213", # incompatible with D212 (multi-line-summary-first-line)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "structlog.*"
+ignore_missing_imports = true
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.pytest.ini_options]
+addopts = "--mypy --ruff"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+# Enable subprocess coverage - automatically patches subprocess.Popen
+# to inject coverage measurement into spawned worker processes
+patch = ["subprocess"]
+# Each subprocess writes to its own data file (.coverage.<hostname>.<pid>)
+parallel = true
+# Handle SIGTERM gracefully (writes coverage data before exit)
+sigterm = true
+# Measure branch coverage
+branch = true
+# What to measure
+source = ["vgi-rpc"]
+# Omit test files and examples from coverage
+omit = ["vgi-rpc/examples/*", "tests/*"]
+
+[tool.coverage.report]
+# Fail if coverage drops below this threshold
+fail_under = 80
+# Show missing lines in the report
+show_missing = true
+# Exclude common patterns from coverage
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "@overload",
+  "raise NotImplementedError",
+  "\\.\\.\\.",                  # Ellipsis in stub files
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[dependency-groups]
+dev = ["lxml>=6.0.2", "pytest-timeout>=2.4.0", "ty>=0.0.8"]

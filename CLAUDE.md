@@ -1,0 +1,66 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+**vgi-rpc** is a transport-agnostic RPC framework built on Apache Arrow IPC serialization. RPC interfaces are defined as Python Protocol classes; the framework derives Arrow schemas from type annotations and provides typed client proxies with automatic serialization/deserialization.
+
+## Commands
+
+```bash
+# Run all tests (includes mypy type checking and ruff linting via pytest plugins)
+pytest
+
+# Run a single test
+pytest tests/test_rpc.py::test_name
+
+# Lint and format
+ruff check vgi_rpc/ tests/
+ruff format vgi_rpc/ tests/
+
+# Type checking
+mypy vgi_rpc/
+
+# Coverage (80% minimum, branch coverage enabled)
+pytest --cov=vgi_rpc
+```
+
+Uses `uv` as the package manager. Install dev dependencies with `uv sync --all-extras`.
+
+Tests should complete in 10 seconds or less ALWAYS!
+
+## Architecture
+
+### Three modules, one package (`vgi_rpc/`)
+
+- **`rpc.py`** — The RPC framework. Defines the wire protocol, method types (UNARY, SERVER_STREAM, BIDI_STREAM), and the core classes: `RpcServer`, `RpcConnection`, `RpcTransport`, `PipeTransport`. Introspects Protocol classes via `rpc_methods()` to extract `RpcMethodInfo` (schemas, method type). Client gets a typed proxy from `RpcConnection`; server dispatches via `RpcServer.serve()`.
+
+- **`utils.py`** — Arrow serialization layer. `ArrowSerializableDataclass` mixin auto-generates `ARROW_SCHEMA` from dataclass field annotations and provides `serialize()`/`deserialize_from_batch()`. Handles type inference from Python types to Arrow types (including generics, Enum, Optional, nested dataclasses). Also provides low-level IPC stream read/write helpers.
+
+- **`log.py`** — Structured log messages (`Message` with `Level` enum). Messages are serialized out-of-band as zero-row batches with metadata keys `vgi.log_level`, `vgi.log_message`, `vgi.log_extra`. Server methods can accept an optional `emit_log: EmitLog` parameter injected by the framework.
+
+### Wire protocol
+
+Multiple IPC streams are written sequentially on the same pipe. Each method call writes one request stream and reads one response stream:
+
+- **Unary**: Client sends params batch → Server replies with log batches + result/error batch
+- **Server Stream**: Client sends params batch → Server replies with interleaved log and data batches
+- **Bidi Stream**: Initial params exchange, then lockstep: client sends input batch, server replies with log batches + output batch, repeating until EOS
+
+### Key patterns
+
+**Defining an RPC service**: Write a `Protocol` class where return types determine method type — plain types for unary, `ServerStream[S]` for server streaming, `BidiStream[S]` for bidirectional.
+
+**Stream state**: Streaming methods return a state object (`ServerStreamState` or `BidiStreamState` subclass) that drives iteration via `produce(out)` or `process(input, out)` callbacks on `OutputCollector`.
+
+**Error propagation**: Server exceptions become zero-row batches with error metadata; clients receive `RpcError` with `error_type`, `error_message`, and `remote_traceback`. The transport stays clean for subsequent requests.
+
+**Debug env vars**: `VGI_IPC_DEBUG=1` for IPC debug logging, `VGI_IPC_STATS=1` for aggregate stream statistics.
+
+## Code Style
+
+- Line length 120, double quotes, target Python 3.12+
+- Strict mypy (`python_version = "3.13"`, `strict = true`)
+- Ruff rules: E, F, I, UP, B, SIM, D (includes docstring enforcement)
+- Google-style docstrings with Args/Returns/Raises sections
