@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Protocol
 
+import httpx
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
+from vgi_rpc.http import _HttpProxy, http_connect
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import (
     AnnotatedBatch,
@@ -32,6 +36,7 @@ from vgi_rpc.rpc import (
     ServerStream,
     ServerStreamState,
     StreamSession,
+    _RpcProxy,
     connect,
     describe_rpc,
     make_pipe_pair,
@@ -40,6 +45,8 @@ from vgi_rpc.rpc import (
     serve_pipe,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
+
+type RpcProxyType = _RpcProxy | _HttpProxy
 
 # ---------------------------------------------------------------------------
 # Enum for type fidelity tests
@@ -194,11 +201,11 @@ class RpcFixtureService(Protocol):
         """Do nothing."""
         ...
 
-    def generate(self, count: int) -> ServerStream[Any]:
+    def generate(self, count: int) -> ServerStream[ServerStreamState]:
         """Generate count batches."""
         ...
 
-    def transform(self, factor: float) -> BidiStream[Any]:
+    def transform(self, factor: float) -> BidiStream[BidiStreamState]:
         """Scale values by factor."""
         ...
 
@@ -206,11 +213,11 @@ class RpcFixtureService(Protocol):
         """Raise ValueError."""
         ...
 
-    def fail_stream(self) -> ServerStream[Any]:
+    def fail_stream(self) -> ServerStream[ServerStreamState]:
         """Stream that fails mid-iteration."""
         ...
 
-    def fail_bidi_mid(self, factor: float) -> BidiStream[Any]:
+    def fail_bidi_mid(self, factor: float) -> BidiStream[BidiStreamState]:
         """Bidi that fails after first batch."""
         ...
 
@@ -242,11 +249,11 @@ class RpcFixtureService(Protocol):
         """Greet by name, emitting log messages."""
         ...
 
-    def generate_with_logs(self, count: int) -> ServerStream[Any]:
+    def generate_with_logs(self, count: int) -> ServerStream[ServerStreamState]:
         """Generate batches with interleaved log messages."""
         ...
 
-    def transform_with_logs(self, factor: float) -> BidiStream[Any]:
+    def transform_with_logs(self, factor: float) -> BidiStream[BidiStreamState]:
         """Bidi transform with log messages per exchange."""
         ...
 
@@ -347,7 +354,7 @@ def rpc_conn(
     protocol: type = RpcFixtureService,
     impl: object | None = None,
     on_log: Callable[[Message], None] | None = None,
-) -> Iterator[Any]:
+) -> Iterator[_RpcProxy]:
     """Start a server thread, yield a proxy, and clean up on exit."""
     if impl is None:
         impl = RpcFixtureServiceImpl()
@@ -379,7 +386,8 @@ def rpc_server_transport(
 # Helpers: subprocess worker command
 # ---------------------------------------------------------------------------
 
-_SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture.py")
+_SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
+_SERVE_FIXTURE_HTTP = str(Path(__file__).parent / "serve_fixture_http.py")
 
 
 def _worker_cmd() -> list[str]:
@@ -394,24 +402,78 @@ def _worker_cmd() -> list[str]:
     return [sys.executable, _SERVE_FIXTURE]
 
 
+def _http_worker_cmd() -> list[str]:
+    """Return the command to launch the test HTTP RPC worker subprocess.
+
+    Prefers the installed ``vgi-rpc-test-http-worker`` entry point; falls back
+    to running the fixture script directly.
+    """
+    entry_point = shutil.which("vgi-rpc-test-http-worker")
+    if entry_point:
+        return [entry_point]
+    return [sys.executable, _SERVE_FIXTURE_HTTP]
+
+
+def _wait_for_http(port: int, timeout: float = 5.0) -> None:
+    """Poll until the HTTP server is accepting connections."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            # Any response (even 404) means the server is up
+            del resp
+            return
+        except httpx.ConnectError:
+            time.sleep(0.05)
+    raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
+
+
+@contextlib.contextmanager
+def http_conn(on_log: Callable[[Message], None] | None = None) -> Iterator[_HttpProxy]:
+    """Spawn an HTTP server subprocess and yield a connected proxy."""
+    proc = subprocess.Popen(
+        _http_worker_cmd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        # Read the PORT:<n> line
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+
+        _wait_for_http(port)
+
+        with http_connect(RpcFixtureService, f"http://127.0.0.1:{port}", on_log=on_log) as proxy:
+            yield proxy
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
 # ---------------------------------------------------------------------------
-# Fixture: make_conn — parametrized over pipe and subprocess transports
+# Fixture: make_conn — parametrized over pipe, subprocess, and http transports
 # ---------------------------------------------------------------------------
 
 
-ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
+ConnFactory = Callable[..., contextlib.AbstractContextManager[RpcProxyType]]
 """Type alias for the ``make_conn`` fixture return type."""
 
 
-@pytest.fixture(params=["pipe", "subprocess"])
+@pytest.fixture(params=["pipe", "subprocess", "http"])
 def make_conn(request: pytest.FixtureRequest) -> ConnFactory:
     """Return a factory that creates an RPC connection context manager."""
 
-    def factory(on_log: Callable[[Message], None] | None = None) -> contextlib.AbstractContextManager[Any]:
+    def factory(
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[RpcProxyType]:
         if request.param == "pipe":
             return rpc_conn(on_log=on_log)
-        else:
+        elif request.param == "subprocess":
             return connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
+        else:
+            return http_conn(on_log=on_log)
 
     return factory
 
@@ -611,10 +673,12 @@ class TestBidiStream:
             session.close()
 
     def test_bidi_session_type(self, make_conn: ConnFactory) -> None:
-        """Bidi stream returns a BidiSession."""
+        """Bidi stream returns a BidiSession or HttpBidiSession."""
+        from vgi_rpc.http import HttpBidiSession
+
         with make_conn() as proxy:
             session = proxy.transform(factor=1.0)
-            assert isinstance(session, BidiSession)
+            assert isinstance(session, (BidiSession, HttpBidiSession))
             session.close()
 
     def test_bidi_context_manager(self, make_conn: ConnFactory) -> None:
@@ -1196,11 +1260,11 @@ class NullValidationService(Protocol):
         """Non-optional return type."""
         ...
 
-    def stream_non_optional(self, a: float) -> ServerStream[Any]:
+    def stream_non_optional(self, a: float) -> ServerStream[ServerStreamState]:
         """Server stream with non-optional param."""
         ...
 
-    def bidi_non_optional(self, factor: float) -> BidiStream[Any]:
+    def bidi_non_optional(self, factor: float) -> BidiStream[BidiStreamState]:
         """Bidi stream with non-optional param."""
         ...
 
@@ -1235,7 +1299,7 @@ class NullValidationServiceImpl:
         return BidiStream(output_schema=schema, state=PassthroughState())
 
 
-def _null_conn() -> contextlib.AbstractContextManager[Any]:
+def _null_conn() -> contextlib.AbstractContextManager[_RpcProxy]:
     """Shorthand for ``rpc_conn(NullValidationService, NullValidationServiceImpl())``."""
     return rpc_conn(NullValidationService, NullValidationServiceImpl())
 
@@ -1403,7 +1467,7 @@ class TestEmitLog:
                 self.current += 1
 
         class BufferedLogService(Protocol):
-            def stream_with_early_log(self, count: int) -> ServerStream[Any]: ...
+            def stream_with_early_log(self, count: int) -> ServerStream[ServerStreamState]: ...
 
         class BufferedLogServiceImpl:
             def stream_with_early_log(
@@ -1563,7 +1627,7 @@ class TestInputSchemaValidation:
         """Sending a batch with wrong schema raises TypeError."""
 
         class SchemaCheckService(Protocol):
-            def checked_transform(self, factor: float) -> BidiStream[Any]: ...
+            def checked_transform(self, factor: float) -> BidiStream[BidiStreamState]: ...
 
         class SchemaCheckServiceImpl:
             def checked_transform(self, factor: float) -> BidiStream[TransformState]:
@@ -1584,7 +1648,7 @@ class TestInputSchemaValidation:
         """Sending a batch with correct schema works normally."""
 
         class SchemaCheckService(Protocol):
-            def checked_transform(self, factor: float) -> BidiStream[Any]: ...
+            def checked_transform(self, factor: float) -> BidiStream[BidiStreamState]: ...
 
         class SchemaCheckServiceImpl:
             def checked_transform(self, factor: float) -> BidiStream[TransformState]:

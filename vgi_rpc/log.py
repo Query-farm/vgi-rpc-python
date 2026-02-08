@@ -36,7 +36,7 @@ import json
 import os
 import traceback
 from enum import Enum
-from typing import Any, ClassVar
+from typing import ClassVar
 
 __all__ = [
     "Level",
@@ -88,11 +88,11 @@ class Message:
     _MAX_TRACEBACK_CHARS: ClassVar[int] = 16_000
     _MAX_TRACEBACK_FRAMES: ClassVar[int] = 5
 
-    def __init__(self, level: Level, message: str, **kwargs: Any) -> None:
+    def __init__(self, level: Level, message: str, **kwargs: object) -> None:
         """Create a log message with level, message text, and optional extras."""
         self.level = level
         self.message = message
-        self.extra: dict[str, Any] | None = kwargs if kwargs else None
+        self.extra: dict[str, object] | None = kwargs if kwargs else None
 
     def __eq__(self, other: object) -> bool:
         """Compare log messages by level, message, and extra fields."""
@@ -107,7 +107,7 @@ class Message:
         return f"Message({self.level!r}, {self.message!r})"
 
     @classmethod
-    def exception(cls, message: str, **kwargs: Any) -> "Message":
+    def exception(cls, message: str, **kwargs: object) -> "Message":
         """Create an EXCEPTION level log message.
 
         Additional kwargs are stored in the extra field.
@@ -115,7 +115,7 @@ class Message:
         return cls(Level.EXCEPTION, message, **kwargs)
 
     @classmethod
-    def error(cls, message: str, **kwargs: Any) -> "Message":
+    def error(cls, message: str, **kwargs: object) -> "Message":
         """Create an ERROR level log message.
 
         Additional kwargs are stored in the extra field.
@@ -123,7 +123,7 @@ class Message:
         return cls(Level.ERROR, message, **kwargs)
 
     @classmethod
-    def warn(cls, message: str, **kwargs: Any) -> "Message":
+    def warn(cls, message: str, **kwargs: object) -> "Message":
         """Create a WARN level log message.
 
         Additional kwargs are stored in the extra field.
@@ -131,7 +131,7 @@ class Message:
         return cls(Level.WARN, message, **kwargs)
 
     @classmethod
-    def info(cls, message: str, **kwargs: Any) -> "Message":
+    def info(cls, message: str, **kwargs: object) -> "Message":
         """Create an INFO level log message.
 
         Additional kwargs are stored in the extra field.
@@ -139,7 +139,7 @@ class Message:
         return cls(Level.INFO, message, **kwargs)
 
     @classmethod
-    def debug(cls, message: str, **kwargs: Any) -> "Message":
+    def debug(cls, message: str, **kwargs: object) -> "Message":
         """Create a DEBUG level log message.
 
         Additional kwargs are stored in the extra field.
@@ -147,7 +147,7 @@ class Message:
         return cls(Level.DEBUG, message, **kwargs)
 
     @classmethod
-    def trace(cls, message: str, **kwargs: Any) -> "Message":
+    def trace(cls, message: str, **kwargs: object) -> "Message":
         """Create a TRACE level log message.
 
         Additional kwargs are stored in the extra field.
@@ -168,21 +168,21 @@ class Message:
 
         Returns:
             New dict containing original entries plus:
-            - vgi.log_level: The Level value (e.g., "INFO", "EXCEPTION")
-            - vgi.log_message: The human-readable message text
-            - vgi.log_extra: JSON string with {correlation_id, invocation_id,
+            - vgi_rpc.log_level: The Level value (e.g., "INFO", "EXCEPTION")
+            - vgi_rpc.log_message: The human-readable message text
+            - vgi_rpc.log_extra: JSON string with {correlation_id, invocation_id,
                 pid, ...extra kwargs}
 
         """
         result = dict(metadata) if metadata else {}
-        result["vgi.log_level"] = self.level.value
-        log_data: dict[str, Any] = {
+        result["vgi_rpc.log_level"] = self.level.value
+        log_data: dict[str, object] = {
             "pid": os.getpid(),
         }
         if self.extra:
             log_data.update(self.extra)
-        result["vgi.log_message"] = self.message
-        result["vgi.log_extra"] = json.dumps(log_data)
+        result["vgi_rpc.log_message"] = self.message
+        result["vgi_rpc.log_extra"] = json.dumps(log_data)
         return result
 
     def should_terminate(self) -> bool:
@@ -204,7 +204,7 @@ class Message:
         # Short, semantic summary (LLM anchor)
         summary = f"{type(exc).__name__}: {exc}"
 
-        extra: dict[str, Any] = {
+        extra: dict[str, object] = {
             "exception_type": type(exc).__name__,
             "exception_message": str(exc),
             "traceback": formatted_tb,

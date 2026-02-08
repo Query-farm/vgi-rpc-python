@@ -1,5 +1,7 @@
 """Transport-agnostic RPC framework built on Apache Arrow IPC serialization."""
 
+import contextlib
+
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import (
     AnnotatedBatch,
@@ -28,6 +30,10 @@ from vgi_rpc.rpc import (
     serve_stdio,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
+
+# HTTP (optional — requires `pip install vgi-rpc[http]`)
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http import HttpBidiSession, http_connect, make_asgi_app, make_sync_client
 
 __all__ = [
     # Core
@@ -65,4 +71,9 @@ __all__ = [
     # Serialization
     "ArrowSerializableDataclass",
     "ArrowType",
+    # HTTP (optional)
+    "HttpBidiSession",
+    "http_connect",
+    "make_asgi_app",
+    "make_sync_client",
 ]

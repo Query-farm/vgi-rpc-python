@@ -28,7 +28,7 @@ pytest --cov=vgi_rpc
 
 Uses `uv` as the package manager. Install dev dependencies with `uv sync --all-extras`.
 
-Tests should complete in 10 seconds or less ALWAYS!
+Tests should complete in 30 seconds or less ALWAYS!
 
 ## Architecture
 
@@ -38,7 +38,7 @@ Tests should complete in 10 seconds or less ALWAYS!
 
 - **`utils.py`** — Arrow serialization layer. `ArrowSerializableDataclass` mixin auto-generates `ARROW_SCHEMA` from dataclass field annotations and provides `serialize()`/`deserialize_from_batch()`. Handles type inference from Python types to Arrow types (including generics, Enum, Optional, nested dataclasses). Also provides low-level IPC stream read/write helpers.
 
-- **`log.py`** — Structured log messages (`Message` with `Level` enum). Messages are serialized out-of-band as zero-row batches with metadata keys `vgi.log_level`, `vgi.log_message`, `vgi.log_extra`. Server methods can accept an optional `emit_log: EmitLog` parameter injected by the framework.
+- **`log.py`** — Structured log messages (`Message` with `Level` enum). Messages are serialized out-of-band as zero-row batches with metadata keys `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`. Server methods can accept an optional `emit_log: EmitLog` parameter injected by the framework.
 
 ### Wire protocol
 

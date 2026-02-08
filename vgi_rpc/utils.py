@@ -10,7 +10,6 @@ deserialize_record_batch(data) : Deserialize and validate type
 read_single_record_batch(stream, context) : Read and validate
 validate_single_row_batch(batch, class_name, required_fields, custom_metadata) : Validate batch and verify batch type
 get_batch_type(metadata) : Extract batch type from metadata
-merge_metadata(*metadata_dicts) : Merge multiple metadata dictionaries
 
 KEY CLASSES
 -----------
@@ -41,6 +40,8 @@ from typing import (
 import pyarrow as pa
 import structlog
 from pyarrow import ipc
+
+from vgi_rpc.metadata import decode_metadata
 
 __all__ = [
     "ArrowSerializableDataclass",
@@ -79,42 +80,8 @@ def _schema_to_dict(schema: pa.Schema) -> dict[str, str]:
     return {field.name: str(field.type) for field in schema}
 
 
-def _metadata_to_dict(
-    metadata: pa.KeyValueMetadata | None,
-) -> dict[str, str] | None:
-    """Convert Arrow metadata to string dict for logging."""
-    if metadata is None:
-        return None
-    return {
-        k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
-        for k, v in metadata.items()
-    }
-
-
 class IPCError(Exception):
     """Error during IPC message reading or writing."""
-
-
-def merge_metadata(
-    *metadata_dicts: pa.KeyValueMetadata | dict[bytes, bytes] | None,
-) -> pa.KeyValueMetadata | None:
-    """Merge multiple metadata dictionaries into one.
-
-    Args:
-        *metadata_dicts: Metadata dictionaries to merge. None values are skipped.
-
-    Returns:
-        Merged KeyValueMetadata, or None if all inputs were None/empty.
-
-    """
-    result: dict[bytes, bytes] = {}
-    for md in metadata_dicts:
-        if md is not None:
-            for k, v in md.items():
-                key = k if isinstance(k, bytes) else k.encode()
-                val = v if isinstance(v, bytes) else v.encode()
-                result[key] = val
-    return pa.KeyValueMetadata(result) if result else None
 
 
 def empty_batch(schema: pa.Schema) -> pa.RecordBatch:
@@ -154,7 +121,7 @@ def serialize_record_batch(
             "ipc_write",
             num_rows=batch.num_rows,
             schema=_schema_to_dict(batch.schema),
-            metadata=_metadata_to_dict(custom_metadata),
+            metadata=decode_metadata(custom_metadata),
         )
 
 
@@ -213,7 +180,7 @@ def deserialize_record_batch(
                 "ipc_read",
                 num_rows=batch.num_rows,
                 schema=_schema_to_dict(batch.schema),
-                metadata=_metadata_to_dict(custom_metadata),
+                metadata=decode_metadata(custom_metadata),
                 nbytes=len(data),
             )
         return batch, custom_metadata
@@ -262,7 +229,7 @@ def read_single_record_batch(
                         context=context,
                         num_rows=batch.num_rows,
                         schema=_schema_to_dict(batch.schema),
-                        metadata=_metadata_to_dict(custom_metadata),
+                        metadata=decode_metadata(custom_metadata),
                     )
                 return batch, custom_metadata
 

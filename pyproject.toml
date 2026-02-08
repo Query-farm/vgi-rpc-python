@@ -7,7 +7,9 @@ requires-python = ">=3.12.4"
 dependencies = ["pyarrow", "structlog"]
 
 [project.optional-dependencies]
+http = ["starlette", "httpx", "uvicorn"]
 dev = [
+  "httpx",
   "mypy",
   "pyarrow-stubs",
   "pytest",
@@ -17,10 +19,13 @@ dev = [
   "pytest-ruff",
   "pytest-xdist",
   "ruff",
+  "starlette",
+  "uvicorn",
 ]
 
 [project.scripts]
-vgi-rpc-test-worker = "tests.serve_fixture:main"
+vgi-rpc-test-worker = "tests.serve_fixture_pipe:main"
+vgi-rpc-test-http-worker = "tests.serve_fixture_http:main"
 
 [build-system]
 requires = ["hatchling"]

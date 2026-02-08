@@ -1,7 +1,7 @@
-"""Subprocess server entry point for RPC fixture tests.
+"""Subprocess server entry point for pipe-based RPC fixture tests.
 
 Installed as ``vgi-rpc-test-worker`` via pyproject.toml ``[project.scripts]``.
-Can also be run directly: ``python -m tests.serve_fixture``
+Can also be run directly: ``python -m tests.serve_fixture_pipe``
 
 Imports the test service Protocol and implementation, then serves
 RPC requests over stdin/stdout.

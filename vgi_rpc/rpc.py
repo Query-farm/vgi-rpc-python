@@ -17,8 +17,8 @@ Multiple IPC streams are written/read sequentially on the same pipe.  Each
 and stops.  The next ``ipc.open_stream()`` picks up where the last left off.
 
 Errors and log messages are signaled as zero-row batches with
-``vgi.log_level``, ``vgi.log_message``, and ``vgi.log_extra`` custom metadata
-on the batch, following the same pattern as ``vgi.worker`` and ``vgi.client``.
+``vgi_rpc.log_level``, ``vgi_rpc.log_message``, and ``vgi_rpc.log_extra`` custom metadata
+on the batch.
 
 - **EXCEPTION** level → error (client raises ``RpcError``)
 - **Other levels** (ERROR, WARN, INFO, DEBUG, TRACE) → log message
@@ -95,13 +95,12 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.log import Level, Message
+from vgi_rpc.metadata import LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY, RPC_METHOD_KEY, encode_metadata
 from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_optional_type, empty_batch
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-_RPC_METHOD_KEY = b"rpc.method"
 
 _EMPTY_SCHEMA = pa.schema([])
 
@@ -175,11 +174,6 @@ class AnnotatedBatch:
         return cls(batch=batch)
 
 
-def _encode_metadata(metadata: dict[str, str]) -> pa.KeyValueMetadata:
-    """Encode a plain dict to pa.KeyValueMetadata."""
-    return pa.KeyValueMetadata({k.encode(): v.encode() for k, v in metadata.items()})
-
-
 class OutputCollector:
     """Accumulates output batches during a produce/process call.
 
@@ -222,7 +216,7 @@ class OutputCollector:
         if self._has_data_batch:
             raise RuntimeError("Only one data batch may be emitted per call")
         self._has_data_batch = True
-        custom_metadata = _encode_metadata(metadata) if metadata else None
+        custom_metadata = encode_metadata(metadata) if metadata else None
         self._batches.append(AnnotatedBatch(batch=batch, custom_metadata=custom_metadata))
 
     def emit_arrays(
@@ -248,7 +242,7 @@ class OutputCollector:
     def log(self, level: Level, message: str, **extra: str) -> None:
         """Emit a zero-row log batch with log metadata."""
         msg = Message(level, message, **extra)
-        custom_metadata = _encode_metadata(msg.add_to_metadata())
+        custom_metadata = encode_metadata(msg.add_to_metadata())
         self._batches.append(AnnotatedBatch(batch=empty_batch(self._output_schema), custom_metadata=custom_metadata))
 
     # --- Stream completion (ServerStream only) ---
@@ -519,14 +513,14 @@ def _convert_for_arrow(val: Any) -> Any:
 def _write_request(writer_stream: IOBase, method_name: str, params_schema: pa.Schema, kwargs: dict[str, Any]) -> None:
     """Write a request as a complete IPC stream (schema + 1 batch + EOS).
 
-    The method name is sent as ``rpc.method`` in the batch's custom_metadata.
+    The method name is sent as ``vgi_rpc.method`` in the batch's custom_metadata.
     """
     arrays: list[pa.Array[Any]] = []
     for f in params_schema:
         val = _convert_for_arrow(kwargs.get(f.name))
         arrays.append(pa.array([val], type=f.type))
     batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
-    custom_metadata = pa.KeyValueMetadata({_RPC_METHOD_KEY: method_name.encode()})
+    custom_metadata = pa.KeyValueMetadata({RPC_METHOD_KEY: method_name.encode()})
     with ipc.new_stream(writer_stream, params_schema) as writer:
         writer.write_batch(batch, custom_metadata=custom_metadata)
 
@@ -537,7 +531,7 @@ def _write_message_batch(
     msg: Message,
 ) -> None:
     """Write a zero-row batch with Message metadata on an existing IPC stream writer."""
-    custom_metadata = _encode_metadata(msg.add_to_metadata())
+    custom_metadata = encode_metadata(msg.add_to_metadata())
     writer.write_batch(empty_batch(schema), custom_metadata=custom_metadata)
 
 
@@ -596,13 +590,13 @@ def _write_result_batch(writer: ipc.RecordBatchStreamWriter, result_schema: pa.S
 def _read_request(reader_stream: IOBase) -> tuple[str, dict[str, Any]]:
     """Read a request IPC stream, return (method_name, kwargs).
 
-    The method name is read from ``rpc.method`` in the batch's custom_metadata.
+    The method name is read from ``vgi_rpc.method`` in the batch's custom_metadata.
     """
     reader = ipc.open_stream(reader_stream)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
-    method_name_bytes = custom_metadata.get(_RPC_METHOD_KEY) if custom_metadata else None
+    method_name_bytes = custom_metadata.get(RPC_METHOD_KEY) if custom_metadata else None
     if method_name_bytes is None:
-        raise RpcError("ProtocolError", "Missing rpc.method in request batch custom_metadata", "")
+        raise RpcError("ProtocolError", "Missing vgi_rpc.method in request batch custom_metadata", "")
     method_name = method_name_bytes.decode()
     _drain_stream(reader)
     kwargs = {f.name: batch.column(i)[0].as_py() for i, f in enumerate(batch.schema)}
@@ -626,8 +620,8 @@ def _dispatch_log_or_error(
         return False
     if batch.num_rows != 0:
         return False
-    level_bytes = custom_metadata.get(b"vgi.log_level")
-    message_bytes = custom_metadata.get(b"vgi.log_message")
+    level_bytes = custom_metadata.get(LOG_LEVEL_KEY)
+    message_bytes = custom_metadata.get(LOG_MESSAGE_KEY)
     if level_bytes is None or message_bytes is None:
         return False
 
@@ -636,7 +630,7 @@ def _dispatch_log_or_error(
 
     # Extract extra info (traceback, exception_type, etc.)
     extra: dict[str, Any] = {}
-    raw_extra = custom_metadata.get(b"vgi.log_extra")
+    raw_extra = custom_metadata.get(LOG_EXTRA_KEY)
     if raw_extra is not None:
         with contextlib.suppress(json.JSONDecodeError):
             extra = json.loads(raw_extra.decode())
@@ -908,6 +902,16 @@ class RpcServer:
     def methods(self) -> Mapping[str, RpcMethodInfo]:
         """Return method metadata for this server's protocol."""
         return self._methods
+
+    @property
+    def implementation(self) -> object:
+        """The implementation object."""
+        return self._impl
+
+    @property
+    def emit_log_methods(self) -> frozenset[str]:
+        """Method names whose implementations accept an emit_log parameter."""
+        return frozenset(self._emit_log_methods)
 
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""
