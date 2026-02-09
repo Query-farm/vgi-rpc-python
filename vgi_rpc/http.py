@@ -471,7 +471,7 @@ def make_wsgi_app(
     *,
     prefix: str = "/vgi",
     signing_key: bytes | None = None,
-) -> falcon.App:
+) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
     Args:
@@ -524,7 +524,7 @@ class _SyncTestClient:
 
     __slots__ = ("_client",)
 
-    def __init__(self, app: falcon.App) -> None:
+    def __init__(self, app: falcon.App[falcon.Request, falcon.Response]) -> None:
         self._client = falcon.testing.TestClient(app)
 
     def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
