@@ -1,8 +1,9 @@
 """Shared helpers for ``pa.KeyValueMetadata`` used across the RPC framework.
 
-Centralises well-known metadata keys, encoding/decoding, merging, and
-key-stripping so that ``rpc.py``, ``http.py``, and ``utils.py`` share a
-single implementation instead of duplicating these patterns.
+Centralises well-known metadata keys (including the wire-protocol version
+constant ``REQUEST_VERSION``), encoding/decoding, merging, and key-stripping
+so that ``rpc.py``, ``http.py``, and ``utils.py`` share a single
+implementation instead of duplicating these patterns.
 """
 
 from __future__ import annotations
@@ -33,13 +34,13 @@ def encode_metadata(metadata: dict[str, str]) -> pa.KeyValueMetadata:
 
 def decode_metadata(
     metadata: pa.KeyValueMetadata | None,
-) -> dict[str, str] | None:
+) -> dict[str, str]:
     """Decode ``pa.KeyValueMetadata`` to a plain ``dict[str, str]``.
 
-    Returns ``None`` when *metadata* is ``None``.
+    Returns an empty dict when *metadata* is ``None``.
     """
     if metadata is None:
-        return None
+        return {}
     return {
         k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
         for k, v in metadata.items()

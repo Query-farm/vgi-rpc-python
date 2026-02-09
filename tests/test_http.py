@@ -18,7 +18,6 @@ from vgi_rpc.http import (
     _ARROW_CONTENT_TYPE,
     _SyncTestClient,
     _SyncTestResponse,
-    http_connect,
     make_sync_client,
     make_wsgi_app,
 )
@@ -118,12 +117,7 @@ class TestHttpErrorCases:
         assert "ArrowInvalid" in err.error_type
 
     def test_malformed_body_bidi_exchange_400(self, client: _SyncTestClient) -> None:
-        """Garbage bytes on a bidi exchange endpoint return 400 (after valid init)."""
-        # Initialize a valid bidi session so the exchange path reaches ipc.open_stream
-        with http_connect(RpcFixtureService, _BASE_URL, client=client) as svc:
-            svc.transform(factor=1.0)
-
-        # Now send garbage to the exchange endpoint
+        """Garbage bytes on a bidi exchange endpoint return 400."""
         resp = client.post(
             f"{_BASE_URL}/vgi/transform/exchange",
             content=b"garbage bytes",

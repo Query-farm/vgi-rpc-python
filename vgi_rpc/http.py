@@ -21,11 +21,16 @@ Optional dependencies: ``pip install vgi-rpc[http]``
 from __future__ import annotations
 
 import contextlib
-import threading
+import hashlib
+import hmac
+import os
+import struct
+import warnings
 from collections.abc import Callable, Iterator
-from io import BytesIO
+from http import HTTPStatus
+from io import BytesIO, IOBase
 from types import TracebackType
-from typing import Any
+from typing import Any, get_args, get_origin, get_type_hints
 from urllib.parse import urlparse
 
 import falcon
@@ -50,6 +55,7 @@ from vgi_rpc.rpc import (
     StreamSession,
     _deserialize_params,
     _drain_stream,
+    _flush_collector,
     _LogSink,
     _read_batch_with_log_check,
     _read_request,
@@ -71,35 +77,182 @@ __all__ = [
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 
 
-def _check_content_type(req: falcon.Request) -> bytes | None:
-    """Return error bytes if Content-Type is not Arrow IPC stream, else ``None``."""
+class _RpcHttpError(Exception):
+    """Internal exception for HTTP-layer errors with status codes."""
+
+    __slots__ = ("cause", "status_code", "schema")
+
+    def __init__(self, cause: BaseException, *, status_code: HTTPStatus, schema: pa.Schema = _EMPTY_SCHEMA) -> None:
+        self.cause = cause
+        self.status_code = status_code
+        self.schema = schema
+
+
+def _check_content_type(req: falcon.Request) -> None:
+    """Raise ``_RpcHttpError`` if Content-Type is not Arrow IPC stream."""
     content_type = req.content_type or ""
     if content_type != _ARROW_CONTENT_TYPE:
-        return _error_response_bytes(
+        raise _RpcHttpError(
             TypeError(f"Expected Content-Type: {_ARROW_CONTENT_TYPE}, got {content_type!r}"),
+            status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
         )
-    return None
 
 
-def _error_response_bytes(exc: BaseException, schema: pa.Schema = _EMPTY_SCHEMA) -> bytes:
-    """Serialize an exception as a complete Arrow IPC error stream."""
-    resp_buf = BytesIO()
-    with ipc.new_stream(resp_buf, schema) as writer:
+def _error_response_stream(exc: BaseException, schema: pa.Schema = _EMPTY_SCHEMA) -> BytesIO:
+    """Serialize an exception as a complete Arrow IPC error stream.
+
+    Args:
+        exc: The exception to serialize.
+        schema: Arrow schema for the error stream (default empty).
+
+    Returns:
+        A ``BytesIO`` positioned at the start, containing the IPC stream.
+
+    """
+    buf = BytesIO()
+    with ipc.new_stream(buf, schema) as writer:
         _write_error_batch(writer, schema, exc)
-    return resp_buf.getvalue()
+    buf.seek(0)
+    return buf
 
 
 def _set_error_response(
     resp: falcon.Response,
     exc: BaseException,
     *,
-    status_code: int = 200,
+    status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
     schema: pa.Schema = _EMPTY_SCHEMA,
 ) -> None:
     """Set a Falcon response to an Arrow IPC error stream."""
     resp.content_type = _ARROW_CONTENT_TYPE
-    resp.data = _error_response_bytes(exc, schema)
-    resp.status = str(status_code)
+    resp.stream = _error_response_stream(exc, schema)
+    resp.status = str(status_code.value)
+
+
+# ---------------------------------------------------------------------------
+# Signed bidi token helpers
+# ---------------------------------------------------------------------------
+
+_HMAC_LEN = 32  # SHA-256 digest size
+_HEADER_LEN = 4  # uint32 LE prefix for each segment
+_MIN_TOKEN_LEN = _HEADER_LEN + _HEADER_LEN + _HMAC_LEN  # two length prefixes + HMAC
+
+
+def _pack_bidi_token(state_bytes: bytes, schema_bytes: bytes, signing_key: bytes) -> bytes:
+    """Pack state and schema bytes into a signed token.
+
+    Wire format::
+
+        [4 bytes: state_len  (uint32 LE)]
+        [state_len bytes: state_bytes]
+        [4 bytes: schema_len (uint32 LE)]
+        [schema_len bytes: schema_bytes]
+        [32 bytes: HMAC-SHA256(key, state_bytes + schema_bytes)]
+
+    Args:
+        state_bytes: Serialized bidi state (Arrow IPC).
+        schema_bytes: Serialized ``pa.Schema``.
+        signing_key: HMAC signing key.
+
+    Returns:
+        The opaque signed token.
+
+    """
+    payload = (
+        struct.pack("<I", len(state_bytes))
+        + state_bytes
+        + struct.pack("<I", len(schema_bytes))
+        + schema_bytes
+    )
+    mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
+    return payload + mac
+
+
+def _unpack_bidi_token(token: bytes, signing_key: bytes) -> tuple[bytes, bytes]:
+    """Unpack and verify a signed bidi token.
+
+    Args:
+        token: The opaque token produced by ``_pack_bidi_token``.
+        signing_key: HMAC signing key (must match the one used to pack).
+
+    Returns:
+        ``(state_bytes, schema_bytes)``
+
+    Raises:
+        _RpcHttpError: On malformed or tampered tokens (HTTP 400).
+
+    """
+    if len(token) < _MIN_TOKEN_LEN:
+        raise _RpcHttpError(
+            RuntimeError("Malformed bidi state token"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    # Parse lengths and extract segments
+    state_len = struct.unpack_from("<I", token, 0)[0]
+    offset = _HEADER_LEN + state_len
+    if offset + _HEADER_LEN + _HMAC_LEN > len(token):
+        raise _RpcHttpError(
+            RuntimeError("Malformed bidi state token"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    schema_len = struct.unpack_from("<I", token, offset)[0]
+    payload_end = offset + _HEADER_LEN + schema_len
+    if payload_end + _HMAC_LEN != len(token):
+        raise _RpcHttpError(
+            RuntimeError("Malformed bidi state token"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    payload = token[:payload_end]
+    received_mac = token[payload_end:]
+    expected_mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
+    if not hmac.compare_digest(received_mac, expected_mac):
+        raise _RpcHttpError(
+            RuntimeError("Bidi state token signature verification failed"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    state_bytes = token[_HEADER_LEN : _HEADER_LEN + state_len]
+    schema_bytes = token[offset + _HEADER_LEN : offset + _HEADER_LEN + schema_len]
+    return state_bytes, schema_bytes
+
+
+def _resolve_bidi_state_types(server: RpcServer) -> dict[str, type[BidiStreamState]]:
+    """Introspect server implementation to map bidi method names to concrete state types.
+
+    Examines the return type hints of each bidi-stream method on the
+    implementation (not the protocol) to extract the concrete
+    ``BidiStreamState`` subclass from ``BidiStream[ConcreteState]``.
+
+    Args:
+        server: The ``RpcServer`` whose implementation to introspect.
+
+    Returns:
+        Mapping of method name to concrete ``BidiStreamState`` subclass.
+
+    """
+    result: dict[str, type[BidiStreamState]] = {}
+    for name, info in server.methods.items():
+        if info.method_type != MethodType.BIDI_STREAM:
+            continue
+        impl_method = getattr(server.implementation, name, None)
+        if impl_method is None:
+            continue
+        try:
+            hints = get_type_hints(impl_method)
+        except (NameError, AttributeError):
+            continue
+        return_hint = hints.get("return")
+        if return_hint is None:
+            continue
+        origin = get_origin(return_hint)
+        if origin is BidiStream:
+            args = get_args(return_hint)
+            if args and isinstance(args[0], type) and issubclass(args[0], BidiStreamState):
+                result[name] = args[0]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -110,24 +263,34 @@ def _set_error_response(
 class _HttpRpcApp:
     """Internal helper that wraps an RpcServer and manages bidi state."""
 
-    __slots__ = ("_server", "_bidi_state_types", "_bidi_output_schemas", "_lock")
+    __slots__ = ("_server", "_signing_key", "_bidi_state_types")
 
-    def __init__(self, server: RpcServer) -> None:
+    def __init__(self, server: RpcServer, signing_key: bytes) -> None:
         self._server = server
-        self._bidi_state_types: dict[str, type[BidiStreamState]] = {}
-        self._bidi_output_schemas: dict[str, pa.Schema] = {}
-        self._lock = threading.Lock()
+        self._signing_key = signing_key
+        self._bidi_state_types = _resolve_bidi_state_types(server)
 
-    def _bidi_init_sync(self, method_name: str, info: RpcMethodInfo, body: bytes) -> bytes:
+    def _resolve_method(self, req: falcon.Request, method: str) -> RpcMethodInfo:
+        """Validate content type and resolve method info.
+
+        Raises:
+            _RpcHttpError: If content type is wrong or method is unknown.
+
+        """
+        _check_content_type(req)
+        info = self._server.methods.get(method)
+        if info is None:
+            raise _RpcHttpError(AttributeError(f"Unknown method: {method}"), status_code=HTTPStatus.NOT_FOUND)
+        return info
+
+    def _bidi_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run bidi init synchronously."""
-        req_buf = BytesIO(body)
-        _, kwargs = _read_request(req_buf)
-        _deserialize_params(kwargs, info.param_types)
-
         try:
+            _, kwargs = _read_request(stream)
+            _deserialize_params(kwargs, info.param_types)
             _validate_params(info.name, kwargs, info.param_types)
-        except TypeError as exc:
-            return _error_response_bytes(exc)
+        except (pa.ArrowInvalid, TypeError, StopIteration) as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Inject emit_log if the implementation accepts it
         sink = _LogSink()
@@ -137,84 +300,96 @@ class _HttpRpcApp:
         try:
             result: BidiStream[BidiStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
         except Exception as exc:
-            return _error_response_bytes(exc)
+            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
         state = result.state
         output_schema = result.output_schema
 
-        # Cache state type and output schema for exchange calls
-        with self._lock:
-            self._bidi_state_types[method_name] = type(state)
-            self._bidi_output_schemas[method_name] = output_schema
-
-        # Serialize state
+        # Pack state + schema into a signed token
         state_bytes = state.serialize_to_bytes()
+        schema_bytes = output_schema.serialize().to_pybytes()
+        token = _pack_bidi_token(state_bytes, schema_bytes, self._signing_key)
 
-        # Write response: log batches + zero-row batch with state metadata
+        # Write response: log batches + zero-row batch with token in metadata
         resp_buf = BytesIO()
         with ipc.new_stream(resp_buf, output_schema) as writer:
-            sink.activate(writer, output_schema)
-            state_metadata = pa.KeyValueMetadata({BIDI_STATE_KEY: state_bytes})
+            sink.flush_contents(writer, output_schema)
+            state_metadata = pa.KeyValueMetadata({BIDI_STATE_KEY: token})
             zero_batch = empty_batch(output_schema)
             writer.write_batch(zero_batch, custom_metadata=state_metadata)
 
-        return resp_buf.getvalue()
+        resp_buf.seek(0)
+        return resp_buf
 
-    def _bidi_exchange_sync(self, method_name: str, info: RpcMethodInfo, body: bytes) -> bytes:
+    def _bidi_exchange_sync(self, method_name: str, stream: IOBase) -> BytesIO:
         """Run bidi exchange synchronously."""
-        with self._lock:
-            state_cls = self._bidi_state_types.get(method_name)
-            output_schema = self._bidi_output_schemas.get(method_name)
-
+        state_cls = self._bidi_state_types.get(method_name)
         if state_cls is None:
-            return _error_response_bytes(RuntimeError(f"No bidi session initialized for method '{method_name}'"))
+            raise _RpcHttpError(
+                RuntimeError(f"Cannot resolve bidi state type for method '{method_name}'"),
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
-        # Read the input batch + extract state from metadata
-        req_reader = ipc.open_stream(BytesIO(body))
-        input_batch, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
-        _drain_stream(req_reader)
+        # Read the input batch + extract token from metadata
+        try:
+            req_reader = ipc.open_stream(stream)
+            input_batch, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
+            _drain_stream(req_reader)
+        except pa.ArrowInvalid as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
-        if custom_metadata is None or custom_metadata.get(BIDI_STATE_KEY) is None:
-            return _error_response_bytes(RuntimeError("Missing vgi_rpc.bidi_state in exchange request"))
+        token = custom_metadata.get(BIDI_STATE_KEY) if custom_metadata is not None else None
+        if token is None:
+            raise _RpcHttpError(
+                RuntimeError("Missing vgi_rpc.bidi_state in exchange request"),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
 
-        state_bytes = custom_metadata.get(BIDI_STATE_KEY)
-        assert state_bytes is not None  # already checked above
+        # Unpack and verify the signed token
+        state_bytes, schema_bytes = _unpack_bidi_token(token, self._signing_key)
+
+        # Recover output schema from token
+        try:
+            output_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
+        except Exception as exc:
+            raise _RpcHttpError(
+                RuntimeError(f"Failed to deserialize output schema: {exc}"),
+                status_code=HTTPStatus.BAD_REQUEST,
+            ) from exc
+
+        # Deserialize state
         try:
             state = state_cls.deserialize_from_bytes(state_bytes)
         except Exception as exc:
-            return _error_response_bytes(RuntimeError(f"Failed to deserialize bidi state: {exc}"))
-
-        if output_schema is None:
-            return _error_response_bytes(RuntimeError(f"No output schema cached for method '{method_name}'"))
-
-        # Strip vgi_rpc.bidi_state from metadata visible to process()
-        user_cm = strip_keys(custom_metadata, BIDI_STATE_KEY)
-
-        ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
-        out = OutputCollector(output_schema)
+            raise _RpcHttpError(
+                RuntimeError(f"Failed to deserialize bidi state: {exc}"),
+                status_code=HTTPStatus.BAD_REQUEST,
+            ) from exc
 
         try:
+            # Strip vgi_rpc.bidi_state from metadata visible to process()
+            user_cm = strip_keys(custom_metadata, BIDI_STATE_KEY)
+
+            ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
+            out = OutputCollector(output_schema)
+
             state.process(ab_in, out)
+            out.validate()
+
+            # Repack updated state with same schema into new signed token
+            updated_state_bytes = state.serialize_to_bytes()
+            updated_token = _pack_bidi_token(updated_state_bytes, schema_bytes, self._signing_key)
+            out.merge_data_metadata(pa.KeyValueMetadata({BIDI_STATE_KEY: updated_token}))
+
+            # Write response batches (log + data, in order)
+            resp_buf = BytesIO()
+            with ipc.new_stream(resp_buf, output_schema) as writer:
+                _flush_collector(writer, out)
         except Exception as exc:
-            return _error_response_bytes(exc, output_schema)
+            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR, schema=output_schema) from exc
 
-        # Serialize updated state
-        updated_state_bytes = state.serialize_to_bytes()
-
-        # Write response: log batches + data batch with state metadata
-        resp_buf = BytesIO()
-        with ipc.new_stream(resp_buf, output_schema) as writer:
-            for ab in out.batches:
-                if ab.batch.num_rows == 0 and ab.custom_metadata is not None:
-                    # Log batch — write as-is
-                    writer.write_batch(ab.batch, custom_metadata=ab.custom_metadata)
-                else:
-                    # Data batch — attach state metadata
-                    state_md = pa.KeyValueMetadata({BIDI_STATE_KEY: updated_state_bytes})
-                    merged = merge_metadata(ab.custom_metadata, state_md)
-                    writer.write_batch(ab.batch, custom_metadata=merged)
-
-        return resp_buf.getvalue()
+        resp_buf.seek(0)
+        return resp_buf
 
 
 class _RpcResource:
@@ -225,34 +400,29 @@ class _RpcResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle unary and server-stream RPC calls."""
-        if (ct_err := _check_content_type(req)) is not None:
-            resp.content_type = _ARROW_CONTENT_TYPE
-            resp.data = ct_err
-            resp.status = "415"
+        try:
+            info = self._app._resolve_method(req, method)
+            if info.method_type == MethodType.BIDI_STREAM:
+                raise _RpcHttpError(
+                    TypeError(f"Bidi method '{method}' requires /bidi and /exchange endpoints"),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+        except _RpcHttpError as e:
+            _set_error_response(resp, e.cause, status_code=e.status_code, schema=e.schema)
             return
 
-        info = self._app._server.methods.get(method)
-        if info is None:
-            _set_error_response(resp, AttributeError(f"Unknown method: {method}"), status_code=404)
-            return
-        if info.method_type == MethodType.BIDI_STREAM:
-            _set_error_response(
-                resp,
-                TypeError(f"Bidi method '{method}' requires /bidi and /exchange endpoints"),
-                status_code=400,
-            )
-            return
-
-        body = req.bounded_stream.read()
-        req_buf = BytesIO(body)
         resp_buf = BytesIO()
-
-        transport = PipeTransport(req_buf, resp_buf)
-        with contextlib.suppress(pa.lib.ArrowInvalid):
+        transport = PipeTransport(req.bounded_stream, resp_buf)
+        try:
             self._app._server.serve_one(transport)
+        except pa.ArrowInvalid:
+            # serve_one writes an Arrow error stream before re-raising;
+            # return it with a 400 status.
+            resp.status = str(HTTPStatus.BAD_REQUEST.value)
 
+        resp_buf.seek(0)
         resp.content_type = _ARROW_CONTENT_TYPE
-        resp.data = resp_buf.getvalue()
+        resp.stream = resp_buf
 
 
 class _BidiInitResource:
@@ -263,32 +433,19 @@ class _BidiInitResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle bidi stream initialization."""
-        if (ct_err := _check_content_type(req)) is not None:
-            resp.content_type = _ARROW_CONTENT_TYPE
-            resp.data = ct_err
-            resp.status = "415"
-            return
-
-        info = self._app._server.methods.get(method)
-        if info is None:
-            _set_error_response(resp, AttributeError(f"Unknown method: {method}"), status_code=404)
-            return
-        if info.method_type != MethodType.BIDI_STREAM:
-            _set_error_response(
-                resp,
-                TypeError(f"Method '{method}' is not a bidi stream"),
-                status_code=400,
-            )
-            return
-
-        body = req.bounded_stream.read()
         try:
-            result_bytes = self._app._bidi_init_sync(method, info, body)
-        except pa.lib.ArrowInvalid as exc:
-            _set_error_response(resp, exc, status_code=400)
+            info = self._app._resolve_method(req, method)
+            if info.method_type != MethodType.BIDI_STREAM:
+                raise _RpcHttpError(
+                    TypeError(f"Method '{method}' is not a bidi stream"),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+            result_stream = self._app._bidi_init_sync(method, info, req.bounded_stream)
+        except _RpcHttpError as e:
+            _set_error_response(resp, e.cause, status_code=e.status_code, schema=e.schema)
             return
         resp.content_type = _ARROW_CONTENT_TYPE
-        resp.data = result_bytes
+        resp.stream = result_stream
 
 
 class _BidiExchangeResource:
@@ -299,47 +456,52 @@ class _BidiExchangeResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle bidi stream exchange."""
-        if (ct_err := _check_content_type(req)) is not None:
-            resp.content_type = _ARROW_CONTENT_TYPE
-            resp.data = ct_err
-            resp.status = "415"
-            return
-
-        info = self._app._server.methods.get(method)
-        if info is None:
-            _set_error_response(resp, AttributeError(f"Unknown method: {method}"), status_code=404)
-            return
-        if info.method_type != MethodType.BIDI_STREAM:
-            _set_error_response(
-                resp,
-                TypeError(f"Method '{method}' is not a bidi stream"),
-                status_code=400,
-            )
-            return
-
-        body = req.bounded_stream.read()
         try:
-            result_bytes = self._app._bidi_exchange_sync(method, info, body)
-        except pa.lib.ArrowInvalid as exc:
-            _set_error_response(resp, exc, status_code=400)
+            info = self._app._resolve_method(req, method)
+            if info.method_type != MethodType.BIDI_STREAM:
+                raise _RpcHttpError(
+                    TypeError(f"Method '{method}' is not a bidi stream"),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+            result_stream = self._app._bidi_exchange_sync(method, req.bounded_stream)
+        except _RpcHttpError as e:
+            _set_error_response(resp, e.cause, status_code=e.status_code, schema=e.schema)
             return
         resp.content_type = _ARROW_CONTENT_TYPE
-        resp.data = result_bytes
+        resp.stream = result_stream
 
 
-def make_wsgi_app(server: RpcServer, *, prefix: str = "/vgi") -> falcon.App:
+def make_wsgi_app(
+    server: RpcServer,
+    *,
+    prefix: str = "/vgi",
+    signing_key: bytes | None = None,
+) -> falcon.App:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
     Args:
         server: The RpcServer instance to serve.
         prefix: URL prefix for all RPC endpoints (default ``/vgi``).
+        signing_key: HMAC key for signing bidi state tokens.  When ``None``
+            (the default), a random 32-byte key is generated **per process**.
+            This means bidi tokens issued by one worker are invalid in
+            another — you **must** provide a shared key for multi-process
+            deployments (e.g. gunicorn with multiple workers).
 
     Returns:
         A Falcon application with routes for unary, server-stream,
         and bidi-stream RPC calls.
 
     """
-    app_handler = _HttpRpcApp(server)
+    if signing_key is None:
+        warnings.warn(
+            "No signing_key provided; generating a random per-process key. "
+            "Bidi tokens will be invalid across workers — pass a shared key "
+            "for multi-process deployments.",
+            stacklevel=2,
+        )
+        signing_key = os.urandom(32)
+    app_handler = _HttpRpcApp(server, signing_key)
     app = falcon.App()
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/bidi", _BidiInitResource(app_handler))
@@ -381,7 +543,12 @@ class _SyncTestClient:
         """Close the client (no-op for test client)."""
 
 
-def make_sync_client(server: RpcServer, *, prefix: str = "/vgi") -> _SyncTestClient:
+def make_sync_client(
+    server: RpcServer,
+    *,
+    prefix: str = "/vgi",
+    signing_key: bytes | None = None,
+) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
     Uses ``falcon.testing.TestClient`` internally — no real HTTP server needed.
@@ -389,13 +556,44 @@ def make_sync_client(server: RpcServer, *, prefix: str = "/vgi") -> _SyncTestCli
     Args:
         server: The RpcServer to test.
         prefix: URL prefix for RPC endpoints (default ``/vgi``).
+        signing_key: HMAC key for signing bidi state tokens (see
+            ``make_wsgi_app`` for details).
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
 
     """
-    app = make_wsgi_app(server, prefix=prefix)
+    app = make_wsgi_app(server, prefix=prefix, signing_key=signing_key)
     return _SyncTestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# Client helpers
+# ---------------------------------------------------------------------------
+
+
+def _open_response_stream(content: bytes, status_code: int) -> ipc.RecordBatchStreamReader:
+    """Open an Arrow IPC stream from HTTP response bytes.
+
+    Args:
+        content: Response body bytes.
+        status_code: HTTP status code (used in error messages).
+
+    Returns:
+        An open IPC stream reader.
+
+    Raises:
+        RpcError: If the response is not a valid Arrow IPC stream.
+
+    """
+    try:
+        return ipc.open_stream(BytesIO(content))
+    except pa.ArrowInvalid:
+        raise RpcError(
+            "HttpError",
+            f"HTTP {status_code}: response is not a valid Arrow IPC stream",
+            "",
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -432,11 +630,11 @@ class HttpBidiSession:
         self._output_schema = output_schema
         self._on_log = on_log
 
-    def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
+    def exchange(self, input_batch: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch and receive the output batch.
 
         Args:
-            input: The input batch to send.
+            input_batch: The input batch to send.
 
         Returns:
             The output batch from the server.
@@ -448,9 +646,9 @@ class HttpBidiSession:
         # Write input batch with state in metadata
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({BIDI_STATE_KEY: self._state_bytes})
-        merged = merge_metadata(input.custom_metadata, state_md)
-        with ipc.new_stream(req_buf, input.batch.schema) as writer:
-            writer.write_batch(input.batch, custom_metadata=merged)
+        merged = merge_metadata(input_batch.custom_metadata, state_md)
+        with ipc.new_stream(req_buf, input_batch.batch.schema) as writer:
+            writer.write_batch(input_batch.batch, custom_metadata=merged)
 
         resp = self._client.post(
             f"{self._url_prefix}/{self._method}/exchange",
@@ -459,7 +657,7 @@ class HttpBidiSession:
         )
 
         # Read response — log batches + data batch with state
-        reader = ipc.open_stream(BytesIO(resp.content))
+        reader = _open_response_stream(resp.content, resp.status_code)
         try:
             ab = _read_batch_with_log_check(reader, self._on_log)
         except RpcError:
@@ -487,9 +685,9 @@ class HttpBidiSession:
 
     def __exit__(
         self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
+        _exc_type: type[BaseException] | None,
+        _exc_val: BaseException | None,
+        _exc_tb: TracebackType | None,
     ) -> None:
         """Exit the context."""
         self.close()
@@ -498,7 +696,7 @@ class HttpBidiSession:
 @contextlib.contextmanager
 def http_connect(
     protocol: type,
-    base_url: str,
+    base_url: str | None = None,
     *,
     prefix: str = "/vgi",
     on_log: Callable[[Message], None] | None = None,
@@ -509,6 +707,8 @@ def http_connect(
     Args:
         protocol: The Protocol class defining the RPC interface.
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
+            Required when *client* is ``None``; ignored when a pre-built
+            *client* is provided.
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         on_log: Optional callback for log messages from the server.
         client: Optional HTTP client — ``httpx.Client`` for production,
@@ -517,9 +717,14 @@ def http_connect(
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
 
+    Raises:
+        ValueError: If *base_url* is ``None`` and *client* is ``None``.
+
     """
     own_client = client is None
     if client is None:
+        if base_url is None:
+            raise ValueError("base_url is required when client is not provided")
         client = httpx.Client(base_url=base_url)
 
     url_prefix = prefix
@@ -546,7 +751,13 @@ class _HttpProxy:
         self._methods = rpc_methods(protocol)
         self._on_log = on_log
 
-    def __getattr__(self, name: str) -> Any:  # noqa: D105
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        """Resolve RPC method names to callable proxies, caching on first access.
+
+        Returns ``Any`` because each method name maps to a different callable
+        signature (unary, server-stream, or bidi), so no single static return
+        type can represent all of them.
+        """
         info = self._methods.get(name)
         if info is None:
             raise AttributeError(f"{self._protocol.__name__} has no RPC method '{name}'")
@@ -578,7 +789,7 @@ class _HttpProxy:
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
 
-            reader = ipc.open_stream(BytesIO(resp.content))
+            reader = _open_response_stream(resp.content, resp.status_code)
             return _read_unary_response(reader, info, on_log)
 
         return caller
@@ -598,7 +809,7 @@ class _HttpProxy:
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
 
-            reader = ipc.open_stream(BytesIO(resp.content))
+            reader = _open_response_stream(resp.content, resp.status_code)
             return _read_stream_response(reader, on_log)
 
         return caller
@@ -620,7 +831,7 @@ class _HttpProxy:
             )
 
             # Read response — log batches + zero-row batch with state
-            reader = ipc.open_stream(BytesIO(resp.content))
+            reader = _open_response_stream(resp.content, resp.status_code)
             output_schema = reader.schema
             state_bytes: bytes | None = None
 

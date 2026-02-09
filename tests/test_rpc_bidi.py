@@ -348,7 +348,7 @@ class TestBidiSessionLifecycle:
             session.close()
             assert isinstance(session, BidiSession)
             # After close, the input writer is closed. Trying to exchange should fail.
-            with pytest.raises((pa.lib.ArrowInvalid, OSError)):
+            with pytest.raises((pa.ArrowInvalid, OSError)):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
 
 
@@ -416,7 +416,7 @@ class TestBidiErrorHandling:
         """
         with edge_conn() as proxy:
             session = proxy.fail_init()
-            with pytest.raises((RpcError, pa.lib.ArrowInvalid)):
+            with pytest.raises((RpcError, pa.ArrowInvalid)):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
 
     def test_bidi_error_then_unary_on_shared_transport(self, make_conn: ConnFactory) -> None:
@@ -894,7 +894,7 @@ class TestBidiHttpTransport:
 
             # Corrupt the state
             session._state_bytes = b"\x00\x01\x02\x03"
-            with pytest.raises(RpcError, match="Failed to deserialize bidi state"):
+            with pytest.raises(RpcError, match="Malformed bidi state token|signature verification"):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
 
     def test_http_bidi_state_persists_across_exchanges(self, http_server_port: int) -> None:

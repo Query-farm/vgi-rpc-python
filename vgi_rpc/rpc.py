@@ -16,6 +16,10 @@ Multiple IPC streams are written/read sequentially on the same pipe.  Each
 ``ipc.open_stream()`` reads one complete IPC stream (schema + batches + EOS)
 and stops.  The next ``ipc.open_stream()`` picks up where the last left off.
 
+Every request batch carries ``vgi_rpc.request_version`` in its custom metadata.
+The server validates this before dispatching and rejects requests with a
+missing or incompatible version (``VersionError``).
+
 Errors and log messages are signaled as zero-row batches with
 ``vgi_rpc.log_level``, ``vgi_rpc.log_message``, and ``vgi_rpc.log_extra`` custom metadata
 on the batch.
@@ -72,6 +76,7 @@ import contextlib
 import functools
 import inspect
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -104,6 +109,7 @@ from vgi_rpc.metadata import (
     REQUEST_VERSION_KEY,
     RPC_METHOD_KEY,
     encode_metadata,
+    merge_metadata,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_optional_type, empty_batch
 
@@ -112,6 +118,7 @@ from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_opt
 # ---------------------------------------------------------------------------
 
 _EMPTY_SCHEMA = pa.schema([])
+_logger = logging.getLogger(__name__)
 
 EmitLog = Callable[[Message], None]
 """Callback type for emitting log messages from RPC method implementations."""
@@ -187,17 +194,19 @@ class OutputCollector:
     """Accumulates output batches during a produce/process call.
 
     Enforces that exactly one data batch is emitted per call (plus any number
-    of preceding log batches). Raises an error if a second data batch is emitted.
+    of log batches).  Batches are stored in a single ordered list because
+    interleaving order matters for the wire protocol (logs must precede the
+    data batch they annotate).
     """
 
-    __slots__ = ("_output_schema", "_batches", "_finished", "_has_data_batch")
+    __slots__ = ("_output_schema", "_batches", "_finished", "_data_batch_idx")
 
     def __init__(self, output_schema: pa.Schema) -> None:
         """Initialize with the output schema for this stream."""
         self._output_schema = output_schema
         self._batches: list[AnnotatedBatch] = []
         self._finished: bool = False
-        self._has_data_batch: bool = False
+        self._data_batch_idx: int | None = None
 
     @property
     def output_schema(self) -> pa.Schema:
@@ -216,15 +225,47 @@ class OutputCollector:
 
     # --- Data emission (exactly one per call) ---
 
+    @property
+    def data_batch(self) -> AnnotatedBatch:
+        """Return the single data batch, or raise if none was emitted."""
+        if self._data_batch_idx is None:
+            raise RuntimeError("No data batch was emitted")
+        return self._batches[self._data_batch_idx]
+
+    def validate(self) -> None:
+        """Assert that exactly one data batch was emitted.
+
+        Raises:
+            RuntimeError: If no data batch was emitted.
+
+        """
+        if self._data_batch_idx is None:
+            raise RuntimeError("No data batch was emitted")
+
+    def merge_data_metadata(self, metadata: pa.KeyValueMetadata) -> None:
+        """Merge extra metadata into the data batch.
+
+        Raises:
+            RuntimeError: If no data batch was emitted.
+
+        """
+        if self._data_batch_idx is None:
+            raise RuntimeError("No data batch was emitted")
+        ab = self._batches[self._data_batch_idx]
+        self._batches[self._data_batch_idx] = AnnotatedBatch(
+            batch=ab.batch,
+            custom_metadata=merge_metadata(ab.custom_metadata, metadata),
+        )
+
     def emit(
         self,
         batch: pa.RecordBatch,
         metadata: dict[str, str] | None = None,
     ) -> None:
         """Emit a pre-built data batch. Raises if a data batch was already emitted."""
-        if self._has_data_batch:
+        if self._data_batch_idx is not None:
             raise RuntimeError("Only one data batch may be emitted per call")
-        self._has_data_batch = True
+        self._data_batch_idx = len(self._batches)
         custom_metadata = encode_metadata(metadata) if metadata else None
         self._batches.append(AnnotatedBatch(batch=batch, custom_metadata=custom_metadata))
 
@@ -594,7 +635,8 @@ def _convert_for_arrow(val: object) -> object:
 def _write_request(writer_stream: IOBase, method_name: str, params_schema: pa.Schema, kwargs: dict[str, Any]) -> None:
     """Write a request as a complete IPC stream (schema + 1 batch + EOS).
 
-    The method name is sent as ``vgi_rpc.method`` in the batch's custom_metadata.
+    The batch's custom_metadata carries ``vgi_rpc.method`` (the method name)
+    and ``vgi_rpc.request_version`` (the wire-protocol version).
     """
     arrays: list[pa.Array[Any]] = []
     for f in params_schema:
@@ -647,7 +689,7 @@ class _LogSink:
         else:
             self._buffer.append(msg)
 
-    def activate(self, writer: ipc.RecordBatchStreamWriter, schema: pa.Schema) -> None:
+    def flush_contents(self, writer: ipc.RecordBatchStreamWriter, schema: pa.Schema) -> None:
         """Flush buffered messages and switch to direct writing."""
         self._writer = writer
         self._schema = schema
@@ -671,7 +713,14 @@ def _write_result_batch(writer: ipc.RecordBatchStreamWriter, result_schema: pa.S
 def _read_request(reader_stream: IOBase) -> tuple[str, dict[str, Any]]:
     """Read a request IPC stream, return (method_name, kwargs).
 
-    The method name is read from ``vgi_rpc.method`` in the batch's custom_metadata.
+    Extracts ``vgi_rpc.method`` and validates ``vgi_rpc.request_version``
+    from the batch's custom_metadata.
+
+    Raises:
+        RpcError: If ``vgi_rpc.method`` is missing.
+        VersionError: If ``vgi_rpc.request_version`` is missing or
+            does not match ``REQUEST_VERSION``.
+
     """
     reader = ipc.open_stream(reader_stream)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
@@ -686,7 +735,7 @@ def _read_request(reader_stream: IOBase) -> tuple[str, dict[str, Any]]:
     method_name = method_name_bytes.decode()
     _drain_stream(reader)
     kwargs = {f.name: batch.column(i)[0].as_py() for i, f in enumerate(batch.schema)}
-    return str(method_name), kwargs
+    return method_name, kwargs
 
 
 def _dispatch_log_or_error(
@@ -812,9 +861,11 @@ def _validate_result(method_name: str, value: object, result_type: Any) -> None:
 
 def _drain_stream(reader: ipc.RecordBatchStreamReader) -> None:
     """Consume remaining batches so the IPC EOS marker is read."""
-    with contextlib.suppress(StopIteration):
-        while True:
+    while True:
+        try:
             reader.read_next_batch()
+        except StopIteration:
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +954,7 @@ class SubprocessTransport:
     return fewer (POSIX short-read semantics).
     """
 
-    __slots__ = ("_proc", "_reader", "_writer")
+    __slots__ = ("_proc", "_reader", "_writer", "_closed")
 
     def __init__(self, cmd: list[str]) -> None:
         """Spawn the subprocess and wire up stdin/stdout as the transport."""
@@ -918,6 +969,7 @@ class SubprocessTransport:
         assert self._proc.stdin is not None
         self._reader: IOBase = os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False)
         self._writer: IOBase = cast(IOBase, self._proc.stdin)
+        self._closed = False
 
     @property
     def proc(self) -> subprocess.Popen[bytes]:
@@ -936,6 +988,9 @@ class SubprocessTransport:
 
     def close(self) -> None:
         """Close stdin (sends EOF), wait for exit, close stdout."""
+        if self._closed:
+            return
+        self._closed = True
         if self._proc.stdin:
             self._proc.stdin.close()
         self._proc.wait()
@@ -985,11 +1040,12 @@ class RpcServer:
         _validate_implementation(protocol, implementation, self._methods)
 
         # Detect which impl methods accept an `emit_log` parameter.
-        self._emit_log_methods: set[str] = set()
-        for name in self._methods:
-            method = getattr(implementation, name, None)
-            if method is not None and "emit_log" in inspect.signature(method).parameters:
-                self._emit_log_methods.add(name)
+        self._emit_log_methods: frozenset[str] = frozenset(
+            name
+            for name in self._methods
+            if (method := getattr(implementation, name, None)) is not None
+            and "emit_log" in inspect.signature(method).parameters
+        )
 
     @property
     def methods(self) -> Mapping[str, RpcMethodInfo]:
@@ -1004,28 +1060,35 @@ class RpcServer:
     @property
     def emit_log_methods(self) -> frozenset[str]:
         """Method names whose implementations accept an emit_log parameter."""
-        return frozenset(self._emit_log_methods)
+        return self._emit_log_methods
 
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""
         while True:
             try:
                 self.serve_one(transport)
-            except (EOFError, StopIteration, pa.lib.ArrowInvalid):
+            except (EOFError, StopIteration):
+                break
+            except pa.ArrowInvalid:
+                _logger.debug("serve loop ending due to ArrowInvalid", exc_info=True)
                 break
 
     def serve_one(self, transport: RpcTransport) -> None:
         """Handle a single RPC call (any method type) over the given transport.
 
+        Protocol-level errors (``VersionError``, ``RpcError`` from missing
+        metadata) are caught, written back as error responses, and the
+        method returns normally so the serve loop can continue.
+
         Raises:
-            pa.lib.ArrowInvalid: If the incoming data is not valid Arrow IPC.
+            pa.ArrowInvalid: If the incoming data is not valid Arrow IPC.
                 An error response is written to *transport* before raising so
                 the client can read a structured ``RpcError``.
 
         """
         try:
             method_name, kwargs = _read_request(transport.reader)
-        except pa.lib.ArrowInvalid as exc:
+        except pa.ArrowInvalid as exc:
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
             raise
@@ -1065,7 +1128,7 @@ class RpcServer:
         schema = info.result_schema
         sink = self._make_log_sink(info, kwargs)
         with ipc.new_stream(transport.writer, schema) as writer:
-            sink.activate(writer, schema)
+            sink.flush_contents(writer, schema)
             try:
                 result = getattr(self._impl, info.name)(**kwargs)
                 _validate_result(info.name, result, info.result_type)
@@ -1085,11 +1148,13 @@ class RpcServer:
         schema = result.output_schema
         state = result.state
         with ipc.new_stream(transport.writer, schema) as stream_writer:
-            sink.activate(stream_writer, schema)
+            sink.flush_contents(stream_writer, schema)
             try:
                 while True:
                     out = OutputCollector(schema)
                     state.produce(out)
+                    if not out.finished:
+                        out.validate()
                     _flush_collector(stream_writer, out)
                     if out.finished:
                         break
@@ -1112,7 +1177,7 @@ class RpcServer:
         input_reader = ipc.open_stream(transport.reader)
 
         with ipc.new_stream(transport.writer, output_schema) as output_writer:
-            sink.activate(output_writer, output_schema)
+            sink.flush_contents(output_writer, output_schema)
             try:
                 while True:
                     try:
@@ -1128,6 +1193,7 @@ class RpcServer:
                     ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=custom_metadata)
                     out = OutputCollector(output_schema)
                     state.process(ab_in, out)
+                    out.validate()
                     _flush_collector(output_writer, out)
             except Exception as exc:
                 _write_error_batch(output_writer, output_schema, exc)

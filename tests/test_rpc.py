@@ -1801,7 +1801,7 @@ class TestMalformedInput:
         resp_buf = BytesIO()
         transport = PipeTransport(req_buf, resp_buf)
 
-        with pytest.raises(pa.lib.ArrowInvalid):
+        with pytest.raises(pa.ArrowInvalid):
             server.serve_one(transport)
 
         # Error response was written before the raise
@@ -1826,7 +1826,7 @@ class TestMalformedInput:
         resp_buf = BytesIO()
         transport = PipeTransport(req_buf, resp_buf)
 
-        with pytest.raises(pa.lib.ArrowInvalid):
+        with pytest.raises(pa.ArrowInvalid):
             server.serve_one(transport)
 
         resp_buf.seek(0)
@@ -1952,5 +1952,5 @@ class TestInvalidBidiState:
             # Corrupt the state bytes
             session._state_bytes = b"garbage"
 
-            with pytest.raises(RpcError, match="Failed to deserialize bidi state"):
+            with pytest.raises(RpcError, match="Malformed bidi state token|signature verification"):
                 session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [2.0]})))

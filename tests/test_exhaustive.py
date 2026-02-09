@@ -449,10 +449,12 @@ class TestDispatchLogOrError:
 
     def test_nonzero_rows_returns_false(self) -> None:
         """Data batch with rows => not consumed even if metadata present."""
-        md = encode_metadata({
-            "vgi_rpc.log_level": "INFO",
-            "vgi_rpc.log_message": "test",
-        })
+        md = encode_metadata(
+            {
+                "vgi_rpc.log_level": "INFO",
+                "vgi_rpc.log_message": "test",
+            }
+        )
         assert _dispatch_log_or_error(self._make_data_batch(), md) is False
 
     def test_missing_level_returns_false(self) -> None:
@@ -468,11 +470,13 @@ class TestDispatchLogOrError:
     def test_exception_level_raises(self) -> None:
         """EXCEPTION level raises RpcError."""
         extra = json.dumps({"exception_type": "ValueError", "traceback": "tb here"})
-        md = encode_metadata({
-            "vgi_rpc.log_level": "EXCEPTION",
-            "vgi_rpc.log_message": "boom",
-            "vgi_rpc.log_extra": extra,
-        })
+        md = encode_metadata(
+            {
+                "vgi_rpc.log_level": "EXCEPTION",
+                "vgi_rpc.log_message": "boom",
+                "vgi_rpc.log_extra": extra,
+            }
+        )
         with pytest.raises(RpcError, match="boom") as exc_info:
             _dispatch_log_or_error(self._make_zero_row_batch(), md)
         assert exc_info.value.error_type == "ValueError"
@@ -480,10 +484,12 @@ class TestDispatchLogOrError:
 
     def test_exception_without_extra_uses_defaults(self) -> None:
         """EXCEPTION with no extra uses level as error_type."""
-        md = encode_metadata({
-            "vgi_rpc.log_level": "EXCEPTION",
-            "vgi_rpc.log_message": "err",
-        })
+        md = encode_metadata(
+            {
+                "vgi_rpc.log_level": "EXCEPTION",
+                "vgi_rpc.log_message": "err",
+            }
+        )
         with pytest.raises(RpcError) as exc_info:
             _dispatch_log_or_error(self._make_zero_row_batch(), md)
         assert exc_info.value.error_type == "EXCEPTION"
@@ -491,11 +497,13 @@ class TestDispatchLogOrError:
 
     def test_malformed_json_extra_ignored(self) -> None:
         """Malformed JSON in log_extra is silently ignored."""
-        md = encode_metadata({
-            "vgi_rpc.log_level": "INFO",
-            "vgi_rpc.log_message": "test",
-            "vgi_rpc.log_extra": "not valid json{{{",
-        })
+        md = encode_metadata(
+            {
+                "vgi_rpc.log_level": "INFO",
+                "vgi_rpc.log_message": "test",
+                "vgi_rpc.log_extra": "not valid json{{{",
+            }
+        )
         logs: list[Message] = []
         result = _dispatch_log_or_error(self._make_zero_row_batch(), md, on_log=logs.append)
         assert result is True
@@ -504,21 +512,25 @@ class TestDispatchLogOrError:
 
     def test_log_without_callback_silently_consumed(self) -> None:
         """Log batch with no on_log callback is consumed (returns True)."""
-        md = encode_metadata({
-            "vgi_rpc.log_level": "DEBUG",
-            "vgi_rpc.log_message": "debug msg",
-        })
+        md = encode_metadata(
+            {
+                "vgi_rpc.log_level": "DEBUG",
+                "vgi_rpc.log_message": "debug msg",
+            }
+        )
         result = _dispatch_log_or_error(self._make_zero_row_batch(), md, on_log=None)
         assert result is True
 
     def test_log_extra_pid_stripped(self) -> None:
         """Internal 'pid' key is stripped from the reconstructed Message.extra."""
         extra = json.dumps({"pid": 12345, "custom_key": "value"})
-        md = encode_metadata({
-            "vgi_rpc.log_level": "INFO",
-            "vgi_rpc.log_message": "msg",
-            "vgi_rpc.log_extra": extra,
-        })
+        md = encode_metadata(
+            {
+                "vgi_rpc.log_level": "INFO",
+                "vgi_rpc.log_message": "msg",
+                "vgi_rpc.log_extra": extra,
+            }
+        )
         logs: list[Message] = []
         _dispatch_log_or_error(self._make_zero_row_batch(), md, on_log=logs.append)
         assert logs[0].extra is not None
@@ -698,7 +710,7 @@ class TestLogSink:
         schema = pa.schema([pa.field("x", pa.int64())])
         buf = BytesIO()
         with ipc.new_stream(buf, schema) as writer:
-            sink.activate(writer, schema)
+            sink.flush_contents(writer, schema)
             # Buffer should be empty after activation
             assert len(sink._buffer) == 0
 
@@ -708,7 +720,7 @@ class TestLogSink:
         schema = pa.schema([pa.field("x", pa.int64())])
         buf = BytesIO()
         with ipc.new_stream(buf, schema) as writer:
-            sink.activate(writer, schema)
+            sink.flush_contents(writer, schema)
             sink(Message.info("direct"))
             assert len(sink._buffer) == 0
 

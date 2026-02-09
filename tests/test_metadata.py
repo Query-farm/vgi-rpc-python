@@ -26,15 +26,14 @@ class TestEncodeDecodeMetadata:
         decoded = decode_metadata(encoded)
         assert decoded == original
 
-    def test_decode_none_returns_none(self) -> None:
-        """decode_metadata(None) returns None."""
-        assert decode_metadata(None) is None
+    def test_decode_none_returns_empty_dict(self) -> None:
+        """decode_metadata(None) returns an empty dict."""
+        assert decode_metadata(None) == {}
 
     def test_decode_string_keys(self) -> None:
         """Metadata with string keys (not bytes) decodes correctly."""
         md = pa.KeyValueMetadata({"str_key": "str_value"})  # type: ignore[dict-item]
         decoded = decode_metadata(md)
-        assert decoded is not None
         assert decoded["str_key"] == "str_value"
 
 

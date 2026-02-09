@@ -33,11 +33,15 @@ Message : Log message with level, message text, and optional extras
 
 """
 
+from __future__ import annotations
+
 import json
 import os
 import traceback
 from enum import Enum
 from typing import ClassVar
+
+from vgi_rpc.metadata import LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY
 
 __all__ = [
     "Level",
@@ -107,7 +111,7 @@ class Message:
         return f"Message({self.level!r}, {self.message!r})"
 
     @classmethod
-    def exception(cls, message: str, **kwargs: object) -> "Message":
+    def exception(cls, message: str, **kwargs: object) -> Message:
         """Create an EXCEPTION level log message.
 
         Additional kwargs are stored in the extra field.
@@ -115,7 +119,7 @@ class Message:
         return cls(Level.EXCEPTION, message, **kwargs)
 
     @classmethod
-    def error(cls, message: str, **kwargs: object) -> "Message":
+    def error(cls, message: str, **kwargs: object) -> Message:
         """Create an ERROR level log message.
 
         Additional kwargs are stored in the extra field.
@@ -123,7 +127,7 @@ class Message:
         return cls(Level.ERROR, message, **kwargs)
 
     @classmethod
-    def warn(cls, message: str, **kwargs: object) -> "Message":
+    def warn(cls, message: str, **kwargs: object) -> Message:
         """Create a WARN level log message.
 
         Additional kwargs are stored in the extra field.
@@ -131,7 +135,7 @@ class Message:
         return cls(Level.WARN, message, **kwargs)
 
     @classmethod
-    def info(cls, message: str, **kwargs: object) -> "Message":
+    def info(cls, message: str, **kwargs: object) -> Message:
         """Create an INFO level log message.
 
         Additional kwargs are stored in the extra field.
@@ -139,7 +143,7 @@ class Message:
         return cls(Level.INFO, message, **kwargs)
 
     @classmethod
-    def debug(cls, message: str, **kwargs: object) -> "Message":
+    def debug(cls, message: str, **kwargs: object) -> Message:
         """Create a DEBUG level log message.
 
         Additional kwargs are stored in the extra field.
@@ -147,7 +151,7 @@ class Message:
         return cls(Level.DEBUG, message, **kwargs)
 
     @classmethod
-    def trace(cls, message: str, **kwargs: object) -> "Message":
+    def trace(cls, message: str, **kwargs: object) -> Message:
         """Create a TRACE level log message.
 
         Additional kwargs are stored in the extra field.
@@ -174,14 +178,17 @@ class Message:
 
         """
         result = dict(metadata) if metadata else {}
-        result["vgi_rpc.log_level"] = self.level.value
+        level_key: str = LOG_LEVEL_KEY.decode()
+        message_key: str = LOG_MESSAGE_KEY.decode()
+        extra_key: str = LOG_EXTRA_KEY.decode()
+        result[level_key] = self.level.value
         log_data: dict[str, object] = {
             "pid": os.getpid(),
         }
         if self.extra:
             log_data.update(self.extra)
-        result["vgi_rpc.log_message"] = self.message
-        result["vgi_rpc.log_extra"] = json.dumps(log_data)
+        result[message_key] = self.message
+        result[extra_key] = json.dumps(log_data)
         return result
 
     def should_terminate(self) -> bool:
@@ -189,7 +196,7 @@ class Message:
         return self.level == Level.EXCEPTION
 
     @classmethod
-    def from_exception(cls, exc: BaseException) -> "Message":
+    def from_exception(cls, exc: BaseException) -> Message:
         """Produce a Message from an exception."""
         tb_exc = traceback.TracebackException.from_exception(
             exc,
