@@ -3,6 +3,7 @@
 import contextlib
 
 from vgi_rpc.log import Level, Message
+from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     BidiSession,
@@ -29,7 +30,6 @@ from vgi_rpc.rpc import (
     serve_pipe,
     serve_stdio,
 )
-from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
 # HTTP (optional — requires `pip install vgi-rpc[http]`)

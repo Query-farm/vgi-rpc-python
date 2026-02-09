@@ -158,12 +158,7 @@ def _pack_bidi_token(state_bytes: bytes, schema_bytes: bytes, signing_key: bytes
         The opaque signed token.
 
     """
-    payload = (
-        struct.pack("<I", len(state_bytes))
-        + state_bytes
-        + struct.pack("<I", len(schema_bytes))
-        + schema_bytes
-    )
+    payload = struct.pack("<I", len(state_bytes)) + state_bytes + struct.pack("<I", len(schema_bytes)) + schema_bytes
     mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
     return payload + mac
 

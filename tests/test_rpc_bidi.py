@@ -653,9 +653,13 @@ class TestBidiInputSchemaValidation:
         """Correct input schema passes validation."""
         with edge_conn() as proxy:
             session = proxy.passthrough_with_input_schema()
-            out = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict(
-                {"value": [1.0]}, schema=pa.schema([pa.field("value", pa.float64())])
-            )))
+            out = session.exchange(
+                AnnotatedBatch(
+                    batch=pa.RecordBatch.from_pydict(
+                        {"value": [1.0]}, schema=pa.schema([pa.field("value", pa.float64())])
+                    )
+                )
+            )
             assert out.batch.column("row_count").to_pylist() == [1]
             session.close()
 
