@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -134,7 +134,7 @@ class LargeBatchState(BidiStreamState):
 
     def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
         """Multiply all values by factor."""
-        scaled = pc.multiply(input.batch.column("value"), self.factor)
+        scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
 
 

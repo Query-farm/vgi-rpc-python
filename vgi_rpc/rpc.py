@@ -81,7 +81,7 @@ import os
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from io import IOBase
@@ -271,7 +271,7 @@ class OutputCollector:
 
     def emit_arrays(
         self,
-        arrays: list[pa.Array[Any]],
+        arrays: Sequence[pa.Array[Any]],
         metadata: dict[str, str] | None = None,
     ) -> None:
         """Build a RecordBatch from arrays using output_schema and emit it."""
@@ -806,7 +806,7 @@ def _deserialize_value(value: object, type_hint: Any) -> object:
         return base[value]
     origin = get_origin(base)
     if origin is dict and isinstance(value, list):
-        return dict(value)
+        return dict(cast(list[tuple[Any, Any]], value))
     if origin is frozenset and isinstance(value, list):
         return frozenset(value)
     return value

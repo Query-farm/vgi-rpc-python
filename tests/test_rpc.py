@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, Protocol, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -84,7 +84,7 @@ class TransformState(BidiStreamState):
 
     def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
         """Process an input batch."""
-        scaled = pc.multiply(input.batch.column("value"), self.factor)
+        scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
 
 
@@ -115,7 +115,7 @@ class FailBidiMidState(BidiStreamState):
         if self.count > 0:
             raise RuntimeError("bidi boom")
         self.count += 1
-        scaled = pc.multiply(input.batch.column("value"), self.factor)
+        scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
 
 
@@ -145,7 +145,7 @@ class TransformWithLogsState(BidiStreamState):
     def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
         """Process input with a log message."""
         out.log(Level.INFO, f"transforming batch with factor={self.factor}")
-        scaled = pc.multiply(input.batch.column("value"), self.factor)
+        scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
 
 
@@ -1612,7 +1612,7 @@ class TestStateMutation:
 
             def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
                 self.call_count += 1
-                scaled = pc.multiply(input.batch.column("value"), self.factor)
+                scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
                 out.emit_arrays([scaled])
 
         state = CountingState(factor=2.0)

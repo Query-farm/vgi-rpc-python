@@ -28,11 +28,13 @@ from typing import (
     Annotated,
     Any,
     ClassVar,
+    Protocol,
     Self,
     Union,
     get_args,
     get_origin,
     get_type_hints,
+    runtime_checkable,
 )
 
 import pyarrow as pa
@@ -45,6 +47,14 @@ __all__ = [
     "ArrowSerializableDataclass",
     "ArrowType",
 ]
+
+
+@runtime_checkable
+class _BytesSerializable(Protocol):
+    """Protocol for objects that can serialize themselves to bytes."""
+
+    def serialize_to_bytes(self) -> bytes: ...
+
 
 # IPC debug logging - enable with VGI_IPC_DEBUG=1
 _IPC_DEBUG = os.environ.get("VGI_IPC_DEBUG", "").lower() in ("1", "true", "yes")
@@ -565,7 +575,7 @@ class ArrowSerializableDataclass:
             return value._to_row_dict()
 
         # Handle objects with serialize_to_bytes() method (e.g., Arguments)
-        if hasattr(value, "serialize_to_bytes") and callable(value.serialize_to_bytes):
+        if isinstance(value, _BytesSerializable):
             return value.serialize_to_bytes()
 
         # Handle Enum -> .name (always uppercase, consistent across all enum types)
