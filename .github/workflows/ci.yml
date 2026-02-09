@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -28,8 +32,31 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --python ${{ matrix.python-version }}
 
-      - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest
+      - name: Run tests with coverage
+        run: >
+          uv run --python ${{ matrix.python-version }} pytest
+          --cov=vgi_rpc
+          --cov-report=term-missing
+          --cov-report="markdown:coverage.md"
+
+      - name: Write coverage to job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f coverage.md ]; then
+            echo "## Coverage — Python ${{ matrix.python-version }} / ${{ matrix.os }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat coverage.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Coverage PR comment
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' && github.event_name == 'pull_request'
+        uses: MishaKav/pytest-coverage-comment@main
+        with:
+          coverage-path-prefix: vgi_rpc/
+          pytest-coverage-path: coverage.md
+          title: Coverage Report
+          badge-title: coverage
 
   lint:
     name: Lint
