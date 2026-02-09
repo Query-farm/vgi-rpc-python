@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Protocol
+from typing import Annotated, Any, Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -30,7 +30,6 @@ from vgi_rpc.rpc import (
     ServerStream,
     ServerStreamState,
     StreamSession,
-    SubprocessTransport,
     _RpcProxy,
     connect,
     describe_rpc,
@@ -41,9 +40,7 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
-from .conftest import _worker_cmd
-
-type RpcProxyType = _RpcProxy | _HttpProxy
+from .conftest import ConnFactory, _worker_cmd
 
 # ---------------------------------------------------------------------------
 # Enum for type fidelity tests
@@ -384,41 +381,6 @@ def http_conn(port: int, on_log: Callable[[Message], None] | None = None) -> Ite
     """Yield an HTTP proxy connected to a shared server on *port*."""
     with http_connect(RpcFixtureService, f"http://127.0.0.1:{port}", on_log=on_log) as proxy:
         yield proxy
-
-
-# ---------------------------------------------------------------------------
-# Fixture: make_conn — parametrized over pipe, subprocess, and http transports
-# ---------------------------------------------------------------------------
-
-
-ConnFactory = Callable[..., contextlib.AbstractContextManager[RpcProxyType]]
-"""Type alias for the ``make_conn`` fixture return type."""
-
-
-@pytest.fixture(params=["pipe", "subprocess", "http"])
-def make_conn(
-    request: pytest.FixtureRequest,
-    http_server_port: int,
-    subprocess_worker: SubprocessTransport,
-) -> ConnFactory:
-    """Return a factory that creates an RPC connection context manager."""
-
-    def factory(
-        on_log: Callable[[Message], None] | None = None,
-    ) -> contextlib.AbstractContextManager[RpcProxyType]:
-        if request.param == "pipe":
-            return rpc_conn(on_log=on_log)
-        elif request.param == "subprocess":
-
-            @contextlib.contextmanager
-            def _conn() -> Iterator[_RpcProxy]:
-                yield _RpcProxy(RpcFixtureService, subprocess_worker, on_log)
-
-            return _conn()
-        else:
-            return http_conn(http_server_port, on_log=on_log)
-
-    return factory
 
 
 # ---------------------------------------------------------------------------
@@ -1874,6 +1836,100 @@ class TestMalformedInput:
                 batch, cm = reader.read_next_batch_with_custom_metadata()
                 _dispatch_log_or_error(batch, cm)
         _drain_stream(reader)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Request version validation
+# ---------------------------------------------------------------------------
+
+
+class TestRequestVersion:
+    """Tests for request version metadata validation."""
+
+    def _write_request_with_metadata(
+        self,
+        method_name: str,
+        params_schema: pa.Schema,
+        kwargs: dict[str, object],
+        custom_metadata: pa.KeyValueMetadata,
+    ) -> bytes:
+        """Write a request IPC stream with custom metadata, returning raw bytes."""
+        from io import BytesIO
+
+        from vgi_rpc.rpc import _convert_for_arrow
+
+        buf = BytesIO()
+        arrays: list[pa.Array[Any]] = []
+        for f in params_schema:
+            val = _convert_for_arrow(kwargs.get(f.name))
+            arrays.append(pa.array([val], type=f.type))
+        batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
+        with pa.ipc.new_stream(buf, params_schema) as writer:
+            writer.write_batch(batch, custom_metadata=custom_metadata)
+        return buf.getvalue()
+
+    def test_wrong_version_raises(self) -> None:
+        """Request with wrong version is rejected with VersionError."""
+        from io import BytesIO
+
+        from vgi_rpc.metadata import REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _dispatch_log_or_error, _drain_stream
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        methods = rpc_methods(RpcFixtureService)
+        info = methods["add"]
+
+        req_bytes = self._write_request_with_metadata(
+            "add",
+            info.params_schema,
+            {"a": 1.0, "b": 2.0},
+            pa.KeyValueMetadata({RPC_METHOD_KEY: b"add", REQUEST_VERSION_KEY: b"999"}),
+        )
+        req_buf = BytesIO(req_bytes)
+        resp_buf = BytesIO()
+        transport = PipeTransport(req_buf, resp_buf)
+        server.serve_one(transport)
+
+        resp_buf.seek(0)
+        reader = pa.ipc.open_stream(resp_buf)
+        with pytest.raises(RpcError, match="Unsupported request version") as exc_info:
+            while True:
+                batch, cm = reader.read_next_batch_with_custom_metadata()
+                _dispatch_log_or_error(batch, cm)
+        _drain_stream(reader)
+        assert exc_info.value.error_type == "VersionError"
+
+    def test_missing_version_raises(self) -> None:
+        """Request with missing version is rejected with VersionError."""
+        from io import BytesIO
+
+        from vgi_rpc.metadata import RPC_METHOD_KEY
+        from vgi_rpc.rpc import _dispatch_log_or_error, _drain_stream
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        methods = rpc_methods(RpcFixtureService)
+        info = methods["add"]
+
+        # Only include method key, no version key
+        req_bytes = self._write_request_with_metadata(
+            "add",
+            info.params_schema,
+            {"a": 1.0, "b": 2.0},
+            pa.KeyValueMetadata({RPC_METHOD_KEY: b"add"}),
+        )
+        req_buf = BytesIO(req_bytes)
+        resp_buf = BytesIO()
+        transport = PipeTransport(req_buf, resp_buf)
+        server.serve_one(transport)
+
+        resp_buf.seek(0)
+        reader = pa.ipc.open_stream(resp_buf)
+        with pytest.raises(RpcError, match="Missing vgi_rpc.request_version") as exc_info:
+            while True:
+                batch, cm = reader.read_next_batch_with_custom_metadata()
+                _dispatch_log_or_error(batch, cm)
+        _drain_stream(reader)
+        assert exc_info.value.error_type == "VersionError"
 
 
 # ---------------------------------------------------------------------------

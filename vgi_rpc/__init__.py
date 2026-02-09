@@ -29,11 +29,12 @@ from vgi_rpc.rpc import (
     serve_pipe,
     serve_stdio,
 )
+from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
 # HTTP (optional — requires `pip install vgi-rpc[http]`)
 with contextlib.suppress(ImportError):
-    from vgi_rpc.http import HttpBidiSession, http_connect, make_asgi_app, make_sync_client
+    from vgi_rpc.http import HttpBidiSession, http_connect, make_sync_client, make_wsgi_app
 
 __all__ = [
     # Core
@@ -71,9 +72,11 @@ __all__ = [
     # Serialization
     "ArrowSerializableDataclass",
     "ArrowType",
+    # Protocol version
+    "REQUEST_VERSION",
     # HTTP (optional)
     "HttpBidiSession",
     "http_connect",
-    "make_asgi_app",
+    "make_wsgi_app",
     "make_sync_client",
 ]

@@ -80,11 +80,12 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from io import IOBase
-from types import MappingProxyType
+from types import MappingProxyType, TracebackType
 from typing import (
     Annotated,
     Any,
     Protocol,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -95,7 +96,15 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.log import Level, Message
-from vgi_rpc.metadata import LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY, RPC_METHOD_KEY, encode_metadata
+from vgi_rpc.metadata import (
+    LOG_EXTRA_KEY,
+    LOG_LEVEL_KEY,
+    LOG_MESSAGE_KEY,
+    REQUEST_VERSION,
+    REQUEST_VERSION_KEY,
+    RPC_METHOD_KEY,
+    encode_metadata,
+)
 from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_optional_type, empty_batch
 
 # ---------------------------------------------------------------------------
@@ -332,6 +341,10 @@ class RpcError(Exception):
         super().__init__(f"{error_type}: {error_message}")
 
 
+class VersionError(Exception):
+    """Raised when a request has a missing or incompatible protocol version."""
+
+
 # ---------------------------------------------------------------------------
 # RpcMethodInfo
 # ---------------------------------------------------------------------------
@@ -556,7 +569,7 @@ def _validate_implementation(
 # ---------------------------------------------------------------------------
 
 
-def _convert_for_arrow(val: Any) -> Any:
+def _convert_for_arrow(val: object) -> object:
     """Convert a Python value for Arrow serialization.
 
     Inverse of ``_deserialize_value``.  Handles types that Arrow cannot
@@ -588,7 +601,7 @@ def _write_request(writer_stream: IOBase, method_name: str, params_schema: pa.Sc
         val = _convert_for_arrow(kwargs.get(f.name))
         arrays.append(pa.array([val], type=f.type))
     batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
-    custom_metadata = pa.KeyValueMetadata({RPC_METHOD_KEY: method_name.encode()})
+    custom_metadata = pa.KeyValueMetadata({RPC_METHOD_KEY: method_name.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION})
     with ipc.new_stream(writer_stream, params_schema) as writer:
         writer.write_batch(batch, custom_metadata=custom_metadata)
 
@@ -643,7 +656,7 @@ class _LogSink:
         self._buffer.clear()
 
 
-def _write_result_batch(writer: ipc.RecordBatchStreamWriter, result_schema: pa.Schema, value: Any) -> None:
+def _write_result_batch(writer: ipc.RecordBatchStreamWriter, result_schema: pa.Schema, value: object) -> None:
     """Write a unary result batch to an already-open IPC stream writer."""
     if len(result_schema) == 0:
         batch = pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
@@ -665,6 +678,11 @@ def _read_request(reader_stream: IOBase) -> tuple[str, dict[str, Any]]:
     method_name_bytes = custom_metadata.get(RPC_METHOD_KEY) if custom_metadata else None
     if method_name_bytes is None:
         raise RpcError("ProtocolError", "Missing vgi_rpc.method in request batch custom_metadata", "")
+    version_bytes = custom_metadata.get(REQUEST_VERSION_KEY) if custom_metadata else None
+    if version_bytes is None:
+        raise VersionError("Missing vgi_rpc.request_version in request metadata")
+    if version_bytes != REQUEST_VERSION:
+        raise VersionError(f"Unsupported request version {version_bytes!r}, expected {REQUEST_VERSION!r}")
     method_name = method_name_bytes.decode()
     _drain_stream(reader)
     kwargs = {f.name: batch.column(i)[0].as_py() for i, f in enumerate(batch.schema)}
@@ -697,7 +715,7 @@ def _dispatch_log_or_error(
     message_str = message_bytes.decode()
 
     # Extract extra info (traceback, exception_type, etc.)
-    extra: dict[str, Any] = {}
+    extra: dict[str, object] = {}
     raw_extra = custom_metadata.get(LOG_EXTRA_KEY)
     if raw_extra is not None:
         with contextlib.suppress(json.JSONDecodeError):
@@ -705,8 +723,8 @@ def _dispatch_log_or_error(
 
     # EXCEPTION level → raise RpcError (existing behaviour)
     if level_str == Level.EXCEPTION.value:
-        error_type = extra.get("exception_type", level_str)
-        traceback_str = extra.get("traceback", "")
+        error_type = str(extra.get("exception_type", level_str))
+        traceback_str = str(extra.get("traceback", ""))
         raise RpcError(error_type, message_str, traceback_str)
 
     # Non-exception log message → invoke callback
@@ -718,19 +736,24 @@ def _dispatch_log_or_error(
     return True
 
 
-def _deserialize_value(value: Any, type_hint: Any) -> Any:
+def _deserialize_value(value: object, type_hint: Any) -> object:
     """Deserialize a single value based on its type hint.
 
     Inverse of ``_convert_for_arrow``.  Handles ArrowSerializableDataclass,
-    Enum, dict, frozenset.
+    Enum, dict, frozenset.  Each branch narrows the value type with
+    ``isinstance`` before performing type-specific operations.
     """
     inner, _ = _is_optional_type(type_hint)
     base = _unwrap_annotated(inner)
-    if isinstance(value, bytes) and isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
+    if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
+        if not isinstance(value, bytes):
+            return value
         reader = ipc.open_stream(value)
         batch, metadata = reader.read_next_batch_with_custom_metadata()
         return base.deserialize_from_batch(batch, metadata)
-    if isinstance(base, type) and issubclass(base, Enum) and isinstance(value, str):
+    if isinstance(base, type) and issubclass(base, Enum):
+        if not isinstance(value, str):
+            return value
         return base[value]
     origin = get_origin(base)
     if origin is dict and isinstance(value, list):
@@ -772,7 +795,7 @@ def _validate_params(method_name: str, kwargs: dict[str, Any], param_types: dict
             raise TypeError(f"{method_name}() parameter '{name}' is not optional but got None")
 
 
-def _validate_result(method_name: str, value: Any, result_type: Any) -> None:
+def _validate_result(method_name: str, value: object, result_type: Any) -> None:
     """Validate that a non-optional return value is not None.
 
     Raises TypeError if the implementation returns None for a method whose
@@ -880,7 +903,7 @@ class SubprocessTransport:
     return fewer (POSIX short-read semantics).
     """
 
-    __slots__ = ("_proc", "_reader")
+    __slots__ = ("_proc", "_reader", "_writer")
 
     def __init__(self, cmd: list[str]) -> None:
         """Spawn the subprocess and wire up stdin/stdout as the transport."""
@@ -892,7 +915,9 @@ class SubprocessTransport:
             bufsize=0,
         )
         assert self._proc.stdout is not None
+        assert self._proc.stdin is not None
         self._reader: IOBase = os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False)
+        self._writer: IOBase = cast(IOBase, self._proc.stdin)
 
     @property
     def proc(self) -> subprocess.Popen[bytes]:
@@ -906,9 +931,8 @@ class SubprocessTransport:
 
     @property
     def writer(self) -> IOBase:
-        """Writable binary stream (child's stdin)."""
-        assert self._proc.stdin is not None
-        return self._proc.stdin  # type: ignore[return-value]
+        """Writable binary stream (child's stdin, unbuffered)."""
+        return self._writer
 
     def close(self) -> None:
         """Close stdin (sends EOF), wait for exit, close stdout."""
@@ -1005,6 +1029,10 @@ class RpcServer:
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
             raise
+        except (VersionError, RpcError) as exc:
+            with contextlib.suppress(BrokenPipeError, OSError):
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+            return
         info = self._methods.get(method_name)
         if info is None:
             _write_error_stream(transport.writer, _EMPTY_SCHEMA, AttributeError(f"Unknown method: {method_name}"))
@@ -1049,7 +1077,7 @@ class RpcServer:
     def _serve_server_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
         sink = self._make_log_sink(info, kwargs)
         try:
-            result: ServerStream[Any] = getattr(self._impl, info.name)(**kwargs)
+            result: ServerStream[ServerStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
             _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
             return
@@ -1072,7 +1100,7 @@ class RpcServer:
         sink = self._make_log_sink(info, kwargs)
 
         try:
-            result: BidiStream[Any] = getattr(self._impl, info.name)(**kwargs)
+            result: BidiStream[BidiStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
             _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
             return
@@ -1116,17 +1144,47 @@ class RpcServer:
 def _read_batch_with_log_check(
     reader: ipc.RecordBatchStreamReader,
     on_log: Callable[[Message], None] | None = None,
-) -> pa.RecordBatch:
+) -> AnnotatedBatch:
     """Read the next non-log batch, dispatching log batches to *on_log*.
 
     Loops internally, skipping zero-row log batches (via
-    ``_dispatch_log_or_error``).  Returns the first data batch.
-    ``StopIteration`` and ``RpcError`` propagate to the caller.
+    ``_dispatch_log_or_error``).  Returns the first data batch as an
+    ``AnnotatedBatch``.  ``StopIteration`` and ``RpcError`` propagate
+    to the caller.
     """
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         if not _dispatch_log_or_error(batch, custom_metadata, on_log):
-            return batch
+            return AnnotatedBatch(batch=batch, custom_metadata=custom_metadata)
+
+
+def _read_unary_response(
+    reader: ipc.RecordBatchStreamReader,
+    info: RpcMethodInfo,
+    on_log: Callable[[Message], None] | None,
+) -> object:
+    """Read a unary response: skip logs, extract result, deserialize."""
+    try:
+        batch = _read_batch_with_log_check(reader, on_log)
+    except RpcError:
+        _drain_stream(reader)
+        raise
+    _drain_stream(reader)
+    if not info.has_return:
+        return None
+    value = batch.batch.column("result")[0].as_py()
+    _validate_result(info.name, value, info.result_type)
+    if value is None:
+        return None
+    return _deserialize_value(value, info.result_type)
+
+
+def _read_stream_response(
+    reader: ipc.RecordBatchStreamReader,
+    on_log: Callable[[Message], None] | None,
+) -> StreamSession:
+    """Wrap a response reader in a StreamSession."""
+    return StreamSession(reader, on_log)
 
 
 class StreamSession:
@@ -1151,12 +1209,9 @@ class StreamSession:
         try:
             while True:
                 try:
-                    batch, custom_metadata = self._reader.read_next_batch_with_custom_metadata()
+                    yield _read_batch_with_log_check(self._reader, self._on_log)
                 except StopIteration:
                     break
-                if _dispatch_log_or_error(batch, custom_metadata, self._on_log):
-                    continue
-                yield AnnotatedBatch(batch=batch, custom_metadata=custom_metadata)
         except RpcError:
             _drain_stream(self._reader)
             raise
@@ -1204,11 +1259,7 @@ class BidiSession:
             self._output_reader = ipc.open_stream(self._reader_stream)
 
         try:
-            while True:
-                batch, custom_metadata = self._output_reader.read_next_batch_with_custom_metadata()
-                if _dispatch_log_or_error(batch, custom_metadata, self._on_log):
-                    continue
-                return AnnotatedBatch(batch=batch, custom_metadata=custom_metadata)
+            return _read_batch_with_log_check(self._output_reader, self._on_log)
         except RpcError:
             self.close()
             raise
@@ -1232,7 +1283,12 @@ class BidiSession:
     def __enter__(self) -> BidiSession:  # noqa: D105
         return self
 
-    def __exit__(self, *args: Any) -> None:  # noqa: D105
+    def __exit__(  # noqa: D105
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
 
 
@@ -1274,46 +1330,33 @@ class _RpcProxy:
         self.__dict__[name] = caller
         return caller
 
-    def _make_unary_caller(self, info: RpcMethodInfo) -> Any:
+    def _make_unary_caller(self, info: RpcMethodInfo) -> Callable[..., object]:
         transport = self._transport
         on_log = self._on_log
 
-        def caller(**kwargs: Any) -> Any:
+        def caller(**kwargs: object) -> object:
             _send_request(transport.writer, info, kwargs)
             reader = ipc.open_stream(transport.reader)
-            try:
-                batch = _read_batch_with_log_check(reader, on_log)
-            except RpcError:
-                # Drain remaining stream so transport is clean for the next call
-                _drain_stream(reader)
-                raise
-            _drain_stream(reader)
-            if not info.has_return:
-                return None
-            value = batch.column("result")[0].as_py()
-            _validate_result(info.name, value, info.result_type)
-            if value is None:
-                return None
-            return _deserialize_value(value, info.result_type)
+            return _read_unary_response(reader, info, on_log)
 
         return caller
 
-    def _make_stream_caller(self, info: RpcMethodInfo) -> Any:
+    def _make_stream_caller(self, info: RpcMethodInfo) -> Callable[..., StreamSession]:
         transport = self._transport
         on_log = self._on_log
 
-        def caller(**kwargs: Any) -> StreamSession:
+        def caller(**kwargs: object) -> StreamSession:
             _send_request(transport.writer, info, kwargs)
             reader = ipc.open_stream(transport.reader)
-            return StreamSession(reader, on_log)
+            return _read_stream_response(reader, on_log)
 
         return caller
 
-    def _make_bidi_caller(self, info: RpcMethodInfo) -> Any:
+    def _make_bidi_caller(self, info: RpcMethodInfo) -> Callable[..., BidiSession]:
         transport = self._transport
         on_log = self._on_log
 
-        def caller(**kwargs: Any) -> BidiSession:
+        def caller(**kwargs: object) -> BidiSession:
             _send_request(transport.writer, info, kwargs)
             return BidiSession(transport.writer, transport.reader, on_log)
 
@@ -1352,7 +1395,12 @@ class RpcConnection:
         """Enter the context and return a typed proxy."""
         return _RpcProxy(self._protocol, self._transport, self._on_log)
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Close the transport."""
         self._transport.close()
 

@@ -18,6 +18,8 @@ BIDI_STATE_KEY = b"vgi_rpc.bidi_state"
 LOG_LEVEL_KEY = b"vgi_rpc.log_level"
 LOG_MESSAGE_KEY = b"vgi_rpc.log_message"
 LOG_EXTRA_KEY = b"vgi_rpc.log_extra"
+REQUEST_VERSION_KEY = b"vgi_rpc.request_version"
+REQUEST_VERSION = b"1"
 
 # ---------------------------------------------------------------------------
 # Encode / decode

@@ -18,12 +18,13 @@ IPCError : Exception raised on IPC communication errors
 """
 
 import os
-from dataclasses import MISSING, dataclass
+from dataclasses import MISSING, Field, dataclass
 from dataclasses import fields as dataclass_fields
 from enum import Enum
 from io import BytesIO, IOBase
 from types import UnionType
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     ClassVar,
@@ -174,15 +175,14 @@ def deserialize_record_batch(
 
 
 def read_single_record_batch(
-    stream: Any,
+    stream: IOBase,
     context: str = "batch",
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Read a single record batch from a stream.
 
     Args:
         stream: Stream to read from (must support binary reads, e.g., stdin pipe,
-            BufferedReader). Type is Any to accommodate runtime reassignment
-            of stdin/stdout to binary mode.
+            BufferedReader).
         context: Description for error messages (e.g., "invocation", "init_input").
 
     Returns:
@@ -448,9 +448,9 @@ class _ArrowSchemaDescriptor:
             type_hints = get_type_hints(cls, include_extras=True)
         except Exception:
             # Fallback to field.type if get_type_hints fails
-            type_hints = {f.name: f.type for f in dataclass_fields(cls)}  # type: ignore[arg-type]
+            type_hints = {f.name: f.type for f in dataclass_fields(cls)}
 
-        for field in dataclass_fields(cls):  # type: ignore[arg-type]
+        for field in dataclass_fields(cls):
             field_name = field.name
             field_type = type_hints.get(field_name, field.type)
 
@@ -511,6 +511,11 @@ class ArrowSerializableDataclass:
 
     """
 
+    # Declare dataclass protocol attribute so dataclass_fields() accepts our mixin.
+    # Actual value is set by @dataclass on subclasses.
+    if TYPE_CHECKING:
+        __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
+
     # Auto-generated from field annotations on first access
     ARROW_SCHEMA: ClassVar[pa.Schema] = _ArrowSchemaDescriptor()  # type: ignore[assignment]
 
@@ -531,13 +536,13 @@ class ArrowSerializableDataclass:
 
         """
         row: dict[str, Any] = {}
-        for field in dataclass_fields(self):  # type: ignore[arg-type]
+        for field in dataclass_fields(self):
             value = getattr(self, field.name)
             value = self._convert_value_for_serialization(value)
             row[field.name] = value
         return row
 
-    def _convert_value_for_serialization(self, value: Any) -> Any:
+    def _convert_value_for_serialization(self, value: object) -> object:
         """Convert a value for Arrow serialization."""
         if value is None:
             return None
@@ -634,7 +639,7 @@ class ArrowSerializableDataclass:
         # Get required fields (those without defaults) from dataclass definition.
         # Fields with defaults or default_factory are optional for compatibility.
         required_fields = []
-        for f in dataclass_fields(cls):  # type: ignore[arg-type]
+        for f in dataclass_fields(cls):
             has_default = f.default is not MISSING or f.default_factory is not MISSING
             if not has_default:
                 required_fields.append(f.name)
@@ -651,11 +656,11 @@ class ArrowSerializableDataclass:
         try:
             type_hints = get_type_hints(cls)
         except Exception:
-            type_hints = {f.name: f.type for f in dataclass_fields(cls)}  # type: ignore[arg-type]
+            type_hints = {f.name: f.type for f in dataclass_fields(cls)}
 
         # Convert values back to expected Python types
         kwargs: dict[str, Any] = {}
-        for field in dataclass_fields(cls):  # type: ignore[arg-type]
+        for field in dataclass_fields(cls):
             # Check if field is present in the row
             if field.name not in row:
                 # Use default if available (for backward compatibility)
@@ -691,10 +696,14 @@ class ArrowSerializableDataclass:
 
         # Handle pa.Schema reconstruction from bytes
         if inner_type is pa.Schema:
+            if not isinstance(value, bytes):
+                raise TypeError(f"Expected bytes for pa.Schema deserialization, got {type(value).__name__}")
             return pa.ipc.read_schema(pa.py_buffer(value))
 
         # Handle pa.RecordBatch reconstruction from bytes
         if inner_type is pa.RecordBatch:
+            if not isinstance(value, bytes):
+                raise TypeError(f"Expected bytes for pa.RecordBatch deserialization, got {type(value).__name__}")
             reader = pa.ipc.open_stream(value)
             return reader.read_next_batch()
 
@@ -706,6 +715,8 @@ class ArrowSerializableDataclass:
 
         # Handle Enum reconstruction from name (uppercase) or value (legacy lowercase)
         if isinstance(inner_type, type) and issubclass(inner_type, Enum):
+            if not isinstance(value, str):
+                raise TypeError(f"Expected str for Enum deserialization, got {type(value).__name__}")
             # Try lookup by name first (new format: uppercase)
             try:
                 return inner_type[value]
@@ -739,11 +750,11 @@ class ArrowSerializableDataclass:
             return inner_type(**nested_kwargs)
 
         # Handle frozenset reconstruction
-        if get_origin(inner_type) is frozenset:
+        if get_origin(inner_type) is frozenset and isinstance(value, list):
             return frozenset(value)
 
         # Handle dict reconstruction from list of tuples
-        if get_origin(inner_type) is dict:
+        if get_origin(inner_type) is dict and isinstance(value, list):
             return dict(value)
 
         # Handle list with element type conversion

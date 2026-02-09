@@ -1,6 +1,6 @@
-"""HTTP transport for vgi-rpc using Starlette (server) and httpx (client).
+"""HTTP transport for vgi-rpc using Falcon (server) and httpx (client).
 
-Provides ``make_asgi_app`` to expose an ``RpcServer`` as a Starlette ASGI
+Provides ``make_wsgi_app`` to expose an ``RpcServer`` as a Falcon WSGI
 application, and ``http_connect`` to call it from Python with ``httpx``.
 
 HTTP Wire Protocol
@@ -20,20 +20,19 @@ Optional dependencies: ``pip install vgi-rpc[http]``
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
+import threading
 from collections.abc import Callable, Iterator
 from io import BytesIO
 from types import TracebackType
 from typing import Any
+from urllib.parse import urlparse
 
+import falcon
+import falcon.testing
 import httpx
 import pyarrow as pa
 from pyarrow import ipc
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import Response
-from starlette.routing import Mount, Route
 
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import BIDI_STATE_KEY, merge_metadata, strip_keys
@@ -50,15 +49,14 @@ from vgi_rpc.rpc import (
     RpcServer,
     StreamSession,
     _deserialize_params,
-    _deserialize_value,
-    _dispatch_log_or_error,
     _drain_stream,
     _LogSink,
     _read_batch_with_log_check,
     _read_request,
+    _read_stream_response,
+    _read_unary_response,
     _send_request,
     _validate_params,
-    _validate_result,
     _write_error_batch,
     rpc_methods,
 )
@@ -67,95 +65,61 @@ from vgi_rpc.utils import empty_batch
 __all__ = [
     "HttpBidiSession",
     "http_connect",
-    "make_asgi_app",
+    "make_wsgi_app",
 ]
 
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 
 
+def _check_content_type(req: falcon.Request) -> bytes | None:
+    """Return error bytes if Content-Type is not Arrow IPC stream, else ``None``."""
+    content_type = req.content_type or ""
+    if content_type != _ARROW_CONTENT_TYPE:
+        return _error_response_bytes(
+            TypeError(f"Expected Content-Type: {_ARROW_CONTENT_TYPE}, got {content_type!r}"),
+        )
+    return None
+
+
+def _error_response_bytes(exc: BaseException, schema: pa.Schema = _EMPTY_SCHEMA) -> bytes:
+    """Serialize an exception as a complete Arrow IPC error stream."""
+    resp_buf = BytesIO()
+    with ipc.new_stream(resp_buf, schema) as writer:
+        _write_error_batch(writer, schema, exc)
+    return resp_buf.getvalue()
+
+
+def _set_error_response(
+    resp: falcon.Response,
+    exc: BaseException,
+    *,
+    status_code: int = 200,
+    schema: pa.Schema = _EMPTY_SCHEMA,
+) -> None:
+    """Set a Falcon response to an Arrow IPC error stream."""
+    resp.content_type = _ARROW_CONTENT_TYPE
+    resp.data = _error_response_bytes(exc, schema)
+    resp.status = str(status_code)
+
+
 # ---------------------------------------------------------------------------
-# Server — ASGI app
+# Server — Falcon WSGI resources
 # ---------------------------------------------------------------------------
 
 
 class _HttpRpcApp:
-    """Internal helper that wraps an RpcServer and provides Starlette route handlers."""
+    """Internal helper that wraps an RpcServer and manages bidi state."""
 
-    __slots__ = ("_server", "_bidi_state_types", "_bidi_output_schemas")
+    __slots__ = ("_server", "_bidi_state_types", "_bidi_output_schemas", "_lock")
 
     def __init__(self, server: RpcServer) -> None:
         self._server = server
         self._bidi_state_types: dict[str, type[BidiStreamState]] = {}
         self._bidi_output_schemas: dict[str, pa.Schema] = {}
-
-    # --- Route handlers ---
-
-    async def rpc_endpoint(self, request: Request) -> Response:
-        """Handle unary and server-stream calls via ``POST /vgi/{method}``."""
-        method_name: str = request.path_params["method"]
-        info = self._server.methods.get(method_name)
-        if info is None:
-            return Response(f"Unknown method: {method_name}", status_code=404)
-        if info.method_type == MethodType.BIDI_STREAM:
-            return Response(
-                f"Bidi method '{method_name}' requires /bidi and /exchange endpoints",
-                status_code=400,
-            )
-
-        body = await request.body()
-        req_buf = BytesIO(body)
-        resp_buf = BytesIO()
-
-        transport = PipeTransport(req_buf, resp_buf)
-        with contextlib.suppress(pa.lib.ArrowInvalid):
-            await asyncio.to_thread(self._server.serve_one, transport)
-
-        return Response(content=resp_buf.getvalue(), media_type=_ARROW_CONTENT_TYPE)
-
-    async def bidi_init_endpoint(self, request: Request) -> Response:
-        """Handle bidi init via ``POST /vgi/{method}/bidi``."""
-        method_name: str = request.path_params["method"]
-        info = self._server.methods.get(method_name)
-        if info is None:
-            return Response(f"Unknown method: {method_name}", status_code=404)
-        if info.method_type != MethodType.BIDI_STREAM:
-            return Response(f"Method '{method_name}' is not a bidi stream", status_code=400)
-
-        body = await request.body()
-
-        def _do_init() -> bytes:
-            return self._bidi_init_sync(method_name, info, body)
-
-        try:
-            result_bytes = await asyncio.to_thread(_do_init)
-        except pa.lib.ArrowInvalid as exc:
-            return Response(f"Invalid Arrow IPC payload: {exc}", status_code=400)
-        return Response(content=result_bytes, media_type=_ARROW_CONTENT_TYPE)
-
-    async def bidi_exchange_endpoint(self, request: Request) -> Response:
-        """Handle bidi exchange via ``POST /vgi/{method}/exchange``."""
-        method_name: str = request.path_params["method"]
-        info = self._server.methods.get(method_name)
-        if info is None:
-            return Response(f"Unknown method: {method_name}", status_code=404)
-        if info.method_type != MethodType.BIDI_STREAM:
-            return Response(f"Method '{method_name}' is not a bidi stream", status_code=400)
-
-        body = await request.body()
-
-        def _do_exchange() -> bytes:
-            return self._bidi_exchange_sync(method_name, info, body)
-
-        try:
-            result_bytes = await asyncio.to_thread(_do_exchange)
-        except pa.lib.ArrowInvalid as exc:
-            return Response(f"Invalid Arrow IPC payload: {exc}", status_code=400)
-        return Response(content=result_bytes, media_type=_ARROW_CONTENT_TYPE)
-
-    # --- Sync helpers (run in thread) ---
+        self._lock = threading.Lock()
 
     def _bidi_init_sync(self, method_name: str, info: RpcMethodInfo, body: bytes) -> bytes:
-        """Run bidi init synchronously — called via asyncio.to_thread."""
+        """Run bidi init synchronously."""
         req_buf = BytesIO(body)
         _, kwargs = _read_request(req_buf)
         _deserialize_params(kwargs, info.param_types)
@@ -163,10 +127,7 @@ class _HttpRpcApp:
         try:
             _validate_params(info.name, kwargs, info.param_types)
         except TypeError as exc:
-            resp_buf = BytesIO()
-            with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
-                _write_error_batch(writer, _EMPTY_SCHEMA, exc)
-            return resp_buf.getvalue()
+            return _error_response_bytes(exc)
 
         # Inject emit_log if the implementation accepts it
         sink = _LogSink()
@@ -176,17 +137,15 @@ class _HttpRpcApp:
         try:
             result: BidiStream[BidiStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
         except Exception as exc:
-            resp_buf = BytesIO()
-            with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
-                _write_error_batch(writer, _EMPTY_SCHEMA, exc)
-            return resp_buf.getvalue()
+            return _error_response_bytes(exc)
 
         state = result.state
         output_schema = result.output_schema
 
         # Cache state type and output schema for exchange calls
-        self._bidi_state_types[method_name] = type(state)
-        self._bidi_output_schemas[method_name] = output_schema
+        with self._lock:
+            self._bidi_state_types[method_name] = type(state)
+            self._bidi_output_schemas[method_name] = output_schema
 
         # Serialize state
         state_bytes = state.serialize_to_bytes()
@@ -202,14 +161,13 @@ class _HttpRpcApp:
         return resp_buf.getvalue()
 
     def _bidi_exchange_sync(self, method_name: str, info: RpcMethodInfo, body: bytes) -> bytes:
-        """Run bidi exchange synchronously — called via asyncio.to_thread."""
-        state_cls = self._bidi_state_types.get(method_name)
+        """Run bidi exchange synchronously."""
+        with self._lock:
+            state_cls = self._bidi_state_types.get(method_name)
+            output_schema = self._bidi_output_schemas.get(method_name)
+
         if state_cls is None:
-            resp_buf = BytesIO()
-            exc = RuntimeError(f"No bidi session initialized for method '{method_name}'")
-            with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
-                _write_error_batch(writer, _EMPTY_SCHEMA, exc)
-            return resp_buf.getvalue()
+            return _error_response_bytes(RuntimeError(f"No bidi session initialized for method '{method_name}'"))
 
         # Read the input batch + extract state from metadata
         req_reader = ipc.open_stream(BytesIO(body))
@@ -217,30 +175,17 @@ class _HttpRpcApp:
         _drain_stream(req_reader)
 
         if custom_metadata is None or custom_metadata.get(BIDI_STATE_KEY) is None:
-            resp_buf = BytesIO()
-            exc = RuntimeError("Missing vgi_rpc.bidi_state in exchange request")
-            with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
-                _write_error_batch(writer, _EMPTY_SCHEMA, exc)
-            return resp_buf.getvalue()
+            return _error_response_bytes(RuntimeError("Missing vgi_rpc.bidi_state in exchange request"))
 
         state_bytes = custom_metadata.get(BIDI_STATE_KEY)
         assert state_bytes is not None  # already checked above
         try:
             state = state_cls.deserialize_from_bytes(state_bytes)
         except Exception as exc:
-            resp_buf = BytesIO()
-            err = RuntimeError(f"Failed to deserialize bidi state: {exc}")
-            with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
-                _write_error_batch(writer, _EMPTY_SCHEMA, err)
-            return resp_buf.getvalue()
+            return _error_response_bytes(RuntimeError(f"Failed to deserialize bidi state: {exc}"))
 
-        output_schema = self._bidi_output_schemas.get(method_name)
         if output_schema is None:
-            resp_buf = BytesIO()
-            err = RuntimeError(f"No output schema cached for method '{method_name}'")
-            with ipc.new_stream(resp_buf, _EMPTY_SCHEMA) as writer:
-                _write_error_batch(writer, _EMPTY_SCHEMA, err)
-            return resp_buf.getvalue()
+            return _error_response_bytes(RuntimeError(f"No output schema cached for method '{method_name}'"))
 
         # Strip vgi_rpc.bidi_state from metadata visible to process()
         user_cm = strip_keys(custom_metadata, BIDI_STATE_KEY)
@@ -251,10 +196,7 @@ class _HttpRpcApp:
         try:
             state.process(ab_in, out)
         except Exception as exc:
-            resp_buf = BytesIO()
-            with ipc.new_stream(resp_buf, output_schema) as writer:
-                _write_error_batch(writer, output_schema, exc)
-            return resp_buf.getvalue()
+            return _error_response_bytes(exc, output_schema)
 
         # Serialize updated state
         updated_state_bytes = state.serialize_to_bytes()
@@ -275,39 +217,142 @@ class _HttpRpcApp:
         return resp_buf.getvalue()
 
 
-def make_asgi_app(server: RpcServer, *, prefix: str = "/vgi") -> Starlette:
-    """Create a Starlette ASGI app that serves RPC requests over HTTP.
+class _RpcResource:
+    """Falcon resource for unary and server-stream calls: ``POST {prefix}/{method}``."""
+
+    def __init__(self, app: _HttpRpcApp) -> None:
+        self._app = app
+
+    def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
+        """Handle unary and server-stream RPC calls."""
+        if (ct_err := _check_content_type(req)) is not None:
+            resp.content_type = _ARROW_CONTENT_TYPE
+            resp.data = ct_err
+            resp.status = "415"
+            return
+
+        info = self._app._server.methods.get(method)
+        if info is None:
+            _set_error_response(resp, AttributeError(f"Unknown method: {method}"), status_code=404)
+            return
+        if info.method_type == MethodType.BIDI_STREAM:
+            _set_error_response(
+                resp,
+                TypeError(f"Bidi method '{method}' requires /bidi and /exchange endpoints"),
+                status_code=400,
+            )
+            return
+
+        body = req.bounded_stream.read()
+        req_buf = BytesIO(body)
+        resp_buf = BytesIO()
+
+        transport = PipeTransport(req_buf, resp_buf)
+        with contextlib.suppress(pa.lib.ArrowInvalid):
+            self._app._server.serve_one(transport)
+
+        resp.content_type = _ARROW_CONTENT_TYPE
+        resp.data = resp_buf.getvalue()
+
+
+class _BidiInitResource:
+    """Falcon resource for bidi init: ``POST {prefix}/{method}/bidi``."""
+
+    def __init__(self, app: _HttpRpcApp) -> None:
+        self._app = app
+
+    def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
+        """Handle bidi stream initialization."""
+        if (ct_err := _check_content_type(req)) is not None:
+            resp.content_type = _ARROW_CONTENT_TYPE
+            resp.data = ct_err
+            resp.status = "415"
+            return
+
+        info = self._app._server.methods.get(method)
+        if info is None:
+            _set_error_response(resp, AttributeError(f"Unknown method: {method}"), status_code=404)
+            return
+        if info.method_type != MethodType.BIDI_STREAM:
+            _set_error_response(
+                resp,
+                TypeError(f"Method '{method}' is not a bidi stream"),
+                status_code=400,
+            )
+            return
+
+        body = req.bounded_stream.read()
+        try:
+            result_bytes = self._app._bidi_init_sync(method, info, body)
+        except pa.lib.ArrowInvalid as exc:
+            _set_error_response(resp, exc, status_code=400)
+            return
+        resp.content_type = _ARROW_CONTENT_TYPE
+        resp.data = result_bytes
+
+
+class _BidiExchangeResource:
+    """Falcon resource for bidi exchange: ``POST {prefix}/{method}/exchange``."""
+
+    def __init__(self, app: _HttpRpcApp) -> None:
+        self._app = app
+
+    def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
+        """Handle bidi stream exchange."""
+        if (ct_err := _check_content_type(req)) is not None:
+            resp.content_type = _ARROW_CONTENT_TYPE
+            resp.data = ct_err
+            resp.status = "415"
+            return
+
+        info = self._app._server.methods.get(method)
+        if info is None:
+            _set_error_response(resp, AttributeError(f"Unknown method: {method}"), status_code=404)
+            return
+        if info.method_type != MethodType.BIDI_STREAM:
+            _set_error_response(
+                resp,
+                TypeError(f"Method '{method}' is not a bidi stream"),
+                status_code=400,
+            )
+            return
+
+        body = req.bounded_stream.read()
+        try:
+            result_bytes = self._app._bidi_exchange_sync(method, info, body)
+        except pa.lib.ArrowInvalid as exc:
+            _set_error_response(resp, exc, status_code=400)
+            return
+        resp.content_type = _ARROW_CONTENT_TYPE
+        resp.data = result_bytes
+
+
+def make_wsgi_app(server: RpcServer, *, prefix: str = "/vgi") -> falcon.App:
+    """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
     Args:
         server: The RpcServer instance to serve.
         prefix: URL prefix for all RPC endpoints (default ``/vgi``).
 
     Returns:
-        A Starlette application with routes for unary, server-stream,
+        A Falcon application with routes for unary, server-stream,
         and bidi-stream RPC calls.
 
     """
     app_handler = _HttpRpcApp(server)
-    return Starlette(
-        routes=[
-            Mount(
-                prefix,
-                routes=[
-                    Route("/{method}", app_handler.rpc_endpoint, methods=["POST"]),
-                    Route("/{method}/bidi", app_handler.bidi_init_endpoint, methods=["POST"]),
-                    Route("/{method}/exchange", app_handler.bidi_exchange_endpoint, methods=["POST"]),
-                ],
-            ),
-        ],
-    )
+    app = falcon.App()
+    app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
+    app.add_route(f"{prefix}/{{method}}/bidi", _BidiInitResource(app_handler))
+    app.add_route(f"{prefix}/{{method}}/exchange", _BidiExchangeResource(app_handler))
+    return app
 
 
 # ---------------------------------------------------------------------------
-# Sync ASGI bridge for testing
+# Sync test client
 # ---------------------------------------------------------------------------
 
 
-class _SyncASGIResponse:
+class _SyncTestResponse:
     """Minimal response object matching what _HttpProxy expects from httpx.Response."""
 
     __slots__ = ("status_code", "content")
@@ -316,57 +361,41 @@ class _SyncASGIResponse:
         self.status_code = status_code
         self.content = content
 
-    def raise_for_status(self) -> None:
-        """Raise httpx.HTTPStatusError if status >= 400."""
-        if self.status_code >= 400:
-            raise httpx.HTTPStatusError(
-                f"HTTP {self.status_code}",
-                request=httpx.Request("POST", "http://test"),
-                response=httpx.Response(self.status_code, content=self.content),
-            )
 
+class _SyncTestClient:
+    """Sync HTTP client that calls a Falcon WSGI app directly via falcon.testing.TestClient."""
 
-class _SyncASGIClient:
-    """Sync HTTP client that calls a Starlette ASGI app directly.
+    __slots__ = ("_client",)
 
-    Uses a private event loop to run ``httpx.AsyncClient`` with
-    ``ASGITransport`` — no real server needed.
-    """
+    def __init__(self, app: falcon.App) -> None:
+        self._client = falcon.testing.TestClient(app)
 
-    __slots__ = ("_loop", "_client")
-
-    def __init__(self, app: Starlette, base_url: str) -> None:
-        self._loop = asyncio.new_event_loop()
-        transport = httpx.ASGITransport(app=app)
-        self._client = httpx.AsyncClient(transport=transport, base_url=base_url)
-
-    def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncASGIResponse:
-        """Send a synchronous POST by bridging to the async client."""
-        resp = self._loop.run_until_complete(self._client.post(url, content=content, headers=headers))
-        return _SyncASGIResponse(resp.status_code, resp.content)
+    def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
+        """Send a synchronous POST using the Falcon test client."""
+        # Strip scheme+host if present (test_http.py passes full URLs)
+        path = urlparse(url).path
+        result = self._client.simulate_post(path, body=content, headers=headers)
+        return _SyncTestResponse(result.status_code, result.content)
 
     def close(self) -> None:
-        """Close the async client and event loop."""
-        self._loop.run_until_complete(self._client.aclose())
-        self._loop.close()
+        """Close the client (no-op for test client)."""
 
 
-def make_sync_client(server: RpcServer, *, base_url: str = "http://test", prefix: str = "/vgi") -> _SyncASGIClient:
+def make_sync_client(server: RpcServer, *, prefix: str = "/vgi") -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
-    Uses ``httpx.ASGITransport`` internally — no real HTTP server needed.
+    Uses ``falcon.testing.TestClient`` internally — no real HTTP server needed.
 
     Args:
         server: The RpcServer to test.
-        base_url: Fake base URL (default ``http://test``).
         prefix: URL prefix for RPC endpoints (default ``/vgi``).
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
 
     """
-    app = make_asgi_app(server, prefix=prefix)
-    return _SyncASGIClient(app, base_url)
+    app = make_wsgi_app(server, prefix=prefix)
+    return _SyncTestClient(app)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +417,7 @@ class HttpBidiSession:
 
     def __init__(
         self,
-        client: httpx.Client | _SyncASGIClient,
+        client: httpx.Client | _SyncTestClient,
         url_prefix: str,
         method: str,
         state_bytes: bytes,
@@ -428,30 +457,26 @@ class HttpBidiSession:
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
-        resp.raise_for_status()
 
         # Read response — log batches + data batch with state
         reader = ipc.open_stream(BytesIO(resp.content))
         try:
-            while True:
-                batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
-                if _dispatch_log_or_error(batch, custom_metadata, self._on_log):
-                    continue
-
-                # Extract updated state from metadata
-                if custom_metadata is not None:
-                    new_state = custom_metadata.get(BIDI_STATE_KEY)
-                    if new_state is not None:
-                        self._state_bytes = new_state
-
-                # Strip vgi_rpc.bidi_state from user-visible metadata
-                user_cm = strip_keys(custom_metadata, BIDI_STATE_KEY)
-
-                _drain_stream(reader)
-                return AnnotatedBatch(batch=batch, custom_metadata=user_cm)
+            ab = _read_batch_with_log_check(reader, self._on_log)
         except RpcError:
             _drain_stream(reader)
             raise
+
+        # Extract updated state from metadata
+        if ab.custom_metadata is not None:
+            new_state = ab.custom_metadata.get(BIDI_STATE_KEY)
+            if new_state is not None:
+                self._state_bytes = new_state
+
+        # Strip vgi_rpc.bidi_state from user-visible metadata
+        user_cm = strip_keys(ab.custom_metadata, BIDI_STATE_KEY)
+
+        _drain_stream(reader)
+        return AnnotatedBatch(batch=ab.batch, custom_metadata=user_cm)
 
     def close(self) -> None:
         """Close the session (no-op for HTTP — stateless)."""
@@ -477,7 +502,7 @@ def http_connect(
     *,
     prefix: str = "/vgi",
     on_log: Callable[[Message], None] | None = None,
-    client: httpx.Client | _SyncASGIClient | None = None,
+    client: httpx.Client | _SyncTestClient | None = None,
 ) -> Iterator[_HttpProxy]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -487,7 +512,7 @@ def http_connect(
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         on_log: Optional callback for log messages from the server.
         client: Optional HTTP client — ``httpx.Client`` for production,
-            or a ``_SyncASGIClient`` from ``make_sync_client()`` for testing.
+            or a ``_SyncTestClient`` from ``make_sync_client()`` for testing.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -497,7 +522,7 @@ def http_connect(
     if client is None:
         client = httpx.Client(base_url=base_url)
 
-    url_prefix = f"{base_url}{prefix}"
+    url_prefix = prefix
     try:
         yield _HttpProxy(protocol, client, url_prefix, on_log)
     finally:
@@ -511,7 +536,7 @@ class _HttpProxy:
     def __init__(
         self,
         protocol: type,
-        client: httpx.Client | _SyncASGIClient,
+        client: httpx.Client | _SyncTestClient,
         url_prefix: str,
         on_log: Callable[[Message], None] | None = None,
     ) -> None:
@@ -552,22 +577,9 @@ class _HttpProxy:
                 content=req_buf.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
-            resp.raise_for_status()
 
             reader = ipc.open_stream(BytesIO(resp.content))
-            try:
-                batch = _read_batch_with_log_check(reader, on_log)
-            except RpcError:
-                _drain_stream(reader)
-                raise
-            _drain_stream(reader)
-            if not info.has_return:
-                return None
-            value = batch.column("result")[0].as_py()
-            _validate_result(info.name, value, info.result_type)
-            if value is None:
-                return None
-            return _deserialize_value(value, info.result_type)
+            return _read_unary_response(reader, info, on_log)
 
         return caller
 
@@ -585,10 +597,9 @@ class _HttpProxy:
                 content=req_buf.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
-            resp.raise_for_status()
 
             reader = ipc.open_stream(BytesIO(resp.content))
-            return StreamSession(reader, on_log)
+            return _read_stream_response(reader, on_log)
 
         return caller
 
@@ -607,7 +618,6 @@ class _HttpProxy:
                 content=req_buf.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
-            resp.raise_for_status()
 
             # Read response — log batches + zero-row batch with state
             reader = ipc.open_stream(BytesIO(resp.content))
@@ -615,14 +625,10 @@ class _HttpProxy:
             state_bytes: bytes | None = None
 
             try:
-                while True:
-                    batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
-                    if _dispatch_log_or_error(batch, custom_metadata, on_log):
-                        continue
-                    # This is the zero-row batch with state
-                    if custom_metadata is not None:
-                        state_bytes = custom_metadata.get(BIDI_STATE_KEY)
-                    break
+                ab = _read_batch_with_log_check(reader, on_log)
+                # This is the zero-row batch with state
+                if ab.custom_metadata is not None:
+                    state_bytes = ab.custom_metadata.get(BIDI_STATE_KEY)
             except StopIteration:
                 pass
 

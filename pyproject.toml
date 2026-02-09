@@ -7,7 +7,7 @@ requires-python = ">=3.12.4"
 dependencies = ["pyarrow", "structlog"]
 
 [project.optional-dependencies]
-http = ["starlette", "httpx", "uvicorn"]
+http = ["falcon", "httpx", "waitress"]
 dev = [
   "httpx",
   "mypy",
@@ -19,8 +19,8 @@ dev = [
   "pytest-ruff",
   "pytest-xdist",
   "ruff",
-  "starlette",
-  "uvicorn",
+  "falcon",
+  "waitress",
 ]
 
 [project.scripts]
@@ -53,6 +53,14 @@ warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
 module = "structlog.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "falcon.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "waitress.*"
 ignore_missing_imports = true
 
 [tool.ty.rules]

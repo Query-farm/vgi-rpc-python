@@ -30,6 +30,8 @@ Uses `uv` as the package manager. Install dev dependencies with `uv sync --all-e
 
 Tests should complete in 30 seconds or less ALWAYS!
 
+Discourage the use of Any types, check mypy strict type coverage and always try to improve it.
+
 ## Architecture
 
 ### Core modules (`vgi_rpc/`)
@@ -42,7 +44,7 @@ Tests should complete in 30 seconds or less ALWAYS!
 
 - **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.bidi_state`, `vgi_rpc.log_level`, etc.) and provides encoding, decoding, merging, and key-stripping utilities used by `rpc.py`, `http.py`, and `utils.py`.
 
-- **`http.py`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport using Starlette (server) and httpx (client). Exposes `make_asgi_app()` to serve an `RpcServer` as an ASGI app, and `http_connect()` for the client side. Bidi streaming is stateless: each exchange carries serialized `BidiStreamState` in Arrow custom metadata.
+- **`http.py`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport using Falcon (server) and httpx (client). Exposes `make_wsgi_app()` to serve an `RpcServer` as a Falcon WSGI app, and `http_connect()` for the client side. Bidi streaming is stateless: each exchange carries serialized `BidiStreamState` in Arrow custom metadata.
 
 ### Wire protocol
 

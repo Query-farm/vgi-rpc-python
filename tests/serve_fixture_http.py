@@ -3,17 +3,17 @@
 Installed as ``vgi-rpc-test-http-worker`` via pyproject.toml ``[project.scripts]``.
 Can also be run directly: ``python -m tests.serve_fixture_http``
 
-Starts a uvicorn HTTP server exposing the test RPC service, prints
+Starts a waitress HTTP server exposing the test RPC service, prints
 ``PORT:<n>`` to stdout so the parent process can discover the port.
 """
 
 import socket
 import sys
 
-import uvicorn
+import waitress
 
 from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
-from vgi_rpc.http import make_asgi_app
+from vgi_rpc.http import make_wsgi_app
 from vgi_rpc.rpc import RpcServer
 
 
@@ -25,16 +25,16 @@ def _find_free_port() -> int:
 
 
 def main() -> None:
-    """Start a uvicorn HTTP server for the RPC fixture service."""
+    """Start a waitress HTTP server for the RPC fixture service."""
     port = int(sys.argv[1]) if len(sys.argv) > 1 else _find_free_port()
 
     server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-    app = make_asgi_app(server)
+    app = make_wsgi_app(server)
 
     # Signal the port to the parent process
     print(f"PORT:{port}", flush=True)
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="error")
+    waitress.serve(app, host="127.0.0.1", port=port, _quiet=True)
 
 
 if __name__ == "__main__":
