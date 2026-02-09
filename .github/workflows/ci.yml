@@ -10,6 +10,12 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  # Fail if type-precision drops below this percentage (mypy --any-exprs-report)
+  MIN_TYPE_PRECISION: "95"
+  # Fail if the total number of "# type: ignore" comments exceeds this ceiling
+  MAX_TYPE_IGNORES: "20"
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -77,7 +83,64 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check (mypy)
-        run: uv run mypy vgi_rpc/
+        run: uv run mypy vgi_rpc/ --any-exprs-report mypy-type-report
+
+      - name: Type precision report
+        if: always()
+        shell: bash
+        run: |
+          if [ -f mypy-type-report/any-exprs.txt ]; then
+            echo "## Mypy Type Precision" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # Convert the fixed-width report to a markdown table
+            echo "| Module | Anys | Exprs | Coverage |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|-----:|------:|---------:|" >> "$GITHUB_STEP_SUMMARY"
+            # Skip header (2 lines) and separator, process data lines
+            awk 'NR > 2 { if (index($0, "---") == 0 && NF >= 4) printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4 }' \
+              mypy-type-report/any-exprs.txt >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # Extract total coverage percentage and check threshold
+            total_pct=$(awk '/Total/ { gsub(/%/, "", $4); print $4 }' mypy-type-report/any-exprs.txt)
+            echo "Type precision: **${total_pct}%** (minimum: ${MIN_TYPE_PRECISION}%)" >> "$GITHUB_STEP_SUMMARY"
+
+            if [ -n "$total_pct" ]; then
+              below=$(echo "$total_pct < $MIN_TYPE_PRECISION" | bc -l)
+              if [ "$below" = "1" ]; then
+                echo ""
+                echo "> **Type precision ${total_pct}% is below the ${MIN_TYPE_PRECISION}% threshold.**" >> "$GITHUB_STEP_SUMMARY"
+                echo "::error::Type precision ${total_pct}% is below the ${MIN_TYPE_PRECISION}% minimum"
+                exit 1
+              fi
+            fi
+          fi
+
+      - name: Count type:ignore comments
+        shell: bash
+        run: |
+          count=$(grep -r '# type: ignore' vgi_rpc/ tests/ --include='*.py' | wc -l | tr -d ' ')
+          echo "## Type Ignore Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Total \`# type: ignore\` comments: **${count}** (maximum: ${MAX_TYPE_IGNORES})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$count" -gt "$MAX_TYPE_IGNORES" ]; then
+            echo "> **${count} type:ignore comments exceeds the ${MAX_TYPE_IGNORES} ceiling.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| File | Line | Comment |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|------|-----:|---------|" >> "$GITHUB_STEP_SUMMARY"
+            grep -rn '# type: ignore' vgi_rpc/ tests/ --include='*.py' | \
+              sed 's/\(.*\):\([0-9]*\):\(.*\)/| \1 | \2 | `\3` |/' >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::${count} type:ignore comments exceeds the ${MAX_TYPE_IGNORES} ceiling"
+            exit 1
+          fi
+
+          # Always list them for visibility
+          echo "| File | Line | Comment |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|-----:|---------|" >> "$GITHUB_STEP_SUMMARY"
+          grep -rn '# type: ignore' vgi_rpc/ tests/ --include='*.py' | \
+            sed 's/\(.*\):\([0-9]*\):\(.*\)/| \1 | \2 | `\3` |/' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Type check (ty)
         run: uv run ty check vgi_rpc/
