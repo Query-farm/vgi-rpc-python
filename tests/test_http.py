@@ -38,7 +38,7 @@ _BASE_URL = "http://test"
 @pytest.fixture
 def client() -> Iterator[_SyncTestClient]:
     """Create a sync Falcon test client with proper cleanup."""
-    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()))
+    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), signing_key=b"test-key")
     yield c
     c.close()
 
@@ -54,7 +54,7 @@ class TestMakeWsgiApp:
     def test_returns_falcon_app(self) -> None:
         """make_wsgi_app returns a Falcon application."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server)
+        app = make_wsgi_app(server, signing_key=b"test-key")
         assert isinstance(app, falcon.App)
 
 
