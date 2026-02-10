@@ -349,7 +349,15 @@ class TestFetchHedging:
             assert result == data
 
     def test_slow_chunks_trigger_hedging(self) -> None:
-        """Slow responses trigger time-based hedging; result is correct."""
+        """Slow responses trigger time-based hedging; result is correct.
+
+        Uses ``repeat=True`` on a single mock to avoid an aioresponses
+        ``KeyError`` race where two concurrent async callbacks (original +
+        hedge) try to delete the same non-repeating mock entry.  The sleep
+        is generous (0.5 s) so that even on Windows — where asyncio timer
+        resolution is ~15 ms — the slow chunk clearly exceeds the
+        median-based hedging threshold.
+        """
         chunk_size = 500
         data = b"z" * 2000  # 4 chunks
         url = "https://example.com/slow-hedge"
@@ -359,20 +367,22 @@ class TestFetchHedging:
             max_parallel_requests=8,
             speculative_retry_multiplier=1.5,
         ) as config:
-            call_count = 0
+            first_attempt_for_chunk: dict[int, bool] = {}
 
             async def _slow_callback(url_: Any, **kwargs: Any) -> CallbackResult:
-                nonlocal call_count
                 headers = kwargs.get("headers", {})
                 range_header = headers.get("Range", "")
                 if range_header:
-                    call_count += 1
                     match = re.match(r"bytes=(\d+)-(\d+)", range_header)
                     if match:
                         start, end = int(match.group(1)), int(match.group(2))
-                        # Make the third chunk's first attempt slow so it gets hedged
-                        if start == 1000 and call_count <= 4:
-                            await asyncio.sleep(0.15)
+                        chunk_idx = start // chunk_size
+                        is_first = first_attempt_for_chunk.get(chunk_idx) is None
+                        if is_first:
+                            first_attempt_for_chunk[chunk_idx] = True
+                        # Slow the first attempt for chunk 2 so it gets hedged
+                        if chunk_idx == 2 and is_first:
+                            await asyncio.sleep(0.5)
                         chunk = data[start : end + 1]
                         return CallbackResult(
                             status=206,
@@ -386,8 +396,7 @@ class TestFetchHedging:
 
             with aioresponses() as mock:
                 _register_head(mock, url, data)
-                for _ in range(50):
-                    mock.get(url, callback=_slow_callback)
+                mock.get(url, callback=_slow_callback, repeat=True)
                 result = fetch_url(url, config)
 
             assert result == data
