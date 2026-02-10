@@ -264,7 +264,7 @@ class BidiEdgeCaseServiceImpl:
 @contextlib.contextmanager
 def edge_conn(
     on_log: Callable[[Message], None] | None = None,
-) -> Iterator[_RpcProxy]:
+) -> Iterator[BidiEdgeCaseService]:
     """Start an edge-case service and yield a proxy."""
     with serve_pipe(BidiEdgeCaseService, BidiEdgeCaseServiceImpl(), on_log=on_log) as proxy:
         yield proxy

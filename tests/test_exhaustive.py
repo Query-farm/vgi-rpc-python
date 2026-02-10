@@ -43,7 +43,6 @@ from vgi_rpc.rpc import (
     _deserialize_value,
     _dispatch_log_or_error,
     _drain_stream,
-    _RpcProxy,
     _validate_params,
     _validate_result,
     _write_request,
@@ -72,11 +71,11 @@ class _EnumDefaultProtocol(Protocol):
 
 
 @contextlib.contextmanager
-def _pipe_conn(
-    protocol: type,
+def _pipe_conn[P](
+    protocol: type[P],
     impl: object,
     on_log: Callable[[Message], None] | None = None,
-) -> Iterator[_RpcProxy]:
+) -> Iterator[P]:
     """Start a pipe server, yield a proxy, clean up on exit."""
     with serve_pipe(protocol, impl, on_log=on_log) as proxy:
         yield proxy

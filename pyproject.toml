@@ -78,6 +78,12 @@ ignore_missing_imports = true
 module = "google.cloud.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Protocol classes are passed as type markers (not instantiated) to serve_pipe/connect/http_connect;
+# type[P] correctly triggers type-abstract for abstract Protocol classes.
+disable_error_code = ["type-abstract"]
+
 [tool.ty.rules]
 unused-type-ignore-comment = "ignore"  # these comments are required by mypy
 

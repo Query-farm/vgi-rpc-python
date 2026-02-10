@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
-from vgi_rpc.http import _HttpProxy, http_connect
+from vgi_rpc.http import http_connect
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import (
     _ANONYMOUS,
@@ -31,7 +31,6 @@ from vgi_rpc.rpc import (
     ServerStream,
     ServerStreamState,
     StreamSession,
-    _RpcProxy,
     connect,
     describe_rpc,
     make_pipe_pair,
@@ -348,10 +347,10 @@ class RpcFixtureServiceImpl:
 
 @contextlib.contextmanager
 def rpc_conn(
-    protocol: type = RpcFixtureService,
+    protocol: type[Any] = RpcFixtureService,
     impl: object | None = None,
     on_log: Callable[[Message], None] | None = None,
-) -> Iterator[_RpcProxy]:
+) -> Iterator[Any]:
     """Start a server thread, yield a proxy, and clean up on exit."""
     if impl is None:
         impl = RpcFixtureServiceImpl()
@@ -380,7 +379,7 @@ def rpc_server_transport(
 
 
 @contextlib.contextmanager
-def http_conn(port: int, on_log: Callable[[Message], None] | None = None) -> Iterator[_HttpProxy]:
+def http_conn(port: int, on_log: Callable[[Message], None] | None = None) -> Iterator[RpcFixtureService]:
     """Yield an HTTP proxy connected to a shared server on *port*."""
     with http_connect(RpcFixtureService, f"http://127.0.0.1:{port}", on_log=on_log) as proxy:
         yield proxy
@@ -1138,7 +1137,7 @@ class NullValidationServiceImpl:
         return BidiStream(output_schema=schema, state=PassthroughState())
 
 
-def _null_conn() -> contextlib.AbstractContextManager[_RpcProxy]:
+def _null_conn() -> contextlib.AbstractContextManager[NullValidationService]:
     """Shorthand for ``rpc_conn(NullValidationService, NullValidationServiceImpl())``."""
     return rpc_conn(NullValidationService, NullValidationServiceImpl())
 
@@ -1149,7 +1148,7 @@ class TestNullValidation:
     def test_none_for_non_optional_param_raises_client_side(self) -> None:
         """Passing None for a non-optional param raises TypeError on the client."""
         with _null_conn() as proxy, pytest.raises(TypeError, match="parameter 'a' is not optional but got None"):
-            proxy.add(a=None, b=1.0)
+            proxy.add(a=None, b=1.0)  # type: ignore[arg-type]  # intentional: testing runtime null validation
 
     def test_none_for_optional_param_allowed(self) -> None:
         """Passing None for an optional param works fine."""
@@ -1171,12 +1170,12 @@ class TestNullValidation:
     def test_none_param_server_stream_raises(self) -> None:
         """Passing None for a non-optional param on a stream method raises TypeError."""
         with _null_conn() as proxy, pytest.raises(TypeError, match="parameter 'a' is not optional but got None"):
-            list(proxy.stream_non_optional(a=None))
+            list(proxy.stream_non_optional(a=None))  # type: ignore[arg-type]  # intentional: testing runtime null validation
 
     def test_none_param_bidi_raises(self) -> None:
         """Passing None for a non-optional param on a bidi method raises TypeError."""
         with _null_conn() as proxy, pytest.raises(TypeError, match="parameter 'factor' is not optional but got None"):
-            proxy.bidi_non_optional(factor=None)
+            proxy.bidi_non_optional(factor=None)  # type: ignore[arg-type]  # intentional: testing runtime null validation
 
 
 # ---------------------------------------------------------------------------
@@ -1960,7 +1959,7 @@ class TestInvalidBidiState:
             assert out.batch.column("value").to_pylist() == [2.0]
 
             # Corrupt the state bytes
-            session._state_bytes = b"garbage"
+            session._state_bytes = b"garbage"  # type: ignore[attr-defined]  # accessing HttpBidiSession internals
 
             with pytest.raises(RpcError, match=r"Malformed state token|signature verification"):
                 session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [2.0]})))

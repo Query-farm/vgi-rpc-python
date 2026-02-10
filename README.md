@@ -6,7 +6,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 
 **Key features:**
 
-- **Protocol-based interfaces** — define services as typed Python Protocol classes
+- **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
 - **Apache Arrow IPC wire format** — zero-copy serialization for structured data
 - **Three method types** — unary, server-streaming, and bidirectional streaming
 - **Transport-agnostic** — in-process pipes, subprocess, or HTTP
@@ -67,6 +67,7 @@ class CalculatorImpl:
 
 # 3. Serve and call methods through a typed proxy
 with serve_pipe(Calculator, CalculatorImpl()) as proxy:
+    # proxy is typed as Calculator — IDE shows add(), greet() with full signatures
     result = proxy.add(2.0, 3.0)
     print(result)  # 5.0
 
@@ -268,7 +269,7 @@ class DataService(Protocol):
 
 ### Pipe (in-process)
 
-`serve_pipe` starts a server on a background thread and yields a typed proxy. No subprocess needed — useful for tests and embedded use:
+`serve_pipe` starts a server on a background thread and yields a proxy typed as the Protocol class. No subprocess needed — useful for tests and embedded use:
 
 ```python
 from vgi_rpc import serve_pipe
@@ -290,7 +291,7 @@ from my_service import MyService, MyServiceImpl
 run_server(MyService, MyServiceImpl())
 ```
 
-The client connects with `connect`:
+The client connects with `connect`, which returns a proxy typed as the Protocol class:
 
 ```python
 import sys
@@ -298,12 +299,12 @@ import sys
 from vgi_rpc import connect
 
 with connect(MyService, [sys.executable, "worker.py"]) as proxy:
-    result = proxy.echo("hello")
+    result = proxy.echo("hello")  # proxy is typed as MyService
 ```
 
 ### HTTP
 
-Requires `pip install vgi-rpc[http]`. The server exposes a Falcon WSGI app; the client uses httpx:
+Requires `pip install vgi-rpc[http]`. The server exposes a Falcon WSGI app; the client uses httpx. Like pipe and subprocess transports, `http_connect` returns a proxy typed as the Protocol class:
 
 ```python
 from vgi_rpc import RpcServer, http_connect, make_wsgi_app
@@ -315,7 +316,7 @@ app = make_wsgi_app(server)
 
 # Client
 with http_connect(MyService, "http://localhost:8080") as proxy:
-    result = proxy.echo("hello")
+    result = proxy.echo("hello")  # proxy is typed as MyService
 ```
 
 `make_wsgi_app` options:
@@ -389,11 +390,11 @@ class CountdownServiceImpl:
         return ServerStream(output_schema=schema, state=CountdownState(n=n))
 ```
 
-The client iterates over a `StreamSession`:
+The client iterates over the result — the proxy type preserves `ServerStream`'s `__iter__` signature, so IDEs know each `batch` is an `AnnotatedBatch`:
 
 ```python
 with serve_pipe(CountdownService, CountdownServiceImpl()) as proxy:
-    for batch in proxy.countdown(3):
+    for batch in proxy.countdown(3):  # batch: AnnotatedBatch
         print(batch.batch.to_pydict())
     # {'value': [3]}
     # {'value': [2]}
@@ -432,11 +433,11 @@ class RunningSum(BidiStreamState):
         out.emit_pydict({"total": [self.total]})
 ```
 
-The client uses `BidiSession.exchange()` for lockstep communication:
+The client uses the result as a context manager with `exchange()` for lockstep communication — the proxy type preserves `BidiStream`'s context manager and `exchange` signatures:
 
 ```python
 with serve_pipe(SumService, SumServiceImpl()) as proxy:
-    with proxy.accumulate(0.0) as session:
+    with proxy.accumulate(0.0) as session:  # session supports exchange() and close()
         result = session.exchange(
             AnnotatedBatch.from_pydict({"value": [1.0, 2.0]})
         )

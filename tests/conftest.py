@@ -8,19 +8,17 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
-from vgi_rpc.http import _HttpProxy
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
 _SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
 _SERVE_FIXTURE_HTTP = str(Path(__file__).parent / "serve_fixture_http.py")
 
-type RpcProxyType = _RpcProxy | _HttpProxy
-
-ConnFactory = Callable[..., contextlib.AbstractContextManager[RpcProxyType]]
+ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 """Type alias for the ``make_conn`` fixture return type."""
 
 
@@ -101,7 +99,7 @@ def make_conn(
 
     def factory(
         on_log: Callable[[Message], None] | None = None,
-    ) -> contextlib.AbstractContextManager[RpcProxyType]:
+    ) -> contextlib.AbstractContextManager[Any]:
         if request.param == "pipe":
             return serve_pipe(RpcFixtureService, RpcFixtureServiceImpl(), on_log=on_log)
         elif request.param == "subprocess":

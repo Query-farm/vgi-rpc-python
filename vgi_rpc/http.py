@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from http import HTTPStatus
 from io import BytesIO, IOBase
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, cast, get_args, get_origin, get_type_hints
 from urllib.parse import urlparse
 
 import falcon
@@ -1168,15 +1168,15 @@ class HttpStreamSession:
 
 
 @contextlib.contextmanager
-def http_connect(
-    protocol: type,
+def http_connect[P](
+    protocol: type[P],
     base_url: str | None = None,
     *,
     prefix: str = "/vgi",
     on_log: Callable[[Message], None] | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
     external_location: ExternalLocationConfig | None = None,
-) -> Iterator[_HttpProxy]:
+) -> Iterator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
     Args:
@@ -1207,7 +1207,7 @@ def http_connect(
 
     url_prefix = prefix
     try:
-        yield _HttpProxy(protocol, client, url_prefix, on_log, external_config=external_location)
+        yield cast(P, _HttpProxy(protocol, client, url_prefix, on_log, external_config=external_location))
     finally:
         if own_client:
             client.close()

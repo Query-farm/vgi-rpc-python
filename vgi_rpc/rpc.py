@@ -105,6 +105,7 @@ from typing import (
     Any,
     Final,
     Protocol,
+    Self,
     cast,
     get_args,
     get_origin,
@@ -486,10 +487,23 @@ class ServerStream[S: ServerStreamState]:
     Bundles the output schema with a state object whose ``produce(out)`` method
     is called repeatedly to generate output batches.  The state object calls
     ``out.finish()`` to signal stream completion.
+
+    On the client side, the proxy returns this type so that ``for batch in
+    proxy.method(...)`` type-checks correctly via the ``__iter__`` stub.
     """
 
     output_schema: pa.Schema
     state: S
+
+    def __iter__(self) -> Iterator[AnnotatedBatch]:
+        """Iterate over output batches (client-side stub).
+
+        Raises:
+            NotImplementedError: Always — this is a server-side type.
+                Use ``StreamSession`` on the client.
+
+        """
+        raise NotImplementedError("ServerStream is a server-side type; iterate StreamSession on the client")
 
 
 @dataclass(frozen=True)
@@ -502,11 +516,62 @@ class BidiStream[S: BidiStreamState]:
     If ``input_schema`` is provided, the framework validates each input batch
     against it before passing to ``process()``.  When ``None`` (the default),
     the input schema is implicit from the client's first batch.
+
+    Client-side stub methods (``__enter__``, ``__exit__``, ``exchange``,
+    ``close``) provide accurate types for IDE autocompletion when the proxy
+    return type is ``BidiStream[S]``.
     """
 
     output_schema: pa.Schema
     state: S
     input_schema: pa.Schema | None = None
+
+    def __enter__(self) -> Self:
+        """Enter context manager (client-side stub).
+
+        Raises:
+            NotImplementedError: Always — this is a server-side type.
+                Use ``BidiSession`` on the client.
+
+        """
+        raise NotImplementedError("BidiStream is a server-side type; use BidiSession on the client")
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit context manager (client-side stub).
+
+        Raises:
+            NotImplementedError: Always — this is a server-side type.
+
+        """
+        raise NotImplementedError
+
+    def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
+        """Exchange an input batch for an output batch (client-side stub).
+
+        Args:
+            input: The input batch to send.
+
+        Raises:
+            NotImplementedError: Always — this is a server-side type.
+                Use ``BidiSession`` on the client.
+
+        """
+        raise NotImplementedError
+
+    def close(self) -> None:
+        """Close the stream (client-side stub).
+
+        Raises:
+            NotImplementedError: Always — this is a server-side type.
+                Use ``BidiSession`` on the client.
+
+        """
+        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -1826,13 +1891,14 @@ class _RpcProxy:
 # ---------------------------------------------------------------------------
 
 
-class RpcConnection:
+class RpcConnection[P]:
     """Context manager that provides a typed RPC proxy over a transport.
 
-    Usage::
+    The type parameter ``P`` is the Protocol class, enabling IDE
+    autocompletion for all methods defined on the protocol::
 
         with RpcConnection(MyProtocol, transport) as svc:
-            result = svc.add(a=1, b=2)
+            result = svc.add(a=1, b=2)   # IDE sees MyProtocol methods
 
     """
 
@@ -1840,7 +1906,7 @@ class RpcConnection:
 
     def __init__(
         self,
-        protocol: type,
+        protocol: type[P],
         transport: RpcTransport,
         on_log: Callable[[Message], None] | None = None,
         *,
@@ -1852,9 +1918,9 @@ class RpcConnection:
         self._on_log = on_log
         self._external_config = external_location
 
-    def __enter__(self) -> _RpcProxy:
+    def __enter__(self) -> P:
         """Enter the context and return a typed proxy."""
-        return _RpcProxy(self._protocol, self._transport, self._on_log, external_config=self._external_config)
+        return cast(P, _RpcProxy(self._protocol, self._transport, self._on_log, external_config=self._external_config))
 
     def __exit__(
         self,
@@ -1902,13 +1968,13 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
 
 
 @contextlib.contextmanager
-def connect(
-    protocol: type,
+def connect[P](
+    protocol: type[P],
     cmd: list[str],
     *,
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
-) -> Iterator[_RpcProxy]:
+) -> Iterator[P]:
     """Connect to a subprocess RPC server.
 
     Context manager that spawns a subprocess, yields a typed proxy, and
@@ -1934,13 +2000,13 @@ def connect(
 
 
 @contextlib.contextmanager
-def serve_pipe(
-    protocol: type,
+def serve_pipe[P](
+    protocol: type[P],
     implementation: object,
     *,
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
-) -> Iterator[_RpcProxy]:
+) -> Iterator[P]:
     """Start an in-process pipe server and yield a typed client proxy.
 
     Useful for tests and demos — no subprocess needed.  A background thread
