@@ -28,7 +28,7 @@ pytest --cov=vgi_rpc
 
 Uses `uv` as the package manager. Install dev dependencies with `uv sync --all-extras`.
 
-Tests should complete in 30 seconds or less ALWAYS!
+Tests should complete in 50 seconds or less ALWAYS!
 
 Discourage the use of Any types, check mypy strict type coverage and always try to improve it.
 

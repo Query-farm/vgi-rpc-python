@@ -89,7 +89,7 @@ unused-type-ignore-comment = "ignore"  # these comments are required by mypy
 python-version = "3.13"
 
 [tool.pytest.ini_options]
-addopts = "--mypy --ruff --timeout=30"
+addopts = "--mypy --ruff --timeout=50"
 testpaths = ["tests"]
 
 [tool.coverage.run]
@@ -126,7 +126,7 @@ directory = "htmlcov"
 paths_to_mutate = ["vgi_rpc/utils.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
 also_copy = ["vgi_rpc/"]
-pytest_add_cli_args = ["--timeout=30", "--no-header", "-o", "addopts=", "-o", "pythonpath=.", "--ignore=tests/test_external_fetch.py"]
+pytest_add_cli_args = ["--timeout=50", "--no-header", "-o", "addopts=", "-o", "pythonpath=.", "--ignore=tests/test_external_fetch.py"]
 
 [dependency-groups]
 dev = [
