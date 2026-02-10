@@ -9,7 +9,7 @@ import pytest
 from vgi_rpc.rpc import (
     BidiStream,
     BidiStreamState,
-    EmitLog,
+    CallContext,
     RpcServer,
     ServerStream,
     ServerStreamState,
@@ -295,53 +295,53 @@ class TestParameterMismatch:
 
 
 # ---------------------------------------------------------------------------
-# Tests: emit_log handling
+# Tests: ctx handling
 # ---------------------------------------------------------------------------
 
 
-class TestEmitLogHandling:
-    """Tests for emit_log special-case handling."""
+class TestCtxHandling:
+    """Tests for ctx special-case handling."""
 
-    def test_optional_emit_log_allowed(self) -> None:
-        """emit_log with default is allowed and detected."""
+    def test_optional_ctx_allowed(self) -> None:
+        """Optional ctx with default is allowed and detected."""
 
         class Impl:
-            def add(self, a: float, b: float, emit_log: EmitLog | None = None) -> float:
+            def add(self, a: float, b: float, ctx: CallContext | None = None) -> float:
                 return a + b
 
             def greet(self, name: str) -> str:
                 return name
 
         server = RpcServer(SimpleService, Impl())
-        assert "add" in server.emit_log_methods
-        assert "greet" not in server.emit_log_methods
+        assert "add" in server.ctx_methods
+        assert "greet" not in server.ctx_methods
 
-    def test_required_emit_log_allowed(self) -> None:
-        """emit_log without default is allowed (framework injects it)."""
+    def test_required_ctx_allowed(self) -> None:
+        """Required ctx without default is allowed (framework injects it)."""
 
         class Impl:
-            def add(self, a: float, b: float, emit_log: EmitLog) -> float:
+            def add(self, a: float, b: float, ctx: CallContext) -> float:
                 return a + b
 
             def greet(self, name: str) -> str:
                 return name
 
         server = RpcServer(SimpleService, Impl())
-        assert "add" in server.emit_log_methods
+        assert "add" in server.ctx_methods
 
-    def test_emit_log_on_all_methods(self) -> None:
-        """emit_log on every method is allowed."""
+    def test_ctx_on_all_methods(self) -> None:
+        """Allow ctx on every method."""
 
         class Impl:
-            def add(self, a: float, b: float, emit_log: EmitLog | None = None) -> float:
+            def add(self, a: float, b: float, ctx: CallContext | None = None) -> float:
                 return a + b
 
-            def greet(self, name: str, emit_log: EmitLog | None = None) -> str:
+            def greet(self, name: str, ctx: CallContext | None = None) -> str:
                 return name
 
         server = RpcServer(SimpleService, Impl())
-        assert "add" in server.emit_log_methods
-        assert "greet" in server.emit_log_methods
+        assert "add" in server.ctx_methods
+        assert "greet" in server.ctx_methods
 
 
 # ---------------------------------------------------------------------------
@@ -471,18 +471,18 @@ class TestValidImplementation:
         server = RpcServer(MixedService, Impl())
         assert len(server.methods) == 4
 
-    def test_superset_with_defaults_and_emit_log(self) -> None:
-        """Impl with extra defaulted params and emit_log passes."""
+    def test_superset_with_defaults_and_ctx(self) -> None:
+        """Impl with extra defaulted params and ctx passes."""
 
         class Impl:
-            def add(self, a: float, b: float, emit_log: EmitLog | None = None, debug: bool = False) -> float:
+            def add(self, a: float, b: float, ctx: CallContext | None = None, debug: bool = False) -> float:
                 return a + b
 
             def greet(self, name: str, **kwargs: str) -> str:
                 return name
 
         server = RpcServer(SimpleService, Impl())
-        assert "add" in server.emit_log_methods
+        assert "add" in server.ctx_methods
 
     def test_extra_methods_on_impl_ignored(self) -> None:
         """Extra methods on impl not in protocol are ignored."""

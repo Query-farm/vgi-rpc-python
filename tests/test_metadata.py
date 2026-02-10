@@ -5,37 +5,9 @@ from __future__ import annotations
 import pyarrow as pa
 
 from vgi_rpc.metadata import (
-    decode_metadata,
-    encode_metadata,
     merge_metadata,
     strip_keys,
 )
-
-# ---------------------------------------------------------------------------
-# encode_metadata / decode_metadata
-# ---------------------------------------------------------------------------
-
-
-class TestEncodeDecodeMetadata:
-    """Tests for encode_metadata and decode_metadata."""
-
-    def test_round_trip(self) -> None:
-        """Encode then decode returns original dict."""
-        original = {"key1": "value1", "key2": "value2"}
-        encoded = encode_metadata(original)
-        decoded = decode_metadata(encoded)
-        assert decoded == original
-
-    def test_decode_none_returns_empty_dict(self) -> None:
-        """decode_metadata(None) returns an empty dict."""
-        assert decode_metadata(None) == {}
-
-    def test_decode_string_keys(self) -> None:
-        """Metadata with string keys (not bytes) decodes correctly."""
-        md = pa.KeyValueMetadata({"str_key": "str_value"})  # type: ignore[dict-item]
-        decoded = decode_metadata(md)
-        assert decoded["str_key"] == "str_value"
-
 
 # ---------------------------------------------------------------------------
 # merge_metadata

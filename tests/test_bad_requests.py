@@ -330,11 +330,13 @@ class TestSchemaMismatch:
 
     def test_extra_columns(self, client: _SyncTestClient) -> None:
         """Extra columns beyond what the method expects return 400."""
-        schema = pa.schema([
-            pa.field("a", pa.float64()),
-            pa.field("b", pa.float64()),
-            pa.field("c", pa.float64()),
-        ])
+        schema = pa.schema(
+            [
+                pa.field("a", pa.float64()),
+                pa.field("b", pa.float64()),
+                pa.field("c", pa.float64()),
+            ]
+        )
         batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0], "c": [3.0]}, schema=schema)
         body = _craft_request("add", schema, batch)
         status, content = _post(client, "/vgi/add", body)

@@ -8,9 +8,11 @@ from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.rpc import (
     AnnotatedBatch,
+    AuthContext,
     BidiSession,
     BidiStream,
     BidiStreamState,
+    CallContext,
     EmitLog,
     MethodType,
     OutputCollector,
@@ -75,6 +77,9 @@ __all__ = [
     "rpc_methods",
     "describe_rpc",
     "MethodType",
+    # Auth & Context
+    "AuthContext",
+    "CallContext",
     # Logging
     "EmitLog",
     "Level",

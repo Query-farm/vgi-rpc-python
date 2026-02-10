@@ -36,7 +36,6 @@ Message : Log message with level, message text, and optional extras
 from __future__ import annotations
 
 import json
-import os
 import traceback
 from enum import Enum
 from typing import ClassVar
@@ -174,21 +173,17 @@ class Message:
             New dict containing original entries plus:
             - vgi_rpc.log_level: The Level value (e.g., "INFO", "EXCEPTION")
             - vgi_rpc.log_message: The human-readable message text
-            - vgi_rpc.log_extra: JSON string with {pid, ...extra kwargs}
+            - vgi_rpc.log_extra: JSON string with extra kwargs (omitted when empty)
 
         """
         result = dict(metadata) if metadata else {}
         level_key: str = LOG_LEVEL_KEY.decode()
         message_key: str = LOG_MESSAGE_KEY.decode()
-        extra_key: str = LOG_EXTRA_KEY.decode()
         result[level_key] = self.level.value
-        log_data: dict[str, object] = {
-            "pid": os.getpid(),
-        }
-        if self.extra:
-            log_data.update(self.extra)
         result[message_key] = self.message
-        result[extra_key] = json.dumps(log_data)
+        if self.extra:
+            extra_key: str = LOG_EXTRA_KEY.decode()
+            result[extra_key] = json.dumps(self.extra)
         return result
 
     @classmethod

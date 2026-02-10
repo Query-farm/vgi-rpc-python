@@ -132,7 +132,8 @@ class TestAddToMetadata:
         result = m.add_to_metadata(None)
         assert result["vgi_rpc.log_level"] == "INFO"
         assert result["vgi_rpc.log_message"] == "hello"
-        assert "vgi_rpc.log_extra" in result
+        # No extra kwargs → log_extra key is omitted
+        assert "vgi_rpc.log_extra" not in result
 
     def test_augments_existing(self) -> None:
         """Existing metadata is preserved."""
@@ -149,7 +150,7 @@ class TestAddToMetadata:
         result = m.add_to_metadata()
         extra = json.loads(result["vgi_rpc.log_extra"])
         assert extra["foo"] == "bar"
-        assert "pid" in extra
+        assert "pid" not in extra
 
 
 # ---------------------------------------------------------------------------

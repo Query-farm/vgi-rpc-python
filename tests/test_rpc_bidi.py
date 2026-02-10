@@ -23,7 +23,7 @@ from vgi_rpc.rpc import (
     BidiSession,
     BidiStream,
     BidiStreamState,
-    EmitLog,
+    CallContext,
     OutputCollector,
     RpcConnection,
     RpcError,
@@ -51,7 +51,7 @@ class AccumulatingState(BidiStreamState):
     running_sum: float = 0.0
     exchange_count: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Add input values to running sum and emit result."""
         col = input.batch.column("value")
         self.running_sum += pc.sum(col).as_py()
@@ -63,7 +63,7 @@ class AccumulatingState(BidiStreamState):
 class FailFirstState(BidiStreamState):
     """State that fails on the very first process() call."""
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Raise on every call."""
         raise RuntimeError("fail on first exchange")
 
@@ -75,7 +75,7 @@ class FailOnNthState(BidiStreamState):
     fail_on: int
     count: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Fail on the Nth call, passthrough otherwise."""
         self.count += 1
         if self.count == self.fail_on:
@@ -87,7 +87,7 @@ class FailOnNthState(BidiStreamState):
 class MultiLogState(BidiStreamState):
     """State that emits multiple log messages per exchange."""
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Emit 3 log messages then the data batch."""
         out.log(Level.DEBUG, "step 1: received input")
         out.log(Level.INFO, "step 2: processing", row_count=str(input.batch.num_rows))
@@ -99,7 +99,7 @@ class MultiLogState(BidiStreamState):
 class MetadataEchoState(BidiStreamState):
     """State that attaches custom metadata to output."""
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Echo input and attach custom metadata."""
         out.emit(input.batch, metadata={"echo": "true", "rows": str(input.batch.num_rows)})
 
@@ -108,7 +108,7 @@ class MetadataEchoState(BidiStreamState):
 class EmptyBatchState(BidiStreamState):
     """State that handles 0-row input batches gracefully."""
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Emit a batch with the row count of the input."""
         out.emit_pydict({"row_count": [input.batch.num_rows]})
 
@@ -119,7 +119,7 @@ class HistoryState(BidiStreamState):
 
     history: list[float] = field(default_factory=list)
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Append input values to history and emit history length."""
         for v in input.batch.column("value"):
             self.history.append(v.as_py())
@@ -132,7 +132,7 @@ class LargeBatchState(BidiStreamState):
 
     factor: float
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Multiply all values by factor."""
         scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
@@ -242,11 +242,11 @@ class BidiEdgeCaseServiceImpl:
         """Bidi where init itself raises."""
         raise ValueError("init boom")
 
-    def log_during_init(self, emit_log: EmitLog | None = None) -> BidiStream[AccumulatingState]:
+    def log_during_init(self, ctx: CallContext | None = None) -> BidiStream[AccumulatingState]:
         """Bidi that emits logs during init (before BidiStream returned)."""
-        if emit_log:
-            emit_log(Message.info("bidi init log"))
-            emit_log(Message.debug("bidi init detail", tag="init"))
+        if ctx:
+            ctx.log(Level.INFO, "bidi init log")
+            ctx.log(Level.DEBUG, "bidi init detail", tag="init")
         fields: list[pa.Field[pa.DataType]] = [
             pa.field("running_sum", pa.float64()),
             pa.field("exchange_count", pa.int64()),
@@ -595,7 +595,7 @@ class TestBidiMetadata:
         class MetadataReadState(BidiStreamState):
             last_meta_value: str = ""
 
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
                 if input.custom_metadata:
                     val = input.custom_metadata.get(b"user_key")
                     if val:

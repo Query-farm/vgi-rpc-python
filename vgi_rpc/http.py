@@ -28,7 +28,7 @@ import hmac
 import os
 import struct
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from http import HTTPStatus
 from io import BytesIO, IOBase
 from types import TracebackType
@@ -50,9 +50,15 @@ from vgi_rpc.log import Message
 from vgi_rpc.metadata import STATE_KEY, merge_metadata, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
+    _EMPTY_TRANSPORT_METADATA,
+    _TransportContext,
+    _current_transport,
+    _get_auth_and_metadata,
     AnnotatedBatch,
+    AuthContext,
     BidiStream,
     BidiStreamState,
+    CallContext,
     MethodType,
     OutputCollector,
     RpcError,
@@ -110,12 +116,15 @@ def _check_content_type(req: falcon.Request) -> None:
         )
 
 
-def _error_response_stream(exc: BaseException, schema: pa.Schema = _EMPTY_SCHEMA) -> BytesIO:
+def _error_response_stream(
+    exc: BaseException, schema: pa.Schema = _EMPTY_SCHEMA, server_id: str | None = None
+) -> BytesIO:
     """Serialize an exception as a complete Arrow IPC error stream.
 
     Args:
         exc: The exception to serialize.
         schema: Arrow schema for the error stream (default empty).
+        server_id: Optional server identifier injected into error metadata.
 
     Returns:
         A ``BytesIO`` positioned at the start, containing the IPC stream.
@@ -123,7 +132,7 @@ def _error_response_stream(exc: BaseException, schema: pa.Schema = _EMPTY_SCHEMA
     """
     buf = BytesIO()
     with ipc.new_stream(buf, schema) as writer:
-        _write_error_batch(writer, schema, exc)
+        _write_error_batch(writer, schema, exc, server_id=server_id)
     buf.seek(0)
     return buf
 
@@ -134,10 +143,11 @@ def _set_error_response(
     *,
     status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
     schema: pa.Schema = _EMPTY_SCHEMA,
+    server_id: str | None = None,
 ) -> None:
     """Set a Falcon response to an Arrow IPC error stream."""
     resp.content_type = _ARROW_CONTENT_TYPE
-    resp.stream = _error_response_stream(exc, schema)
+    resp.stream = _error_response_stream(exc, schema, server_id=server_id)
     resp.status = str(status_code.value)
 
 
@@ -318,9 +328,11 @@ class _HttpRpcApp:
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
-        sink = _LogSink()
-        if method_name in self._server.emit_log_methods:
-            kwargs["emit_log"] = sink
+        server_id = self._server.server_id
+        sink = _LogSink(server_id=server_id)
+        auth, transport_metadata = _get_auth_and_metadata()
+        if method_name in self._server.ctx_methods:
+            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
 
         schema = info.result_schema
         resp_buf = BytesIO()
@@ -332,10 +344,10 @@ class _HttpRpcApp:
                 _validate_result(info.name, result, info.result_type)
                 _write_result_batch(writer, schema, result, self._server.external_config)
             except (TypeError, pa.ArrowInvalid) as exc:
-                _write_error_batch(writer, schema, exc)
+                _write_error_batch(writer, schema, exc, server_id=server_id)
                 http_status = HTTPStatus.BAD_REQUEST
             except Exception as exc:
-                _write_error_batch(writer, schema, exc)
+                _write_error_batch(writer, schema, exc, server_id=server_id)
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
         resp_buf.seek(0)
@@ -352,10 +364,11 @@ class _HttpRpcApp:
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
-        # Inject emit_log if the implementation accepts it
-        sink = _LogSink()
-        if method_name in self._server.emit_log_methods:
-            kwargs["emit_log"] = sink
+        # Inject ctx if the implementation accepts it
+        sink = _LogSink(server_id=self._server.server_id)
+        auth, transport_metadata = _get_auth_and_metadata()
+        if method_name in self._server.ctx_methods:
+            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
 
         try:
             result: BidiStream[BidiStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
@@ -435,9 +448,11 @@ class _HttpRpcApp:
             user_cm = strip_keys(resolved_cm, STATE_KEY)
 
             ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
-            out = OutputCollector(output_schema)
+            out = OutputCollector(output_schema, server_id=self._server.server_id)
 
-            state_obj.process(ab_in, out)
+            auth, transport_md = _get_auth_and_metadata()
+            process_ctx = CallContext(auth=auth, emit_log=out.emit_log_message, transport_metadata=transport_md)
+            state_obj.process(ab_in, out, process_ctx)
             out.validate()
 
             # Repack updated state with same schema into new signed token
@@ -461,6 +476,9 @@ class _HttpRpcApp:
         schema: pa.Schema,
         state: ServerStreamState,
         sink: _LogSink | None = None,
+        *,
+        auth: AuthContext | None = None,
+        transport_metadata: Mapping[str, Any] | None = None,
     ) -> BytesIO:
         """Run the produce loop for a server stream, with optional size-based continuation.
 
@@ -468,11 +486,19 @@ class _HttpRpcApp:
             schema: The output schema for the stream.
             state: The server-stream state object.
             sink: Optional log sink to flush before producing (initial request only).
+            auth: Auth context; falls back to contextvar when ``None`` (continuation path).
+            transport_metadata: Transport metadata; falls back to contextvar when ``None``.
 
         Returns:
             A ``BytesIO`` containing the IPC response stream.
 
         """
+        if auth is None or transport_metadata is None:
+            cv_auth, cv_md = _get_auth_and_metadata()
+            auth = auth if auth is not None else cv_auth
+            transport_metadata = transport_metadata if transport_metadata is not None else cv_md
+
+        server_id = self._server.server_id
         resp_buf = BytesIO()
         max_bytes = self._max_stream_response_bytes
         with ipc.new_stream(resp_buf, schema) as writer:
@@ -481,8 +507,13 @@ class _HttpRpcApp:
             cumulative_bytes = 0
             try:
                 while True:
-                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
-                    state.produce(out)
+                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=server_id)
+                    produce_ctx = CallContext(
+                        auth=auth,
+                        emit_log=out.emit_log_message,
+                        transport_metadata=transport_metadata,
+                    )
+                    state.produce(out, produce_ctx)
                     if not out.finished:
                         out.validate()
                     _flush_collector(writer, out, self._server.external_config)
@@ -499,7 +530,7 @@ class _HttpRpcApp:
                         writer.write_batch(empty_batch(schema), custom_metadata=state_metadata)
                         break
             except Exception as exc:
-                _write_error_batch(writer, schema, exc)
+                _write_error_batch(writer, schema, exc, server_id=server_id)
         resp_buf.seek(0)
         return resp_buf
 
@@ -514,10 +545,11 @@ class _HttpRpcApp:
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
-        # Inject emit_log if the implementation accepts it
-        sink = _LogSink()
-        if method_name in self._server.emit_log_methods:
-            kwargs["emit_log"] = sink
+        # Inject ctx if the implementation accepts it
+        sink = _LogSink(server_id=self._server.server_id)
+        auth, transport_metadata = _get_auth_and_metadata()
+        if method_name in self._server.ctx_methods:
+            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
 
         try:
             result: ServerStream[ServerStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
@@ -526,7 +558,13 @@ class _HttpRpcApp:
         except Exception as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
-        return self._produce_stream_response(result.output_schema, result.state, sink)
+        return self._produce_stream_response(
+            result.output_schema,
+            result.state,
+            sink,
+            auth=auth,
+            transport_metadata=transport_metadata,
+        )
 
     def _server_stream_continue_sync(self, method_name: str, stream: IOBase) -> BytesIO:
         """Resume a server-stream from a continuation token."""
@@ -631,7 +669,13 @@ class _RpcResource:
             resp.content_type = _ARROW_CONTENT_TYPE
             resp.stream = result_stream
         except _RpcHttpError as e:
-            _set_error_response(resp, e.cause, status_code=e.status_code, schema=e.schema)
+            _set_error_response(
+                resp,
+                e.cause,
+                status_code=e.status_code,
+                schema=e.schema,
+                server_id=self._app._server.server_id,
+            )
 
 
 class _BidiInitResource:
@@ -651,7 +695,13 @@ class _BidiInitResource:
                 )
             result_stream = self._app._bidi_init_sync(method, info, req.bounded_stream)
         except _RpcHttpError as e:
-            _set_error_response(resp, e.cause, status_code=e.status_code, schema=e.schema)
+            _set_error_response(
+                resp,
+                e.cause,
+                status_code=e.status_code,
+                schema=e.schema,
+                server_id=self._app._server.server_id,
+            )
             return
         resp.content_type = _ARROW_CONTENT_TYPE
         resp.stream = result_stream
@@ -680,10 +730,71 @@ class _ExchangeResource:
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
         except _RpcHttpError as e:
-            _set_error_response(resp, e.cause, status_code=e.status_code, schema=e.schema)
+            _set_error_response(
+                resp,
+                e.cause,
+                status_code=e.status_code,
+                schema=e.schema,
+                server_id=self._app._server.server_id,
+            )
             return
         resp.content_type = _ARROW_CONTENT_TYPE
         resp.stream = result_stream
+
+
+class _AuthMiddleware:
+    """Falcon middleware that runs an ``authenticate`` callback on each request.
+
+    On success, sets a ``_TransportContext`` in ``_current_transport`` for
+    the duration of the request so that ``CallContext`` picks up the real
+    ``AuthContext`` and transport metadata.
+
+    The ``authenticate`` callback is expected to raise ``ValueError`` (bad
+    credentials) or ``PermissionError`` (forbidden) on failure.  Other
+    exceptions propagate as 500s so that bugs in the callback are not
+    silently swallowed as 401s.
+    """
+
+    __slots__ = ("_authenticate",)
+
+    def __init__(self, authenticate: Callable[[falcon.Request], AuthContext]) -> None:
+        self._authenticate = authenticate
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:  # noqa: ARG002
+        """Authenticate the request and populate the transport contextvar.
+
+        Only ``ValueError`` and ``PermissionError`` are caught and mapped to
+        HTTP 401.  Other exceptions propagate as 500 so that bugs in the
+        authenticate callback surface loudly rather than masquerading as
+        auth failures.
+
+        The 401 response is plain text (not Arrow IPC) because at this
+        stage no method has been resolved and the output schema is unknown.
+        """
+        try:
+            auth = self._authenticate(req)
+        except (ValueError, PermissionError) as exc:
+            raise falcon.HTTPUnauthorized(description=str(exc)) from exc
+        transport_metadata: dict[str, str] = {}
+        if req.remote_addr:
+            transport_metadata["remote_addr"] = req.remote_addr
+        ua = req.user_agent
+        if ua:
+            transport_metadata["user_agent"] = ua
+        tc = _TransportContext(auth=auth, transport_metadata=transport_metadata)
+        req.context.transport_token = _current_transport.set(tc)
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,  # noqa: ARG002
+        resource: object,  # noqa: ARG002
+        req_succeeded: bool,  # noqa: ARG002
+    ) -> None:
+        """Reset the transport contextvar after each request."""
+        token = getattr(req.context, "transport_token", None)
+        if token is not None:
+            _current_transport.reset(token)
 
 
 def make_wsgi_app(
@@ -692,6 +803,7 @@ def make_wsgi_app(
     prefix: str = "/vgi",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
+    authenticate: Callable[[falcon.Request], AuthContext] | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -708,6 +820,12 @@ def make_wsgi_app(
             exceeds this size.  The client transparently resumes via
             ``POST /{method}/exchange``.  ``None`` (default) disables
             resumable streaming.
+        authenticate: Optional callback that extracts an :class:`AuthContext`
+            from a Falcon ``Request``.  When provided, every request is
+            authenticated before dispatch.  The callback should raise
+            ``ValueError`` (bad credentials) or ``PermissionError``
+            (forbidden) on failure — these are mapped to HTTP 401.
+            Other exceptions propagate as 500.
 
     Returns:
         A Falcon application with routes for unary, server-stream,
@@ -723,7 +841,7 @@ def make_wsgi_app(
         )
         signing_key = os.urandom(32)
     app_handler = _HttpRpcApp(server, signing_key, max_stream_response_bytes)
-    app = falcon.App()
+    app = falcon.App(middleware=[_AuthMiddleware(authenticate)] if authenticate is not None else None)
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/bidi", _BidiInitResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))
@@ -748,16 +866,22 @@ class _SyncTestResponse:
 class _SyncTestClient:
     """Sync HTTP client that calls a Falcon WSGI app directly via falcon.testing.TestClient."""
 
-    __slots__ = ("_client",)
+    __slots__ = ("_client", "_default_headers")
 
-    def __init__(self, app: falcon.App[falcon.Request, falcon.Response]) -> None:
+    def __init__(
+        self,
+        app: falcon.App[falcon.Request, falcon.Response],
+        default_headers: dict[str, str] | None = None,
+    ) -> None:
         self._client = falcon.testing.TestClient(app)
+        self._default_headers: dict[str, str] = default_headers or {}
 
     def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
         """Send a synchronous POST using the Falcon test client."""
+        merged = {**self._default_headers, **headers}
         # Strip scheme+host if present (test_http.py passes full URLs)
         path = urlparse(url).path
-        result = self._client.simulate_post(path, body=content, headers=headers)
+        result = self._client.simulate_post(path, body=content, headers=merged)
         return _SyncTestResponse(result.status_code, result.content)
 
     def close(self) -> None:
@@ -770,6 +894,8 @@ def make_sync_client(
     prefix: str = "/vgi",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
+    authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    default_headers: dict[str, str] | None = None,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -781,15 +907,21 @@ def make_sync_client(
         signing_key: HMAC key for signing state tokens (see
             ``make_wsgi_app`` for details).
         max_stream_response_bytes: See ``make_wsgi_app``.
+        authenticate: See ``make_wsgi_app``.
+        default_headers: Headers merged into every request (e.g. auth tokens).
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
 
     """
     app = make_wsgi_app(
-        server, prefix=prefix, signing_key=signing_key, max_stream_response_bytes=max_stream_response_bytes
+        server,
+        prefix=prefix,
+        signing_key=signing_key,
+        max_stream_response_bytes=max_stream_response_bytes,
+        authenticate=authenticate,
     )
-    return _SyncTestClient(app)
+    return _SyncTestClient(app, default_headers=default_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -808,9 +940,15 @@ def _open_response_stream(content: bytes, status_code: int) -> ipc.RecordBatchSt
         An open IPC stream reader.
 
     Raises:
-        RpcError: If the response is not a valid Arrow IPC stream.
+        RpcError: If the server returns 401 (``AuthenticationError``) or
+            the response is not a valid Arrow IPC stream.
 
     """
+    # 401 responses are plain text (not Arrow IPC) because they are produced
+    # by _AuthMiddleware before any method is resolved, so no output schema
+    # is available.  We surface them as RpcError("AuthenticationError").
+    if status_code == HTTPStatus.UNAUTHORIZED:
+        raise RpcError("AuthenticationError", content.decode(errors="replace"), "")
     try:
         return ipc.open_stream(BytesIO(content))
     except pa.ArrowInvalid:

@@ -72,12 +72,12 @@ or ``process()`` methods.  State objects extend ``ArrowSerializableDataclass``
 so they can be serialized between requests — this enables stateless HTTP bidi
 exchanges and resumable server-stream continuations.
 
-Out-of-Band Logging
--------------------
-Server method implementations can accept an optional ``emit_log`` parameter
-(type ``EmitLog``) to emit log messages during processing.  The parameter is
-injected by the framework when present in the method signature — it does **not**
-appear in the Protocol definition.
+Call Context
+------------
+Server method implementations can accept an optional ``ctx`` parameter
+(type ``CallContext``) to access authentication, logging, and transport
+metadata.  The parameter is injected by the framework when present in
+the method signature — it does **not** appear in the Protocol definition.
 
 """
 
@@ -93,7 +93,9 @@ import os
 import subprocess
 import sys
 import threading
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from io import IOBase
@@ -101,6 +103,7 @@ from types import MappingProxyType, TracebackType
 from typing import (
     Annotated,
     Any,
+    Final,
     Protocol,
     cast,
     get_args,
@@ -126,6 +129,7 @@ from vgi_rpc.metadata import (
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
     RPC_METHOD_KEY,
+    SERVER_ID_KEY,
     encode_metadata,
     merge_metadata,
 )
@@ -143,9 +147,11 @@ EmitLog = Callable[[Message], None]
 
 __all__ = [
     "AnnotatedBatch",
+    "AuthContext",
     "BidiSession",
     "BidiStream",
     "BidiStreamState",
+    "CallContext",
     "EmitLog",
     "MethodType",
     "OutputCollector",
@@ -167,6 +173,97 @@ __all__ = [
     "serve_pipe",
     "serve_stdio",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Authentication & Call Context
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    """Authentication context for the current request.
+
+    Populated by transport-specific ``authenticate`` callbacks (e.g. JWT
+    validation on HTTP) and injected into method implementations via
+    :class:`CallContext`.
+
+    Attributes:
+        domain: Authentication scheme that produced this context, or
+            ``None`` for unauthenticated requests.
+        authenticated: Whether the caller was successfully authenticated.
+        principal: Identity of the caller (e.g. username, service account).
+        claims: Arbitrary claims from the authentication token.
+
+    """
+
+    domain: str | None
+    authenticated: bool
+    principal: str | None = None
+    claims: Mapping[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def anonymous(cls) -> AuthContext:
+        """Unauthenticated context (default for pipe transport)."""
+        return _ANONYMOUS
+
+    def require_authenticated(self) -> None:
+        """Raise if not authenticated.
+
+        Raises:
+            PermissionError: If ``authenticated`` is ``False``.
+
+        """
+        if not self.authenticated:
+            raise PermissionError("Authentication required")
+
+
+_ANONYMOUS: Final[AuthContext] = AuthContext(domain=None, authenticated=False)
+_EMPTY_TRANSPORT_METADATA: Final[Mapping[str, Any]] = MappingProxyType({})
+
+
+class CallContext:
+    """Request-scoped context injected into methods that declare a ``ctx`` parameter.
+
+    Provides authentication, logging, and transport metadata in a single
+    injection point.
+    """
+
+    __slots__ = ("auth", "emit_log", "transport_metadata")
+
+    def __init__(
+        self,
+        auth: AuthContext,
+        emit_log: EmitLog,
+        transport_metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Initialize with auth context, log callback, and optional transport metadata."""
+        self.auth = auth
+        self.emit_log = emit_log
+        self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
+
+    def log(self, level: Level, message: str, **extra: str) -> None:
+        """Emit a log message (convenience wrapper)."""
+        self.emit_log(Message(level, message, **extra))
+
+
+@dataclass(frozen=True)
+class _TransportContext:
+    """Internal: auth + transport metadata set by the transport layer."""
+
+    auth: AuthContext
+    transport_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+_current_transport: ContextVar[_TransportContext | None] = ContextVar("vgi_rpc_transport", default=None)
+
+
+def _get_auth_and_metadata() -> tuple[AuthContext, Mapping[str, Any]]:
+    """Read auth and transport metadata from the current transport contextvar."""
+    tc = _current_transport.get()
+    if tc is not None:
+        return tc.auth, tc.transport_metadata
+    return _ANONYMOUS, _EMPTY_TRANSPORT_METADATA
 
 
 # ---------------------------------------------------------------------------
@@ -217,14 +314,15 @@ class OutputCollector:
     data batch they annotate).
     """
 
-    __slots__ = ("_batches", "_data_batch_idx", "_finished", "_output_schema", "_prior_data_bytes")
+    __slots__ = ("_batches", "_data_batch_idx", "_finished", "_output_schema", "_prior_data_bytes", "_server_id")
 
-    def __init__(self, output_schema: pa.Schema, *, prior_data_bytes: int = 0) -> None:
+    def __init__(self, output_schema: pa.Schema, *, prior_data_bytes: int = 0, server_id: str | None = None) -> None:
         """Initialize with the output schema for this stream.
 
         Args:
             output_schema: The Arrow schema for data batches.
             prior_data_bytes: Cumulative data bytes from earlier produce/process calls in this stream.
+            server_id: Optional server identifier injected into log batch metadata.
 
         """
         self._output_schema = output_schema
@@ -232,6 +330,7 @@ class OutputCollector:
         self._finished: bool = False
         self._data_batch_idx: int | None = None
         self._prior_data_bytes = prior_data_bytes
+        self._server_id = server_id
 
     @property
     def output_schema(self) -> pa.Schema:
@@ -251,7 +350,9 @@ class OutputCollector:
         data batch (if one has been emitted).  Measured via
         ``pa.RecordBatch.get_total_buffer_size()``.
         """
-        current = self._batches[self._data_batch_idx].batch.get_total_buffer_size() if self._data_batch_idx is not None else 0
+        current = (
+            self._batches[self._data_batch_idx].batch.get_total_buffer_size() if self._data_batch_idx is not None else 0
+        )
         return self._prior_data_bytes + current
 
     @property
@@ -325,11 +426,17 @@ class OutputCollector:
 
     # --- Logging (zero or more per call) ---
 
+    def emit_log_message(self, msg: Message) -> None:
+        """Append a zero-row log batch (used by CallContext.emit_log in produce/process)."""
+        md = msg.add_to_metadata()
+        if self._server_id is not None:
+            md[SERVER_ID_KEY.decode()] = self._server_id
+        custom_metadata = encode_metadata(md)
+        self._batches.append(AnnotatedBatch(batch=empty_batch(self._output_schema), custom_metadata=custom_metadata))
+
     def log(self, level: Level, message: str, **extra: str) -> None:
         """Emit a zero-row log batch with log metadata."""
-        msg = Message(level, message, **extra)
-        custom_metadata = encode_metadata(msg.add_to_metadata())
-        self._batches.append(AnnotatedBatch(batch=empty_batch(self._output_schema), custom_metadata=custom_metadata))
+        self.emit_log_message(Message(level, message, **extra))
 
     # --- Stream completion (ServerStream only) ---
 
@@ -341,7 +448,7 @@ class OutputCollector:
 class ServerStreamState(ArrowSerializableDataclass, abc.ABC):
     """Base class for server-stream state objects.
 
-    Subclasses must be dataclasses that define ``produce(out)`` which is
+    Subclasses must be dataclasses that define ``produce(out, ctx)`` which is
     called repeatedly to generate output batches.  Call ``out.finish()``
     to signal stream end.
 
@@ -350,7 +457,7 @@ class ServerStreamState(ArrowSerializableDataclass, abc.ABC):
     """
 
     @abc.abstractmethod
-    def produce(self, out: OutputCollector) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce output batches into the collector."""
         ...
 
@@ -358,7 +465,7 @@ class ServerStreamState(ArrowSerializableDataclass, abc.ABC):
 class BidiStreamState(ArrowSerializableDataclass, abc.ABC):
     """Base class for bidi-stream state objects.
 
-    Subclasses must be dataclasses that define ``process(input, out)``
+    Subclasses must be dataclasses that define ``process(input, out, ctx)``
     which is called once per input batch.  State is mutated in-place
     across calls.
 
@@ -367,7 +474,7 @@ class BidiStreamState(ArrowSerializableDataclass, abc.ABC):
     """
 
     @abc.abstractmethod
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process an input batch and emit output into the collector."""
         ...
 
@@ -617,7 +724,7 @@ def _validate_implementation(
 
     Checks that every method declared in the protocol exists on the
     implementation, is callable, and has a compatible parameter list.
-    The special ``emit_log`` parameter is allowed on implementations
+    The special ``ctx`` parameter is allowed on implementations
     even when not present in the protocol.
 
     Raises:
@@ -652,7 +759,7 @@ def _validate_implementation(
         for param_name, param in impl_params.items():
             if param_name in proto_param_names:
                 continue
-            if param_name == "emit_log":
+            if param_name == "ctx":
                 continue
             if param.default is inspect.Parameter.empty and param.kind not in (
                 inspect.Parameter.VAR_POSITIONAL,
@@ -714,9 +821,13 @@ def _write_message_batch(
     writer: ipc.RecordBatchStreamWriter,
     schema: pa.Schema,
     msg: Message,
+    server_id: str | None = None,
 ) -> None:
     """Write a zero-row batch with Message metadata on an existing IPC stream writer."""
-    custom_metadata = encode_metadata(msg.add_to_metadata())
+    md = msg.add_to_metadata()
+    if server_id is not None:
+        md[SERVER_ID_KEY.decode()] = server_id
+    custom_metadata = encode_metadata(md)
     writer.write_batch(empty_batch(schema), custom_metadata=custom_metadata)
 
 
@@ -724,30 +835,34 @@ def _write_error_batch(
     writer: ipc.RecordBatchStreamWriter,
     schema: pa.Schema,
     exc: BaseException,
+    server_id: str | None = None,
 ) -> None:
     """Write error as zero-row batch (convenience wrapper)."""
-    _write_message_batch(writer, schema, Message.from_exception(exc))
+    _write_message_batch(writer, schema, Message.from_exception(exc), server_id=server_id)
 
 
-def _write_error_stream(writer_stream: IOBase, schema: pa.Schema, exc: BaseException) -> None:
+def _write_error_stream(
+    writer_stream: IOBase, schema: pa.Schema, exc: BaseException, server_id: str | None = None
+) -> None:
     """Write a complete IPC stream containing just an error batch."""
     with ipc.new_stream(writer_stream, schema) as writer:
-        _write_error_batch(writer, schema, exc)
+        _write_error_batch(writer, schema, exc, server_id=server_id)
 
 
 class _LogSink:
     """Buffers log messages until an IPC writer is available, then writes directly."""
 
-    __slots__ = ("_buffer", "_schema", "_writer")
+    __slots__ = ("_buffer", "_schema", "_server_id", "_writer")
 
-    def __init__(self) -> None:
+    def __init__(self, server_id: str | None = None) -> None:
         self._buffer: list[Message] = []
         self._writer: ipc.RecordBatchStreamWriter | None = None
         self._schema: pa.Schema | None = None
+        self._server_id = server_id
 
     def __call__(self, msg: Message) -> None:
         if self._writer is not None and self._schema is not None:
-            _write_message_batch(self._writer, self._schema, msg)
+            _write_message_batch(self._writer, self._schema, msg, server_id=self._server_id)
         else:
             self._buffer.append(msg)
 
@@ -756,7 +871,7 @@ class _LogSink:
         self._writer = writer
         self._schema = schema
         for msg in self._buffer:
-            _write_message_batch(writer, schema, msg)
+            _write_message_batch(writer, schema, msg, server_id=self._server_id)
         self._buffer.clear()
 
 
@@ -838,22 +953,26 @@ def _dispatch_log_or_error(
     message_str = message_bytes.decode()
 
     # Extract extra info (traceback, exception_type, etc.)
-    extra: dict[str, object] = {}
+    raw_extra_data: dict[str, object] = {}
     raw_extra = custom_metadata.get(LOG_EXTRA_KEY)
     if raw_extra is not None:
         with contextlib.suppress(json.JSONDecodeError):
-            extra = json.loads(raw_extra.decode())
+            raw_extra_data = json.loads(raw_extra.decode())
 
     # EXCEPTION level → raise RpcError (existing behaviour)
     if level_str == Level.EXCEPTION.value:
-        error_type = str(extra.get("exception_type", level_str))
-        traceback_str = str(extra.get("traceback", ""))
+        error_type = str(raw_extra_data.get("exception_type", level_str))
+        traceback_str = str(raw_extra_data.get("traceback", ""))
         raise RpcError(error_type, message_str, traceback_str)
 
     # Non-exception log message → invoke callback
-    # Strip internal keys (pid) before reconstructing Message.extra
-    log_extra = {k: v for k, v in extra.items() if k != "pid"}
-    msg = Message(Level(level_str), message_str, **log_extra)
+    # Coerce all extra values to str for Message(**extra)
+    extra: dict[str, str] = {k: str(v) for k, v in raw_extra_data.items()}
+    # Extract server_id from top-level metadata into extra
+    server_id_bytes = custom_metadata.get(SERVER_ID_KEY)
+    if server_id_bytes is not None:
+        extra["server_id"] = server_id_bytes.decode() if isinstance(server_id_bytes, bytes) else server_id_bytes
+    msg = Message(Level(level_str), message_str, **extra)
     if on_log is not None:
         on_log(msg)
     return True
@@ -1120,7 +1239,7 @@ def _flush_collector(
 class RpcServer:
     """Dispatches RPC requests to an implementation over IO-stream transports."""
 
-    __slots__ = ("_emit_log_methods", "_external_config", "_impl", "_methods", "_protocol")
+    __slots__ = ("_ctx_methods", "_external_config", "_impl", "_methods", "_protocol", "_server_id")
 
     def __init__(
         self,
@@ -1128,20 +1247,22 @@ class RpcServer:
         implementation: object,
         *,
         external_location: ExternalLocationConfig | None = None,
+        server_id: str | None = None,
     ) -> None:
         """Initialize with a protocol type and its implementation."""
         self._protocol = protocol
         self._impl = implementation
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
+        self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]
         _validate_implementation(protocol, implementation, self._methods)
 
-        # Detect which impl methods accept an `emit_log` parameter.
-        self._emit_log_methods: frozenset[str] = frozenset(
+        # Detect which impl methods accept a `ctx` parameter.
+        self._ctx_methods: frozenset[str] = frozenset(
             name
             for name in self._methods
             if (method := getattr(implementation, name, None)) is not None
-            and "emit_log" in inspect.signature(method).parameters
+            and "ctx" in inspect.signature(method).parameters
         )
 
     @property
@@ -1160,9 +1281,14 @@ class RpcServer:
         return self._external_config
 
     @property
-    def emit_log_methods(self) -> frozenset[str]:
-        """Method names whose implementations accept an emit_log parameter."""
-        return self._emit_log_methods
+    def server_id(self) -> str:
+        """Short random identifier for this server instance."""
+        return self._server_id
+
+    @property
+    def ctx_methods(self) -> frozenset[str]:
+        """Method names whose implementations accept a ctx parameter."""
+        return self._ctx_methods
 
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""
@@ -1192,15 +1318,20 @@ class RpcServer:
             method_name, kwargs = _read_request(transport.reader)
         except pa.ArrowInvalid as exc:
             with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             raise
         except (VersionError, RpcError) as exc:
             with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
         info = self._methods.get(method_name)
         if info is None:
-            _write_error_stream(transport.writer, _EMPTY_SCHEMA, AttributeError(f"Unknown method: {method_name}"))
+            _write_error_stream(
+                transport.writer,
+                _EMPTY_SCHEMA,
+                AttributeError(f"Unknown method: {method_name}"),
+                server_id=self._server_id,
+            )
             return
 
         _deserialize_params(kwargs, info.param_types)
@@ -1209,7 +1340,7 @@ class RpcServer:
             _validate_params(info.name, kwargs, info.param_types)
         except TypeError as exc:
             err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
-            _write_error_stream(transport.writer, err_schema, exc)
+            _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
             return
 
         if info.method_type == MethodType.UNARY:
@@ -1219,44 +1350,49 @@ class RpcServer:
         elif info.method_type == MethodType.BIDI_STREAM:
             self._serve_bidi_stream(transport, info, kwargs)
 
-    def _make_log_sink(self, info: RpcMethodInfo, kwargs: dict[str, Any]) -> _LogSink:
-        """Create a log sink, wiring it into *kwargs* if the method accepts ``emit_log``."""
-        sink = _LogSink()
-        if info.name in self._emit_log_methods:
-            kwargs["emit_log"] = sink
-        return sink
+    def _prepare_method_call(
+        self, info: RpcMethodInfo, kwargs: dict[str, Any]
+    ) -> tuple[_LogSink, AuthContext, Mapping[str, Any]]:
+        """Create a log sink + read auth; wire a :class:`CallContext` into *kwargs* if the method accepts ``ctx``."""
+        sink = _LogSink(server_id=self._server_id)
+        auth, transport_metadata = _get_auth_and_metadata()
+        if info.name in self._ctx_methods:
+            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
+        return sink, auth, transport_metadata
 
     def _serve_unary(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
         schema = info.result_schema
-        sink = self._make_log_sink(info, kwargs)
+        sink, _, _ = self._prepare_method_call(info, kwargs)
         with ipc.new_stream(transport.writer, schema) as writer:
             sink.flush_contents(writer, schema)
             try:
                 result = getattr(self._impl, info.name)(**kwargs)
                 _validate_result(info.name, result, info.result_type)
             except Exception as exc:
-                _write_error_batch(writer, schema, exc)
+                _write_error_batch(writer, schema, exc, server_id=self._server_id)
                 return
             _write_result_batch(writer, info.result_schema, result, self._external_config)
 
     def _serve_server_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
-        sink = self._make_log_sink(info, kwargs)
+        sink, auth, transport_md = self._prepare_method_call(info, kwargs)
         try:
             result: ServerStream[ServerStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
             with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
 
         schema = result.output_schema
         state = result.state
+
         with ipc.new_stream(transport.writer, schema) as stream_writer:
             sink.flush_contents(stream_writer, schema)
             cumulative_bytes = 0
             try:
                 while True:
-                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
-                    state.produce(out)
+                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
+                    produce_ctx = CallContext(auth=auth, emit_log=out.emit_log_message, transport_metadata=transport_md)
+                    state.produce(out, produce_ctx)
                     if not out.finished:
                         out.validate()
                     _flush_collector(stream_writer, out, self._external_config)
@@ -1265,16 +1401,16 @@ class RpcServer:
                     cumulative_bytes = out.total_data_bytes
             except Exception as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
-                    _write_error_batch(stream_writer, schema, exc)
+                    _write_error_batch(stream_writer, schema, exc, server_id=self._server_id)
 
     def _serve_bidi_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
-        sink = self._make_log_sink(info, kwargs)
+        sink, auth, transport_md = self._prepare_method_call(info, kwargs)
 
         try:
             result: BidiStream[BidiStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
             with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
 
         output_schema = result.output_schema
@@ -1304,14 +1440,15 @@ class RpcServer:
                         )
 
                     ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
-                    out = OutputCollector(output_schema, prior_data_bytes=cumulative_bytes)
-                    state.process(ab_in, out)
+                    out = OutputCollector(output_schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
+                    process_ctx = CallContext(auth=auth, emit_log=out.emit_log_message, transport_metadata=transport_md)
+                    state.process(ab_in, out, process_ctx)
                     out.validate()
                     _flush_collector(output_writer, out, self._external_config)
                     cumulative_bytes = out.total_data_bytes
             except Exception as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
-                    _write_error_batch(output_writer, output_schema, exc)
+                    _write_error_batch(output_writer, output_schema, exc, server_id=self._server_id)
 
         # Drain remaining input so transport is clean for next request
         with contextlib.suppress(pa.ArrowInvalid, OSError):

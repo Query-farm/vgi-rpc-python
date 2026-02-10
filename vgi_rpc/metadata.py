@@ -20,8 +20,8 @@ __all__ = [
     "REQUEST_VERSION",
     "REQUEST_VERSION_KEY",
     "RPC_METHOD_KEY",
+    "SERVER_ID_KEY",
     "STATE_KEY",
-    "decode_metadata",
     "encode_metadata",
     "merge_metadata",
     "strip_keys",
@@ -39,6 +39,8 @@ LOG_EXTRA_KEY = b"vgi_rpc.log_extra"
 REQUEST_VERSION_KEY = b"vgi_rpc.request_version"
 REQUEST_VERSION = b"1"
 
+SERVER_ID_KEY = b"vgi_rpc.server_id"
+
 LOCATION_KEY = b"vgi_rpc.location"
 LOCATION_FETCH_MS_KEY = b"vgi_rpc.location.fetch_ms"
 LOCATION_SOURCE_KEY = b"vgi_rpc.location.source"
@@ -51,21 +53,6 @@ LOCATION_SOURCE_KEY = b"vgi_rpc.location.source"
 def encode_metadata(metadata: dict[str, str]) -> pa.KeyValueMetadata:
     """Encode a plain ``dict[str, str]`` to ``pa.KeyValueMetadata`` with bytes keys/values."""
     return pa.KeyValueMetadata({k.encode(): v.encode() for k, v in metadata.items()})
-
-
-def decode_metadata(
-    metadata: pa.KeyValueMetadata | None,
-) -> dict[str, str]:
-    """Decode ``pa.KeyValueMetadata`` to a plain ``dict[str, str]``.
-
-    Returns an empty dict when *metadata* is ``None``.
-    """
-    if metadata is None:
-        return {}
-    return {
-        k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
-        for k, v in metadata.items()
-    }
 
 
 # ---------------------------------------------------------------------------

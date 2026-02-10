@@ -36,6 +36,7 @@ def _clear_schema_cache(cls: type[ArrowSerializableDataclass]) -> None:
     if cache_attr in cls.__dict__:
         delattr(cls, cache_attr)
 
+
 # ---------------------------------------------------------------------------
 # Test dataclasses (module-level so get_type_hints can resolve them)
 # ---------------------------------------------------------------------------

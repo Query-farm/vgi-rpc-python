@@ -42,6 +42,7 @@ from vgi_rpc.rpc import (
     AnnotatedBatch,
     BidiStream,
     BidiStreamState,
+    CallContext,
     OutputCollector,
     ServerStream,
     ServerStreamState,
@@ -678,7 +679,7 @@ class _LargeStreamState(ServerStreamState):
     size: int
     current: int = 0
 
-    def produce(self, out: OutputCollector) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce a large batch with a log message."""
         if self.current >= self.count:
             out.finish()
@@ -694,7 +695,7 @@ class _LargeBidiState(BidiStreamState):
 
     factor: float
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process input and produce large output."""
         scaled = pc.multiply(input.batch.column("value"), self.factor)
         out.emit_arrays([scaled])

@@ -25,6 +25,7 @@ from vgi_rpc.metadata import encode_metadata
 from vgi_rpc.rpc import (
     BidiStream,
     BidiStreamState,
+    CallContext,
     MethodType,
     OutputCollector,
     PipeTransport,
@@ -380,9 +381,26 @@ class TestDispatchLogOrError:
         result = _dispatch_log_or_error(self._make_zero_row_batch(), md, on_log=None)
         assert result is True
 
-    def test_log_extra_pid_stripped(self) -> None:
-        """Internal 'pid' key is stripped from the reconstructed Message.extra."""
-        extra = json.dumps({"pid": 12345, "custom_key": "value"})
+    def test_server_id_extracted_from_metadata(self) -> None:
+        """server_id from top-level metadata appears in reconstructed Message.extra."""
+        extra = json.dumps({"custom_key": "value"})
+        md = encode_metadata(
+            {
+                "vgi_rpc.log_level": "INFO",
+                "vgi_rpc.log_message": "msg",
+                "vgi_rpc.log_extra": extra,
+                "vgi_rpc.server_id": "abc123def456",
+            }
+        )
+        logs: list[Message] = []
+        _dispatch_log_or_error(self._make_zero_row_batch(), md, on_log=logs.append)
+        assert logs[0].extra is not None
+        assert logs[0].extra["server_id"] == "abc123def456"
+        assert logs[0].extra["custom_key"] == "value"
+
+    def test_server_id_absent_when_not_in_metadata(self) -> None:
+        """When server_id is not in metadata, it does not appear in Message.extra."""
+        extra = json.dumps({"custom_key": "value"})
         md = encode_metadata(
             {
                 "vgi_rpc.log_level": "INFO",
@@ -393,7 +411,7 @@ class TestDispatchLogOrError:
         logs: list[Message] = []
         _dispatch_log_or_error(self._make_zero_row_batch(), md, on_log=logs.append)
         assert logs[0].extra is not None
-        assert "pid" not in logs[0].extra
+        assert "server_id" not in logs[0].extra
         assert logs[0].extra["custom_key"] == "value"
 
 
@@ -637,7 +655,7 @@ class TestWireProtocolEdgeCases:
         class EmptyState(ServerStreamState):
             """Immediately finishes."""
 
-            def produce(self, out: OutputCollector) -> None:
+            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
                 """Finish immediately."""
                 out.finish()
 
@@ -762,15 +780,15 @@ class TestWireProtocolEdgeCases:
 
 
 # ===================================================================
-# 11. emit_log injection
+# 11. ctx injection
 # ===================================================================
 
 
-class TestEmitLogInjection:
-    """Tests for emit_log parameter injection by the framework."""
+class TestCtxInjection:
+    """Tests for ctx parameter injection by the framework."""
 
-    def test_emit_log_not_injected_when_absent(self) -> None:
-        """Framework does not inject emit_log when method signature lacks it."""
+    def test_ctx_not_injected_when_absent(self) -> None:
+        """Framework does not inject ctx when method signature lacks it."""
 
         class P(Protocol):
             """Protocol."""
@@ -785,7 +803,7 @@ class TestEmitLogInjection:
                 return x
 
         server = RpcServer(P, Impl())
-        assert "method" not in server.emit_log_methods
+        assert "method" not in server.ctx_methods
 
 
 # ===================================================================

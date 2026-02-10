@@ -16,10 +16,12 @@ import pytest
 from vgi_rpc.http import _HttpProxy, http_connect
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import (
+    _ANONYMOUS,
     AnnotatedBatch,
+    AuthContext,
     BidiStream,
     BidiStreamState,
-    EmitLog,
+    CallContext,
     MethodType,
     OutputCollector,
     PipeTransport,
@@ -40,6 +42,8 @@ from vgi_rpc.rpc import (
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
 from .conftest import ConnFactory, _worker_cmd
+
+_DUMMY_CTX = CallContext(auth=AuthContext.anonymous(), emit_log=lambda _: None)
 
 # ---------------------------------------------------------------------------
 # Enum for type fidelity tests
@@ -66,7 +70,7 @@ class GenerateState(ServerStreamState):
     count: int
     current: int = 0
 
-    def produce(self, out: OutputCollector) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next batch."""
         if self.current >= self.count:
             out.finish()
@@ -81,7 +85,7 @@ class TransformState(BidiStreamState):
 
     factor: float
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process an input batch."""
         scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
@@ -93,7 +97,7 @@ class FailStreamState(ServerStreamState):
 
     emitted: bool = False
 
-    def produce(self, out: OutputCollector) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce a batch, then fail on the next call."""
         if not self.emitted:
             self.emitted = True
@@ -109,7 +113,7 @@ class FailBidiMidState(BidiStreamState):
     factor: float
     count: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process one batch, then fail on the next."""
         if self.count > 0:
             raise RuntimeError("bidi boom")
@@ -125,7 +129,7 @@ class GenerateWithLogsState(ServerStreamState):
     count: int
     current: int = 0
 
-    def produce(self, out: OutputCollector) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next batch with a log message."""
         if self.current >= self.count:
             out.finish()
@@ -141,7 +145,7 @@ class TransformWithLogsState(BidiStreamState):
 
     factor: float
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process input with a log message."""
         out.log(Level.INFO, f"transforming batch with factor={self.factor}")
         scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
@@ -152,7 +156,7 @@ class TransformWithLogsState(BidiStreamState):
 class PassthroughState(BidiStreamState):
     """State for a passthrough bidi stream."""
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Pass through the input batch unchanged."""
         out.emit(input.batch)
 
@@ -161,7 +165,7 @@ class PassthroughState(BidiStreamState):
 class EmptyStreamState(ServerStreamState):
     """State for a stream that immediately finishes."""
 
-    def produce(self, out: OutputCollector) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Finish immediately."""
         out.finish()
 
@@ -316,22 +320,22 @@ class RpcFixtureServiceImpl:
         """Return the tags back."""
         return tags
 
-    def greet_with_logs(self, name: str, emit_log: EmitLog | None = None) -> str:
+    def greet_with_logs(self, name: str, ctx: CallContext | None = None) -> str:
         """Greet by name, emitting INFO + DEBUG logs."""
-        if emit_log:
-            emit_log(Message.info(f"greeting {name}"))
-            emit_log(Message.debug("debug detail", detail="extra-info"))
+        if ctx:
+            ctx.log(Level.INFO, f"greeting {name}")
+            ctx.log(Level.DEBUG, "debug detail", detail="extra-info")
         return f"Hello, {name}!"
 
-    def generate_with_logs(self, count: int, emit_log: EmitLog | None = None) -> ServerStream[GenerateWithLogsState]:
+    def generate_with_logs(self, count: int, ctx: CallContext | None = None) -> ServerStream[GenerateWithLogsState]:
         """Generate batches with interleaved log messages."""
         schema = pa.schema([pa.field("i", pa.int64())])
         # Emit log BEFORE creating the stream — exercises _LogSink buffering
-        if emit_log:
-            emit_log(Message.info("pre-stream log"))
+        if ctx:
+            ctx.log(Level.INFO, "pre-stream log")
         return ServerStream(output_schema=schema, state=GenerateWithLogsState(count=count))
 
-    def transform_with_logs(self, factor: float, emit_log: EmitLog | None = None) -> BidiStream[TransformWithLogsState]:
+    def transform_with_logs(self, factor: float, ctx: CallContext | None = None) -> BidiStream[TransformWithLogsState]:
         """Bidi transform with log messages per exchange."""
         schema = pa.schema([pa.field("value", pa.float64())])
         return BidiStream(output_schema=schema, state=TransformWithLogsState(factor=factor))
@@ -1176,12 +1180,12 @@ class TestNullValidation:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Out-of-band log messages (emit_log)
+# Tests: Out-of-band log messages (CallContext)
 # ---------------------------------------------------------------------------
 
 
-class TestEmitLog:
-    """Tests for out-of-band log message delivery via emit_log."""
+class TestCallContextLogging:
+    """Tests for out-of-band log message delivery via CallContext."""
 
     def test_unary_emit_log(self, make_conn: ConnFactory) -> None:
         """Unary method emits log messages that are delivered to on_log callback."""
@@ -1239,13 +1243,13 @@ class TestEmitLog:
             def multi_level(self) -> str: ...
 
         class MultiLevelServiceImpl:
-            def multi_level(self, emit_log: EmitLog | None = None) -> str:
-                if emit_log:
-                    emit_log(Message.error("error msg"))
-                    emit_log(Message.warn("warn msg"))
-                    emit_log(Message.info("info msg"))
-                    emit_log(Message.debug("debug msg"))
-                    emit_log(Message.trace("trace msg"))
+            def multi_level(self, ctx: CallContext | None = None) -> str:
+                if ctx:
+                    ctx.log(Level.ERROR, "error msg")
+                    ctx.log(Level.WARN, "warn msg")
+                    ctx.log(Level.INFO, "info msg")
+                    ctx.log(Level.DEBUG, "debug msg")
+                    ctx.log(Level.TRACE, "trace msg")
                 return "done"
 
         logs: list[Message] = []
@@ -1273,9 +1277,9 @@ class TestEmitLog:
             def log_then_fail(self) -> str: ...
 
         class LogThenErrorServiceImpl:
-            def log_then_fail(self, emit_log: EmitLog | None = None) -> str:
-                if emit_log:
-                    emit_log(Message.info("about to fail"))
+            def log_then_fail(self, ctx: CallContext | None = None) -> str:
+                if ctx:
+                    ctx.log(Level.INFO, "about to fail")
                 raise ValueError("intentional failure")
 
         logs: list[Message] = []
@@ -1294,7 +1298,7 @@ class TestEmitLog:
             count: int
             current: int = 0
 
-            def produce(self, out: OutputCollector) -> None:
+            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
                 if self.current >= self.count:
                     out.finish()
                     return
@@ -1306,11 +1310,11 @@ class TestEmitLog:
 
         class BufferedLogServiceImpl:
             def stream_with_early_log(
-                self, count: int, emit_log: EmitLog | None = None
+                self, count: int, ctx: CallContext | None = None
             ) -> ServerStream[EarlyLogStreamState]:
                 # Emit log BEFORE creating the stream — exercises _LogSink buffering
-                if emit_log:
-                    emit_log(Message.info("before stream open"))
+                if ctx:
+                    ctx.log(Level.INFO, "before stream open")
                 schema = pa.schema([pa.field("i", pa.int64())])
                 return ServerStream(output_schema=schema, state=EarlyLogStreamState(count=count))
 
@@ -1321,8 +1325,8 @@ class TestEmitLog:
             assert len(logs) == 1
             assert logs[0].message == "before stream open"
 
-    def test_emit_log_backward_compatible(self, make_conn: ConnFactory) -> None:
-        """Existing methods without emit_log parameter work unchanged."""
+    def test_ctx_backward_compatible(self, make_conn: ConnFactory) -> None:
+        """Existing methods without ctx parameter work unchanged."""
         logs: list[Message] = []
         with make_conn(on_log=logs.append) as proxy:
             result = proxy.add(a=1.5, b=2.5)
@@ -1437,7 +1441,7 @@ class TestOutputCollector:
         cumulative_bytes = 0
         for _ in range(3):
             out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
-            state.produce(out)
+            state.produce(out, _DUMMY_CTX)
             assert not out.finished
             assert out.total_data_bytes > cumulative_bytes
             cumulative_bytes = out.total_data_bytes
@@ -1454,7 +1458,7 @@ class TestOutputCollector:
             max_bytes: int
             emitted: int = 0
 
-            def produce(self, out: OutputCollector) -> None:
+            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
                 """Emit a batch or finish if byte threshold reached."""
                 if out.total_data_bytes >= self.max_bytes:
                     out.finish()
@@ -1473,7 +1477,7 @@ class TestOutputCollector:
         batches_produced = 0
         while True:
             out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
-            state.produce(out)
+            state.produce(out, _DUMMY_CTX)
             if out.finished:
                 break
             out.validate()
@@ -1592,20 +1596,20 @@ class TestStateMutation:
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
 
         out1 = OutputCollector(schema)
-        state.produce(out1)
+        state.produce(out1, _DUMMY_CTX)
         assert state.current == 1
         assert not out1.finished
 
         out2 = OutputCollector(schema)
-        state.produce(out2)
+        state.produce(out2, _DUMMY_CTX)
         assert state.current == 2
 
         out3 = OutputCollector(schema)
-        state.produce(out3)
+        state.produce(out3, _DUMMY_CTX)
         assert state.current == 3
 
         out4 = OutputCollector(schema)
-        state.produce(out4)
+        state.produce(out4, _DUMMY_CTX)
         assert out4.finished
 
     def test_bidi_state_across_exchanges(self) -> None:
@@ -1616,7 +1620,7 @@ class TestStateMutation:
             factor: float
             call_count: int = 0
 
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
                 self.call_count += 1
                 scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
                 out.emit_arrays([scaled])
@@ -1627,7 +1631,7 @@ class TestStateMutation:
         for i in range(5):
             inp = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [float(i)]}))
             out = OutputCollector(schema)
-            state.process(inp, out)
+            state.process(inp, out, _DUMMY_CTX)
 
         assert state.call_count == 5
 
@@ -1682,7 +1686,7 @@ class TestStateSerializationRoundTrip:
         # Continue producing from restored state
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
         out = OutputCollector(schema)
-        restored.produce(out)
+        restored.produce(out, _DUMMY_CTX)
         assert not out.finished
         assert out.batches[0].batch.column("i")[0].as_py() == 2
         assert restored.current == 3
@@ -1702,7 +1706,7 @@ class TestStateSerializationRoundTrip:
         schema = pa.schema([pa.field("value", pa.float64())])
         inp = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [10.0]}))
         out = OutputCollector(schema)
-        restored.process(inp, out)
+        restored.process(inp, out, _DUMMY_CTX)
         assert out.batches[0].batch.column("value")[0].as_py() == 30.0
 
     def test_stateful_bidi_roundtrip(self) -> None:
@@ -1713,7 +1717,7 @@ class TestStateSerializationRoundTrip:
         schema = pa.schema([pa.field("value", pa.float64())])
         inp = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5.0]}))
         out = OutputCollector(schema)
-        state.process(inp, out)
+        state.process(inp, out, _DUMMY_CTX)
         assert state.count == 1
 
         # Serialize after mutation
@@ -1960,3 +1964,157 @@ class TestInvalidBidiState:
 
             with pytest.raises(RpcError, match=r"Malformed state token|signature verification"):
                 session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [2.0]})))
+
+
+# ---------------------------------------------------------------------------
+# Tests: AuthContext and CallContext
+# ---------------------------------------------------------------------------
+
+
+class TestAuthContext:
+    """Tests for AuthContext data class and utilities."""
+
+    def test_anonymous_factory(self) -> None:
+        """AuthContext.anonymous() returns unauthenticated context."""
+        ctx = AuthContext.anonymous()
+        assert ctx.domain is None
+        assert ctx.authenticated is False
+        assert ctx.principal is None
+        assert ctx.claims == {}
+
+    def test_require_authenticated_raises(self) -> None:
+        """require_authenticated raises PermissionError when not authenticated."""
+        ctx = AuthContext.anonymous()
+        with pytest.raises(PermissionError, match="Authentication required"):
+            ctx.require_authenticated()
+
+    def test_require_authenticated_passes(self) -> None:
+        """require_authenticated succeeds when authenticated."""
+        ctx = AuthContext(domain="jwt", authenticated=True, principal="alice")
+        ctx.require_authenticated()  # should not raise
+
+    def test_frozen(self) -> None:
+        """AuthContext is immutable."""
+        ctx = AuthContext(domain="jwt", authenticated=True, principal="alice")
+        with pytest.raises(AttributeError):
+            ctx.principal = "bob"  # type: ignore[misc]
+
+    def test_anonymous_constant_matches_factory(self) -> None:
+        """anonymous() returns the cached _ANONYMOUS singleton."""
+        assert _ANONYMOUS is AuthContext.anonymous()
+
+    def test_claims_default_empty(self) -> None:
+        """Claims default to an empty dict."""
+        ctx = AuthContext(domain="api_key", authenticated=True, principal="svc")
+        assert ctx.claims == {}
+
+
+class TestCallContext:
+    """Tests for CallContext injection over pipes (anonymous auth)."""
+
+    def test_ctx_has_anonymous_auth_over_pipe(self) -> None:
+        """ctx.auth is anonymous when using pipe transport (no authenticate callback)."""
+        captured: list[AuthContext] = []
+
+        class AuthProbe(Protocol):
+            def probe(self) -> str: ...
+
+        class AuthProbeImpl:
+            def probe(self, ctx: CallContext) -> str:
+                captured.append(ctx.auth)
+                return "ok"
+
+        with rpc_conn(AuthProbe, AuthProbeImpl()) as proxy:
+            assert proxy.probe() == "ok"
+        assert len(captured) == 1
+        assert captured[0].authenticated is False
+        assert captured[0].domain is None
+
+    def test_ctx_log_emits_messages(self) -> None:
+        """ctx.log() produces the same result as using emit_log directly."""
+        logs: list[Message] = []
+
+        class LogProbe(Protocol):
+            def probe(self) -> str: ...
+
+        class LogProbeImpl:
+            def probe(self, ctx: CallContext) -> str:
+                ctx.log(Level.INFO, "hello from ctx")
+                return "ok"
+
+        with rpc_conn(LogProbe, LogProbeImpl(), on_log=logs.append) as proxy:
+            assert proxy.probe() == "ok"
+        assert len(logs) == 1
+        assert logs[0].level == Level.INFO
+        assert logs[0].message == "hello from ctx"
+
+    def test_ctx_in_produce(self) -> None:
+        """Verify ctx is accessible in ServerStreamState.produce."""
+        captured: list[AuthContext] = []
+
+        @dataclass
+        class ProbeStreamState(ServerStreamState):
+            done: bool = False
+
+            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+                captured.append(ctx.auth)
+                if self.done:
+                    out.finish()
+                    return
+                self.done = True
+                out.emit_pydict({"x": [1]})
+
+        class StreamProbe(Protocol):
+            def stream_probe(self) -> ServerStream[ServerStreamState]: ...
+
+        class StreamProbeImpl:
+            def stream_probe(self) -> ServerStream[ProbeStreamState]:
+                schema = pa.schema([pa.field("x", pa.int64())])
+                return ServerStream(output_schema=schema, state=ProbeStreamState())
+
+        with rpc_conn(StreamProbe, StreamProbeImpl()) as proxy:
+            batches = list(proxy.stream_probe())
+        assert len(batches) == 1
+        # produce called twice (once for data, once for finish)
+        assert len(captured) == 2
+        assert all(not a.authenticated for a in captured)
+
+    def test_ctx_in_process(self) -> None:
+        """Verify ctx is accessible in BidiStreamState.process."""
+        captured: list[AuthContext] = []
+
+        @dataclass
+        class ProbeBidiState(BidiStreamState):
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+                captured.append(ctx.auth)
+                out.emit(input.batch)
+
+        class BidiProbe(Protocol):
+            def bidi_probe(self) -> BidiStream[BidiStreamState]: ...
+
+        class BidiProbeImpl:
+            def bidi_probe(self) -> BidiStream[ProbeBidiState]:
+                schema = pa.schema([pa.field("v", pa.int64())])
+                return BidiStream(output_schema=schema, state=ProbeBidiState())
+
+        with rpc_conn(BidiProbe, BidiProbeImpl()) as proxy, proxy.bidi_probe() as session:
+            session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"v": [1]})))
+        assert len(captured) == 1
+        assert not captured[0].authenticated
+
+    def test_require_authenticated_propagates_as_rpc_error(self) -> None:
+        """PermissionError from require_authenticated becomes RpcError."""
+
+        class GuardedService(Protocol):
+            def guarded(self) -> str: ...
+
+        class GuardedServiceImpl:
+            def guarded(self, ctx: CallContext) -> str:
+                ctx.auth.require_authenticated()
+                return "secret"
+
+        with (
+            rpc_conn(GuardedService, GuardedServiceImpl()) as proxy,
+            pytest.raises(RpcError, match="Authentication required"),
+        ):
+            proxy.guarded()

@@ -8,12 +8,14 @@ This file tests only things unique to the HTTP transport layer.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from io import BytesIO
-from typing import Any
+from typing import Any, Protocol, cast
 
 import falcon
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as aioresponses_ctx
@@ -30,7 +32,20 @@ from vgi_rpc.http import (
     make_wsgi_app,
 )
 from vgi_rpc.log import Message
-from vgi_rpc.rpc import AnnotatedBatch, RpcError, RpcServer, _dispatch_log_or_error, _drain_stream
+from vgi_rpc.rpc import (
+    AnnotatedBatch,
+    AuthContext,
+    BidiStream,
+    BidiStreamState,
+    CallContext,
+    OutputCollector,
+    RpcError,
+    RpcServer,
+    ServerStream,
+    ServerStreamState,
+    _dispatch_log_or_error,
+    _drain_stream,
+)
 
 from .test_external import (
     MockStorage,
@@ -438,4 +453,271 @@ class TestHttpExternalStorage:
         for ab in batches:
             assert ab.batch.num_rows == 2
         assert len(storage.data) == 0
+        client.close()
+
+
+# ---------------------------------------------------------------------------
+# Auth test protocol + implementation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _AuthStreamState(ServerStreamState):
+    """Stream state that checks auth in produce()."""
+
+    count: int
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Produce a batch containing the caller's principal."""
+        if self.current >= self.count:
+            out.finish()
+            return
+        out.emit_pydict({"i": [self.current], "principal": [ctx.auth.principal or "anonymous"]})
+        self.current += 1
+
+
+@dataclass
+class _AuthBidiState(BidiStreamState):
+    """Bidi state that checks auth in process()."""
+
+    factor: float
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Process input and tag output with caller's principal."""
+        scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
+        out.emit_pydict({"value": scaled.to_pylist(), "principal": [ctx.auth.principal or "anon"] * len(scaled)})
+
+
+class _AuthService(Protocol):
+    """Protocol for auth integration tests."""
+
+    def whoami(self) -> str:
+        """Return the caller's principal."""
+        ...
+
+    def public(self) -> str:
+        """Return a constant string."""
+        ...
+
+    def guarded(self) -> str:
+        """Require authentication and return a secret."""
+        ...
+
+    def auth_stream(self, count: int) -> ServerStream[ServerStreamState]:
+        """Stream that includes principal in output."""
+        ...
+
+    def auth_bidi(self, factor: float) -> BidiStream[BidiStreamState]:
+        """Bidi that includes principal in output."""
+        ...
+
+
+class _AuthServiceImpl:
+    """Implementation for auth integration tests."""
+
+    def whoami(self, ctx: CallContext) -> str:
+        """Return the caller's principal."""
+        return ctx.auth.principal or "anonymous"
+
+    def public(self) -> str:
+        """No ctx — always works regardless of auth."""
+        return "ok"
+
+    def guarded(self, ctx: CallContext) -> str:
+        """Require authentication."""
+        ctx.auth.require_authenticated()
+        return f"secret for {ctx.auth.principal}"
+
+    def auth_stream(self, count: int, ctx: CallContext) -> ServerStream[_AuthStreamState]:
+        """Stream that passes principal to state."""
+        fields: list[pa.Field[Any]] = [pa.field("i", pa.int64()), pa.field("principal", pa.utf8())]
+        schema = pa.schema(fields)
+        return ServerStream(
+            output_schema=schema,
+            state=_AuthStreamState(count=count),
+        )
+
+    def auth_bidi(self, factor: float) -> BidiStream[_AuthBidiState]:
+        """Bidi that tags output with principal."""
+        fields: list[pa.Field[Any]] = [pa.field("value", pa.float64()), pa.field("principal", pa.utf8())]
+        schema = pa.schema(fields)
+        return BidiStream(output_schema=schema, state=_AuthBidiState(factor=factor))
+
+
+def _test_authenticate(req: falcon.Request) -> AuthContext:
+    """Test authenticate callback — expects 'Bearer <principal>' header."""
+    auth_header = req.get_header("Authorization") or ""
+    if not auth_header.startswith("Bearer "):
+        msg = "Missing or invalid Authorization header"
+        raise ValueError(msg)
+    principal = auth_header.removeprefix("Bearer ")
+    return AuthContext(domain="jwt", authenticated=True, principal=principal)
+
+
+def _make_auth_client(
+    authenticate: Callable[[falcon.Request], AuthContext] = _test_authenticate,
+    principal: str | None = None,
+) -> _SyncTestClient:
+    """Create a sync test client with authentication enabled.
+
+    When *principal* is given, the client auto-injects a
+    ``Bearer <principal>`` header on every request via ``default_headers``.
+    """
+    server = RpcServer(_AuthService, _AuthServiceImpl())
+    default_headers = {"Authorization": f"Bearer {principal}"} if principal is not None else None
+    return make_sync_client(
+        server,
+        signing_key=b"auth-test-key",
+        authenticate=authenticate,
+        default_headers=default_headers,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Authentication over HTTP
+# ---------------------------------------------------------------------------
+
+
+class TestAuthentication:
+    """Tests for HTTP authentication via _AuthMiddleware."""
+
+    def test_authenticated_unary(self) -> None:
+        """Authenticated unary call populates ctx.auth correctly."""
+        client = _make_auth_client(principal="alice")
+        with http_connect(_AuthService, client=client) as proxy:
+            result = proxy.whoami()
+        assert result == "alice"
+        client.close()
+
+    def test_missing_auth_401(self) -> None:
+        """Missing auth header returns 401."""
+        client = _make_auth_client()
+        # No auth header → authenticate callback raises → 401
+        resp = client.post(
+            "http://test/vgi/whoami",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 401
+        client.close()
+
+    def test_auth_callback_exception_401(self) -> None:
+        """ValueError in authenticate callback returns 401."""
+
+        def failing_auth(req: falcon.Request) -> AuthContext:
+            msg = "Token expired"
+            raise ValueError(msg)
+
+        client = _make_auth_client(authenticate=failing_auth)
+        resp = client.post(
+            "http://test/vgi/public",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, "Authorization": "Bearer whatever"},
+        )
+        assert resp.status_code == 401
+        client.close()
+
+    def test_unexpected_auth_error_propagates_500(self) -> None:
+        """Non-ValueError/PermissionError in authenticate propagates as 500."""
+
+        def buggy_auth(req: falcon.Request) -> AuthContext:
+            msg = "oops"
+            raise KeyError(msg)
+
+        client = _make_auth_client(authenticate=buggy_auth)
+        resp = client.post(
+            "http://test/vgi/public",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, "Authorization": "Bearer whatever"},
+        )
+        assert resp.status_code == 500
+        client.close()
+
+    def test_client_receives_rpc_error_on_401(self) -> None:
+        """Client-side 401 is raised as RpcError('AuthenticationError')."""
+        client = _make_auth_client()
+        with (
+            pytest.raises(RpcError) as exc_info,
+            http_connect(_AuthService, client=client) as proxy,
+        ):
+            proxy.whoami()  # no auth header → 401
+        assert exc_info.value.error_type == "AuthenticationError"
+        client.close()
+
+    def test_method_without_ctx_works_with_auth(self) -> None:
+        """Methods not declaring ctx work even when authenticate is configured."""
+        client = _make_auth_client(principal="bob")
+        with http_connect(_AuthService, client=client) as proxy:
+            result = proxy.public()
+        assert result == "ok"
+        client.close()
+
+    def test_guarded_method_passes_when_authenticated(self) -> None:
+        """Method calling require_authenticated succeeds with valid auth."""
+        client = _make_auth_client(principal="charlie")
+        with http_connect(_AuthService, client=client) as proxy:
+            result = proxy.guarded()
+        assert result == "secret for charlie"
+        client.close()
+
+    def test_authenticated_server_stream(self) -> None:
+        """Auth context is available in ServerStreamState.produce over HTTP."""
+        client = _make_auth_client(principal="dave")
+        with http_connect(_AuthService, client=client) as proxy:
+            batches = list(proxy.auth_stream(count=3))
+        assert len(batches) == 3
+        for ab in batches:
+            assert ab.batch.column("principal")[0].as_py() == "dave"
+        client.close()
+
+    def test_authenticated_bidi(self) -> None:
+        """Auth context is available in BidiStreamState.process over HTTP."""
+        client = _make_auth_client(principal="eve")
+        with http_connect(_AuthService, client=client) as proxy:
+            bidi = proxy.auth_bidi(factor=2.0)
+            with bidi:
+                input_batch = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0, 2.0]}))
+                result = bidi.exchange(input_batch)
+        assert result.batch.column("value").to_pylist() == [2.0, 4.0]
+        assert result.batch.column("principal")[0].as_py() == "eve"
+        client.close()
+
+    def test_transport_metadata_populated(self) -> None:
+        """ctx.transport_metadata includes remote_addr from HTTP request."""
+        captured: list[dict[str, Any]] = []
+
+        class MetaService(Protocol):
+            def meta(self) -> str: ...
+
+        class MetaServiceImpl:
+            def meta(self, ctx: CallContext) -> str:
+                captured.append(dict(ctx.transport_metadata))
+                return "ok"
+
+        def always_auth(req: falcon.Request) -> AuthContext:
+            return AuthContext(domain="jwt", authenticated=True, principal="test")
+
+        server = RpcServer(MetaService, MetaServiceImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"test",
+            authenticate=always_auth,
+            default_headers={"Authorization": "Bearer test"},
+        )
+        with http_connect(MetaService, client=client) as proxy:
+            proxy.meta()
+        assert len(captured) == 1
+        # Falcon test client sets remote_addr
+        assert "remote_addr" in captured[0]
+        client.close()
+
+    def test_no_auth_middleware_when_authenticate_is_none(self) -> None:
+        """Without authenticate parameter, no auth middleware is added."""
+        server = RpcServer(_AuthService, _AuthServiceImpl())
+        client = make_sync_client(server, signing_key=b"test")
+        # whoami should work — ctx.auth will be anonymous
+        with http_connect(_AuthService, client=client) as proxy:
+            result = proxy.whoami()
+        assert result == "anonymous"
         client.close()
