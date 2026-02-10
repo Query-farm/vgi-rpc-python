@@ -531,7 +531,7 @@ class TestBidiLogging:
         with edge_conn(on_log=logs.append) as proxy, proxy.multi_log() as session:
             session.exchange(AnnotatedBatch.from_pydict({"value": [1.0, 2.0, 3.0]}))
 
-            info_log = [m for m in logs if m.level == Level.INFO][0]
+            info_log = next(m for m in logs if m.level == Level.INFO)
             assert info_log.extra is not None
             assert info_log.extra["row_count"] == "3"
 

@@ -104,7 +104,7 @@ class S3Storage:
 # Runtime check that S3Storage satisfies ExternalStorage protocol
 def _check_protocol() -> None:
     """Verify S3Storage satisfies ExternalStorage at import time."""
-    storage: ExternalStorage = S3Storage(bucket="test")  # noqa: F841
+    _storage: ExternalStorage = S3Storage(bucket="test")
 
 
 _check_protocol()

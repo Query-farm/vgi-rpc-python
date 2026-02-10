@@ -106,7 +106,7 @@ class ExternalLocationConfig:
         compression: Compression algorithm for externalized data.
             Currently only ``"zstd"`` is supported.  ``None`` disables
             compression (default).
-        compression_level: Zstandard compression level (1–22).
+        compression_level: Zstandard compression level (1-22).
             Only used when ``compression="zstd"``.
 
     """

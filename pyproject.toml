@@ -4,33 +4,30 @@ version = "0.1.0"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
 requires-python = ">=3.12.4"
+license = {file = "LICENSE.md"}
+authors = [{ name = "Query.farm" }]
+keywords = ["rpc", "arrow", "ipc", "serialization", "streaming"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: Other/Proprietary License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
 dependencies = ["aiohttp>=3.9", "pyarrow>=14.0", "structlog>=23.0", "tenacity>=8.0", "zstandard>=0.20"]
 
-[project.optional-dependencies]
-http = ["falcon", "httpx", "waitress"]
-s3 = ["boto3"]
-gcs = ["google-cloud-storage"]
-dev = [
-  "aioresponses",
-  "httpx",
-  "mypy",
-  "pyarrow-stubs",
-  "pytest",
-  "pytest-cov",
-  "pytest-examples",
-  "pytest-mypy",
-  "pytest-ruff",
-  "ruff",
-  "falcon",
-  "waitress",
-  "boto3",
-  "moto[s3]",
-  "google-cloud-storage",
-]
+[project.urls]
+Homepage = "https://github.com/Query-farm/vgi-rpc-python"
+Repository = "https://github.com/Query-farm/vgi-rpc-python"
+Issues = "https://github.com/Query-farm/vgi-rpc-python/issues"
 
-[project.scripts]
-vgi-rpc-test-worker = "tests.serve_fixture_pipe:main"
-vgi-rpc-test-http-worker = "tests.serve_fixture_http:main"
+[project.optional-dependencies]
+http = ["falcon>=3.0", "httpx>=0.24", "waitress>=2.0"]
+s3 = ["boto3>=1.28"]
+gcs = ["google-cloud-storage>=2.10"]
 
 [build-system]
 requires = ["hatchling"]
@@ -41,17 +38,18 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+select = ["E", "F", "I", "UP", "B", "SIM", "D", "RUF", "PERF"]
 ignore = [
-  "D203", # incompatible with D211 (no-blank-line-before-class)
-  "D213", # incompatible with D212 (multi-line-summary-first-line)
+  "D203",   # incompatible with D211 (no-blank-line-before-class)
+  "D213",   # incompatible with D212 (multi-line-summary-first-line)
+  "RUF022", # __all__ is intentionally grouped by category, not sorted
 ]
 
 [tool.ruff.format]
 quote-style = "double"
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
@@ -91,13 +89,10 @@ unused-type-ignore-comment = "ignore"  # these comments are required by mypy
 python-version = "3.13"
 
 [tool.pytest.ini_options]
-addopts = "--mypy --ruff"
+addopts = "--mypy --ruff --timeout=30"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-# Enable subprocess coverage - automatically patches subprocess.Popen
-# to inject coverage measurement into spawned worker processes
-patch = ["subprocess"]
 # Each subprocess writes to its own data file (.coverage.<hostname>.<pid>)
 parallel = true
 # Handle SIGTERM gracefully (writes coverage data before exit)
@@ -105,7 +100,7 @@ sigterm = true
 # Measure branch coverage
 branch = true
 # What to measure
-source = ["vgi-rpc"]
+source = ["vgi_rpc"]
 # Omit test files and examples from coverage
 omit = ["vgi_rpc/examples/*", "tests/*"]
 
@@ -127,10 +122,31 @@ exclude_lines = [
 [tool.coverage.html]
 directory = "htmlcov"
 
+[tool.mutmut]
+paths_to_mutate = ["vgi_rpc/utils.py"]
+pytest_add_cli_args_test_selection = ["tests/"]
+also_copy = ["vgi_rpc/"]
+pytest_add_cli_args = ["--timeout=30", "--no-header", "-o", "addopts=", "-o", "pythonpath=.", "--ignore=tests/test_external_fetch.py"]
+
 [dependency-groups]
 dev = [
+    "aioresponses>=0.7",
+    "boto3>=1.28",
+    "falcon>=3.0",
+    "google-cloud-storage>=2.10",
+    "httpx>=0.24",
     "lxml>=6.0.2",
- "mutmut>=3.4.0",
- "pytest-timeout>=2.4.0",
- "ty>=0.0.8",
+    "moto[s3]>=4.0",
+    "mutmut>=3.4.0",
+    "mypy>=1.0",
+    "pyarrow-stubs>=17.0",
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-examples>=0.0.10",
+    "pytest-mypy>=0.10",
+    "pytest-ruff>=0.1",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.1",
+    "ty>=0.0.8",
+    "waitress>=2.0",
 ]

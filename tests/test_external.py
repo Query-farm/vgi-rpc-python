@@ -163,13 +163,13 @@ class TestMakeExternalLocationBatch:
 
     def test_produces_zero_row_batch(self) -> None:
         """Created batch is zero-row with correct schema."""
-        batch, cm = make_external_location_batch(_SCHEMA, "mock://test")
+        batch, _cm = make_external_location_batch(_SCHEMA, "mock://test")
         assert batch.num_rows == 0
         assert batch.schema == _SCHEMA
 
     def test_has_location_metadata(self) -> None:
         """Created batch has LOCATION_KEY in metadata."""
-        batch, cm = make_external_location_batch(_SCHEMA, "mock://test")
+        _batch, cm = make_external_location_batch(_SCHEMA, "mock://test")
         assert cm.get(LOCATION_KEY) == b"mock://test"
 
     def test_is_detected(self) -> None:
@@ -199,7 +199,7 @@ class TestResolveExternalLocation:
         pointer, cm = make_external_location_batch(_SCHEMA, url)
 
         with _mock_aio(storage):
-            resolved, resolved_cm = resolve_external_location(pointer, cm, config)
+            resolved, _resolved_cm = resolve_external_location(pointer, cm, config)
 
         assert resolved.num_rows == 1
         assert resolved.column("value")[0].as_py() == 42
@@ -553,7 +553,7 @@ class TestMaybeExternalizeCollector:
         assert len(storage.data) == 1
 
         # Read back the uploaded IPC stream
-        uploaded_bytes = list(storage.data.values())[0]
+        uploaded_bytes = next(iter(storage.data.values()))
         reader = ipc.open_stream(BytesIO(uploaded_bytes))
         fetched_batches = []
         while True:
@@ -637,9 +637,9 @@ class TestMaybeExternalizeBatch:
         assert result_cm is not None
 
         # Read back the uploaded IPC stream and check user metadata is present
-        uploaded_bytes = list(storage.data.values())[0]
+        uploaded_bytes = next(iter(storage.data.values()))
         reader = ipc.open_stream(BytesIO(uploaded_bytes))
-        b, cm = reader.read_next_batch_with_custom_metadata()
+        _b, cm = reader.read_next_batch_with_custom_metadata()
         assert cm is not None
         assert cm.get(b"user.key") == b"user.value"
 
@@ -1099,7 +1099,7 @@ class TestS3Storage:
         """S3 put_object receives ContentEncoding kwarg when configured."""
         from vgi_rpc.s3 import S3Storage
 
-        s3_storage, s3_client = _s3_env
+        _s3_storage, s3_client = _s3_env
         storage_with_enc = S3Storage(
             bucket="test-bucket",
             region_name="us-east-1",
@@ -1122,7 +1122,7 @@ class TestS3Storage:
 
     def test_upload_without_content_encoding(self, _s3_env: tuple[Any, Any]) -> None:
         """Backward compat: no ContentEncoding when not configured."""
-        s3_storage, s3_client = _s3_env
+        s3_storage, _s3_client = _s3_env
 
         data_batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_SCHEMA)
         ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
@@ -1135,7 +1135,7 @@ class TestS3Storage:
         """Key ends in .arrow.zst when content_encoding is zstd."""
         from vgi_rpc.s3 import S3Storage
 
-        s3_storage, _ = _s3_env
+        _s3_storage, _ = _s3_env
         storage_with_enc = S3Storage(
             bucket="test-bucket",
             region_name="us-east-1",
@@ -1173,7 +1173,7 @@ class TestGCSStorage:
         """Upload IPC data, verify signed URL is generated."""
         from vgi_rpc.gcs import GCSStorage
 
-        mock_cls, mock_client, mock_bucket, mock_blob = _gcs_mocks
+        _mock_cls, mock_client, _mock_bucket, mock_blob = _gcs_mocks
         mock_blob.generate_signed_url.return_value = "https://storage.googleapis.com/signed-url"
 
         data_batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_SCHEMA)
@@ -1260,7 +1260,7 @@ class TestGCSStorage:
         """Blob content_encoding set before upload when configured."""
         from vgi_rpc.gcs import GCSStorage
 
-        _, _, mock_bucket, mock_blob = _gcs_mocks
+        _, _, _mock_bucket, mock_blob = _gcs_mocks
         mock_blob.generate_signed_url.return_value = "https://example.com/signed"
 
         storage = GCSStorage(bucket="test-bucket", content_encoding="zstd")
@@ -1330,7 +1330,7 @@ class TestFetchConfigIntegration:
             mock.head(url, headers={"Content-Length": str(len(ipc_bytes))})
             mock.get(url, body=ipc_bytes, headers={"Content-Length": str(len(ipc_bytes))})
 
-            resolved, resolved_cm = resolve_external_location(pointer, cm, config)
+            resolved, _resolved_cm = resolve_external_location(pointer, cm, config)
 
         assert resolved.num_rows == 1
         assert resolved.column("value")[0].as_py() == 42
@@ -1430,7 +1430,7 @@ class TestCompression:
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         maybe_externalize_batch(batch, None, config)
 
-        uploaded_bytes = list(storage.data.values())[0]
+        uploaded_bytes = next(iter(storage.data.values()))
         # Raw IPC stream — NOT zstd-compressed (no zstd magic 0x28B52FFD)
         assert uploaded_bytes[:4] != b"\x28\xb5\x2f\xfd"
         # Verify it parses as valid IPC
@@ -1446,7 +1446,7 @@ class TestCompression:
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         maybe_externalize_batch(batch, None, config)
 
-        uploaded_bytes = list(storage.data.values())[0]
+        uploaded_bytes = next(iter(storage.data.values()))
         # Zstd magic number is 0xFD2FB528 (little-endian)
         assert uploaded_bytes[:4] == b"\x28\xb5\x2f\xfd"
 
@@ -1461,7 +1461,7 @@ class TestCompression:
         result = maybe_externalize_collector(out, config)
         assert len(result) == 1
 
-        uploaded_bytes = list(storage.data.values())[0]
+        uploaded_bytes = next(iter(storage.data.values()))
         # Verify zstd magic
         assert uploaded_bytes[:4] == b"\x28\xb5\x2f\xfd"
 
@@ -1493,7 +1493,7 @@ class TestCompression:
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
 
-        uploaded_bytes = list(storage.data.values())[0]
+        uploaded_bytes = next(iter(storage.data.values()))
         # Verify it's valid zstd
         decompressed = zstandard.ZstdDecompressor().decompress(uploaded_bytes)
         # Decompressed data should be valid IPC

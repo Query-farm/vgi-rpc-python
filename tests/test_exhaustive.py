@@ -119,7 +119,7 @@ class TestRpcMethodsIntrospection:
         class WithClassVar(Protocol):
             """Protocol with a class variable."""
 
-            some_value: int  # noqa: D105
+            some_value: int
 
             def method(self) -> None: ...
 
@@ -195,7 +195,7 @@ class TestClassifyReturnType:
 
     def test_none_return(self) -> None:
         """None return type is unary with no return."""
-        mt, rt, has_ret = _classify_return_type(type(None))
+        mt, _rt, has_ret = _classify_return_type(type(None))
         assert mt == MethodType.UNARY
         assert has_ret is False
 
@@ -865,12 +865,12 @@ class TestIsOptionalEdgeCases:
 
     def test_non_union_generic_not_optional(self) -> None:
         """list[int] is not optional."""
-        inner, is_nullable = _is_optional_type(list[int])
+        _inner, is_nullable = _is_optional_type(list[int])
         assert is_nullable is False
 
     def test_none_type_not_optional(self) -> None:
         """NoneType alone is not considered optional (it's just None)."""
-        inner, is_nullable = _is_optional_type(type(None))
+        _inner, is_nullable = _is_optional_type(type(None))
         assert is_nullable is False
 
 

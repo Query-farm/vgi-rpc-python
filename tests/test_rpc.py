@@ -1262,7 +1262,7 @@ class TestEmitLog:
             result = proxy.greet_with_logs(name="Carol")
             assert result == "Hello, Carol!"
             # The DEBUG message has detail="extra-info"
-            debug_msg = [m for m in logs if m.level == Level.DEBUG][0]
+            debug_msg = next(m for m in logs if m.level == Level.DEBUG)
             assert debug_msg.extra is not None
             assert debug_msg.extra["detail"] == "extra-info"
 
@@ -1854,7 +1854,7 @@ class TestRequestVersion:
 
         resp_buf.seek(0)
         reader = pa.ipc.open_stream(resp_buf)
-        with pytest.raises(RpcError, match="Missing vgi_rpc.request_version") as exc_info:
+        with pytest.raises(RpcError, match=r"Missing vgi_rpc\.request_version") as exc_info:
             while True:
                 batch, cm = reader.read_next_batch_with_custom_metadata()
                 _dispatch_log_or_error(batch, cm)
@@ -1882,5 +1882,5 @@ class TestInvalidBidiState:
             # Corrupt the state bytes
             session._state_bytes = b"garbage"
 
-            with pytest.raises(RpcError, match="Malformed state token|signature verification"):
+            with pytest.raises(RpcError, match=r"Malformed state token|signature verification"):
                 session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [2.0]})))

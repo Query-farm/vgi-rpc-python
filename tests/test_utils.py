@@ -6,7 +6,7 @@ import typing
 from dataclasses import dataclass, field
 from enum import Enum
 from io import BytesIO
-from typing import Annotated, NewType
+from typing import Annotated, ClassVar, NewType
 
 import pyarrow as pa
 import pytest
@@ -550,7 +550,7 @@ class TestSchemaGeneration:
         class WithOverride(ArrowSerializableDataclass):
             """Dataclass with a field override."""
 
-            _ARROW_FIELD_OVERRIDES = {"score": pa.float32()}  # noqa: D105
+            _ARROW_FIELD_OVERRIDES: ClassVar[dict[str, pa.DataType]] = {"score": pa.float32()}
             score: float = 0.0
 
         schema = WithOverride.ARROW_SCHEMA
@@ -632,7 +632,7 @@ class TestSerializeDeserializeRecordBatch:
         """Serialize and deserialize a batch preserves data."""
         batch = pa.RecordBatch.from_pylist([{"x": 42, "y": "hello"}])
         data = serialize_record_batch_bytes(batch)
-        restored, metadata = deserialize_record_batch(data)
+        restored, _metadata = deserialize_record_batch(data)
         assert restored.num_rows == 1
         assert restored.to_pylist() == [{"x": 42, "y": "hello"}]
 
@@ -722,12 +722,12 @@ class TestIsOptionalTypeExtra:
 
     def test_multi_type_union_not_optional(self) -> None:
         """typing.Union[int, str, None] is NOT treated as optional (more than 2 args)."""
-        inner, is_nullable = _is_optional_type(typing.Union[int, str, None])  # noqa: UP007
+        _inner, is_nullable = _is_optional_type(typing.Union[int, str, None])  # noqa: UP007
         assert is_nullable is False
 
     def test_union_without_none(self) -> None:
         """typing.Union[int, str] is not optional."""
-        inner, is_nullable = _is_optional_type(typing.Union[int, str])  # noqa: UP007
+        _inner, is_nullable = _is_optional_type(typing.Union[int, str])  # noqa: UP007
         assert is_nullable is False
 
 
@@ -767,7 +767,7 @@ class TestSerializationEdgeCases:
         class WithSchema(ArrowSerializableDataclass):
             """Dataclass with a pa.Schema field."""
 
-            _ARROW_FIELD_OVERRIDES = {"schema": pa.binary()}  # noqa: D105
+            _ARROW_FIELD_OVERRIDES: ClassVar[dict[str, pa.DataType]] = {"schema": pa.binary()}
             schema: pa.Schema
 
         original_schema = pa.schema({"a": pa.int64(), "b": pa.string()})  # type: ignore[arg-type]
@@ -782,7 +782,7 @@ class TestSerializationEdgeCases:
         class WithBatch(ArrowSerializableDataclass):
             """Dataclass with a pa.RecordBatch field."""
 
-            _ARROW_FIELD_OVERRIDES = {"batch": pa.binary()}  # noqa: D105
+            _ARROW_FIELD_OVERRIDES: ClassVar[dict[str, pa.DataType]] = {"batch": pa.binary()}
             batch: pa.RecordBatch
 
         original_batch = pa.RecordBatch.from_pylist([{"x": 1, "y": "hi"}])

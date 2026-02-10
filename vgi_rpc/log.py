@@ -86,7 +86,7 @@ class Message:
 
     """
 
-    __slots__ = ("level", "message", "extra")
+    __slots__ = ("extra", "level", "message")
     __hash__ = None  # type: ignore[assignment]  # Unhashable since we define __eq__
 
     _MAX_TRACEBACK_CHARS: ClassVar[int] = 16_000

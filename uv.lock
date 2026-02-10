@@ -1987,23 +1987,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "aioresponses" },
-    { name = "boto3" },
-    { name = "falcon" },
-    { name = "google-cloud-storage" },
-    { name = "httpx" },
-    { name = "moto", extra = ["s3"] },
-    { name = "mypy" },
-    { name = "pyarrow-stubs" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-examples" },
-    { name = "pytest-mypy" },
-    { name = "pytest-ruff" },
-    { name = "ruff" },
-    { name = "waitress" },
-]
 gcs = [
     { name = "google-cloud-storage" },
 ]
@@ -2018,48 +2001,63 @@ s3 = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aioresponses" },
+    { name = "boto3" },
+    { name = "falcon" },
+    { name = "google-cloud-storage" },
+    { name = "httpx" },
     { name = "lxml" },
+    { name = "moto", extra = ["s3"] },
     { name = "mutmut" },
+    { name = "mypy" },
+    { name = "pyarrow-stubs" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-examples" },
+    { name = "pytest-mypy" },
+    { name = "pytest-ruff" },
     { name = "pytest-timeout" },
+    { name = "ruff" },
     { name = "ty" },
+    { name = "waitress" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
-    { name = "aioresponses", marker = "extra == 'dev'" },
-    { name = "boto3", marker = "extra == 'dev'" },
-    { name = "boto3", marker = "extra == 's3'" },
-    { name = "falcon", marker = "extra == 'dev'" },
-    { name = "falcon", marker = "extra == 'http'" },
-    { name = "google-cloud-storage", marker = "extra == 'dev'" },
-    { name = "google-cloud-storage", marker = "extra == 'gcs'" },
-    { name = "httpx", marker = "extra == 'dev'" },
-    { name = "httpx", marker = "extra == 'http'" },
-    { name = "moto", extras = ["s3"], marker = "extra == 'dev'" },
-    { name = "mypy", marker = "extra == 'dev'" },
+    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.28" },
+    { name = "falcon", marker = "extra == 'http'", specifier = ">=3.0" },
+    { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.10" },
+    { name = "httpx", marker = "extra == 'http'", specifier = ">=0.24" },
     { name = "pyarrow", specifier = ">=14.0" },
-    { name = "pyarrow-stubs", marker = "extra == 'dev'" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "pytest-examples", marker = "extra == 'dev'" },
-    { name = "pytest-mypy", marker = "extra == 'dev'" },
-    { name = "pytest-ruff", marker = "extra == 'dev'" },
-    { name = "ruff", marker = "extra == 'dev'" },
     { name = "structlog", specifier = ">=23.0" },
     { name = "tenacity", specifier = ">=8.0" },
-    { name = "waitress", marker = "extra == 'dev'" },
-    { name = "waitress", marker = "extra == 'http'" },
+    { name = "waitress", marker = "extra == 'http'", specifier = ">=2.0" },
     { name = "zstandard", specifier = ">=0.20" },
 ]
-provides-extras = ["http", "s3", "gcs", "dev"]
+provides-extras = ["http", "s3", "gcs"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aioresponses", specifier = ">=0.7" },
+    { name = "boto3", specifier = ">=1.28" },
+    { name = "falcon", specifier = ">=3.0" },
+    { name = "google-cloud-storage", specifier = ">=2.10" },
+    { name = "httpx", specifier = ">=0.24" },
     { name = "lxml", specifier = ">=6.0.2" },
+    { name = "moto", extras = ["s3"], specifier = ">=4.0" },
     { name = "mutmut", specifier = ">=3.4.0" },
+    { name = "mypy", specifier = ">=1.0" },
+    { name = "pyarrow-stubs", specifier = ">=17.0" },
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "pytest-cov", specifier = ">=4.0" },
+    { name = "pytest-examples", specifier = ">=0.0.10" },
+    { name = "pytest-mypy", specifier = ">=0.10" },
+    { name = "pytest-ruff", specifier = ">=0.1" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
+    { name = "ruff", specifier = ">=0.1" },
     { name = "ty", specifier = ">=0.0.8" },
+    { name = "waitress", specifier = ">=2.0" },
 ]
 
 [[package]]

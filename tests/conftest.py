@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import shutil
 import subprocess
 import sys
 import time
@@ -26,22 +25,12 @@ ConnFactory = Callable[..., contextlib.AbstractContextManager[RpcProxyType]]
 
 
 def _worker_cmd() -> list[str]:
-    """Return the command to launch the test RPC worker subprocess.
-
-    Prefers the installed ``vgi-rpc-test-worker`` entry point; falls back
-    to running the fixture script directly.
-    """
-    entry_point = shutil.which("vgi-rpc-test-worker")
-    if entry_point:
-        return [entry_point]
+    """Return the command to launch the test RPC worker subprocess."""
     return [sys.executable, _SERVE_FIXTURE]
 
 
 def _http_worker_cmd() -> list[str]:
     """Return the command to launch the test HTTP RPC worker subprocess."""
-    entry_point = shutil.which("vgi-rpc-test-http-worker")
-    if entry_point:
-        return [entry_point]
     return [sys.executable, _SERVE_FIXTURE_HTTP]
 
 

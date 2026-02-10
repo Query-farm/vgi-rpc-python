@@ -153,7 +153,7 @@ class TestNotCallable:
 
             greet = "not a function"
 
-        with pytest.raises(TypeError, match="'greet' .* not callable"):
+        with pytest.raises(TypeError, match=r"'greet' .* not callable"):
             RpcServer(SimpleService, Impl())
 
     def test_int_attribute(self) -> None:
@@ -165,7 +165,7 @@ class TestNotCallable:
 
             greet = 42
 
-        with pytest.raises(TypeError, match="'greet' .* not callable"):
+        with pytest.raises(TypeError, match=r"'greet' .* not callable"):
             RpcServer(SimpleService, Impl())
 
     def test_none_attribute(self) -> None:
@@ -229,7 +229,7 @@ class TestParameterMismatch:
             def greet(self, name: str) -> str:
                 return name
 
-        with pytest.raises(TypeError, match="'add\\(\\)' has required parameter 'c'.*SimpleService"):
+        with pytest.raises(TypeError, match=r"'add\(\)' has required parameter 'c'.*SimpleService"):
             RpcServer(SimpleService, Impl())
 
     def test_extra_required_keyword_only(self) -> None:

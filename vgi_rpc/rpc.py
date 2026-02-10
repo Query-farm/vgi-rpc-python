@@ -217,7 +217,7 @@ class OutputCollector:
     data batch they annotate).
     """
 
-    __slots__ = ("_output_schema", "_batches", "_finished", "_data_batch_idx")
+    __slots__ = ("_batches", "_data_batch_idx", "_finished", "_output_schema")
 
     def __init__(self, output_schema: pa.Schema) -> None:
         """Initialize with the output schema for this stream."""
@@ -601,9 +601,11 @@ def _validate_implementation(
         impl_params = {k: v for k, v in impl_sig.parameters.items() if k != "self"}
         proto_param_names = set(info.param_types.keys())
 
-        for param_name in proto_param_names:
-            if param_name not in impl_params:
-                errors.append(f"'{name}()' missing parameter '{param_name}'")
+        errors.extend(
+            f"'{name}()' missing parameter '{param_name}'"
+            for param_name in proto_param_names
+            if param_name not in impl_params
+        )
 
         for param_name, param in impl_params.items():
             if param_name in proto_param_names:
@@ -694,7 +696,7 @@ def _write_error_stream(writer_stream: IOBase, schema: pa.Schema, exc: BaseExcep
 class _LogSink:
     """Buffers log messages until an IPC writer is available, then writes directly."""
 
-    __slots__ = ("_buffer", "_writer", "_schema")
+    __slots__ = ("_buffer", "_schema", "_writer")
 
     def __init__(self) -> None:
         self._buffer: list[Message] = []
@@ -984,11 +986,11 @@ class SubprocessTransport:
     return fewer (POSIX short-read semantics).
     """
 
-    __slots__ = ("_proc", "_reader", "_writer", "_closed")
+    __slots__ = ("_closed", "_proc", "_reader", "_writer")
 
     def __init__(self, cmd: list[str]) -> None:
         """Spawn the subprocess and wire up stdin/stdout as the transport."""
-        self._proc = subprocess.Popen(  # noqa: S603
+        self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -1076,7 +1078,7 @@ def _flush_collector(
 class RpcServer:
     """Dispatches RPC requests to an implementation over IO-stream transports."""
 
-    __slots__ = ("_protocol", "_impl", "_methods", "_emit_log_methods", "_external_config")
+    __slots__ = ("_emit_log_methods", "_external_config", "_impl", "_methods", "_protocol")
 
     def __init__(
         self,
@@ -1336,7 +1338,7 @@ class StreamSession:
     Log batches are delivered to the ``on_log`` callback.
     """
 
-    __slots__ = ("_reader", "_on_log", "_external_config")
+    __slots__ = ("_external_config", "_on_log", "_reader")
 
     def __init__(
         self,
@@ -1371,13 +1373,13 @@ class BidiSession:
     """
 
     __slots__ = (
-        "_writer_stream",
-        "_reader_stream",
-        "_on_log",
-        "_input_writer",
-        "_output_reader",
         "_closed",
         "_external_config",
+        "_input_writer",
+        "_on_log",
+        "_output_reader",
+        "_reader_stream",
+        "_writer_stream",
     )
 
     def __init__(
@@ -1555,7 +1557,7 @@ class RpcConnection:
 
     """
 
-    __slots__ = ("_protocol", "_transport", "_on_log", "_external_config")
+    __slots__ = ("_external_config", "_on_log", "_protocol", "_transport")
 
     def __init__(
         self,

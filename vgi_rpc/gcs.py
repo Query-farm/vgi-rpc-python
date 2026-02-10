@@ -92,7 +92,7 @@ class GCSStorage:
 # Runtime check that GCSStorage satisfies ExternalStorage protocol
 def _check_protocol() -> None:
     """Verify GCSStorage satisfies ExternalStorage at import time."""
-    storage: ExternalStorage = GCSStorage(bucket="test")  # noqa: F841
+    _storage: ExternalStorage = GCSStorage(bucket="test")
 
 
 _check_protocol()

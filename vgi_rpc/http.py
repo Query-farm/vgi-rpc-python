@@ -90,7 +90,7 @@ _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 class _RpcHttpError(Exception):
     """Internal exception for HTTP-layer errors with status codes."""
 
-    __slots__ = ("cause", "status_code", "schema")
+    __slots__ = ("cause", "schema", "status_code")
 
     def __init__(self, cause: BaseException, *, status_code: HTTPStatus, schema: pa.Schema = _EMPTY_SCHEMA) -> None:
         self.cause = cause
@@ -274,7 +274,7 @@ def _resolve_state_types(
 class _HttpRpcApp:
     """Internal helper that wraps an RpcServer and manages stream/bidi state."""
 
-    __slots__ = ("_server", "_signing_key", "_state_types", "_max_stream_response_bytes")
+    __slots__ = ("_max_stream_response_bytes", "_server", "_signing_key", "_state_types")
 
     def __init__(self, server: RpcServer, signing_key: bytes, max_stream_response_bytes: int | None = None) -> None:
         self._server = server
@@ -682,7 +682,7 @@ def make_wsgi_app(
 class _SyncTestResponse:
     """Minimal response object matching what _HttpProxy expects from httpx.Response."""
 
-    __slots__ = ("status_code", "content")
+    __slots__ = ("content", "status_code")
 
     def __init__(self, status_code: int, content: bytes) -> None:
         self.status_code = status_code
@@ -780,7 +780,7 @@ class HttpBidiSession:
     Supports context manager protocol for convenience.
     """
 
-    __slots__ = ("_client", "_url_prefix", "_method", "_state_bytes", "_output_schema", "_on_log", "_external_config")
+    __slots__ = ("_client", "_external_config", "_method", "_on_log", "_output_schema", "_state_bytes", "_url_prefix")
 
     def __init__(
         self,
@@ -880,7 +880,7 @@ class HttpStreamSession:
     transparently sends a ``POST /{method}/exchange`` to resume the stream.
     """
 
-    __slots__ = ("_client", "_url_prefix", "_method", "_reader", "_on_log", "_external_config")
+    __slots__ = ("_client", "_external_config", "_method", "_on_log", "_reader", "_url_prefix")
 
     def __init__(
         self,
@@ -1009,7 +1009,7 @@ class _HttpProxy:
         self._on_log = on_log
         self._external_config = external_config
 
-    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+    def __getattr__(self, name: str) -> Any:
         """Resolve RPC method names to callable proxies, caching on first access.
 
         Returns ``Any`` because each method name maps to a different callable
