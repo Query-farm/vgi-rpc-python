@@ -721,3 +721,36 @@ class TestAuthentication:
             result = proxy.whoami()
         assert result == "anonymous"
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: CORS
+# ---------------------------------------------------------------------------
+
+
+class TestCors:
+    """Tests for CORS support via cors_origins parameter."""
+
+    def test_cors_wildcard_adds_headers(self) -> None:
+        """cors_origins='*' adds Access-Control-Allow-Origin to responses."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        assert resp.headers.get("access-control-allow-origin") == "*"
+
+    def test_cors_specific_origin(self) -> None:
+        """cors_origins with a specific origin only allows that origin."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test", cors_origins="http://example.com")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        assert resp.headers.get("access-control-allow-origin") == "http://example.com"
+
+    def test_no_cors_by_default(self) -> None:
+        """Without cors_origins, no CORS headers are added."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        assert "access-control-allow-origin" not in resp.headers

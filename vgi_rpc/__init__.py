@@ -4,6 +4,12 @@ import contextlib
 
 from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage
 from vgi_rpc.external_fetch import FetchConfig
+from vgi_rpc.introspect import (
+    DESCRIBE_METHOD_NAME,
+    MethodDescription,
+    ServiceDescription,
+    introspect,
+)
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.rpc import (
@@ -26,6 +32,7 @@ from vgi_rpc.rpc import (
     ServerStreamState,
     StreamSession,
     SubprocessTransport,
+    VersionError,
     connect,
     describe_rpc,
     make_pipe_pair,
@@ -34,11 +41,18 @@ from vgi_rpc.rpc import (
     serve_pipe,
     serve_stdio,
 )
-from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
+from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType, IPCError
 
 # HTTP (optional — requires `pip install vgi-rpc[http]`)
 with contextlib.suppress(ImportError):
-    from vgi_rpc.http import HttpBidiSession, HttpStreamSession, http_connect, make_sync_client, make_wsgi_app
+    from vgi_rpc.http import (
+        HttpBidiSession,
+        HttpStreamSession,
+        http_connect,
+        http_introspect,
+        make_sync_client,
+        make_wsgi_app,
+    )
 
 # S3 storage backend (optional — requires `pip install vgi-rpc[s3]`)
 with contextlib.suppress(ImportError):
@@ -55,6 +69,8 @@ __all__ = [
     "RpcTransport",
     "RpcError",
     "RpcMethodInfo",
+    "VersionError",
+    "IPCError",
     # Convenience
     "run_server",
     "connect",
@@ -74,6 +90,10 @@ __all__ = [
     "OutputCollector",
     "AnnotatedBatch",
     # Introspection
+    "DESCRIBE_METHOD_NAME",
+    "MethodDescription",
+    "ServiceDescription",
+    "introspect",
     "rpc_methods",
     "describe_rpc",
     "MethodType",
@@ -102,4 +122,11 @@ if "S3Storage" in dir():
 if "GCSStorage" in dir():
     __all__.append("GCSStorage")
 if "HttpBidiSession" in dir():
-    __all__ += ["HttpBidiSession", "HttpStreamSession", "http_connect", "make_wsgi_app", "make_sync_client"]
+    __all__ += [
+        "HttpBidiSession",
+        "HttpStreamSession",
+        "http_connect",
+        "http_introspect",
+        "make_wsgi_app",
+        "make_sync_client",
+    ]

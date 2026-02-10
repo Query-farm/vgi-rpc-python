@@ -12,6 +12,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Transport-agnostic** — in-process pipes, subprocess, or HTTP
 - **Automatic schema inference** — Python type annotations map to Arrow types
 - **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
+- **Runtime introspection** — opt-in `__describe__` RPC method for dynamic service discovery
 - **Large batch support** — transparent externalization to S3/GCS for oversized data
 
 ## Installation
@@ -140,7 +141,7 @@ class SearchService(Protocol):
         ...
 ```
 
-### Introspection
+### Static introspection
 
 Use `rpc_methods()` to inspect a protocol's methods, or `describe_rpc()` for a human-readable summary:
 
@@ -153,6 +154,65 @@ for name, info in methods.items():
 
 print(describe_rpc(Calculator))
 ```
+
+### Runtime introspection
+
+Enable the built-in `__describe__` RPC method to let clients discover a server's methods at runtime — without needing the Python Protocol class. This is useful for dynamic clients, debugging tools, and cross-language interop.
+
+Enable it on the server with `enable_describe=True`:
+
+```python
+from vgi_rpc import RpcServer
+
+server = RpcServer(Calculator, CalculatorImpl(), enable_describe=True)
+```
+
+Query over pipe/subprocess transport with `introspect()`:
+
+```python
+from vgi_rpc import introspect, connect
+
+with connect(Calculator, ["python", "worker.py"]) as proxy:
+    desc = introspect(proxy._transport)
+    for name, method in desc.methods.items():
+        print(f"{name}: {method.method_type.value}")
+        print(f"  params: {method.param_types}")
+        print(f"  has_return: {method.has_return}")
+```
+
+Query over HTTP with `http_introspect()`:
+
+```python
+from vgi_rpc import http_introspect
+
+desc = http_introspect("http://localhost:8080")
+print(desc)
+```
+
+The `ServiceDescription` returned contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `protocol_name` | `str` | Name of the Protocol class |
+| `request_version` | `str` | Wire protocol version |
+| `describe_version` | `str` | Introspection format version |
+| `server_id` | `str` | Server instance identifier |
+| `methods` | `Mapping[str, MethodDescription]` | Method metadata keyed by name |
+
+Each `MethodDescription` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Method name |
+| `method_type` | `MethodType` | `UNARY`, `SERVER_STREAM`, or `BIDI_STREAM` |
+| `doc` | `str \| None` | Method docstring |
+| `has_return` | `bool` | Whether the method returns a value |
+| `params_schema` | `pa.Schema` | Arrow schema for request parameters |
+| `result_schema` | `pa.Schema` | Arrow schema for the response |
+| `param_types` | `dict[str, str]` | Human-readable type names by parameter |
+| `param_defaults` | `dict[str, object]` | Default values by parameter |
+
+The response is a standard Arrow IPC batch — any Arrow-capable language can parse it directly.
 
 ## Serialization — ArrowSerializableDataclass
 
@@ -266,6 +326,21 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `signing_key` | random 32 bytes | HMAC key for signing state tokens |
 | `max_stream_response_bytes` | `None` | Split server-stream responses across multiple HTTP exchanges |
 | `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |
+| `cors_origins` | `None` | Allowed CORS origins — `"*"` for all, a string, or list of strings |
+
+### CORS (browser clients)
+
+To allow browser-based clients to call the HTTP transport, pass `cors_origins` to `make_wsgi_app`:
+
+```python
+# Allow all origins
+app = make_wsgi_app(server, cors_origins="*")
+
+# Allow specific origins
+app = make_wsgi_app(server, cors_origins=["https://app.example.com", "https://staging.example.com"])
+```
+
+This uses Falcon's built-in `CORSMiddleware`, which handles preflight `OPTIONS` requests automatically.
 
 ## Streaming
 
@@ -621,6 +696,8 @@ All framework metadata keys live in the `vgi_rpc.` namespace:
 | `vgi_rpc.location` | batch metadata | External storage URL for large batches |
 | `vgi_rpc.location.fetch_ms` | batch metadata | Fetch duration (diagnostics) |
 | `vgi_rpc.location.source` | batch metadata | Fetch source (diagnostics) |
+| `vgi_rpc.protocol_name` | schema metadata | Protocol class name (`__describe__` response) |
+| `vgi_rpc.describe_version` | schema metadata | Introspection format version (`__describe__` response) |
 
 ### Unary wire format
 
@@ -664,6 +741,7 @@ All endpoints use `Content-Type: application/vnd.apache.arrow.stream`.
 | `{prefix}/{method}` | POST | Unary and server-stream calls |
 | `{prefix}/{method}/bidi` | POST | Bidi stream initialization |
 | `{prefix}/{method}/exchange` | POST | Bidi and server-stream continuation |
+| `{prefix}/__describe__` | POST | Introspection (when `enable_describe=True`) |
 
 Over HTTP, bidi streaming is **stateless**: each exchange carries serialized `BidiStreamState` in a signed token in the `vgi_rpc.bidi_state` batch metadata key.
 

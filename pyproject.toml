@@ -17,7 +17,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-dependencies = ["aiohttp>=3.9", "pyarrow>=14.0", "structlog>=23.0", "tenacity>=8.0", "zstandard>=0.20"]
+dependencies = ["aiohttp>=3.9", "pyarrow>=14.0", "tenacity>=8.0", "zstandard>=0.20"]
 
 [project.urls]
 Homepage = "https://github.com/Query-farm/vgi-rpc-python"
@@ -53,10 +53,6 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
-
-[[tool.mypy.overrides]]
-module = "structlog.*"
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "falcon.*"

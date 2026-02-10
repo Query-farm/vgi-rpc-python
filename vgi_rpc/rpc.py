@@ -641,6 +641,39 @@ def _build_result_schema(result_type: Any) -> pa.Schema:
     return pa.schema([pa.field("result", arrow_type, nullable=is_nullable)])
 
 
+_UNSUPPORTED_PARAM_KINDS: dict[int, str] = {
+    inspect.Parameter.POSITIONAL_ONLY: "positional-only (before '/')",
+    inspect.Parameter.VAR_POSITIONAL: "*args",
+    inspect.Parameter.VAR_KEYWORD: "**kwargs",
+}
+
+
+def _validate_protocol_params(protocol: type, method_name: str, sig: inspect.Signature) -> None:
+    """Validate that protocol method parameters are compatible with the wire protocol.
+
+    The RPC wire protocol identifies parameters by name (Arrow schema columns),
+    so all parameters must be passable as keyword arguments. This rejects
+    positional-only, ``*args``, and ``**kwargs`` parameters.
+
+    Raises:
+        TypeError: If any parameter uses an unsupported kind.
+
+    """
+    errors: list[str] = []
+    for name, param in sig.parameters.items():
+        if name == "self":
+            continue
+        label = _UNSUPPORTED_PARAM_KINDS.get(param.kind)
+        if label is not None:
+            errors.append(f"  - '{name}' is {label}")
+    if errors:
+        detail = "\n".join(errors)
+        raise TypeError(
+            f"{protocol.__name__}.{method_name}() has parameters incompatible"
+            f" with the RPC wire protocol (all parameters must be keyword-passable):\n{detail}"
+        )
+
+
 def _get_param_defaults(protocol: type, method_name: str) -> dict[str, Any]:
     """Extract default values for method parameters."""
     method = getattr(protocol, method_name, None)
@@ -676,6 +709,8 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
             method_hints = get_type_hints(attr, include_extras=True)
         except (NameError, AttributeError):
             continue
+
+        _validate_protocol_params(protocol, name, inspect.signature(attr))
 
         return_hint = method_hints.get("return", type(None))
         method_type, result_type, has_return = _classify_return_type(return_hint)
@@ -1239,7 +1274,16 @@ def _flush_collector(
 class RpcServer:
     """Dispatches RPC requests to an implementation over IO-stream transports."""
 
-    __slots__ = ("_ctx_methods", "_external_config", "_impl", "_methods", "_protocol", "_server_id")
+    __slots__ = (
+        "_ctx_methods",
+        "_describe_batch",
+        "_enable_describe",
+        "_external_config",
+        "_impl",
+        "_methods",
+        "_protocol",
+        "_server_id",
+    )
 
     def __init__(
         self,
@@ -1248,14 +1292,35 @@ class RpcServer:
         *,
         external_location: ExternalLocationConfig | None = None,
         server_id: str | None = None,
+        enable_describe: bool = False,
     ) -> None:
-        """Initialize with a protocol type and its implementation."""
+        """Initialize with a protocol type and its implementation.
+
+        Args:
+            protocol: The Protocol class defining the RPC interface.
+            implementation: Object implementing all methods from *protocol*.
+            external_location: Optional ExternalLocation configuration.
+            server_id: Optional server identifier; auto-generated if ``None``.
+            enable_describe: When ``True``, the server handles ``__describe__``
+                requests returning machine-readable method metadata.
+
+        """
         self._protocol = protocol
         self._impl = implementation
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
         self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]
         _validate_implementation(protocol, implementation, self._methods)
+
+        self._enable_describe = enable_describe
+        if enable_describe:
+            from vgi_rpc.introspect import build_describe_batch
+
+            self._describe_batch: pa.RecordBatch | None = build_describe_batch(
+                protocol.__name__, self._methods, self._server_id
+            )
+        else:
+            self._describe_batch = None
 
         # Detect which impl methods accept a `ctx` parameter.
         self._ctx_methods: frozenset[str] = frozenset(
@@ -1289,6 +1354,11 @@ class RpcServer:
     def ctx_methods(self) -> frozenset[str]:
         """Method names whose implementations accept a ctx parameter."""
         return self._ctx_methods
+
+    @property
+    def describe_enabled(self) -> bool:
+        """Whether ``__describe__`` introspection is enabled."""
+        return self._enable_describe
 
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""
@@ -1324,6 +1394,20 @@ class RpcServer:
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
+
+        # Built-in __describe__ introspection
+        if method_name == "__describe__":
+            if self._describe_batch is None:
+                _write_error_stream(
+                    transport.writer,
+                    _EMPTY_SCHEMA,
+                    AttributeError("Introspection is not enabled on this server"),
+                    server_id=self._server_id,
+                )
+                return
+            self._serve_describe(transport)
+            return
+
         info = self._methods.get(method_name)
         if info is None:
             _write_error_stream(
@@ -1349,6 +1433,13 @@ class RpcServer:
             self._serve_server_stream(transport, info, kwargs)
         elif info.method_type == MethodType.BIDI_STREAM:
             self._serve_bidi_stream(transport, info, kwargs)
+
+    def _serve_describe(self, transport: RpcTransport) -> None:
+        """Write the cached ``__describe__`` batch as a unary IPC response."""
+        assert self._describe_batch is not None
+        schema = self._describe_batch.schema
+        with ipc.new_stream(transport.writer, schema) as writer:
+            writer.write_batch(self._describe_batch)
 
     def _prepare_method_call(
         self, info: RpcMethodInfo, kwargs: dict[str, Any]

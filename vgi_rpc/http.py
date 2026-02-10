@@ -28,11 +28,11 @@ import hmac
 import os
 import struct
 import warnings
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from http import HTTPStatus
 from io import BytesIO, IOBase
 from types import TracebackType
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, get_args, get_origin, get_type_hints
 from urllib.parse import urlparse
 
 import falcon
@@ -83,10 +83,14 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.utils import empty_batch
 
+if TYPE_CHECKING:
+    from vgi_rpc.introspect import ServiceDescription
+
 __all__ = [
     "HttpBidiSession",
     "HttpStreamSession",
     "http_connect",
+    "http_introspect",
     "make_sync_client",
     "make_wsgi_app",
 ]
@@ -351,6 +355,40 @@ class _HttpRpcApp:
 
         resp_buf.seek(0)
         return resp_buf, http_status
+
+    def _describe_sync(self, stream: IOBase) -> tuple[BytesIO, HTTPStatus]:
+        """Handle a ``__describe__`` request synchronously.
+
+        Drains the incoming request, checks whether introspection is enabled,
+        and writes the cached describe batch.  Follows the same pattern as
+        ``_unary_sync()``.
+
+        Returns:
+            ``(response_buf, http_status)``
+
+        Raises:
+            _RpcHttpError: If introspection is disabled or the request is
+                malformed.
+
+        """
+        try:
+            _read_request(stream)
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+
+        if not self._server.describe_enabled or self._server._describe_batch is None:
+            raise _RpcHttpError(
+                AttributeError("Introspection is not enabled on this server"),
+                status_code=HTTPStatus.FORBIDDEN,
+            )
+
+        batch = self._server._describe_batch
+        schema = batch.schema
+        resp_buf = BytesIO()
+        with ipc.new_stream(resp_buf, schema) as writer:
+            writer.write_batch(batch)
+        resp_buf.seek(0)
+        return resp_buf, HTTPStatus.OK
 
     def _bidi_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run bidi init synchronously."""
@@ -651,7 +689,19 @@ class _RpcResource:
         self._app = app
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
-        """Handle unary and server-stream RPC calls."""
+        """Handle unary, server-stream, and __describe__ RPC calls."""
+        # Built-in __describe__ introspection
+        if method == "__describe__":
+            try:
+                _check_content_type(req)
+                result_stream, http_status = self._app._describe_sync(req.bounded_stream)
+                resp.content_type = _ARROW_CONTENT_TYPE
+                resp.stream = result_stream
+                resp.status = str(http_status.value)
+            except _RpcHttpError as e:
+                _set_error_response(resp, e.cause, status_code=e.status_code, server_id=self._app._server.server_id)
+            return
+
         try:
             info = self._app._resolve_method(req, method)
             if info.method_type == MethodType.BIDI_STREAM:
@@ -807,6 +857,7 @@ def make_wsgi_app(
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    cors_origins: str | Iterable[str] | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -829,6 +880,12 @@ def make_wsgi_app(
             ``ValueError`` (bad credentials) or ``PermissionError``
             (forbidden) on failure — these are mapped to HTTP 401.
             Other exceptions propagate as 500.
+        cors_origins: Allowed origins for CORS.  Pass ``"*"`` to allow all
+            origins, a single origin string like ``"https://example.com"``,
+            or an iterable of origin strings.  ``None`` (the default)
+            disables CORS headers.  Uses Falcon's built-in
+            ``CORSMiddleware`` which also handles preflight OPTIONS
+            requests automatically.
 
     Returns:
         A Falcon application with routes for unary, server-stream,
@@ -844,7 +901,12 @@ def make_wsgi_app(
         )
         signing_key = os.urandom(32)
     app_handler = _HttpRpcApp(server, signing_key, max_stream_response_bytes)
-    app = falcon.App(middleware=[_AuthMiddleware(authenticate)] if authenticate is not None else None)
+    middleware: list[Any] = []
+    if cors_origins is not None:
+        middleware.append(falcon.CORSMiddleware(allow_origins=cors_origins))
+    if authenticate is not None:
+        middleware.append(_AuthMiddleware(authenticate))
+    app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/bidi", _BidiInitResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))
@@ -1183,6 +1245,78 @@ def http_connect(
     url_prefix = prefix
     try:
         yield _HttpProxy(protocol, client, url_prefix, on_log, external_config=external_location)
+    finally:
+        if own_client:
+            client.close()
+
+
+def http_introspect(
+    base_url: str | None = None,
+    *,
+    prefix: str = "/vgi",
+    client: httpx.Client | _SyncTestClient | None = None,
+) -> ServiceDescription:
+    """Send a ``__describe__`` request over HTTP and return a ``ServiceDescription``.
+
+    Args:
+        base_url: Base URL of the server (e.g. ``http://localhost:8000``).
+            Required when *client* is ``None``.
+        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+
+    Returns:
+        A ``ServiceDescription`` with all method metadata.
+
+    Raises:
+        RpcError: If the server does not support introspection or returns
+            an error.
+        ValueError: If *base_url* is ``None`` and *client* is ``None``.
+
+    """
+    from vgi_rpc.introspect import DESCRIBE_METHOD_NAME, parse_describe_batch
+
+    own_client = client is None
+    if client is None:
+        if base_url is None:
+            raise ValueError("base_url is required when client is not provided")
+        client = httpx.Client(base_url=base_url, follow_redirects=True)
+
+    try:
+        # Build a minimal request: empty params with __describe__ method name
+        req_buf = BytesIO()
+        request_metadata = pa.KeyValueMetadata(
+            {
+                b"vgi_rpc.method": DESCRIBE_METHOD_NAME.encode(),
+                b"vgi_rpc.request_version": b"1",
+            }
+        )
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(
+                pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA),
+                custom_metadata=request_metadata,
+            )
+
+        resp = client.post(
+            f"{prefix}/{DESCRIBE_METHOD_NAME}",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+
+        reader = _open_response_stream(resp.content, resp.status_code)
+        # Skip log batches
+        while True:
+            batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+            if not _dispatch_log_or_error(batch, custom_metadata):
+                break
+        _drain_stream(reader)
+
+        # Reconstruct batch with schema metadata from the IPC stream
+        schema_with_md = reader.schema.with_metadata(reader.schema.metadata or {})
+        batch_with_md = pa.RecordBatch.from_arrays(
+            [batch.column(i) for i in range(batch.num_columns)],
+            schema=schema_with_md,
+        )
+        return parse_describe_batch(batch_with_md)
     finally:
         if own_client:
             client.close()

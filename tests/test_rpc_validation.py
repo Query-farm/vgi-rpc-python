@@ -13,6 +13,7 @@ from vgi_rpc.rpc import (
     RpcServer,
     ServerStream,
     ServerStreamState,
+    rpc_methods,
 )
 
 # ---------------------------------------------------------------------------
@@ -498,3 +499,77 @@ class TestValidImplementation:
                 return "extra"
 
         RpcServer(SimpleService, Impl())
+
+
+# ---------------------------------------------------------------------------
+# Tests: protocol parameter kind validation
+# ---------------------------------------------------------------------------
+
+
+class TestProtocolParamKinds:
+    """Tests that rpc_methods() rejects unsupported parameter kinds."""
+
+    def test_positional_only_rejected(self) -> None:
+        """Positional-only params (before /) are rejected."""
+
+        class Bad(Protocol):
+            def method(self, a: int, b: int, /) -> int: ...
+
+        with pytest.raises(TypeError, match="positional-only"):
+            rpc_methods(Bad)
+
+    def test_var_positional_rejected(self) -> None:
+        """*args params are rejected."""
+
+        class Bad(Protocol):
+            def method(self, *args: int) -> int: ...
+
+        with pytest.raises(TypeError, match=r"\*args"):
+            rpc_methods(Bad)
+
+    def test_var_keyword_rejected(self) -> None:
+        """**kwargs params are rejected."""
+
+        class Bad(Protocol):
+            def method(self, **kwargs: int) -> int: ...
+
+        with pytest.raises(TypeError, match=r"\*\*kwargs"):
+            rpc_methods(Bad)
+
+    def test_positional_or_keyword_accepted(self) -> None:
+        """Normal params (positional-or-keyword) are accepted."""
+
+        class Good(Protocol):
+            def method(self, a: int, b: int) -> int: ...
+
+        methods = rpc_methods(Good)
+        assert "method" in methods
+
+    def test_keyword_only_accepted(self) -> None:
+        """Keyword-only params (after *) are accepted."""
+
+        class Good(Protocol):
+            def method(self, *, a: int, b: int) -> int: ...
+
+        methods = rpc_methods(Good)
+        assert "method" in methods
+
+    def test_mixed_bad_kinds_all_reported(self) -> None:
+        """Multiple bad params are all reported in one error."""
+
+        class Bad(Protocol):
+            def method(self, a: int, /, *args: int, **kwargs: int) -> int: ...
+
+        with pytest.raises(TypeError, match=r"a.*positional-only") as exc_info:
+            rpc_methods(Bad)
+        assert "*args" in str(exc_info.value)
+        assert "**kwargs" in str(exc_info.value)
+
+    def test_error_includes_protocol_and_method_name(self) -> None:
+        """Error message includes protocol class name and method name."""
+
+        class MyService(Protocol):
+            def compute(self, x: int, /) -> int: ...
+
+        with pytest.raises(TypeError, match=r"MyService\.compute\(\)"):
+            rpc_methods(MyService)
