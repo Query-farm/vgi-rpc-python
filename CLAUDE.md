@@ -42,13 +42,13 @@ Verify "ty" type checking too.
 
 ### Core modules (`vgi_rpc/`)
 
-- **`rpc.py`** — The RPC framework. Defines the wire protocol, method types (UNARY, SERVER_STREAM, BIDI_STREAM), and the core classes: `RpcServer`, `RpcConnection`, `RpcTransport`, `PipeTransport`. Introspects Protocol classes via `rpc_methods()` to extract `RpcMethodInfo` (schemas, method type). Client gets a typed proxy from `RpcConnection`; server dispatches via `RpcServer.serve()`.
+- **`rpc.py`** — The RPC framework. Defines the wire protocol, method types (UNARY, SERVER_STREAM, BIDI_STREAM), and the core classes: `RpcServer`, `RpcConnection`, `RpcTransport`, `PipeTransport`. Also defines `AuthContext` (frozen dataclass for authentication state), `CallContext` (request-scoped context injected into methods via `ctx` parameter), and `_TransportContext` (contextvar bridge for HTTP auth). Introspects Protocol classes via `rpc_methods()` to extract `RpcMethodInfo` (schemas, method type). Client gets a typed proxy from `RpcConnection`; server dispatches via `RpcServer.serve()`.
 
 - **`utils.py`** — Arrow serialization layer. `ArrowSerializableDataclass` mixin auto-generates `ARROW_SCHEMA` from dataclass field annotations and provides `serialize()`/`deserialize_from_batch()`. Handles type inference from Python types to Arrow types (including generics, Enum, Optional, nested dataclasses). Also provides low-level IPC stream read/write helpers.
 
-- **`log.py`** — Structured log messages (`Message` with `Level` enum). Messages are serialized out-of-band as zero-row batches with metadata keys `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`. Server methods can accept an optional `emit_log: EmitLog` parameter injected by the framework.
+- **`log.py`** — Structured log messages (`Message` with `Level` enum). Messages are serialized out-of-band as zero-row batches with metadata keys `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`. Server methods access logging via the `CallContext` (see below).
 
-- **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.bidi_state`, `vgi_rpc.log_level`, etc.) and provides encoding, decoding, merging, and key-stripping utilities used by `rpc.py`, `http.py`, `utils.py`, `log.py`, and `external.py`.
+- **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.bidi_state`, `vgi_rpc.log_level`, `vgi_rpc.server_id`, etc.) and provides encoding, merging, and key-stripping utilities used by `rpc.py`, `http.py`, `utils.py`, `log.py`, and `external.py`.
 
 - **`external.py`** — ExternalLocation batch support for large data. When batches exceed a configurable size threshold, they are uploaded to pluggable `ExternalStorage` (e.g. S3) and replaced with zero-row pointer batches containing a `vgi_rpc.location` URL metadata key. Readers resolve pointers transparently via `external_fetch.fetch_url()` (aiohttp-based parallel fetching); writers externalize batches above the threshold. Provides `ExternalLocationConfig`, `ExternalStorage` protocol, and production/resolution functions. Supports optional zstd compression.
 
@@ -58,7 +58,7 @@ Verify "ty" type checking too.
 
 - **`gcs.py`** *(optional — `pip install vgi-rpc[gcs]`)* — Google Cloud Storage backend implementing `ExternalStorage`. Uses google-cloud-storage to upload IPC data and generate V4 signed URLs. Relies on Application Default Credentials.
 
-- **`http.py`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport using Falcon (server) and httpx (client). Exposes `make_wsgi_app()` to serve an `RpcServer` as a Falcon WSGI app, and `http_connect()` for the client side. Bidi streaming is stateless: each exchange carries serialized `BidiStreamState` in Arrow custom metadata.
+- **`http.py`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport using Falcon (server) and httpx (client). Exposes `make_wsgi_app()` to serve an `RpcServer` as a Falcon WSGI app, and `http_connect()` for the client side. Bidi streaming is stateless: each exchange carries serialized `BidiStreamState` in Arrow custom metadata. Supports pluggable authentication via an `authenticate` callback and `_AuthMiddleware`.
 
 ### Wire protocol
 
@@ -72,7 +72,13 @@ Multiple IPC streams are written sequentially on the same pipe. Each method call
 
 **Defining an RPC service**: Write a `Protocol` class where return types determine method type — plain types for unary, `ServerStream[S]` for server streaming, `BidiStream[S]` for bidirectional.
 
-**Stream state**: Streaming methods return a state object (`ServerStreamState` or `BidiStreamState` subclass) that drives iteration via `produce(out)` or `process(input, out)` callbacks on `OutputCollector`.
+**Stream state**: Streaming methods return a state object (`ServerStreamState` or `BidiStreamState` subclass) that drives iteration via `produce(out, ctx)` or `process(input, out, ctx)` callbacks on `OutputCollector`.
+
+**CallContext injection**: Server method implementations can accept an optional `ctx: CallContext` parameter. `CallContext` provides `auth` (`AuthContext`), `log()` (convenience logging), `emit_log` (raw `EmitLog` callback), and `transport_metadata` (e.g. `remote_addr` from HTTP). The parameter is injected by the framework — it does **not** appear in the Protocol definition.
+
+**Authentication**: `AuthContext` (frozen dataclass) carries `domain`, `authenticated`, `principal`, and `claims`. For HTTP transport, `make_wsgi_app(authenticate=...)` installs `_AuthMiddleware` that calls the callback on each request and populates `CallContext.auth`. Pipe transport gets anonymous auth by default. Methods can call `ctx.auth.require_authenticated()` to gate access.
+
+**Server identity**: Each `RpcServer` gets a `server_id` (auto-generated 12-char hex or caller-supplied). This ID is attached to all log and error batches as `vgi_rpc.server_id` metadata for distributed tracing.
 
 **Error propagation**: Server exceptions become zero-row batches with error metadata; clients receive `RpcError` with `error_type`, `error_message`, and `remote_traceback`. The transport stays clean for subsequent requests.
 
