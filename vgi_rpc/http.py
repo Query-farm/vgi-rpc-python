@@ -331,6 +331,15 @@ class _HttpRpcApp:
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
+        # Pre-built __describe__ batch — write directly, skip implementation call.
+        describe_batch = self._server._describe_batch
+        if describe_batch is not None and method_name == "__describe__":
+            resp_buf = BytesIO()
+            with ipc.new_stream(resp_buf, describe_batch.schema) as writer:
+                writer.write_batch(describe_batch)
+            resp_buf.seek(0)
+            return resp_buf, HTTPStatus.OK
+
         server_id = self._server.server_id
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
@@ -355,40 +364,6 @@ class _HttpRpcApp:
 
         resp_buf.seek(0)
         return resp_buf, http_status
-
-    def _describe_sync(self, stream: IOBase) -> tuple[BytesIO, HTTPStatus]:
-        """Handle a ``__describe__`` request synchronously.
-
-        Drains the incoming request, checks whether introspection is enabled,
-        and writes the cached describe batch.  Follows the same pattern as
-        ``_unary_sync()``.
-
-        Returns:
-            ``(response_buf, http_status)``
-
-        Raises:
-            _RpcHttpError: If introspection is disabled or the request is
-                malformed.
-
-        """
-        try:
-            _read_request(stream)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
-
-        if not self._server.describe_enabled or self._server._describe_batch is None:
-            raise _RpcHttpError(
-                AttributeError("Introspection is not enabled on this server"),
-                status_code=HTTPStatus.FORBIDDEN,
-            )
-
-        batch = self._server._describe_batch
-        schema = batch.schema
-        resp_buf = BytesIO()
-        with ipc.new_stream(resp_buf, schema) as writer:
-            writer.write_batch(batch)
-        resp_buf.seek(0)
-        return resp_buf, HTTPStatus.OK
 
     def _bidi_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run bidi init synchronously."""
@@ -690,18 +665,6 @@ class _RpcResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle unary, server-stream, and __describe__ RPC calls."""
-        # Built-in __describe__ introspection
-        if method == "__describe__":
-            try:
-                _check_content_type(req)
-                result_stream, http_status = self._app._describe_sync(req.bounded_stream)
-                resp.content_type = _ARROW_CONTENT_TYPE
-                resp.stream = result_stream
-                resp.status = str(http_status.value)
-            except _RpcHttpError as e:
-                _set_error_response(resp, e.cause, status_code=e.status_code, server_id=self._app._server.server_id)
-            return
-
         try:
             info = self._app._resolve_method(req, method)
             if info.method_type == MethodType.BIDI_STREAM:

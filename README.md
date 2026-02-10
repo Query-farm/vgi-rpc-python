@@ -741,7 +741,6 @@ All endpoints use `Content-Type: application/vnd.apache.arrow.stream`.
 | `{prefix}/{method}` | POST | Unary and server-stream calls |
 | `{prefix}/{method}/bidi` | POST | Bidi stream initialization |
 | `{prefix}/{method}/exchange` | POST | Bidi and server-stream continuation |
-| `{prefix}/__describe__` | POST | Introspection (when `enable_describe=True`) |
 
 Over HTTP, bidi streaming is **stateless**: each exchange carries serialized `BidiStreamState` in a signed token in the `vgi_rpc.bidi_state` batch metadata key.
 

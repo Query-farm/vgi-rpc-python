@@ -1277,7 +1277,6 @@ class RpcServer:
     __slots__ = (
         "_ctx_methods",
         "_describe_batch",
-        "_enable_describe",
         "_external_config",
         "_impl",
         "_methods",
@@ -1312,13 +1311,25 @@ class RpcServer:
         self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]
         _validate_implementation(protocol, implementation, self._methods)
 
-        self._enable_describe = enable_describe
         if enable_describe:
-            from vgi_rpc.introspect import build_describe_batch
+            from vgi_rpc.introspect import DESCRIBE_METHOD_NAME, build_describe_batch
 
             self._describe_batch: pa.RecordBatch | None = build_describe_batch(
                 protocol.__name__, self._methods, self._server_id
             )
+            # Register __describe__ as a synthetic unary method so normal dispatch handles it.
+            self._methods = {
+                **self._methods,
+                DESCRIBE_METHOD_NAME: RpcMethodInfo(
+                    name=DESCRIBE_METHOD_NAME,
+                    params_schema=_EMPTY_SCHEMA,
+                    result_schema=self._describe_batch.schema,
+                    result_type=type(None),
+                    method_type=MethodType.UNARY,
+                    has_return=True,
+                    doc="Return machine-readable metadata about all server methods.",
+                ),
+            }
         else:
             self._describe_batch = None
 
@@ -1358,7 +1369,7 @@ class RpcServer:
     @property
     def describe_enabled(self) -> bool:
         """Whether ``__describe__`` introspection is enabled."""
-        return self._enable_describe
+        return self._describe_batch is not None
 
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""
@@ -1395,19 +1406,6 @@ class RpcServer:
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
 
-        # Built-in __describe__ introspection
-        if method_name == "__describe__":
-            if self._describe_batch is None:
-                _write_error_stream(
-                    transport.writer,
-                    _EMPTY_SCHEMA,
-                    AttributeError("Introspection is not enabled on this server"),
-                    server_id=self._server_id,
-                )
-                return
-            self._serve_describe(transport)
-            return
-
         info = self._methods.get(method_name)
         if info is None:
             _write_error_stream(
@@ -1434,13 +1432,6 @@ class RpcServer:
         elif info.method_type == MethodType.BIDI_STREAM:
             self._serve_bidi_stream(transport, info, kwargs)
 
-    def _serve_describe(self, transport: RpcTransport) -> None:
-        """Write the cached ``__describe__`` batch as a unary IPC response."""
-        assert self._describe_batch is not None
-        schema = self._describe_batch.schema
-        with ipc.new_stream(transport.writer, schema) as writer:
-            writer.write_batch(self._describe_batch)
-
     def _prepare_method_call(
         self, info: RpcMethodInfo, kwargs: dict[str, Any]
     ) -> tuple[_ClientLogSink, AuthContext, Mapping[str, Any]]:
@@ -1452,6 +1443,12 @@ class RpcServer:
         return sink, auth, transport_metadata
 
     def _serve_unary(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
+        # Pre-built __describe__ batch — write directly, skip implementation call.
+        if self._describe_batch is not None and info.name == "__describe__":
+            with ipc.new_stream(transport.writer, self._describe_batch.schema) as writer:
+                writer.write_batch(self._describe_batch)
+            return
+
         schema = info.result_schema
         sink, _, _ = self._prepare_method_call(info, kwargs)
         with ipc.new_stream(transport.writer, schema) as writer:

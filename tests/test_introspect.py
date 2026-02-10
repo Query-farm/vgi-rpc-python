@@ -545,7 +545,7 @@ class TestIntrospectPipe:
         thread = threading.Thread(target=_run_server_thread, args=(server, server_transport), daemon=True)
         thread.start()
         try:
-            with pytest.raises(RpcError, match="Introspection is not enabled"):
+            with pytest.raises(RpcError, match="Unknown method"):
                 introspect(client_transport)
         finally:
             client_transport.close()
