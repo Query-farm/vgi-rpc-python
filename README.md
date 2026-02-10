@@ -611,7 +611,3 @@ When a batch is externalized, it is replaced by a **zero-row batch** with:
 - Original schema preserved for type checking
 
 The client transparently resolves these pointers via parallel range-request fetching.
-
-## License
-
-Apache-2.0
