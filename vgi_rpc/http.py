@@ -63,13 +63,13 @@ from vgi_rpc.rpc import (
     ServerStream,
     ServerStreamState,
     VersionError,
+    _ClientLogSink,
     _current_transport,
     _deserialize_params,
     _dispatch_log_or_error,
     _drain_stream,
     _flush_collector,
     _get_auth_and_metadata,
-    _LogSink,
     _read_batch_with_log_check,
     _read_request,
     _read_unary_response,
@@ -328,10 +328,10 @@ class _HttpRpcApp:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         server_id = self._server.server_id
-        sink = _LogSink(server_id=server_id)
+        sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
 
         schema = info.result_schema
         resp_buf = BytesIO()
@@ -364,10 +364,10 @@ class _HttpRpcApp:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Inject ctx if the implementation accepts it
-        sink = _LogSink(server_id=self._server.server_id)
+        sink = _ClientLogSink(server_id=self._server.server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
 
         try:
             result: BidiStream[BidiStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
@@ -450,7 +450,11 @@ class _HttpRpcApp:
             out = OutputCollector(output_schema, server_id=self._server.server_id)
 
             auth, transport_md = _get_auth_and_metadata()
-            process_ctx = CallContext(auth=auth, emit_log=out.emit_log_message, transport_metadata=transport_md)
+            process_ctx = CallContext(
+                auth=auth,
+                emit_client_log=out.emit_client_log_message,
+                transport_metadata=transport_md,
+            )
             state_obj.process(ab_in, out, process_ctx)
             out.validate()
 
@@ -474,7 +478,7 @@ class _HttpRpcApp:
         self,
         schema: pa.Schema,
         state: ServerStreamState,
-        sink: _LogSink | None = None,
+        sink: _ClientLogSink | None = None,
         *,
         auth: AuthContext | None = None,
         transport_metadata: Mapping[str, Any] | None = None,
@@ -509,7 +513,7 @@ class _HttpRpcApp:
                     out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=server_id)
                     produce_ctx = CallContext(
                         auth=auth,
-                        emit_log=out.emit_log_message,
+                        emit_client_log=out.emit_client_log_message,
                         transport_metadata=transport_metadata,
                     )
                     state.produce(out, produce_ctx)
@@ -545,10 +549,10 @@ class _HttpRpcApp:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Inject ctx if the implementation accepts it
-        sink = _LogSink(server_id=self._server.server_id)
+        sink = _ClientLogSink(server_id=self._server.server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
 
         try:
             result: ServerStream[ServerStreamState] = getattr(self._server.implementation, method_name)(**kwargs)

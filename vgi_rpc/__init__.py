@@ -13,7 +13,7 @@ from vgi_rpc.rpc import (
     BidiStream,
     BidiStreamState,
     CallContext,
-    EmitLog,
+    ClientLog,
     MethodType,
     OutputCollector,
     PipeTransport,
@@ -81,7 +81,7 @@ __all__ = [
     "AuthContext",
     "CallContext",
     # Logging
-    "EmitLog",
+    "ClientLog",
     "Level",
     "Message",
     # Serialization

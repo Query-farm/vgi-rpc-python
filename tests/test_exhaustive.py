@@ -37,12 +37,12 @@ from vgi_rpc.rpc import (
     _build_params_schema,
     _build_result_schema,
     _classify_return_type,
+    _ClientLogSink,
     _convert_for_arrow,
     _deserialize_params,
     _deserialize_value,
     _dispatch_log_or_error,
     _drain_stream,
-    _LogSink,
     _RpcProxy,
     _validate_params,
     _validate_result,
@@ -565,23 +565,23 @@ class TestValidateResult:
 
 
 # ===================================================================
-# 8. _LogSink
+# 8. _ClientLogSink (client-directed log buffering)
 # ===================================================================
 
 
-class TestLogSink:
-    """Edge cases for _LogSink buffering."""
+class TestClientLogSink:
+    """Edge cases for _ClientLogSink client-log buffering."""
 
     def test_buffer_before_activate(self) -> None:
         """Messages are buffered before activate() is called."""
-        sink = _LogSink()
+        sink = _ClientLogSink()
         sink(Message.info("msg1"))
         sink(Message.debug("msg2"))
         assert len(sink._buffer) == 2
 
     def test_activate_flushes_buffer(self) -> None:
         """Buffered messages are flushed on activate()."""
-        sink = _LogSink()
+        sink = _ClientLogSink()
         sink(Message.info("buffered"))
 
         schema = pa.schema([pa.field("x", pa.int64())])
@@ -593,7 +593,7 @@ class TestLogSink:
 
     def test_direct_write_after_activate(self) -> None:
         """Messages after activate() are written directly, not buffered."""
-        sink = _LogSink()
+        sink = _ClientLogSink()
         schema = pa.schema([pa.field("x", pa.int64())])
         buf = BytesIO()
         with ipc.new_stream(buf, schema) as writer:
@@ -614,9 +614,9 @@ class TestOutputCollector:
         """Multiple log messages before a data batch are all collected."""
         schema = pa.schema([pa.field("x", pa.int64())])
         out = OutputCollector(schema)
-        out.log(Level.INFO, "log1")
-        out.log(Level.DEBUG, "log2")
-        out.log(Level.WARN, "log3")
+        out.client_log(Level.INFO, "log1")
+        out.client_log(Level.DEBUG, "log2")
+        out.client_log(Level.WARN, "log3")
         out.emit_pydict({"x": [1]})
         # 3 log batches + 1 data batch
         assert len(out.batches) == 4

@@ -512,7 +512,7 @@ class TestMaybeExternalizeCollector:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         out = OutputCollector(_SCHEMA)
-        out.log(Level.INFO, "hello")
+        out.client_log(Level.INFO, "hello")
         # Don't emit a data batch — this is a log-only collector that also finishes
         out.finish()
 
@@ -548,7 +548,7 @@ class TestMaybeExternalizeCollector:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         out = OutputCollector(_SCHEMA)
-        out.log(Level.INFO, "pre-data log")
+        out.client_log(Level.INFO, "pre-data log")
         out.emit_pydict({"value": list(range(100))})
 
         result = maybe_externalize_collector(out, config)
@@ -684,7 +684,7 @@ class _LargeStreamState(ServerStreamState):
         if self.current >= self.count:
             out.finish()
             return
-        out.log(Level.INFO, f"producing batch {self.current}")
+        out.client_log(Level.INFO, f"producing batch {self.current}")
         out.emit_pydict({"value": list(range(self.size))})
         self.current += 1
 

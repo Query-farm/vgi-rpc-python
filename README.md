@@ -375,31 +375,33 @@ with serve_pipe(SumService, SumServiceImpl()) as proxy:
 
 ## Logging
 
-### Server-side logging
+### Client-directed logging
 
-Server method implementations can emit log messages by accepting a `ctx` parameter (type `CallContext`). The framework injects it automatically — it does **not** appear in the Protocol definition:
+Server method implementations can emit log messages that are transmitted **to the caller** as zero-row Arrow IPC batches. These are not server-side logs — they travel over the wire to the client's `on_log` callback.
+
+Accept a `ctx` parameter (type `CallContext`) to access the logging API. The framework injects it automatically — it does **not** appear in the Protocol definition:
 
 ```python
 from vgi_rpc import CallContext, Level
 
 
 class MyServiceImpl:
-    """Implementation with logging."""
+    """Implementation with client-directed logging."""
 
     def process(self, data: str, ctx: CallContext) -> str:
         """Process data with logging."""
-        ctx.log(Level.INFO, "Processing started", input_size=str(len(data)))
+        ctx.client_log(Level.INFO, "Processing started", input_size=str(len(data)))
         result = data.upper()
-        ctx.log(Level.DEBUG, "Processing complete")
+        ctx.client_log(Level.DEBUG, "Processing complete")
         return result
 ```
 
-In streaming methods, `ctx` is passed to `produce()` and `process()`. You can also use `OutputCollector.log()`:
+In streaming methods, `ctx` is passed to `produce()` and `process()`. You can also use `OutputCollector.client_log()`:
 
 ```python
 def produce(self, out: OutputCollector, ctx: CallContext) -> None:
     """Produce with logging."""
-    ctx.log(Level.INFO, "generating batch")
+    ctx.client_log(Level.INFO, "generating batch")
     out.emit_pydict({"value": [42]})
 ```
 

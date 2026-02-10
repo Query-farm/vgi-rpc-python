@@ -43,7 +43,7 @@ from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
 from .conftest import ConnFactory, _worker_cmd
 
-_DUMMY_CTX = CallContext(auth=AuthContext.anonymous(), emit_log=lambda _: None)
+_DUMMY_CTX = CallContext(auth=AuthContext.anonymous(), emit_client_log=lambda _: None)
 
 # ---------------------------------------------------------------------------
 # Enum for type fidelity tests
@@ -134,7 +134,7 @@ class GenerateWithLogsState(ServerStreamState):
         if self.current >= self.count:
             out.finish()
             return
-        out.log(Level.INFO, f"generating batch {self.current}")
+        out.client_log(Level.INFO, f"generating batch {self.current}")
         out.emit_pydict({"i": [self.current]})
         self.current += 1
 
@@ -147,7 +147,7 @@ class TransformWithLogsState(BidiStreamState):
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process input with a log message."""
-        out.log(Level.INFO, f"transforming batch with factor={self.factor}")
+        out.client_log(Level.INFO, f"transforming batch with factor={self.factor}")
         scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
 
@@ -323,16 +323,16 @@ class RpcFixtureServiceImpl:
     def greet_with_logs(self, name: str, ctx: CallContext | None = None) -> str:
         """Greet by name, emitting INFO + DEBUG logs."""
         if ctx:
-            ctx.log(Level.INFO, f"greeting {name}")
-            ctx.log(Level.DEBUG, "debug detail", detail="extra-info")
+            ctx.client_log(Level.INFO, f"greeting {name}")
+            ctx.client_log(Level.DEBUG, "debug detail", detail="extra-info")
         return f"Hello, {name}!"
 
     def generate_with_logs(self, count: int, ctx: CallContext | None = None) -> ServerStream[GenerateWithLogsState]:
         """Generate batches with interleaved log messages."""
         schema = pa.schema([pa.field("i", pa.int64())])
-        # Emit log BEFORE creating the stream — exercises _LogSink buffering
+        # Emit log BEFORE creating the stream — exercises _ClientLogSink buffering
         if ctx:
-            ctx.log(Level.INFO, "pre-stream log")
+            ctx.client_log(Level.INFO, "pre-stream log")
         return ServerStream(output_schema=schema, state=GenerateWithLogsState(count=count))
 
     def transform_with_logs(self, factor: float, ctx: CallContext | None = None) -> BidiStream[TransformWithLogsState]:
@@ -1184,10 +1184,10 @@ class TestNullValidation:
 # ---------------------------------------------------------------------------
 
 
-class TestCallContextLogging:
+class TestCallContextClientLogging:
     """Tests for out-of-band log message delivery via CallContext."""
 
-    def test_unary_emit_log(self, make_conn: ConnFactory) -> None:
+    def test_unary_client_log(self, make_conn: ConnFactory) -> None:
         """Unary method emits log messages that are delivered to on_log callback."""
         logs: list[Message] = []
         with make_conn(on_log=logs.append) as proxy:
@@ -1199,13 +1199,13 @@ class TestCallContextLogging:
             assert logs[1].level == Level.DEBUG
             assert logs[1].message == "debug detail"
 
-    def test_unary_emit_log_no_callback(self, make_conn: ConnFactory) -> None:
+    def test_unary_client_log_no_callback(self, make_conn: ConnFactory) -> None:
         """Unary with on_log=None: logs are silently discarded, result works."""
         with make_conn() as proxy:
             result = proxy.greet_with_logs(name="Bob")
             assert result == "Hello, Bob!"
 
-    def test_server_stream_emit_log(self, make_conn: ConnFactory) -> None:
+    def test_server_stream_client_log(self, make_conn: ConnFactory) -> None:
         """Server stream delivers log messages from OutputCollector to on_log callback."""
         logs: list[Message] = []
         with make_conn(on_log=logs.append) as proxy:
@@ -1213,13 +1213,13 @@ class TestCallContextLogging:
             assert len(batches) == 3
             assert batches[0].batch.column("i")[0].as_py() == 0
             assert batches[2].batch.column("i")[0].as_py() == 2
-            # 1 pre-stream log (from emit_log in method body) + 3 per-batch logs (from OutputCollector)
+            # 1 pre-stream log (from client_log in method body) + 3 per-batch logs (from OutputCollector)
             assert len(logs) == 4
             assert logs[0].message == "pre-stream log"
             assert "generating batch 0" in logs[1].message
             assert "generating batch 2" in logs[3].message
 
-    def test_bidi_emit_log(self, make_conn: ConnFactory) -> None:
+    def test_bidi_client_log(self, make_conn: ConnFactory) -> None:
         """Bidi stream delivers log messages from OutputCollector during exchange."""
         logs: list[Message] = []
         with make_conn(on_log=logs.append) as proxy:
@@ -1236,7 +1236,7 @@ class TestCallContextLogging:
             assert all(m.level == Level.INFO for m in logs)
             assert "factor=2.0" in logs[0].message
 
-    def test_emit_log_multiple_levels(self) -> None:
+    def test_client_log_multiple_levels(self) -> None:
         """All non-exception log levels are delivered correctly."""
 
         class MultiLevelService(Protocol):
@@ -1245,11 +1245,11 @@ class TestCallContextLogging:
         class MultiLevelServiceImpl:
             def multi_level(self, ctx: CallContext | None = None) -> str:
                 if ctx:
-                    ctx.log(Level.ERROR, "error msg")
-                    ctx.log(Level.WARN, "warn msg")
-                    ctx.log(Level.INFO, "info msg")
-                    ctx.log(Level.DEBUG, "debug msg")
-                    ctx.log(Level.TRACE, "trace msg")
+                    ctx.client_log(Level.ERROR, "error msg")
+                    ctx.client_log(Level.WARN, "warn msg")
+                    ctx.client_log(Level.INFO, "info msg")
+                    ctx.client_log(Level.DEBUG, "debug msg")
+                    ctx.client_log(Level.TRACE, "trace msg")
                 return "done"
 
         logs: list[Message] = []
@@ -1259,7 +1259,7 @@ class TestCallContextLogging:
             assert len(logs) == 5
             assert [m.level for m in logs] == [Level.ERROR, Level.WARN, Level.INFO, Level.DEBUG, Level.TRACE]
 
-    def test_emit_log_with_extras(self, make_conn: ConnFactory) -> None:
+    def test_client_log_with_extras(self, make_conn: ConnFactory) -> None:
         """Message.extra kwargs are preserved through the wire."""
         logs: list[Message] = []
         with make_conn(on_log=logs.append) as proxy:
@@ -1270,7 +1270,7 @@ class TestCallContextLogging:
             assert debug_msg.extra is not None
             assert debug_msg.extra["detail"] == "extra-info"
 
-    def test_emit_log_then_error(self) -> None:
+    def test_client_log_then_error(self) -> None:
         """Logs are delivered before RpcError is raised."""
 
         class LogThenErrorService(Protocol):
@@ -1279,7 +1279,7 @@ class TestCallContextLogging:
         class LogThenErrorServiceImpl:
             def log_then_fail(self, ctx: CallContext | None = None) -> str:
                 if ctx:
-                    ctx.log(Level.INFO, "about to fail")
+                    ctx.client_log(Level.INFO, "about to fail")
                 raise ValueError("intentional failure")
 
         logs: list[Message] = []
@@ -1290,7 +1290,7 @@ class TestCallContextLogging:
             assert logs[0].level == Level.INFO
             assert logs[0].message == "about to fail"
 
-    def test_emit_log_buffered_before_stream(self) -> None:
+    def test_client_log_buffered_before_stream(self) -> None:
         """Logs emitted before ServerStream opens are buffered and delivered."""
 
         @dataclass
@@ -1312,9 +1312,9 @@ class TestCallContextLogging:
             def stream_with_early_log(
                 self, count: int, ctx: CallContext | None = None
             ) -> ServerStream[EarlyLogStreamState]:
-                # Emit log BEFORE creating the stream — exercises _LogSink buffering
+                # Emit log BEFORE creating the stream — exercises _ClientLogSink buffering
                 if ctx:
-                    ctx.log(Level.INFO, "before stream open")
+                    ctx.client_log(Level.INFO, "before stream open")
                 schema = pa.schema([pa.field("i", pa.int64())])
                 return ServerStream(output_schema=schema, state=EarlyLogStreamState(count=count))
 
@@ -1333,7 +1333,7 @@ class TestCallContextLogging:
             assert result == pytest.approx(4.0)
             assert len(logs) == 0  # No logs emitted
 
-    def test_emit_log_via_connection(self) -> None:
+    def test_client_log_via_connection(self) -> None:
         """Log callback works through RpcConnection context manager."""
         logs: list[Message] = []
         with (
@@ -1385,10 +1385,10 @@ class TestOutputCollector:
         assert out.batches[0].custom_metadata is not None
 
     def test_log_emits_zero_row_batch(self) -> None:
-        """log() emits a zero-row batch with log metadata."""
+        """client_log() emits a zero-row batch with log metadata."""
         schema = pa.schema([pa.field("x", pa.int64())])
         out = OutputCollector(schema)
-        out.log(Level.INFO, "test message")
+        out.client_log(Level.INFO, "test message")
         assert len(out.batches) == 1
         assert out.batches[0].batch.num_rows == 0
         assert out.batches[0].custom_metadata is not None
@@ -1405,7 +1405,7 @@ class TestOutputCollector:
         """Log batches appear before data batches in the accumulated list."""
         schema = pa.schema([pa.field("x", pa.int64())])
         out = OutputCollector(schema)
-        out.log(Level.DEBUG, "before data")
+        out.client_log(Level.DEBUG, "before data")
         out.emit_pydict({"x": [42]})
         assert len(out.batches) == 2
         assert out.batches[0].batch.num_rows == 0  # log
@@ -2031,7 +2031,7 @@ class TestCallContext:
         assert captured[0].domain is None
 
     def test_ctx_log_emits_messages(self) -> None:
-        """ctx.log() produces the same result as using emit_log directly."""
+        """ctx.client_log() produces the same result as using emit_client_log directly."""
         logs: list[Message] = []
 
         class LogProbe(Protocol):
@@ -2039,7 +2039,7 @@ class TestCallContext:
 
         class LogProbeImpl:
             def probe(self, ctx: CallContext) -> str:
-                ctx.log(Level.INFO, "hello from ctx")
+                ctx.client_log(Level.INFO, "hello from ctx")
                 return "ok"
 
         with rpc_conn(LogProbe, LogProbeImpl(), on_log=logs.append) as proxy:

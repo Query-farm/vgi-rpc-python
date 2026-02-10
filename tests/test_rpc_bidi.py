@@ -89,9 +89,9 @@ class MultiLogState(BidiStreamState):
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Emit 3 log messages then the data batch."""
-        out.log(Level.DEBUG, "step 1: received input")
-        out.log(Level.INFO, "step 2: processing", row_count=str(input.batch.num_rows))
-        out.log(Level.WARN, "step 3: almost done")
+        out.client_log(Level.DEBUG, "step 1: received input")
+        out.client_log(Level.INFO, "step 2: processing", row_count=str(input.batch.num_rows))
+        out.client_log(Level.WARN, "step 3: almost done")
         out.emit(input.batch)
 
 
@@ -245,8 +245,8 @@ class BidiEdgeCaseServiceImpl:
     def log_during_init(self, ctx: CallContext | None = None) -> BidiStream[AccumulatingState]:
         """Bidi that emits logs during init (before BidiStream returned)."""
         if ctx:
-            ctx.log(Level.INFO, "bidi init log")
-            ctx.log(Level.DEBUG, "bidi init detail", tag="init")
+            ctx.client_log(Level.INFO, "bidi init log")
+            ctx.client_log(Level.DEBUG, "bidi init detail", tag="init")
         fields: list[pa.Field[pa.DataType]] = [
             pa.field("running_sum", pa.float64()),
             pa.field("exchange_count", pa.int64()),

@@ -74,7 +74,7 @@ Multiple IPC streams are written sequentially on the same pipe. Each method call
 
 **Stream state**: Streaming methods return a state object (`ServerStreamState` or `BidiStreamState` subclass) that drives iteration via `produce(out, ctx)` or `process(input, out, ctx)` callbacks on `OutputCollector`.
 
-**CallContext injection**: Server method implementations can accept an optional `ctx: CallContext` parameter. `CallContext` provides `auth` (`AuthContext`), `log()` (convenience logging), `emit_log` (raw `EmitLog` callback), and `transport_metadata` (e.g. `remote_addr` from HTTP). The parameter is injected by the framework — it does **not** appear in the Protocol definition.
+**CallContext injection**: Server method implementations can accept an optional `ctx: CallContext` parameter. `CallContext` provides `auth` (`AuthContext`), `client_log()` (client-directed logging), `emit_client_log` (raw `ClientLog` callback), and `transport_metadata` (e.g. `remote_addr` from HTTP). The parameter is injected by the framework — it does **not** appear in the Protocol definition.
 
 **Authentication**: `AuthContext` (frozen dataclass) carries `domain`, `authenticated`, `principal`, and `claims`. For HTTP transport, `make_wsgi_app(authenticate=...)` installs `_AuthMiddleware` that calls the callback on each request and populates `CallContext.auth`. Pipe transport gets anonymous auth by default. Methods can call `ctx.auth.require_authenticated()` to gate access.
 

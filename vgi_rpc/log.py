@@ -24,7 +24,7 @@ the full traceback:
     try:
         risky_operation()
     except Exception as e:
-        emit_log(Message.from_exception(e))  # Includes traceback
+        emit_client_log(Message.from_exception(e))  # Includes traceback
 
 KEY CLASSES
 -----------
@@ -75,7 +75,7 @@ class Level(Enum):
 class Message:
     """Log message emitted during RPC method processing.
 
-    Messages are emitted via the ``emit_log`` callback or ``OutputCollector.log()``
+    Messages are emitted via the ``emit_client_log`` callback or ``OutputCollector.client_log()``
     and transmitted to the client as zero-row batches with log metadata.
 
     Attributes:

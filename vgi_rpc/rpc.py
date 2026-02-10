@@ -142,8 +142,8 @@ from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_opt
 _EMPTY_SCHEMA = pa.schema([])
 _logger = logging.getLogger(__name__)
 
-EmitLog = Callable[[Message], None]
-"""Callback type for emitting log messages from RPC method implementations."""
+ClientLog = Callable[[Message], None]
+"""Callback type for emitting client-directed log messages from RPC method implementations."""
 
 __all__ = [
     "AnnotatedBatch",
@@ -152,7 +152,7 @@ __all__ = [
     "BidiStream",
     "BidiStreamState",
     "CallContext",
-    "EmitLog",
+    "ClientLog",
     "MethodType",
     "OutputCollector",
     "PipeTransport",
@@ -229,22 +229,22 @@ class CallContext:
     injection point.
     """
 
-    __slots__ = ("auth", "emit_log", "transport_metadata")
+    __slots__ = ("auth", "emit_client_log", "transport_metadata")
 
     def __init__(
         self,
         auth: AuthContext,
-        emit_log: EmitLog,
+        emit_client_log: ClientLog,
         transport_metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        """Initialize with auth context, log callback, and optional transport metadata."""
+        """Initialize with auth context, client-log callback, and optional transport metadata."""
         self.auth = auth
-        self.emit_log = emit_log
+        self.emit_client_log = emit_client_log
         self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
 
-    def log(self, level: Level, message: str, **extra: str) -> None:
-        """Emit a log message (convenience wrapper)."""
-        self.emit_log(Message(level, message, **extra))
+    def client_log(self, level: Level, message: str, **extra: str) -> None:
+        """Emit a client-directed log message (convenience wrapper)."""
+        self.emit_client_log(Message(level, message, **extra))
 
 
 @dataclass(frozen=True)
@@ -426,17 +426,17 @@ class OutputCollector:
 
     # --- Logging (zero or more per call) ---
 
-    def emit_log_message(self, msg: Message) -> None:
-        """Append a zero-row log batch (used by CallContext.emit_log in produce/process)."""
+    def emit_client_log_message(self, msg: Message) -> None:
+        """Append a zero-row client-directed log batch (used by CallContext.emit_client_log in produce/process)."""
         md = msg.add_to_metadata()
         if self._server_id is not None:
             md[SERVER_ID_KEY.decode()] = self._server_id
         custom_metadata = encode_metadata(md)
         self._batches.append(AnnotatedBatch(batch=empty_batch(self._output_schema), custom_metadata=custom_metadata))
 
-    def log(self, level: Level, message: str, **extra: str) -> None:
-        """Emit a zero-row log batch with log metadata."""
-        self.emit_log_message(Message(level, message, **extra))
+    def client_log(self, level: Level, message: str, **extra: str) -> None:
+        """Emit a zero-row client-directed log batch with log metadata."""
+        self.emit_client_log_message(Message(level, message, **extra))
 
     # --- Stream completion (ServerStream only) ---
 
@@ -849,8 +849,8 @@ def _write_error_stream(
         _write_error_batch(writer, schema, exc, server_id=server_id)
 
 
-class _LogSink:
-    """Buffers log messages until an IPC writer is available, then writes directly."""
+class _ClientLogSink:
+    """Buffers client-directed log messages until an IPC writer is available, then writes directly."""
 
     __slots__ = ("_buffer", "_schema", "_server_id", "_writer")
 
@@ -1352,12 +1352,12 @@ class RpcServer:
 
     def _prepare_method_call(
         self, info: RpcMethodInfo, kwargs: dict[str, Any]
-    ) -> tuple[_LogSink, AuthContext, Mapping[str, Any]]:
+    ) -> tuple[_ClientLogSink, AuthContext, Mapping[str, Any]]:
         """Create a log sink + read auth; wire a :class:`CallContext` into *kwargs* if the method accepts ``ctx``."""
-        sink = _LogSink(server_id=self._server_id)
+        sink = _ClientLogSink(server_id=self._server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if info.name in self._ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
         return sink, auth, transport_metadata
 
     def _serve_unary(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
@@ -1391,7 +1391,11 @@ class RpcServer:
             try:
                 while True:
                     out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
-                    produce_ctx = CallContext(auth=auth, emit_log=out.emit_log_message, transport_metadata=transport_md)
+                    produce_ctx = CallContext(
+                        auth=auth,
+                        emit_client_log=out.emit_client_log_message,
+                        transport_metadata=transport_md,
+                    )
                     state.produce(out, produce_ctx)
                     if not out.finished:
                         out.validate()
@@ -1441,7 +1445,11 @@ class RpcServer:
 
                     ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
                     out = OutputCollector(output_schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
-                    process_ctx = CallContext(auth=auth, emit_log=out.emit_log_message, transport_metadata=transport_md)
+                    process_ctx = CallContext(
+                        auth=auth,
+                        emit_client_log=out.emit_client_log_message,
+                        transport_metadata=transport_md,
+                    )
                     state.process(ab_in, out, process_ctx)
                     out.validate()
                     _flush_collector(output_writer, out, self._external_config)
