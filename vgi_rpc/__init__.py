@@ -2,7 +2,7 @@
 
 import contextlib
 
-from vgi_rpc.external import ExternalLocationConfig, ExternalStorage
+from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage
 from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
@@ -85,6 +85,7 @@ __all__ = [
     # Protocol version
     "REQUEST_VERSION",
     # ExternalLocation
+    "Compression",
     "ExternalLocationConfig",
     "ExternalStorage",
     "FetchConfig",

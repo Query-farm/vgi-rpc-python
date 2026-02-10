@@ -20,6 +20,7 @@ from aioresponses import aioresponses as aioresponses_ctx
 from pyarrow import ipc
 
 from vgi_rpc.external import (
+    Compression,
     ExternalLocationConfig,
     ExternalStorage,
     is_external_location_batch,
@@ -61,15 +62,16 @@ class MockStorage(ExternalStorage):
     Uses ``https://`` URLs so aioresponses can intercept them.
     """
 
-    def __init__(self, *, content_encoding: str | None = None) -> None:
+    def __init__(self) -> None:
         """Initialize with empty data store."""
         self.data: dict[str, bytes] = {}
         self._counter = 0
-        self.content_encoding = content_encoding
+        self.last_content_encoding: str | None = None
 
-    def upload(self, data: bytes, schema: pa.Schema) -> str:
+    def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Store data and return a mock URL."""
         self._counter += 1
+        self.last_content_encoding = content_encoding
         url = f"https://mock.storage/{self._counter}"
         self.data[url] = data
         return url
@@ -78,7 +80,7 @@ class MockStorage(ExternalStorage):
 @contextmanager
 def _mock_aio(storage: MockStorage, *, content_encoding: str | None = None) -> Iterator[aioresponses_ctx]:
     """Context manager that registers all MockStorage URLs in aioresponses."""
-    enc = content_encoding or storage.content_encoding
+    enc = content_encoding or storage.last_content_encoding
     with aioresponses_ctx() as mock:
         for url, body in storage.data.items():
             head_headers: dict[str, str] = {"Content-Length": str(len(body))}
@@ -453,7 +455,7 @@ class TestMaybeExternalizeCollector:
     def test_above_threshold(self) -> None:
         """Data batch above threshold is externalized."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
@@ -469,7 +471,7 @@ class TestMaybeExternalizeCollector:
     def test_below_threshold(self) -> None:
         """Data batch below threshold is not externalized."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10_000_000)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10_000_000)
 
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": [1]})
@@ -494,7 +496,7 @@ class TestMaybeExternalizeCollector:
     def test_no_data_batch(self) -> None:
         """Finished-only collector passes through."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         out = OutputCollector(_SCHEMA)
         out.finish()
@@ -506,7 +508,7 @@ class TestMaybeExternalizeCollector:
     def test_log_only_collector(self) -> None:
         """Log-only collector with no data batch passes through."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         out = OutputCollector(_SCHEMA)
         out.log(Level.INFO, "hello")
@@ -527,11 +529,11 @@ class TestMaybeExternalizeCollector:
         class FailStorage:
             """Storage that always fails."""
 
-            def upload(self, data: bytes, schema: pa.Schema) -> str:
+            def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
                 """Raise OSError unconditionally."""
                 raise OSError("storage down")
 
-        config = ExternalLocationConfig(storage=FailStorage(), threshold_bytes=10)
+        config = ExternalLocationConfig(storage=FailStorage(), externalize_threshold_bytes=10)
 
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
@@ -542,7 +544,7 @@ class TestMaybeExternalizeCollector:
     def test_externalized_includes_logs(self) -> None:
         """When externalized, the IPC stream includes log batches + data batch."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         out = OutputCollector(_SCHEMA)
         out.log(Level.INFO, "pre-data log")
@@ -584,7 +586,7 @@ class TestMaybeExternalizeBatch:
     def test_above_threshold(self) -> None:
         """Above threshold is externalized."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         result_batch, result_cm = maybe_externalize_batch(batch, None, config)
@@ -596,7 +598,7 @@ class TestMaybeExternalizeBatch:
     def test_below_threshold(self) -> None:
         """Below threshold passes through."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10_000_000)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10_000_000)
 
         batch = pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA)
         result_batch, result_cm = maybe_externalize_batch(batch, None, config)
@@ -616,7 +618,7 @@ class TestMaybeExternalizeBatch:
     def test_zero_row_passthrough(self) -> None:
         """Zero-row batches are never externalized."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=0)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=0)
 
         batch = empty_batch(_SCHEMA)
         result_batch, _ = maybe_externalize_batch(batch, None, config)
@@ -627,7 +629,7 @@ class TestMaybeExternalizeBatch:
     def test_preserves_existing_metadata(self) -> None:
         """When externalized, the original batch metadata is included in the IPC stream."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         user_cm = pa.KeyValueMetadata({b"user.key": b"user.value"})
@@ -646,7 +648,7 @@ class TestMaybeExternalizeBatch:
     def test_metadata_survives_roundtrip(self) -> None:
         """User metadata on data batches survives externalization round-trip."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, max_retries=0)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         user_cm = pa.KeyValueMetadata({b"user.key": b"user.value"})
@@ -735,7 +737,7 @@ class _ExternalServiceImpl:
 def _mock_aio_dynamic(storage: MockStorage, mock: aioresponses_ctx, *, content_encoding: str | None = None) -> None:
     """Register pattern-based HEAD + GET callbacks that serve from MockStorage dynamically."""
     pattern = re.compile(r"^https://mock\.storage/.*$")
-    enc = content_encoding or storage.content_encoding
+    enc = content_encoding or storage.last_content_encoding
 
     def _head_callback(url_: Any, **kwargs: Any) -> CallbackResult:
         url_str = str(url_)
@@ -770,7 +772,7 @@ class TestPipeIntegration:
         """Create an ExternalLocationConfig with low threshold for testing."""
         return ExternalLocationConfig(
             storage=storage,
-            threshold_bytes=threshold,
+            externalize_threshold_bytes=threshold,
             max_retries=0,
             retry_delay_seconds=0.0,
         )
@@ -1063,7 +1065,7 @@ class TestS3Storage:
         s3_storage, s3_client = _s3_env
         config = ExternalLocationConfig(
             storage=s3_storage,
-            threshold_bytes=10,
+            externalize_threshold_bytes=10,
         )
 
         # Helper to read objects from moto's mock S3 for aioresponses
@@ -1096,19 +1098,13 @@ class TestS3Storage:
         assert result == "x" * 200
 
     def test_upload_with_content_encoding(self, _s3_env: tuple[Any, Any]) -> None:
-        """S3 put_object receives ContentEncoding kwarg when configured."""
-        from vgi_rpc.s3 import S3Storage
-
+        """S3 put_object receives ContentEncoding kwarg when passed to upload()."""
         _s3_storage, s3_client = _s3_env
-        storage_with_enc = S3Storage(
-            bucket="test-bucket",
-            region_name="us-east-1",
-            content_encoding="zstd",
-        )
+        s3_storage = _s3_storage
 
         data_batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_SCHEMA)
         ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
-        url = storage_with_enc.upload(ipc_bytes, _SCHEMA)
+        url = s3_storage.upload(ipc_bytes, _SCHEMA, content_encoding="zstd")
 
         assert ".arrow.zst" in url
 
@@ -1121,7 +1117,7 @@ class TestS3Storage:
         assert head_resp["ContentEncoding"] == "zstd"
 
     def test_upload_without_content_encoding(self, _s3_env: tuple[Any, Any]) -> None:
-        """Backward compat: no ContentEncoding when not configured."""
+        """No ContentEncoding when not passed to upload()."""
         s3_storage, _s3_client = _s3_env
 
         data_batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_SCHEMA)
@@ -1132,19 +1128,12 @@ class TestS3Storage:
         assert ".arrow" in url
 
     def test_file_extension_zst(self, _s3_env: tuple[Any, Any]) -> None:
-        """Key ends in .arrow.zst when content_encoding is zstd."""
-        from vgi_rpc.s3 import S3Storage
-
-        _s3_storage, _ = _s3_env
-        storage_with_enc = S3Storage(
-            bucket="test-bucket",
-            region_name="us-east-1",
-            content_encoding="zstd",
-        )
+        """Key ends in .arrow.zst when content_encoding="zstd" passed to upload()."""
+        s3_storage, _ = _s3_env
 
         data_batch = pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA)
         ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
-        url = storage_with_enc.upload(ipc_bytes, _SCHEMA)
+        url = s3_storage.upload(ipc_bytes, _SCHEMA, content_encoding="zstd")
 
         assert url.split("?")[0].endswith(".arrow.zst")
 
@@ -1204,7 +1193,7 @@ class TestGCSStorage:
         mock_blob.generate_signed_url.return_value = "https://storage.googleapis.com/test"
 
         storage = GCSStorage(bucket="test-bucket")
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         data_batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
 
@@ -1257,15 +1246,15 @@ class TestGCSStorage:
         assert blob_name.endswith(".arrow")
 
     def test_upload_with_content_encoding(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
-        """Blob content_encoding set before upload when configured."""
+        """Blob content_encoding set before upload when passed to upload()."""
         from vgi_rpc.gcs import GCSStorage
 
         _, _, _mock_bucket, mock_blob = _gcs_mocks
         mock_blob.generate_signed_url.return_value = "https://example.com/signed"
 
-        storage = GCSStorage(bucket="test-bucket", content_encoding="zstd")
+        storage = GCSStorage(bucket="test-bucket")
         ipc_bytes = _serialize_ipc(_SCHEMA, [(pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA), None)])
-        storage.upload(ipc_bytes, _SCHEMA)
+        storage.upload(ipc_bytes, _SCHEMA, content_encoding="zstd")
 
         # Verify content_encoding was set on the blob
         assert mock_blob.content_encoding == "zstd"
@@ -1273,7 +1262,7 @@ class TestGCSStorage:
     def test_upload_without_content_encoding(
         self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
     ) -> None:
-        """Backward compat: content_encoding not set when not configured."""
+        """content_encoding not set when not passed to upload()."""
         from vgi_rpc.gcs import GCSStorage
 
         _, _, mock_bucket, mock_blob = _gcs_mocks
@@ -1291,15 +1280,15 @@ class TestGCSStorage:
         assert not blob_name.endswith(".arrow.zst")
 
     def test_file_extension_zst(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
-        """Blob name ends in .arrow.zst when content_encoding is zstd."""
+        """Blob name ends in .arrow.zst when content_encoding="zstd" passed to upload()."""
         from vgi_rpc.gcs import GCSStorage
 
         _, _, mock_bucket, mock_blob = _gcs_mocks
         mock_blob.generate_signed_url.return_value = "https://example.com/signed"
 
-        storage = GCSStorage(bucket="test-bucket", content_encoding="zstd")
+        storage = GCSStorage(bucket="test-bucket")
         ipc_bytes = _serialize_ipc(_SCHEMA, [(pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA), None)])
-        storage.upload(ipc_bytes, _SCHEMA)
+        storage.upload(ipc_bytes, _SCHEMA, content_encoding="zstd")
 
         blob_name: str = mock_bucket.blob.call_args[0][0]
         assert blob_name.endswith(".arrow.zst")
@@ -1400,11 +1389,11 @@ class TestCompression:
 
     def test_compress_decompress_roundtrip(self) -> None:
         """IPC bytes survive compress → upload → fetch (with Content-Encoding: zstd) → decompress → parse."""
-        storage = MockStorage(content_encoding="zstd")
+        storage = MockStorage()
         config = ExternalLocationConfig(
             storage=storage,
-            threshold_bytes=10,
-            compression="zstd",
+            externalize_threshold_bytes=10,
+            compression=Compression(),
             max_retries=0,
         )
 
@@ -1425,7 +1414,7 @@ class TestCompression:
     def test_compression_disabled_by_default(self) -> None:
         """Default ExternalLocationConfig does not compress; uploaded data is raw IPC."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         maybe_externalize_batch(batch, None, config)
@@ -1441,7 +1430,7 @@ class TestCompression:
     def test_compression_enabled_externalize_batch(self) -> None:
         """Compressed data is uploaded (verify uploaded bytes are zstd-compressed)."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, compression="zstd")
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, compression=Compression())
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         maybe_externalize_batch(batch, None, config)
@@ -1453,7 +1442,7 @@ class TestCompression:
     def test_compression_enabled_externalize_collector(self) -> None:
         """Collector output compressed when enabled."""
         storage = MockStorage()
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, compression="zstd")
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, compression=Compression())
 
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
@@ -1467,8 +1456,10 @@ class TestCompression:
 
     def test_compressed_resolve(self) -> None:
         """Resolve round-trip: externalize with compression → mock HTTP with Content-Encoding → resolve."""
-        storage = MockStorage(content_encoding="zstd")
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, compression="zstd", max_retries=0)
+        storage = MockStorage()
+        config = ExternalLocationConfig(
+            storage=storage, externalize_threshold_bytes=10, compression=Compression(), max_retries=0
+        )
 
         batch = pa.RecordBatch.from_pydict({"value": [42, 43, 44]}, schema=_SCHEMA)
         ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
@@ -1481,12 +1472,11 @@ class TestCompression:
 
     def test_compression_level_configurable(self) -> None:
         """Non-default compression level (e.g. 10) produces valid compressed data."""
-        storage = MockStorage(content_encoding="zstd")
+        storage = MockStorage()
         config = ExternalLocationConfig(
             storage=storage,
-            threshold_bytes=10,
-            compression="zstd",
-            compression_level=10,
+            externalize_threshold_bytes=10,
+            compression=Compression(level=10),
             max_retries=0,
         )
 
@@ -1509,7 +1499,7 @@ class TestCompression:
     def test_no_content_encoding_header_no_decompression(self) -> None:
         """Fetch without Content-Encoding header returns raw bytes (backward compat)."""
         storage = MockStorage()  # No content_encoding
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, max_retries=0)
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
 
         batch = pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA)
         ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
@@ -1523,18 +1513,18 @@ class TestCompression:
 
     def test_corrupt_compressed_data(self) -> None:
         """Corrupted bytes with Content-Encoding: zstd raises RuntimeError."""
-        storage = MockStorage(content_encoding="zstd")
-        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, max_retries=0)
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
 
         # Upload raw (non-compressed) data but serve with Content-Encoding: zstd
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         # Externalize WITHOUT compression — raw IPC uploaded
-        no_compress_config = ExternalLocationConfig(storage=storage, threshold_bytes=10)
+        no_compress_config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
         ext_batch, ext_cm = maybe_externalize_batch(batch, None, no_compress_config)
 
         # Now try to resolve with the zstd mock — raw IPC isn't valid zstd
         with (
-            _mock_aio(storage),
+            _mock_aio(storage, content_encoding="zstd"),
             pytest.raises(RuntimeError, match="Failed to decompress zstd data"),
         ):
             resolve_external_location(ext_batch, ext_cm, config)
@@ -1552,15 +1542,15 @@ class TestPipeIntegrationCompressed:
         """Create compressed ExternalLocationConfig for testing."""
         return ExternalLocationConfig(
             storage=storage,
-            threshold_bytes=threshold,
+            externalize_threshold_bytes=threshold,
             max_retries=0,
             retry_delay_seconds=0.0,
-            compression="zstd",
+            compression=Compression(),
         )
 
     def test_unary_large_compressed(self) -> None:
         """Large unary response with compression round-trips correctly."""
-        storage = MockStorage(content_encoding="zstd")
+        storage = MockStorage()
         config = self._make_config(storage, threshold=10)
 
         with aioresponses_ctx() as mock:
@@ -1580,7 +1570,7 @@ class TestPipeIntegrationCompressed:
 
     def test_server_stream_compressed(self) -> None:
         """Server stream + compression + logs works end-to-end."""
-        storage = MockStorage(content_encoding="zstd")
+        storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 
         received_logs: list[Message] = []
@@ -1602,7 +1592,7 @@ class TestPipeIntegrationCompressed:
 
     def test_bidi_compressed(self) -> None:
         """Bidi with compression works end-to-end."""
-        storage = MockStorage(content_encoding="zstd")
+        storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 
         with aioresponses_ctx() as mock:

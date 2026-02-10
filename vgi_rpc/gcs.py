@@ -39,8 +39,6 @@ class GCSStorage:
         presign_expiry_seconds: Lifetime of signed GET URLs.
         project: GCS project ID (``None`` uses Application Default
             Credentials default project).
-        content_encoding: Optional HTTP ``Content-Encoding`` header
-            to set on stored objects (e.g. ``"zstd"``).
 
     """
 
@@ -48,7 +46,6 @@ class GCSStorage:
     prefix: str = "vgi-rpc/"
     presign_expiry_seconds: int = 3600
     project: str | None = None
-    content_encoding: str | None = None
     _pool: _GCSPool = field(default_factory=_GCSPool, init=False, repr=False, compare=False, hash=False)
 
     def _get_client(self) -> Any:
@@ -61,12 +58,14 @@ class GCSStorage:
                 pool.client = storage.Client(project=self.project)
             return pool.client
 
-    def upload(self, data: bytes, schema: pa.Schema) -> str:
+    def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Upload IPC data to GCS and return a signed GET URL.
 
         Args:
             data: Serialized Arrow IPC stream bytes.
             schema: Schema of the data (unused but required by protocol).
+            content_encoding: Optional encoding applied to *data*
+                (e.g. ``"zstd"``).
 
         Returns:
             A signed URL that can be used to download the data.
@@ -74,11 +73,11 @@ class GCSStorage:
         """
         client = self._get_client()
         bucket = client.bucket(self.bucket)
-        ext = ".arrow.zst" if self.content_encoding == "zstd" else ".arrow"
+        ext = ".arrow.zst" if content_encoding == "zstd" else ".arrow"
         blob_name = f"{self.prefix}{uuid.uuid4().hex}{ext}"
         blob = bucket.blob(blob_name)
-        if self.content_encoding is not None:
-            blob.content_encoding = self.content_encoding
+        if content_encoding is not None:
+            blob.content_encoding = content_encoding
         blob.upload_from_string(data, content_type="application/octet-stream")
 
         url: str = blob.generate_signed_url(

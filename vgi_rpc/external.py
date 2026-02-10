@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from vgi_rpc.rpc import OutputCollector
 
 __all__ = [
+    "Compression",
     "ExternalLocationConfig",
     "ExternalStorage",
     "FetchConfig",
@@ -61,12 +62,15 @@ class ExternalStorage(Protocol):
     concurrently from different server threads.
     """
 
-    def upload(self, data: bytes, schema: pa.Schema) -> str:
+    def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Upload serialized IPC data and return a URL for retrieval.
 
         Args:
             data: Complete Arrow IPC stream bytes.
             schema: The schema of the data being uploaded.
+            content_encoding: Optional encoding applied to *data*
+                (e.g. ``"zstd"``).  Backends should store this so that
+                fetchers can decompress correctly.
 
         Returns:
             A URL (typically pre-signed) that can be fetched to retrieve
@@ -79,6 +83,21 @@ class ExternalStorage(Protocol):
 # ---------------------------------------------------------------------------
 # ExternalLocationConfig
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Compression:
+    """Compression settings for externalized data.
+
+    Attributes:
+        algorithm: Compression algorithm.  Currently only ``"zstd"``
+            is supported.
+        level: Compression level (1-22 for zstd).
+
+    """
+
+    algorithm: Literal["zstd"] = "zstd"
+    level: int = 3
 
 
 @dataclass(frozen=True)
@@ -95,29 +114,25 @@ class ExternalLocationConfig:
         storage: Storage backend for uploading externalized data.
             Required for production (writing); not needed for
             resolution-only (reading) scenarios.
-        threshold_bytes: Data batch buffer size above which to
-            externalize.  Uses ``batch.get_total_buffer_size()``
-            as a fast O(1) estimate.
+        externalize_threshold_bytes: Data batch buffer size above
+            which to externalize.  Uses
+            ``batch.get_total_buffer_size()`` as a fast O(1) estimate.
         max_retries: Number of fetch retries (total attempts =
             ``max_retries + 1``, capped at 3).
         retry_delay_seconds: Delay between retry attempts.
         fetch_config: Fetch configuration controlling parallelism,
             timeouts, and size limits.  Defaults to sensible values.
-        compression: Compression algorithm for externalized data.
-            Currently only ``"zstd"`` is supported.  ``None`` disables
-            compression (default).
-        compression_level: Zstandard compression level (1-22).
-            Only used when ``compression="zstd"``.
+        compression: Compression settings for externalized data.
+            ``None`` disables compression (default).
 
     """
 
     storage: ExternalStorage | None = None
-    threshold_bytes: int = 1_048_576
+    externalize_threshold_bytes: int = 1_048_576
     max_retries: int = field(default=2)
     retry_delay_seconds: float = 0.5
     fetch_config: FetchConfig = field(default_factory=FetchConfig)
-    compression: Literal["zstd"] | None = None
-    compression_level: int = 3
+    compression: Compression | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +334,7 @@ def maybe_externalize_collector(
 ) -> list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]]:
     """Possibly externalize an entire OutputCollector cycle.
 
-    If the data batch exceeds ``config.threshold_bytes`` and storage is
+    If the data batch exceeds ``config.externalize_threshold_bytes`` and storage is
     configured, serializes ALL batches (logs + data) as a single IPC
     stream, uploads via ``storage.upload()``, and returns a single-element
     list containing the ExternalLocation pointer batch.
@@ -345,7 +360,7 @@ def maybe_externalize_collector(
         return [(ab.batch, ab.custom_metadata) for ab in out.batches]
 
     # Fast O(1) size check
-    if data_ab.batch.get_total_buffer_size() < config.threshold_bytes:
+    if data_ab.batch.get_total_buffer_size() < config.externalize_threshold_bytes:
         return [(ab.batch, ab.custom_metadata) for ab in out.batches]
 
     # Serialize all batches into one IPC stream
@@ -359,10 +374,12 @@ def maybe_externalize_collector(
 
     ipc_bytes = buf.getvalue()
 
-    if config.compression == "zstd":
-        ipc_bytes = zstandard.ZstdCompressor(level=config.compression_level).compress(ipc_bytes)
+    content_encoding: str | None = None
+    if config.compression is not None:
+        ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
+        content_encoding = config.compression.algorithm
 
-    url = config.storage.upload(ipc_bytes, out.output_schema)
+    url = config.storage.upload(ipc_bytes, out.output_schema, content_encoding=content_encoding)
 
     pointer_batch, pointer_cm = make_external_location_batch(out.output_schema, url)
     return [(pointer_batch, pointer_cm)]
@@ -400,7 +417,7 @@ def maybe_externalize_batch(
         return batch, custom_metadata
 
     # Fast O(1) size check
-    if batch.get_total_buffer_size() < config.threshold_bytes:
+    if batch.get_total_buffer_size() < config.externalize_threshold_bytes:
         return batch, custom_metadata
 
     # Serialize the single batch as IPC stream
@@ -413,9 +430,11 @@ def maybe_externalize_batch(
 
     ipc_bytes = buf.getvalue()
 
-    if config.compression == "zstd":
-        ipc_bytes = zstandard.ZstdCompressor(level=config.compression_level).compress(ipc_bytes)
+    content_encoding: str | None = None
+    if config.compression is not None:
+        ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
+        content_encoding = config.compression.algorithm
 
-    url = config.storage.upload(ipc_bytes, batch.schema)
+    url = config.storage.upload(ipc_bytes, batch.schema, content_encoding=content_encoding)
 
     return make_external_location_batch(batch.schema, url)

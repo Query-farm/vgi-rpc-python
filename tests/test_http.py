@@ -279,7 +279,7 @@ class TestHttpExternalStorage:
         """Create an ExternalLocationConfig with low threshold for testing."""
         return ExternalLocationConfig(
             storage=storage,
-            threshold_bytes=threshold,
+            externalize_threshold_bytes=threshold,
             max_retries=0,
             retry_delay_seconds=0.0,
         )

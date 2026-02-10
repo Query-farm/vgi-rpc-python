@@ -447,13 +447,13 @@ Errors are transmitted as zero-row batches with `EXCEPTION`-level log metadata. 
 When batches exceed a configurable size threshold, they can be transparently uploaded to external storage (S3, GCS) and replaced with lightweight pointer batches. The client resolves pointers automatically using parallel range-request fetching.
 
 ```python
-from vgi_rpc import ExternalLocationConfig, FetchConfig, RpcServer, S3Storage
+from vgi_rpc import Compression, ExternalLocationConfig, FetchConfig, RpcServer, S3Storage
 
 storage = S3Storage(bucket="my-bucket", prefix="rpc-data/")
 config = ExternalLocationConfig(
     storage=storage,
-    threshold_bytes=1_048_576,  # 1 MiB (default)
-    compression="zstd",        # optional zstd compression
+    externalize_threshold_bytes=1_048_576,  # 1 MiB (default)
+    compression=Compression(),              # optional zstd compression
     fetch_config=FetchConfig(
         chunk_size_bytes=8 * 1024 * 1024,    # 8 MiB chunks
         max_parallel_requests=8,              # concurrent fetches

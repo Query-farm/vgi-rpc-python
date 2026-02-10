@@ -55,12 +55,12 @@ from vgi_rpc.rpc import (
     BidiStreamState,
     MethodType,
     OutputCollector,
-    PipeTransport,
     RpcError,
     RpcMethodInfo,
     RpcServer,
     ServerStream,
     ServerStreamState,
+    VersionError,
     _deserialize_params,
     _dispatch_log_or_error,
     _drain_stream,
@@ -71,7 +71,9 @@ from vgi_rpc.rpc import (
     _read_unary_response,
     _send_request,
     _validate_params,
+    _validate_result,
     _write_error_batch,
+    _write_result_batch,
     rpc_methods,
 )
 from vgi_rpc.utils import empty_batch
@@ -295,13 +297,59 @@ class _HttpRpcApp:
             raise _RpcHttpError(AttributeError(f"Unknown method: {method}"), status_code=HTTPStatus.NOT_FOUND)
         return info
 
+    def _unary_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> tuple[BytesIO, HTTPStatus]:
+        """Run a unary method synchronously.
+
+        Returns:
+            ``(response_buf, http_status)`` — the IPC response stream
+            and the HTTP status code to use.
+
+        Raises:
+            _RpcHttpError: For protocol-level errors (bad IPC, missing
+                metadata, param validation failures).
+
+        """
+        try:
+            ipc_method, kwargs = _read_request(stream)
+            if ipc_method != method_name:
+                raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
+            _deserialize_params(kwargs, info.param_types)
+            _validate_params(info.name, kwargs, info.param_types)
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+
+        sink = _LogSink()
+        if method_name in self._server.emit_log_methods:
+            kwargs["emit_log"] = sink
+
+        schema = info.result_schema
+        resp_buf = BytesIO()
+        http_status = HTTPStatus.OK
+        with ipc.new_stream(resp_buf, schema) as writer:
+            sink.flush_contents(writer, schema)
+            try:
+                result = getattr(self._server.implementation, method_name)(**kwargs)
+                _validate_result(info.name, result, info.result_type)
+                _write_result_batch(writer, schema, result, self._server.external_config)
+            except (TypeError, pa.ArrowInvalid) as exc:
+                _write_error_batch(writer, schema, exc)
+                http_status = HTTPStatus.BAD_REQUEST
+            except Exception as exc:
+                _write_error_batch(writer, schema, exc)
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+        resp_buf.seek(0)
+        return resp_buf, http_status
+
     def _bidi_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run bidi init synchronously."""
         try:
-            _, kwargs = _read_request(stream)
+            ipc_method, kwargs = _read_request(stream)
+            if ipc_method != method_name:
+                raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
             _deserialize_params(kwargs, info.param_types)
             _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration) as exc:
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Inject emit_log if the implementation accepts it
@@ -311,24 +359,29 @@ class _HttpRpcApp:
 
         try:
             result: BidiStream[BidiStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
+        except (TypeError, pa.ArrowInvalid) as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
         except Exception as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
-        state = result.state
-        output_schema = result.output_schema
+        try:
+            state = result.state
+            output_schema = result.output_schema
 
-        # Pack state + schema into a signed token
-        state_bytes = state.serialize_to_bytes()
-        schema_bytes = output_schema.serialize().to_pybytes()
-        token = _pack_state_token(state_bytes, schema_bytes, self._signing_key)
+            # Pack state + schema into a signed token
+            state_bytes = state.serialize_to_bytes()
+            schema_bytes = output_schema.serialize().to_pybytes()
+            token = _pack_state_token(state_bytes, schema_bytes, self._signing_key)
 
-        # Write response: log batches + zero-row batch with token in metadata
-        resp_buf = BytesIO()
-        with ipc.new_stream(resp_buf, output_schema) as writer:
-            sink.flush_contents(writer, output_schema)
-            state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
-            zero_batch = empty_batch(output_schema)
-            writer.write_batch(zero_batch, custom_metadata=state_metadata)
+            # Write response: log batches + zero-row batch with token in metadata
+            resp_buf = BytesIO()
+            with ipc.new_stream(resp_buf, output_schema) as writer:
+                sink.flush_contents(writer, output_schema)
+                state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
+                zero_batch = empty_batch(output_schema)
+                writer.write_batch(zero_batch, custom_metadata=state_metadata)
+        except Exception as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
         resp_buf.seek(0)
         return resp_buf
@@ -355,7 +408,13 @@ class _HttpRpcApp:
         token = custom_metadata.get(STATE_KEY) if custom_metadata is not None else None
 
         # Resolve ExternalLocation on input batch
-        input_batch, resolved_cm = resolve_external_location(input_batch, custom_metadata, self._server.external_config)
+        try:
+            input_batch, resolved_cm = resolve_external_location(
+                input_batch, custom_metadata, self._server.external_config
+            )
+        except Exception as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
+
         if token is None:
             raise _RpcHttpError(
                 RuntimeError("Missing state token in exchange request"),
@@ -419,15 +478,17 @@ class _HttpRpcApp:
         with ipc.new_stream(resp_buf, schema) as writer:
             if sink is not None:
                 sink.flush_contents(writer, schema)
+            cumulative_bytes = 0
             try:
                 while True:
-                    out = OutputCollector(schema)
+                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
                     state.produce(out)
                     if not out.finished:
                         out.validate()
                     _flush_collector(writer, out, self._server.external_config)
                     if out.finished:
                         break
+                    cumulative_bytes = out.total_data_bytes
                     # Check size limit after flushing each produce cycle
                     if max_bytes is not None and resp_buf.tell() >= max_bytes:
                         # Serialize state into a continuation token
@@ -445,10 +506,12 @@ class _HttpRpcApp:
     def _server_stream_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run a server-stream method synchronously with resumable support."""
         try:
-            _, kwargs = _read_request(stream)
+            ipc_method, kwargs = _read_request(stream)
+            if ipc_method != method_name:
+                raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
             _deserialize_params(kwargs, info.param_types)
             _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration) as exc:
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Inject emit_log if the implementation accepts it
@@ -458,6 +521,8 @@ class _HttpRpcApp:
 
         try:
             result: ServerStream[ServerStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
+        except (TypeError, pa.ArrowInvalid) as exc:
+            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
         except Exception as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
@@ -554,28 +619,19 @@ class _RpcResource:
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
 
-            # Use resumable path for server-stream when max_stream_response_bytes is configured
-            if info.method_type == MethodType.SERVER_STREAM and self._app._max_stream_response_bytes is not None:
-                result_stream = self._app._server_stream_sync(method, info, req.bounded_stream)
+            if info.method_type == MethodType.UNARY:
+                result_stream, http_status = self._app._unary_sync(method, info, req.bounded_stream)
                 resp.content_type = _ARROW_CONTENT_TYPE
                 resp.stream = result_stream
+                resp.status = str(http_status.value)
                 return
+
+            # SERVER_STREAM
+            result_stream = self._app._server_stream_sync(method, info, req.bounded_stream)
+            resp.content_type = _ARROW_CONTENT_TYPE
+            resp.stream = result_stream
         except _RpcHttpError as e:
             _set_error_response(resp, e.cause, status_code=e.status_code, schema=e.schema)
-            return
-
-        resp_buf = BytesIO()
-        transport = PipeTransport(req.bounded_stream, resp_buf)
-        try:
-            self._app._server.serve_one(transport)
-        except pa.ArrowInvalid:
-            # serve_one writes an Arrow error stream before re-raising;
-            # return it with a 400 status.
-            resp.status = str(HTTPStatus.BAD_REQUEST.value)
-
-        resp_buf.seek(0)
-        resp.content_type = _ARROW_CONTENT_TYPE
-        resp.stream = resp_buf
 
 
 class _BidiInitResource:
@@ -961,7 +1017,8 @@ def http_connect(
         protocol: The Protocol class defining the RPC interface.
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
             Required when *client* is ``None``; ignored when a pre-built
-            *client* is provided.
+            *client* is provided.  The internally-created client follows
+            redirects (307/308) transparently.
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         on_log: Optional callback for log messages from the server.
         client: Optional HTTP client — ``httpx.Client`` for production,
@@ -980,7 +1037,7 @@ def http_connect(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx.Client(base_url=base_url)
+        client = httpx.Client(base_url=base_url, follow_redirects=True)
 
     url_prefix = prefix
     try:

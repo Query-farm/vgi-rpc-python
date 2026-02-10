@@ -217,14 +217,21 @@ class OutputCollector:
     data batch they annotate).
     """
 
-    __slots__ = ("_batches", "_data_batch_idx", "_finished", "_output_schema")
+    __slots__ = ("_batches", "_data_batch_idx", "_finished", "_output_schema", "_prior_data_bytes")
 
-    def __init__(self, output_schema: pa.Schema) -> None:
-        """Initialize with the output schema for this stream."""
+    def __init__(self, output_schema: pa.Schema, *, prior_data_bytes: int = 0) -> None:
+        """Initialize with the output schema for this stream.
+
+        Args:
+            output_schema: The Arrow schema for data batches.
+            prior_data_bytes: Cumulative data bytes from earlier produce/process calls in this stream.
+
+        """
         self._output_schema = output_schema
         self._batches: list[AnnotatedBatch] = []
         self._finished: bool = False
         self._data_batch_idx: int | None = None
+        self._prior_data_bytes = prior_data_bytes
 
     @property
     def output_schema(self) -> pa.Schema:
@@ -235,6 +242,17 @@ class OutputCollector:
     def finished(self) -> bool:
         """Whether finish() has been called."""
         return self._finished
+
+    @property
+    def total_data_bytes(self) -> int:
+        """Cumulative data bytes emitted across the stream so far.
+
+        Includes bytes from prior produce/process calls plus the current
+        data batch (if one has been emitted).  Measured via
+        ``pa.RecordBatch.get_total_buffer_size()``.
+        """
+        current = self._batches[self._data_batch_idx].batch.get_total_buffer_size() if self._data_batch_idx is not None else 0
+        return self._prior_data_bytes + current
 
     @property
     def batches(self) -> list[AnnotatedBatch]:
@@ -411,7 +429,31 @@ class VersionError(Exception):
 
 @dataclass(frozen=True)
 class RpcMethodInfo:
-    """Metadata for a single RPC method, derived from Protocol type hints."""
+    """Metadata for a single RPC method, derived from Protocol type hints.
+
+    Produced by :func:`rpc_methods` when introspecting a Protocol class.
+    Each instance describes one method's wire-protocol details: its Arrow
+    schemas, parameter types and defaults, and the original docstring.
+
+    Attributes:
+        name: Method name as it appears on the Protocol.
+        params_schema: Arrow schema for the serialized request parameters.
+        result_schema: Arrow schema for the serialized response (unary only;
+            empty schema for stream methods).
+        result_type: The raw Python return-type annotation (e.g. ``float``,
+            ``ServerStream[MyState]``).
+        method_type: Whether this is a ``UNARY``, ``SERVER_STREAM``, or
+            ``BIDI_STREAM`` call.
+        has_return: ``True`` when the unary method returns a value (``False``
+            for ``-> None`` or stream methods).
+        doc: The method's docstring from the Protocol class, or ``None`` if
+            no docstring was provided.
+        param_defaults: Mapping of parameter name to default value for
+            parameters that have defaults in the Protocol signature.
+        param_types: Mapping of parameter name to its Python type annotation
+            (excludes ``self`` and ``return``).
+
+    """
 
     name: str
     params_schema: pa.Schema
@@ -1210,15 +1252,17 @@ class RpcServer:
         state = result.state
         with ipc.new_stream(transport.writer, schema) as stream_writer:
             sink.flush_contents(stream_writer, schema)
+            cumulative_bytes = 0
             try:
                 while True:
-                    out = OutputCollector(schema)
+                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
                     state.produce(out)
                     if not out.finished:
                         out.validate()
                     _flush_collector(stream_writer, out, self._external_config)
                     if out.finished:
                         break
+                    cumulative_bytes = out.total_data_bytes
             except Exception as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
                     _write_error_batch(stream_writer, schema, exc)
@@ -1241,6 +1285,7 @@ class RpcServer:
 
         with ipc.new_stream(transport.writer, output_schema) as output_writer:
             sink.flush_contents(output_writer, output_schema)
+            cumulative_bytes = 0
             try:
                 while True:
                     try:
@@ -1259,10 +1304,11 @@ class RpcServer:
                         )
 
                     ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
-                    out = OutputCollector(output_schema)
+                    out = OutputCollector(output_schema, prior_data_bytes=cumulative_bytes)
                     state.process(ab_in, out)
                     out.validate()
                     _flush_collector(output_writer, out, self._external_config)
+                    cumulative_bytes = out.total_data_bytes
             except Exception as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
                     _write_error_batch(output_writer, output_schema, exc)

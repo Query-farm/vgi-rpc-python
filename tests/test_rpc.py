@@ -1407,6 +1407,82 @@ class TestOutputCollector:
         assert out.batches[0].batch.num_rows == 0  # log
         assert out.batches[1].batch.num_rows == 1  # data
 
+    def test_total_data_bytes_before_emit(self) -> None:
+        """total_data_bytes returns prior_data_bytes when no data batch emitted."""
+        schema = pa.schema([pa.field("x", pa.int64())])
+        out = OutputCollector(schema, prior_data_bytes=100)
+        assert out.total_data_bytes == 100
+
+    def test_total_data_bytes_after_emit(self) -> None:
+        """total_data_bytes includes current batch size after emit."""
+        schema = pa.schema([pa.field("x", pa.int64())])
+        batch = pa.RecordBatch.from_pydict({"x": [1, 2, 3]}, schema=schema)
+        out = OutputCollector(schema, prior_data_bytes=100)
+        out.emit(batch)
+        assert out.total_data_bytes == 100 + batch.get_total_buffer_size()
+
+    def test_total_data_bytes_zero_prior(self) -> None:
+        """total_data_bytes with default prior_data_bytes is just the batch size."""
+        schema = pa.schema([pa.field("x", pa.int64())])
+        batch = pa.RecordBatch.from_pydict({"x": [10, 20]}, schema=schema)
+        out = OutputCollector(schema)
+        out.emit(batch)
+        assert out.total_data_bytes == batch.get_total_buffer_size()
+
+    def test_total_data_bytes_cumulative_across_produce_calls(self) -> None:
+        """Simulates the server loop: cumulative bytes grow across produce calls."""
+        schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
+        state = GenerateState(count=3)
+
+        cumulative_bytes = 0
+        for _ in range(3):
+            out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
+            state.produce(out)
+            assert not out.finished
+            assert out.total_data_bytes > cumulative_bytes
+            cumulative_bytes = out.total_data_bytes
+
+        assert cumulative_bytes > 0
+
+    def test_total_data_bytes_early_stop(self) -> None:
+        """A stream state can use total_data_bytes to stop early."""
+
+        @dataclass
+        class ByteLimitedState(ServerStreamState):
+            """Stops when total_data_bytes exceeds a threshold."""
+
+            max_bytes: int
+            emitted: int = 0
+
+            def produce(self, out: OutputCollector) -> None:
+                """Emit a batch or finish if byte threshold reached."""
+                if out.total_data_bytes >= self.max_bytes:
+                    out.finish()
+                    return
+                out.emit_pydict({"x": list(range(100))})
+                self.emitted += 1
+
+        schema = pa.schema([pa.field("x", pa.int64())])
+        # Use a small threshold so the stream finishes after a few batches
+        single_batch = pa.RecordBatch.from_pydict({"x": list(range(100))}, schema=schema)
+        single_size = single_batch.get_total_buffer_size()
+        threshold = single_size * 2 + 1  # allow ~2 batches
+
+        state = ByteLimitedState(max_bytes=threshold)
+        cumulative_bytes = 0
+        batches_produced = 0
+        while True:
+            out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
+            state.produce(out)
+            if out.finished:
+                break
+            out.validate()
+            cumulative_bytes = out.total_data_bytes
+            batches_produced += 1
+
+        assert batches_produced == 3  # 0, 1, 2 all fit; check at 3 exceeds
+        assert state.emitted == 3
+
 
 # ---------------------------------------------------------------------------
 # Tests: AnnotatedBatch

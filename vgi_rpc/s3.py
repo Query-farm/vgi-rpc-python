@@ -39,8 +39,6 @@ class S3Storage:
         region_name: AWS region (``None`` uses boto3 default).
         endpoint_url: Custom endpoint for S3-compatible services
             (e.g. MinIO, LocalStack).
-        content_encoding: Optional HTTP ``Content-Encoding`` header
-            to set on stored objects (e.g. ``"zstd"``).
 
     """
 
@@ -49,7 +47,6 @@ class S3Storage:
     presign_expiry_seconds: int = 3600
     region_name: str | None = None
     endpoint_url: str | None = field(default=None, repr=False)
-    content_encoding: str | None = None
     _pool: _S3Pool = field(default_factory=_S3Pool, init=False, repr=False, compare=False, hash=False)
 
     def _get_client(self) -> Any:
@@ -66,12 +63,14 @@ class S3Storage:
                 )
             return pool.client
 
-    def upload(self, data: bytes, schema: pa.Schema) -> str:
+    def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Upload IPC data to S3 and return a pre-signed GET URL.
 
         Args:
             data: Serialized Arrow IPC stream bytes.
             schema: Schema of the data (unused but required by protocol).
+            content_encoding: Optional encoding applied to *data*
+                (e.g. ``"zstd"``).
 
         Returns:
             A pre-signed URL that can be used to download the data.
@@ -79,7 +78,7 @@ class S3Storage:
         """
         client = self._get_client()
 
-        ext = ".arrow.zst" if self.content_encoding == "zstd" else ".arrow"
+        ext = ".arrow.zst" if content_encoding == "zstd" else ".arrow"
         key = f"{self.prefix}{uuid.uuid4().hex}{ext}"
 
         put_kwargs: dict[str, str | bytes] = {
@@ -88,8 +87,8 @@ class S3Storage:
             "Body": data,
             "ContentType": "application/octet-stream",
         }
-        if self.content_encoding is not None:
-            put_kwargs["ContentEncoding"] = self.content_encoding
+        if content_encoding is not None:
+            put_kwargs["ContentEncoding"] = content_encoding
 
         client.put_object(**put_kwargs)
 
