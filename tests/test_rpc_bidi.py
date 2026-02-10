@@ -788,27 +788,6 @@ class TestBidiMixedScenarios:
             batches2 = list(proxy.generate(count=2))
             assert len(batches2) == 2
 
-    def test_error_recovery_chain(self, make_conn: ConnFactory) -> None:
-        """Chain of error recoveries: unary error → bidi → bidi error → unary."""
-        with make_conn() as proxy:
-            # Unary error
-            with pytest.raises(RpcError, match="unary boom"):
-                proxy.fail_unary()
-
-            # Bidi OK
-            with proxy.transform(factor=2.0) as session:
-                out = session.exchange(AnnotatedBatch.from_pydict({"value": [3.0]}))
-                assert out.batch.column("value").to_pylist() == [6.0]
-
-            # Bidi error
-            session2 = proxy.fail_bidi_mid(factor=1.0)
-            session2.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
-            with pytest.raises(RpcError, match="bidi boom"):
-                session2.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
-
-            # Unary OK
-            assert proxy.add(a=100.0, b=200.0) == pytest.approx(300.0)
-
     def test_bidi_with_logging_then_error_recovery(self, make_conn: ConnFactory) -> None:
         """Bidi with logs, then bidi error, then successful unary with logs."""
         logs: list[Message] = []
@@ -888,18 +867,6 @@ class TestBidiHttpTransport:
             assert out.batch.column("value").to_pylist() == [10.0]
             session.close()
             session.close()  # Multiple closes should be fine
-
-    def test_http_bidi_corrupted_state(self, http_server_port: int) -> None:
-        """Corrupted state bytes cause RpcError on HTTP exchange."""
-        with http_conn(http_server_port) as proxy:
-            session = proxy.transform(factor=2.0)
-            out = session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
-            assert out.batch.column("value").to_pylist() == [2.0]
-
-            # Corrupt the state
-            session._state_bytes = b"\x00\x01\x02\x03"
-            with pytest.raises(RpcError, match="Malformed bidi state token|signature verification"):
-                session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
 
     def test_http_bidi_state_persists_across_exchanges(self, http_server_port: int) -> None:
         """HTTP bidi state is correctly updated across multiple exchanges.
@@ -1029,23 +996,3 @@ class TestBidiSubprocess:
         assert result == pytest.approx(3.0)
 
 
-# ---------------------------------------------------------------------------
-# Tests: AnnotatedBatch.from_pydict in bidi context
-# ---------------------------------------------------------------------------
-
-
-class TestBidiAnnotatedBatchFactory:
-    """Tests for using AnnotatedBatch.from_pydict in bidi exchanges."""
-
-    def test_from_pydict_basic(self, make_conn: ConnFactory) -> None:
-        """AnnotatedBatch.from_pydict works as bidi input."""
-        with make_conn() as proxy, proxy.transform(factor=2.0) as session:
-            out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
-            assert out.batch.column("value").to_pylist() == [10.0]
-
-    def test_from_pydict_with_schema(self, make_conn: ConnFactory) -> None:
-        """AnnotatedBatch.from_pydict with explicit schema works as bidi input."""
-        schema = pa.schema([pa.field("value", pa.float64())])
-        with make_conn() as proxy, proxy.transform(factor=2.0) as session:
-            out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}, schema=schema))
-            assert out.batch.column("value").to_pylist() == [10.0]

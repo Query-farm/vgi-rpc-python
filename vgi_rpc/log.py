@@ -191,10 +191,6 @@ class Message:
         result[extra_key] = json.dumps(log_data)
         return result
 
-    def should_terminate(self) -> bool:
-        """Check if processing should terminate due to an exception."""
-        return self.level == Level.EXCEPTION
-
     @classmethod
     def from_exception(cls, exc: BaseException) -> Message:
         """Produce a Message from an exception."""
@@ -217,10 +213,16 @@ class Message:
         }
 
         if tb_exc.__cause__:
-            extra["cause"] = "".join(tb_exc.__cause__.format())
+            cause_str = "".join(tb_exc.__cause__.format())
+            if len(cause_str) > cls._MAX_TRACEBACK_CHARS:
+                cause_str = cause_str[: cls._MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
+            extra["cause"] = cause_str
 
         if tb_exc.__context__ and not tb_exc.__suppress_context__:
-            extra["context"] = "".join(tb_exc.__context__.format())
+            context_str = "".join(tb_exc.__context__.format())
+            if len(context_str) > cls._MAX_TRACEBACK_CHARS:
+                context_str = context_str[: cls._MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
+            extra["context"] = context_str
 
         extra["frames"] = [
             {

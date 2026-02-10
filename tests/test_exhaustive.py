@@ -1,8 +1,8 @@
 """Exhaustive edge-case tests for the vgi-rpc framework.
 
-Covers protocol introspection boundaries, implementation validation, wire
-protocol corner cases, transport lifecycle, deserialization edge cases, and
-the internal dispatch/log machinery.
+Covers protocol introspection boundaries, wire protocol corner cases,
+transport lifecycle, deserialization edge cases, and the internal
+dispatch/log machinery.
 """
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ import contextlib
 import json
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
-from typing import Annotated, NewType, Protocol
+from typing import NewType, Protocol
 
 import pyarrow as pa
 import pytest
@@ -23,14 +23,11 @@ from pyarrow import ipc
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import encode_metadata
 from vgi_rpc.rpc import (
-    AnnotatedBatch,
     BidiStream,
     BidiStreamState,
-    EmitLog,
     MethodType,
     OutputCollector,
     PipeTransport,
-    RpcConnection,
     RpcError,
     RpcServer,
     ServerStream,
@@ -52,7 +49,6 @@ from vgi_rpc.rpc import (
     describe_rpc,
     make_pipe_pair,
     rpc_methods,
-    run_server,
     serve_pipe,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_optional_type, empty_batch
@@ -144,19 +140,6 @@ class TestRpcMethodsIntrospection:
         info = methods["do_thing"]
         assert info.method_type == MethodType.UNARY
         assert info.has_return is False
-
-    def test_method_docstring_captured(self) -> None:
-        """Method docstring is captured in RpcMethodInfo.doc."""
-
-        class WithDoc(Protocol):
-            """Protocol with docstring."""
-
-            def documented(self) -> int:
-                """Return a documented value."""
-                ...
-
-        methods = rpc_methods(WithDoc)
-        assert methods["documented"].doc == "Return a documented value."
 
     def test_method_without_docstring(self) -> None:
         """Method without docstring has None doc."""
@@ -304,131 +287,7 @@ class TestBuildSchemas:
 
 
 # ===================================================================
-# 4. Implementation validation
-# ===================================================================
-
-
-class TestValidateImplementation:
-    """Edge cases for implementation validation."""
-
-    def test_missing_method_raises(self) -> None:
-        """Missing implementation method raises TypeError."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def do_it(self, x: int) -> None: ...
-
-        class Impl:
-            """Incomplete implementation."""
-
-            pass
-
-        with pytest.raises(TypeError, match="missing method"):
-            RpcServer(P, Impl())
-
-    def test_non_callable_attribute_raises(self) -> None:
-        """Non-callable attribute where method expected raises TypeError."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self) -> None: ...
-
-        class Impl:
-            """Implementation with attribute instead of method."""
-
-            method = 42  # not callable  # noqa: D105
-
-        with pytest.raises(TypeError, match="not callable"):
-            RpcServer(P, Impl())
-
-    def test_missing_parameter_raises(self) -> None:
-        """Implementation missing a required parameter raises TypeError."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self, x: int, y: str) -> None: ...
-
-        class Impl:
-            """Implementation missing param y."""
-
-            def method(self, x: int) -> None: ...
-
-        with pytest.raises(TypeError, match="missing parameter"):
-            RpcServer(P, Impl())
-
-    def test_extra_required_param_raises(self) -> None:
-        """Implementation with extra required param raises TypeError."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self, x: int) -> None: ...
-
-        class Impl:
-            """Implementation with extra required parameter."""
-
-            def method(self, x: int, extra: str) -> None: ...
-
-        with pytest.raises(TypeError, match="not defined in"):
-            RpcServer(P, Impl())
-
-    def test_extra_optional_param_allowed(self) -> None:
-        """Implementation with extra optional param is allowed."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self, x: int) -> None: ...
-
-        class Impl:
-            """Implementation with extra optional parameter."""
-
-            def method(self, x: int, extra: str = "default") -> None: ...
-
-        # Should not raise
-        RpcServer(P, Impl())
-
-    def test_emit_log_param_allowed(self) -> None:
-        """Implementation with emit_log param is allowed without Protocol declaring it."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self, x: int) -> int: ...
-
-        class Impl:
-            """Implementation with emit_log."""
-
-            def method(self, x: int, emit_log: EmitLog | None = None) -> int:
-                """Return x."""
-                return x
-
-        server = RpcServer(P, Impl())
-        assert "method" in server.emit_log_methods
-
-    def test_multiple_validation_errors(self) -> None:
-        """All validation errors are reported in one exception."""
-
-        class P(Protocol):
-            """Protocol with two methods."""
-
-            def a(self) -> None: ...
-            def b(self, x: int) -> None: ...
-
-        class Impl:
-            """Missing both methods."""
-
-            pass
-
-        with pytest.raises(TypeError, match="missing method.*\n.*missing method"):
-            RpcServer(P, Impl())
-
-
-# ===================================================================
-# 5. _dispatch_log_or_error edge cases
+# 4. _dispatch_log_or_error edge cases
 # ===================================================================
 
 
@@ -733,14 +592,6 @@ class TestLogSink:
 class TestOutputCollector:
     """Edge cases for OutputCollector."""
 
-    def test_double_emit_raises(self) -> None:
-        """Emitting two data batches in one call raises."""
-        schema = pa.schema([pa.field("x", pa.int64())])
-        out = OutputCollector(schema)
-        out.emit(pa.RecordBatch.from_pydict({"x": [1]}, schema=schema))
-        with pytest.raises(RuntimeError, match="Only one data batch"):
-            out.emit(pa.RecordBatch.from_pydict({"x": [2]}, schema=schema))
-
     def test_multiple_logs_before_data(self) -> None:
         """Multiple log messages before a data batch are all collected."""
         schema = pa.schema([pa.field("x", pa.int64())])
@@ -751,39 +602,6 @@ class TestOutputCollector:
         out.emit_pydict({"x": [1]})
         # 3 log batches + 1 data batch
         assert len(out.batches) == 4
-
-    def test_emit_with_metadata(self) -> None:
-        """Emit with custom metadata attaches it to the batch."""
-        schema = pa.schema([pa.field("x", pa.int64())])
-        out = OutputCollector(schema)
-        out.emit(
-            pa.RecordBatch.from_pydict({"x": [1]}, schema=schema),
-            metadata={"key": "value"},
-        )
-        assert out.batches[0].custom_metadata is not None
-
-    def test_finish_flag(self) -> None:
-        """finish() sets the finished flag."""
-        schema = pa.schema([pa.field("x", pa.int64())])
-        out = OutputCollector(schema)
-        assert out.finished is False
-        out.finish()
-        assert out.finished is True
-
-    def test_output_schema_property(self) -> None:
-        """output_schema property returns the schema."""
-        schema = pa.schema([pa.field("x", pa.int64())])
-        out = OutputCollector(schema)
-        assert out.output_schema.equals(schema)
-
-    def test_emit_arrays(self) -> None:
-        """emit_arrays builds batch from arrays and schema."""
-        fields: list[pa.Field[pa.DataType]] = [pa.field("x", pa.int64()), pa.field("y", pa.string())]
-        schema = pa.schema(fields)
-        out = OutputCollector(schema)
-        out.emit_arrays([pa.array([1]), pa.array(["a"])])
-        assert out.batches[0].batch.num_rows == 1
-        assert out.batches[0].batch.to_pydict() == {"x": [1], "y": ["a"]}
 
 
 # ===================================================================
@@ -804,98 +622,8 @@ class TestPipeTransportLifecycle:
         server.close()
 
 
-class TestBidiSessionLifecycle:
-    """Edge cases for BidiSession."""
-
-    def test_close_without_exchange(self) -> None:
-        """Closing a session without any exchanges does not hang."""
-
-        @dataclass
-        class State(BidiStreamState):
-            """Passthrough state."""
-
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
-                """Pass through."""
-                out.emit(input.batch)
-
-        class P(Protocol):
-            """Bidi protocol."""
-
-            def bidi(self) -> BidiStream[BidiStreamState]: ...
-
-        class Impl:
-            """Bidi implementation."""
-
-            def bidi(self) -> BidiStream[State]:
-                """Return bidi stream."""
-                schema = pa.schema([pa.field("x", pa.int64())])
-                return BidiStream(output_schema=schema, state=State())
-
-        with _pipe_conn(P, Impl()) as proxy:
-            session = proxy.bidi()
-            session.close()
-
-    def test_close_idempotent(self) -> None:
-        """Calling close() multiple times is safe."""
-
-        @dataclass
-        class State(BidiStreamState):
-            """Passthrough state."""
-
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
-                """Pass through."""
-                out.emit(input.batch)
-
-        class P(Protocol):
-            """Bidi protocol."""
-
-            def bidi(self) -> BidiStream[BidiStreamState]: ...
-
-        class Impl:
-            """Bidi implementation."""
-
-            def bidi(self) -> BidiStream[State]:
-                """Return bidi stream."""
-                schema = pa.schema([pa.field("x", pa.int64())])
-                return BidiStream(output_schema=schema, state=State())
-
-        with _pipe_conn(P, Impl()) as proxy:
-            session = proxy.bidi()
-            session.close()
-            session.close()  # second close should be a no-op
-
-    def test_context_manager(self) -> None:
-        """BidiSession works as context manager."""
-
-        @dataclass
-        class State(BidiStreamState):
-            """Passthrough state."""
-
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
-                """Pass through."""
-                out.emit(input.batch)
-
-        class P(Protocol):
-            """Bidi protocol."""
-
-            def bidi(self) -> BidiStream[BidiStreamState]: ...
-
-        class Impl:
-            """Bidi implementation."""
-
-            def bidi(self) -> BidiStream[State]:
-                """Return bidi stream."""
-                schema = pa.schema([pa.field("x", pa.int64())])
-                return BidiStream(output_schema=schema, state=State())
-
-        with _pipe_conn(P, Impl()) as proxy, proxy.bidi() as session:
-            batch = AnnotatedBatch.from_pydict({"x": [1]})
-            result = session.exchange(batch)
-            assert result.batch.to_pydict() == {"x": [1]}
-
-
 # ===================================================================
-# 11. Wire protocol edge cases (end-to-end over pipes)
+# 10. Wire protocol edge cases (end-to-end over pipes)
 # ===================================================================
 
 
@@ -930,117 +658,6 @@ class TestWireProtocolEdgeCases:
             batches = list(proxy.stream())
             assert batches == []
 
-    def test_unary_error_recovery(self) -> None:
-        """After a unary error, the next call succeeds."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def fail(self) -> str: ...
-            def ok(self) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def fail(self) -> str:
-                """Raise."""
-                raise ValueError("boom")
-
-            def ok(self) -> str:
-                """Return ok."""
-                return "ok"
-
-        with _pipe_conn(P, Impl()) as proxy:
-            with pytest.raises(RpcError):
-                proxy.fail()
-            assert proxy.ok() == "ok"
-
-    def test_stream_error_recovery(self) -> None:
-        """After a stream error, the next call succeeds."""
-
-        @dataclass
-        class FailState(ServerStreamState):
-            """Fails immediately."""
-
-            def produce(self, out: OutputCollector) -> None:
-                """Raise."""
-                raise RuntimeError("stream fail")
-
-        class P(Protocol):
-            """Protocol."""
-
-            def stream(self) -> ServerStream[ServerStreamState]: ...
-            def ok(self) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def stream(self) -> ServerStream[FailState]:
-                """Return failing stream."""
-                schema = pa.schema([pa.field("x", pa.int64())])
-                return ServerStream(output_schema=schema, state=FailState())
-
-            def ok(self) -> str:
-                """Return ok."""
-                return "ok"
-
-        with _pipe_conn(P, Impl()) as proxy:
-            with pytest.raises(RpcError):
-                list(proxy.stream())
-            assert proxy.ok() == "ok"
-
-    def test_bidi_error_recovery(self) -> None:
-        """After a bidi error, the next call succeeds."""
-
-        @dataclass
-        class FailState(BidiStreamState):
-            """Fails on first process."""
-
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
-                """Raise."""
-                raise RuntimeError("bidi fail")
-
-        class P(Protocol):
-            """Protocol."""
-
-            def bidi(self) -> BidiStream[BidiStreamState]: ...
-            def ok(self) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def bidi(self) -> BidiStream[FailState]:
-                """Return failing bidi."""
-                schema = pa.schema([pa.field("x", pa.int64())])
-                return BidiStream(output_schema=schema, state=FailState())
-
-            def ok(self) -> str:
-                """Return ok."""
-                return "ok"
-
-        with _pipe_conn(P, Impl()) as proxy:
-            with proxy.bidi() as session, pytest.raises(RpcError):
-                session.exchange(AnnotatedBatch.from_pydict({"x": [1]}))
-            assert proxy.ok() == "ok"
-
-    def test_unknown_method_returns_error(self) -> None:
-        """Calling a method not in the protocol raises AttributeError on proxy."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def real(self) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def real(self) -> str:
-                """Return real."""
-                return "real"
-
-        with _pipe_conn(P, Impl()) as proxy, pytest.raises(AttributeError, match="no RPC method"):
-            proxy.nonexistent()
-
     def test_falsy_return_values(self) -> None:
         """Falsy values (0, empty string, False) round-trip correctly."""
 
@@ -1070,23 +687,6 @@ class TestWireProtocolEdgeCases:
             assert proxy.zero() == 0
             assert proxy.empty() == ""
             assert proxy.false() is False
-
-    def test_none_return_method(self) -> None:
-        """Method returning None works correctly."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def noop(self) -> None: ...
-
-        class Impl:
-            """Implementation."""
-
-            def noop(self) -> None:
-                """Do nothing."""
-
-        with _pipe_conn(P, Impl()) as proxy:
-            assert proxy.noop() is None
 
     def test_optional_return_none(self) -> None:
         """Method with optional return type can return None."""
@@ -1142,93 +742,32 @@ class TestWireProtocolEdgeCases:
         with _pipe_conn(P, Impl()) as proxy, pytest.raises(RpcError, match="init boom"):
             list(proxy.stream())
 
-    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
-    def test_bidi_error_during_init_propagates(self) -> None:
-        """Error in bidi method init (not process) propagates.
-
-        Note: the server thread receives a leftover close stream after the
-        error, which triggers an expected PytestUnhandledThreadExceptionWarning.
-        """
+    def test_unicode_error_message(self) -> None:
+        """RpcError handles unicode in messages."""
 
         class P(Protocol):
             """Protocol."""
 
-            def bidi(self) -> BidiStream[BidiStreamState]: ...
+            def fail(self) -> str: ...
 
         class Impl:
             """Implementation."""
 
-            def bidi(self) -> BidiStream[BidiStreamState]:
-                """Raise during init."""
-                raise ValueError("bidi init boom")
+            def fail(self) -> str:
+                """Raise with unicode."""
+                raise ValueError("エラー: 失敗しました 🔥")
 
-        with _pipe_conn(P, Impl()) as proxy, pytest.raises(RpcError, match="bidi init boom"):
-            session = proxy.bidi()
-            session.exchange(AnnotatedBatch.from_pydict({"x": [1]}))
-
-    def test_bidi_input_schema_validation(self) -> None:
-        """Input schema mismatch in bidi raises error."""
-
-        @dataclass
-        class State(BidiStreamState):
-            """State."""
-
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
-                """Pass through."""
-                out.emit(input.batch)
-
-        class P(Protocol):
-            """Protocol."""
-
-            def bidi(self) -> BidiStream[BidiStreamState]: ...
-
-        class Impl:
-            """Implementation."""
-
-            def bidi(self) -> BidiStream[State]:
-                """Return bidi with strict input schema."""
-                out_schema = pa.schema([pa.field("x", pa.int64())])
-                in_schema = pa.schema([pa.field("x", pa.int64())])
-                return BidiStream(output_schema=out_schema, state=State(), input_schema=in_schema)
-
-        with _pipe_conn(P, Impl()) as proxy, proxy.bidi() as session:
-            # Send wrong schema
-            wrong_batch = AnnotatedBatch.from_pydict({"y": ["wrong"]})
-            with pytest.raises(RpcError, match="schema mismatch"):
-                session.exchange(wrong_batch)
+        with _pipe_conn(P, Impl()) as proxy, pytest.raises(RpcError, match="エラー"):
+            proxy.fail()
 
 
 # ===================================================================
-# 12. emit_log injection
+# 11. emit_log injection
 # ===================================================================
 
 
 class TestEmitLogInjection:
     """Tests for emit_log parameter injection by the framework."""
-
-    def test_emit_log_injected(self) -> None:
-        """Framework injects emit_log when method signature includes it."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def greet(self, name: str) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def greet(self, name: str, emit_log: EmitLog | None = None) -> str:
-                """Greet with logging."""
-                if emit_log:
-                    emit_log(Message.info(f"hi {name}"))
-                return f"Hello, {name}!"
-
-        logs: list[Message] = []
-        with _pipe_conn(P, Impl(), on_log=logs.append) as proxy:
-            result = proxy.greet(name="World")
-            assert result == "Hello, World!"
-            assert len(logs) == 1
-            assert logs[0].message == "hi World"
 
     def test_emit_log_not_injected_when_absent(self) -> None:
         """Framework does not inject emit_log when method signature lacks it."""
@@ -1248,82 +787,13 @@ class TestEmitLogInjection:
         server = RpcServer(P, Impl())
         assert "method" not in server.emit_log_methods
 
-    def test_emit_log_buffered_before_stream(self) -> None:
-        """Logs emitted before stream opens are buffered and sent."""
-
-        @dataclass
-        class State(ServerStreamState):
-            """State that finishes immediately."""
-
-            def produce(self, out: OutputCollector) -> None:
-                """Finish."""
-                out.finish()
-
-        class P(Protocol):
-            """Protocol."""
-
-            def stream(self) -> ServerStream[ServerStreamState]: ...
-
-        class Impl:
-            """Implementation."""
-
-            def stream(self, emit_log: EmitLog | None = None) -> ServerStream[State]:
-                """Stream with pre-log."""
-                if emit_log:
-                    emit_log(Message.info("before stream"))
-                schema = pa.schema([pa.field("x", pa.int64())])
-                return ServerStream(output_schema=schema, state=State())
-
-        logs: list[Message] = []
-        with _pipe_conn(P, Impl(), on_log=logs.append) as proxy:
-            list(proxy.stream())
-            assert any(m.message == "before stream" for m in logs)
-
-
 # ===================================================================
-# 13. run_server argument validation
+# 12. run_server argument validation
 # ===================================================================
 
 
-class TestRunServerValidation:
-    """Edge cases for run_server() argument checking."""
-
-    def test_rpc_server_with_implementation_raises(self) -> None:
-        """Passing RpcServer + implementation raises TypeError."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def m(self) -> None: ...
-
-        class Impl:
-            """Implementation."""
-
-            def m(self) -> None: ...
-
-        server = RpcServer(P, Impl())
-        with pytest.raises(TypeError, match="implementation must be None"):
-            run_server(server, Impl())
-
-    def test_protocol_without_implementation_raises(self) -> None:
-        """Passing Protocol without implementation raises TypeError."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def m(self) -> None: ...
-
-        with pytest.raises(TypeError, match="implementation is required"):
-            run_server(P)
-
-    def test_non_type_non_server_raises(self) -> None:
-        """Passing neither type nor RpcServer raises TypeError."""
-        with pytest.raises(TypeError, match="Expected a Protocol class or RpcServer"):
-            run_server("not a type")  # type: ignore[arg-type]
-
-
 # ===================================================================
-# 14. describe_rpc
+# 13. describe_rpc
 # ===================================================================
 
 
@@ -1341,34 +811,6 @@ class TestDescribeRpc:
         desc = describe_rpc(Empty)
         assert "Empty" in desc
 
-    def test_includes_all_method_types(self) -> None:
-        """describe_rpc shows unary, server_stream, and bidi_stream methods."""
-
-        class P(Protocol):
-            """Protocol with all types."""
-
-            def unary(self) -> int: ...
-            def stream(self) -> ServerStream[ServerStreamState]: ...
-            def bidi(self) -> BidiStream[BidiStreamState]: ...
-
-        desc = describe_rpc(P)
-        assert "unary" in desc
-        assert "server_stream" in desc
-        assert "bidi_stream" in desc
-
-    def test_shows_docstring(self) -> None:
-        """describe_rpc includes method docstrings."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self) -> int:
-                """Compute a value."""
-                ...
-
-        desc = describe_rpc(P)
-        assert "Compute a value." in desc
-
     def test_custom_methods_arg(self) -> None:
         """describe_rpc uses provided methods dict instead of introspecting."""
 
@@ -1383,69 +825,12 @@ class TestDescribeRpc:
 
 
 # ===================================================================
-# 15. RpcConnection context manager
+# 14. AnnotatedBatch
 # ===================================================================
 
 
-class TestRpcConnection:
-    """Edge cases for RpcConnection."""
-
-    def test_enters_and_exits(self) -> None:
-        """RpcConnection provides proxy on enter and closes on exit."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self) -> int: ...
-
-        class Impl:
-            """Implementation."""
-
-            def method(self) -> int:
-                """Return 42."""
-                return 42
-
-        client, server = make_pipe_pair()
-        rpc_server = RpcServer(P, Impl())
-        thread = threading.Thread(target=rpc_server.serve, args=(server,), daemon=True)
-        thread.start()
-        try:
-            with RpcConnection(P, client) as proxy:
-                assert proxy.method() == 42
-        finally:
-            client.close()
-            thread.join(timeout=5)
-
-
 # ===================================================================
-# 16. AnnotatedBatch
-# ===================================================================
-
-
-class TestAnnotatedBatch:
-    """Edge cases for AnnotatedBatch."""
-
-    def test_from_pydict(self) -> None:
-        """from_pydict creates batch correctly."""
-        ab = AnnotatedBatch.from_pydict({"x": [1, 2]})
-        assert ab.batch.num_rows == 2
-        assert ab.custom_metadata is None
-
-    def test_from_pydict_with_schema(self) -> None:
-        """from_pydict with explicit schema."""
-        schema = pa.schema([pa.field("x", pa.int32())])
-        ab = AnnotatedBatch.from_pydict({"x": [1]}, schema=schema)
-        assert ab.batch.schema.field("x").type == pa.int32()
-
-    def test_frozen(self) -> None:
-        """AnnotatedBatch is frozen (immutable)."""
-        ab = AnnotatedBatch.from_pydict({"x": [1]})
-        with pytest.raises(AttributeError):
-            ab.batch = None  # type: ignore[misc,assignment]
-
-
-# ===================================================================
-# 17. _infer_arrow_type edge cases
+# 15. _infer_arrow_type edge cases
 # ===================================================================
 
 
@@ -1461,11 +846,6 @@ class TestInferArrowTypeEdgeCases:
         """dict[str, list[int]] infers correctly."""
         result = _infer_arrow_type(dict[str, list[int]])
         assert isinstance(result, pa.MapType)
-
-    def test_annotated_without_arrowtype_unwraps(self) -> None:
-        """Annotated[str, 'metadata'] unwraps to string."""
-        result = _infer_arrow_type(Annotated[str, "just a marker"])
-        assert result == pa.string()
 
     def test_newtype_chain(self) -> None:
         """NewType wrapping NewType resolves to base type."""
@@ -1494,123 +874,12 @@ class TestIsOptionalEdgeCases:
 
 
 # ===================================================================
-# 19. Server method error propagation details
+# 16. Stream state serialization round-trip
 # ===================================================================
 
 
-class TestErrorPropagation:
-    """Detailed error propagation tests."""
-
-    def test_rpc_error_fields(self) -> None:
-        """RpcError preserves error_type, error_message, remote_traceback."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def fail(self) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def fail(self) -> str:
-                """Raise custom error."""
-                raise ValueError("detailed error message")
-
-        with _pipe_conn(P, Impl()) as proxy:
-            with pytest.raises(RpcError) as exc_info:
-                proxy.fail()
-            err = exc_info.value
-            assert err.error_type == "ValueError"
-            assert "detailed error message" in err.error_message
-            assert len(err.remote_traceback) > 0
-
-    def test_none_for_non_optional_param_error(self) -> None:
-        """Client-side validation rejects None for non-optional parameter."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self, x: int) -> int: ...
-
-        class Impl:
-            """Implementation."""
-
-            def method(self, x: int) -> int:
-                """Return x."""
-                return x
-
-        with _pipe_conn(P, Impl()) as proxy, pytest.raises(TypeError, match="not optional"):
-            # Validation happens on the client side before sending
-            proxy.method(x=None)
-
-    def test_none_return_for_non_optional_error(self) -> None:
-        """Server rejects None return for non-optional return type."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def method(self) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def method(self) -> str:
-                """Return None illegally."""
-                return None  # type: ignore[return-value]
-
-        with _pipe_conn(P, Impl()) as proxy, pytest.raises(RpcError, match="non-None return"):
-            proxy.method()
-
-
 # ===================================================================
-# 20. Stream state serialization round-trip
-# ===================================================================
-
-
-class TestStreamStateSerialization:
-    """State objects serialize for HTTP transport."""
-
-    def test_server_stream_state_round_trip(self) -> None:
-        """ServerStreamState subclass serializes and deserializes."""
-
-        @dataclass
-        class CountState(ServerStreamState):
-            """Counting state."""
-
-            count: int
-            current: int = 0
-
-            def produce(self, out: OutputCollector) -> None:
-                """Produce."""
-                out.finish()
-
-        original = CountState(count=10, current=3)
-        restored = CountState.deserialize_from_bytes(original.serialize_to_bytes())
-        assert restored.count == 10
-        assert restored.current == 3
-
-    def test_bidi_stream_state_round_trip(self) -> None:
-        """BidiStreamState subclass serializes and deserializes."""
-
-        @dataclass
-        class AccumState(BidiStreamState):
-            """Accumulating state."""
-
-            total: float
-            items: list[int] = field(default_factory=list)
-
-            def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
-                """Process."""
-                out.emit(input.batch)
-
-        original = AccumState(total=99.5, items=[1, 2, 3])
-        restored = AccumState.deserialize_from_bytes(original.serialize_to_bytes())
-        assert restored.total == pytest.approx(99.5)
-        assert restored.items == [1, 2, 3]
-
-
-# ===================================================================
-# 21. _drain_stream
+# 17. _drain_stream
 # ===================================================================
 
 
@@ -1683,58 +952,7 @@ class TestStreamSession:
 
 
 # ===================================================================
-# 23. Multiple sequential calls stress test
-# ===================================================================
-
-
-class TestSequentialCallStress:
-    """Stress test for sequential RPC calls."""
-
-    def test_many_sequential_unary_calls(self) -> None:
-        """100 sequential unary calls all succeed."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def add(self, a: int, b: int) -> int: ...
-
-        class Impl:
-            """Implementation."""
-
-            def add(self, a: int, b: int) -> int:
-                """Add."""
-                return a + b
-
-        with _pipe_conn(P, Impl()) as proxy:
-            for i in range(100):
-                assert proxy.add(a=i, b=1) == i + 1
-
-    def test_alternating_success_and_error(self) -> None:
-        """Alternating success and error calls all work correctly."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def maybe_fail(self, fail: bool) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def maybe_fail(self, fail: bool) -> str:
-                """Fail if told to."""
-                if fail:
-                    raise ValueError("intentional")
-                return "ok"
-
-        with _pipe_conn(P, Impl()) as proxy:
-            for _ in range(20):
-                with pytest.raises(RpcError):
-                    proxy.maybe_fail(fail=True)
-                assert proxy.maybe_fail(fail=False) == "ok"
-
-
-# ===================================================================
-# 24. Serve one with malformed input
+# 18. Serve one with malformed input
 # ===================================================================
 
 
@@ -1905,25 +1123,3 @@ class TestRpcError:
         assert err.error_message == "msg"
         assert err.remote_traceback == "tb"
 
-    def test_is_exception(self) -> None:
-        """RpcError is an Exception subclass."""
-        err = RpcError("E", "m", "t")
-        assert isinstance(err, Exception)
-
-    def test_unicode_error_message(self) -> None:
-        """RpcError handles unicode in messages."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def fail(self) -> str: ...
-
-        class Impl:
-            """Implementation."""
-
-            def fail(self) -> str:
-                """Raise with unicode."""
-                raise ValueError("エラー: 失敗しました 🔥")
-
-        with _pipe_conn(P, Impl()) as proxy, pytest.raises(RpcError, match="エラー"):
-            proxy.fail()

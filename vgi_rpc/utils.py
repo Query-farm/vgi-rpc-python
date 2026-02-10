@@ -17,7 +17,6 @@ IPCError : Exception raised on IPC communication errors
 
 """
 
-import os
 from dataclasses import MISSING, Field, dataclass
 from dataclasses import fields as dataclass_fields
 from enum import Enum
@@ -38,14 +37,16 @@ from typing import (
 )
 
 import pyarrow as pa
-import structlog
 from pyarrow import ipc
-
-from vgi_rpc.metadata import decode_metadata
 
 __all__ = [
     "ArrowSerializableDataclass",
     "ArrowType",
+    "IPCError",
+    "deserialize_record_batch",
+    "empty_batch",
+    "read_single_record_batch",
+    "serialize_record_batch",
 ]
 
 
@@ -54,38 +55,6 @@ class _BytesSerializable(Protocol):
     """Protocol for objects that can serialize themselves to bytes."""
 
     def serialize_to_bytes(self) -> bytes: ...
-
-
-# IPC debug logging - enable with VGI_IPC_DEBUG=1
-_IPC_DEBUG = os.environ.get("VGI_IPC_DEBUG", "").lower() in ("1", "true", "yes")
-# IPC stats logging - enable with VGI_IPC_STATS=1 for aggregate stream stats
-_IPC_STATS = os.environ.get("VGI_IPC_STATS", "").lower() in ("1", "true", "yes")
-_ipc_log: structlog.stdlib.BoundLogger | None = None
-
-
-def _get_ipc_log() -> structlog.stdlib.BoundLogger:
-    """Get or create the IPC debug logger, configured to write to stderr."""
-    global _ipc_log
-    if _ipc_log is None:
-        import sys
-
-        # Configure structlog to write to stderr for IPC debugging
-        structlog.configure(
-            processors=[
-                structlog.processors.add_log_level,
-                structlog.processors.TimeStamper(fmt="iso"),
-                structlog.dev.ConsoleRenderer(),
-            ],
-            wrapper_class=structlog.make_filtering_bound_logger(0),
-            logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-        )
-        _ipc_log = structlog.get_logger().bind(component="ipc")
-    return _ipc_log
-
-
-def _schema_to_dict(schema: pa.Schema) -> dict[str, str]:
-    """Convert Arrow schema to dict of {name: type} for logging."""
-    return {field.name: str(field.type) for field in schema}
 
 
 class IPCError(Exception):
@@ -119,14 +88,6 @@ def serialize_record_batch(
     """
     with ipc.RecordBatchStreamWriter(destination, batch.schema) as writer:
         writer.write_batch(batch, custom_metadata=custom_metadata)
-
-    if _IPC_DEBUG:
-        _get_ipc_log().debug(
-            "ipc_write",
-            num_rows=batch.num_rows,
-            schema=_schema_to_dict(batch.schema),
-            metadata=decode_metadata(custom_metadata),
-        )
 
 
 def serialize_record_batch_bytes(
@@ -173,14 +134,6 @@ def deserialize_record_batch(
         except StopIteration:
             raise IPCError("No RecordBatch found in provided data") from None
 
-        if _IPC_DEBUG:
-            _get_ipc_log().debug(
-                "ipc_read",
-                num_rows=batch.num_rows,
-                schema=_schema_to_dict(batch.schema),
-                metadata=decode_metadata(custom_metadata),
-                nbytes=len(data),
-            )
         return batch, custom_metadata
 
 
@@ -209,32 +162,16 @@ def read_single_record_batch(
             try:
                 batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
             except StopIteration:
-                if _IPC_DEBUG:
-                    _get_ipc_log().error(
-                        "ipc_read: No record batch found in stream",
-                        context=context,
-                    )
                 raise IPCError(f"No record batch found in {context} stream") from None
 
             try:
                 reader.read_next_batch()
             except StopIteration:
-                if _IPC_DEBUG:
-                    _get_ipc_log().debug(
-                        "ipc_read",
-                        context=context,
-                        num_rows=batch.num_rows,
-                        schema=_schema_to_dict(batch.schema),
-                        metadata=decode_metadata(custom_metadata),
-                    )
                 return batch, custom_metadata
 
-            if _IPC_DEBUG:
-                _get_ipc_log().error(
-                    "ipc_read: Multiple batches found in stream",
-                    context=context,
-                )
             raise IPCError(f"Expected single record batch in {context} stream, but found multiple batches")
+    except IPCError:
+        raise
     except Exception as e:
         raise IPCError(f"Error reading record batch from {context} stream: {e}") from e
 
@@ -243,7 +180,6 @@ def _validate_single_row_batch(
     data: pa.RecordBatch,
     class_name: str,
     required_fields: list[str] | None = None,
-    custom_metadata: pa.KeyValueMetadata | None = None,
 ) -> dict[str, Any]:
     """Validate a RecordBatch has exactly one row and return it as a dict.
 
@@ -251,7 +187,6 @@ def _validate_single_row_batch(
         data: The RecordBatch to validate.
         class_name: Name of the class being deserialized (for error messages).
         required_fields: Optional list of field names that must be present.
-        custom_metadata: Optional custom metadata from the batch.
 
     Returns:
         The first (and only) row as a dictionary.
@@ -369,7 +304,7 @@ def _infer_arrow_type(python_type: Any) -> pa.DataType:
 
     # Handle Enum - serialize as dictionary-encoded string
     if isinstance(python_type, type) and issubclass(python_type, Enum):
-        return pa.dictionary(pa.int8(), pa.string())
+        return pa.dictionary(pa.int16(), pa.string())
 
     # Handle ArrowSerializableDataclass - serialize as struct
     if hasattr(python_type, "ARROW_SCHEMA") and isinstance(getattr(python_type, "ARROW_SCHEMA", None), pa.Schema):
@@ -435,7 +370,7 @@ class _ArrowSchemaDescriptor:
     def __get__(self, instance: object | None, owner: type["ArrowSerializableDataclass"]) -> pa.Schema:
         # Check if schema is already cached on the class
         cache_attr = f"_cached_{self._name}"
-        if hasattr(owner, cache_attr):
+        if cache_attr in owner.__dict__:
             cached: pa.Schema = getattr(owner, cache_attr)
             return cached
 
@@ -586,9 +521,12 @@ class ArrowSerializableDataclass:
         if isinstance(value, frozenset):
             return [self._convert_value_for_serialization(v) for v in value]
 
-        # Handle dict -> list of tuples for Arrow map type
+        # Handle dict -> list of tuples for Arrow map type (recursively convert keys and values)
         if isinstance(value, dict):
-            return list(value.items())
+            return [
+                (self._convert_value_for_serialization(k), self._convert_value_for_serialization(v))
+                for k, v in value.items()
+            ]
 
         # Handle list - recursively convert elements
         if isinstance(value, list):
@@ -659,7 +597,6 @@ class ArrowSerializableDataclass:
             batch,
             cls.__name__,
             required_fields=required_fields,
-            custom_metadata=custom_metadata,
         )
 
         # Use get_type_hints to resolve string annotations

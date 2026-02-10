@@ -4,11 +4,14 @@ version = "0.1.0"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
 requires-python = ">=3.12.4"
-dependencies = ["pyarrow", "structlog"]
+dependencies = ["aiohttp>=3.9", "pyarrow>=14.0", "structlog>=23.0", "tenacity>=8.0", "zstandard>=0.20"]
 
 [project.optional-dependencies]
 http = ["falcon", "httpx", "waitress"]
+s3 = ["boto3"]
+gcs = ["google-cloud-storage"]
 dev = [
+  "aioresponses",
   "httpx",
   "mypy",
   "pyarrow-stubs",
@@ -17,10 +20,12 @@ dev = [
   "pytest-examples",
   "pytest-mypy",
   "pytest-ruff",
-  "pytest-xdist",
   "ruff",
   "falcon",
   "waitress",
+  "boto3",
+  "moto[s3]",
+  "google-cloud-storage",
 ]
 
 [project.scripts]
@@ -63,6 +68,22 @@ ignore_missing_imports = true
 module = "waitress.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "boto3.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "moto.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "aioresponses.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "google.cloud.*"
+ignore_missing_imports = true
+
 [tool.ty.rules]
 unused-type-ignore-comment = "ignore"  # these comments are required by mypy
 
@@ -86,7 +107,7 @@ branch = true
 # What to measure
 source = ["vgi-rpc"]
 # Omit test files and examples from coverage
-omit = ["vgi-rpc/examples/*", "tests/*"]
+omit = ["vgi_rpc/examples/*", "tests/*"]
 
 [tool.coverage.report]
 # Fail if coverage drops below this threshold
@@ -107,4 +128,9 @@ exclude_lines = [
 directory = "htmlcov"
 
 [dependency-groups]
-dev = ["lxml>=6.0.2", "pytest-timeout>=2.4.0", "ty>=0.0.8"]
+dev = [
+    "lxml>=6.0.2",
+ "mutmut>=3.4.0",
+ "pytest-timeout>=2.4.0",
+ "ty>=0.0.8",
+]

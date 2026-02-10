@@ -2,6 +2,8 @@
 
 import contextlib
 
+from vgi_rpc.external import ExternalLocationConfig, ExternalStorage
+from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.rpc import (
@@ -34,7 +36,15 @@ from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
 # HTTP (optional — requires `pip install vgi-rpc[http]`)
 with contextlib.suppress(ImportError):
-    from vgi_rpc.http import HttpBidiSession, http_connect, make_sync_client, make_wsgi_app
+    from vgi_rpc.http import HttpBidiSession, HttpStreamSession, http_connect, make_sync_client, make_wsgi_app
+
+# S3 storage backend (optional — requires `pip install vgi-rpc[s3]`)
+with contextlib.suppress(ImportError):
+    from vgi_rpc.s3 import S3Storage  # noqa: F401
+
+# GCS storage backend (optional — requires `pip install vgi-rpc[gcs]`)
+with contextlib.suppress(ImportError):
+    from vgi_rpc.gcs import GCSStorage  # noqa: F401
 
 __all__ = [
     # Core
@@ -74,9 +84,16 @@ __all__ = [
     "ArrowType",
     # Protocol version
     "REQUEST_VERSION",
-    # HTTP (optional)
-    "HttpBidiSession",
-    "http_connect",
-    "make_wsgi_app",
-    "make_sync_client",
+    # ExternalLocation
+    "ExternalLocationConfig",
+    "ExternalStorage",
+    "FetchConfig",
 ]
+
+# Conditionally include optional backend names only when actually imported
+if "S3Storage" in dir():
+    __all__.append("S3Storage")
+if "GCSStorage" in dir():
+    __all__.append("GCSStorage")
+if "HttpBidiSession" in dir():
+    __all__ += ["HttpBidiSession", "HttpStreamSession", "http_connect", "make_wsgi_app", "make_sync_client"]

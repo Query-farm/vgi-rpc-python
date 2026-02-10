@@ -33,32 +33,44 @@ on the batch.
     Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
     Server→Client: [IPC stream: result_schema + 0..N log batches + 1 result/error batch + EOS]
 
-**Server stream**::
+**Server stream** (pipe transport)::
 
     Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
     Server→Client: [IPC stream: output_schema + (log_batch | data_batch)* + EOS]
                  On error, the final batch is 0-row with error metadata.
 
+Over HTTP, when ``max_stream_response_bytes`` is set, the response may be
+split across multiple exchanges.  The server writes a zero-row batch with a
+signed continuation token (``vgi_rpc.bidi_state`` metadata key) when the
+response size limit is reached.  The client transparently resumes via
+``POST /vgi/{method}/exchange``.
+
 **Bidi stream** (state + process)::
 
-    Phase 1 — request params (same as unary/stream):
-      Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
+    Pipe transport:
+      Phase 1 — request params (same as unary/stream):
+        Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
 
-    Phase 2 — lockstep exchange (both within a single IPC stream per direction):
-      Client→Server: [IPC stream: input batch₁ + input batch₂ + ... + EOS]
-      Server→Client: [IPC stream: (log_batch* + output_batch)* + EOS]
+      Phase 2 — lockstep exchange (both within a single IPC stream per direction):
+        Client→Server: [IPC stream: input batch₁ + input batch₂ + ... + EOS]
+        Server→Client: [IPC stream: (log_batch* + output_batch)* + EOS]
 
-    Each input batch produces one output batch (1:1 lockstep).
-    Log batches may appear before each output batch.
-    Client closes its input stream (EOS) to signal end of exchange.
-    On error, the final output batch is 0-row with error metadata.
+      Each input batch produces one output batch (1:1 lockstep).
+      Log batches may appear before each output batch.
+      Client closes its input stream (EOS) to signal end of exchange.
+      On error, the final output batch is 0-row with error metadata.
+
+Over HTTP, bidi streaming is stateless: each exchange is a separate
+``POST /vgi/{method}/exchange`` carrying the input batch and serialized
+``BidiStreamState`` in Arrow custom metadata (``vgi_rpc.bidi_state``).
 
 State-Based Stream Model
 -------------------------
 Server stream and bidi stream methods return ``ServerStream[S]`` or
 ``BidiStream[S]`` where ``S`` is a state object with explicit ``produce()``
 or ``process()`` methods.  State objects extend ``ArrowSerializableDataclass``
-so they can be serialized between requests (required for HTTP transport).
+so they can be serialized between requests — this enables stateless HTTP bidi
+exchanges and resumable server-stream continuations.
 
 Out-of-Band Logging
 -------------------
@@ -100,6 +112,12 @@ from typing import (
 import pyarrow as pa
 from pyarrow import ipc
 
+from vgi_rpc.external import (
+    ExternalLocationConfig,
+    maybe_externalize_batch,
+    maybe_externalize_collector,
+    resolve_external_location,
+)
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import (
     LOG_EXTRA_KEY,
@@ -698,7 +716,12 @@ class _LogSink:
         self._buffer.clear()
 
 
-def _write_result_batch(writer: ipc.RecordBatchStreamWriter, result_schema: pa.Schema, value: object) -> None:
+def _write_result_batch(
+    writer: ipc.RecordBatchStreamWriter,
+    result_schema: pa.Schema,
+    value: object,
+    external_config: ExternalLocationConfig | None = None,
+) -> None:
     """Write a unary result batch to an already-open IPC stream writer."""
     if len(result_schema) == 0:
         batch = pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
@@ -707,6 +730,11 @@ def _write_result_batch(writer: ipc.RecordBatchStreamWriter, result_schema: pa.S
         batch = pa.RecordBatch.from_arrays(
             [pa.array([wire_value], type=result_schema.field(0).type)], schema=result_schema
         )
+    if external_config is not None:
+        batch, cm = maybe_externalize_batch(batch, None, external_config)
+        if cm is not None:
+            writer.write_batch(batch, custom_metadata=cm)
+            return
     writer.write_batch(batch)
 
 
@@ -734,6 +762,8 @@ def _read_request(reader_stream: IOBase) -> tuple[str, dict[str, Any]]:
         raise VersionError(f"Unsupported request version {version_bytes!r}, expected {REQUEST_VERSION!r}")
     method_name = method_name_bytes.decode()
     _drain_stream(reader)
+    if len(batch.schema) > 0 and batch.num_rows != 1:
+        raise RpcError("ProtocolError", f"Expected 1 row in request batch, got {batch.num_rows}", "")
     kwargs = {f.name: batch.column(i)[0].as_py() for i, f in enumerate(batch.schema)}
     return method_name, kwargs
 
@@ -993,7 +1023,11 @@ class SubprocessTransport:
         self._closed = True
         if self._proc.stdin:
             self._proc.stdin.close()
-        self._proc.wait()
+        try:
+            self._proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
         self._reader.close()
 
 
@@ -1013,13 +1047,25 @@ def serve_stdio(server: RpcServer) -> None:
     server.serve(transport)
 
 
-def _flush_collector(writer: ipc.RecordBatchStreamWriter, out: OutputCollector) -> None:
+def _flush_collector(
+    writer: ipc.RecordBatchStreamWriter,
+    out: OutputCollector,
+    external_config: ExternalLocationConfig | None = None,
+) -> None:
     """Write all accumulated batches from an OutputCollector to an IPC stream writer."""
-    for ab in out.batches:
-        if ab.custom_metadata is not None:
-            writer.write_batch(ab.batch, custom_metadata=ab.custom_metadata)
-        else:
-            writer.write_batch(ab.batch)
+    if external_config is not None:
+        batch_list = maybe_externalize_collector(out, external_config)
+        for batch, cm in batch_list:
+            if cm is not None:
+                writer.write_batch(batch, custom_metadata=cm)
+            else:
+                writer.write_batch(batch)
+    else:
+        for ab in out.batches:
+            if ab.custom_metadata is not None:
+                writer.write_batch(ab.batch, custom_metadata=ab.custom_metadata)
+            else:
+                writer.write_batch(ab.batch)
 
 
 # ---------------------------------------------------------------------------
@@ -1030,13 +1076,20 @@ def _flush_collector(writer: ipc.RecordBatchStreamWriter, out: OutputCollector) 
 class RpcServer:
     """Dispatches RPC requests to an implementation over IO-stream transports."""
 
-    __slots__ = ("_protocol", "_impl", "_methods", "_emit_log_methods")
+    __slots__ = ("_protocol", "_impl", "_methods", "_emit_log_methods", "_external_config")
 
-    def __init__(self, protocol: type, implementation: object) -> None:
+    def __init__(
+        self,
+        protocol: type,
+        implementation: object,
+        *,
+        external_location: ExternalLocationConfig | None = None,
+    ) -> None:
         """Initialize with a protocol type and its implementation."""
         self._protocol = protocol
         self._impl = implementation
         self._methods = rpc_methods(protocol)
+        self._external_config = external_location
         _validate_implementation(protocol, implementation, self._methods)
 
         # Detect which impl methods accept an `emit_log` parameter.
@@ -1058,6 +1111,11 @@ class RpcServer:
         return self._impl
 
     @property
+    def external_config(self) -> ExternalLocationConfig | None:
+        """The ExternalLocation configuration, if any."""
+        return self._external_config
+
+    @property
     def emit_log_methods(self) -> frozenset[str]:
         """Method names whose implementations accept an emit_log parameter."""
         return self._emit_log_methods
@@ -1070,7 +1128,7 @@ class RpcServer:
             except (EOFError, StopIteration):
                 break
             except pa.ArrowInvalid:
-                _logger.debug("serve loop ending due to ArrowInvalid", exc_info=True)
+                _logger.warning("serve loop ending due to ArrowInvalid", exc_info=True)
                 break
 
     def serve_one(self, transport: RpcTransport) -> None:
@@ -1135,14 +1193,15 @@ class RpcServer:
             except Exception as exc:
                 _write_error_batch(writer, schema, exc)
                 return
-            _write_result_batch(writer, info.result_schema, result)
+            _write_result_batch(writer, info.result_schema, result, self._external_config)
 
     def _serve_server_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
         sink = self._make_log_sink(info, kwargs)
         try:
             result: ServerStream[ServerStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
-            _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+            with contextlib.suppress(BrokenPipeError, OSError):
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
             return
 
         schema = result.output_schema
@@ -1155,11 +1214,12 @@ class RpcServer:
                     state.produce(out)
                     if not out.finished:
                         out.validate()
-                    _flush_collector(stream_writer, out)
+                    _flush_collector(stream_writer, out, self._external_config)
                     if out.finished:
                         break
             except Exception as exc:
-                _write_error_batch(stream_writer, schema, exc)
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    _write_error_batch(stream_writer, schema, exc)
 
     def _serve_bidi_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
         sink = self._make_log_sink(info, kwargs)
@@ -1167,7 +1227,8 @@ class RpcServer:
         try:
             result: BidiStream[BidiStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
-            _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
+            with contextlib.suppress(BrokenPipeError, OSError):
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc)
             return
 
         output_schema = result.output_schema
@@ -1185,21 +1246,28 @@ class RpcServer:
                     except StopIteration:
                         break
 
+                    # Resolve ExternalLocation on input batch
+                    input_batch, resolved_cm = resolve_external_location(
+                        input_batch, custom_metadata, self._external_config
+                    )
+
                     if expected_input_schema is not None and input_batch.schema != expected_input_schema:
                         raise TypeError(
                             f"Input schema mismatch: expected {expected_input_schema}, got {input_batch.schema}"
                         )
 
-                    ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=custom_metadata)
+                    ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
                     out = OutputCollector(output_schema)
                     state.process(ab_in, out)
                     out.validate()
-                    _flush_collector(output_writer, out)
+                    _flush_collector(output_writer, out, self._external_config)
             except Exception as exc:
-                _write_error_batch(output_writer, output_schema, exc)
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    _write_error_batch(output_writer, output_schema, exc)
 
         # Drain remaining input so transport is clean for next request
-        _drain_stream(input_reader)
+        with contextlib.suppress(pa.ArrowInvalid, OSError):
+            _drain_stream(input_reader)
 
 
 # ---------------------------------------------------------------------------
@@ -1210,6 +1278,7 @@ class RpcServer:
 def _read_batch_with_log_check(
     reader: ipc.RecordBatchStreamReader,
     on_log: Callable[[Message], None] | None = None,
+    external_config: ExternalLocationConfig | None = None,
 ) -> AnnotatedBatch:
     """Read the next non-log batch, dispatching log batches to *on_log*.
 
@@ -1217,21 +1286,29 @@ def _read_batch_with_log_check(
     ``_dispatch_log_or_error``).  Returns the first data batch as an
     ``AnnotatedBatch``.  ``StopIteration`` and ``RpcError`` propagate
     to the caller.
+
+    If *external_config* is provided and the batch is an ExternalLocation
+    pointer, resolves it transparently (dispatching embedded logs via
+    *on_log*).
     """
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         if not _dispatch_log_or_error(batch, custom_metadata, on_log):
-            return AnnotatedBatch(batch=batch, custom_metadata=custom_metadata)
+            resolved_batch, resolved_cm = resolve_external_location(
+                batch, custom_metadata, external_config, on_log
+            )
+            return AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm)
 
 
 def _read_unary_response(
     reader: ipc.RecordBatchStreamReader,
     info: RpcMethodInfo,
     on_log: Callable[[Message], None] | None,
+    external_config: ExternalLocationConfig | None = None,
 ) -> object:
     """Read a unary response: skip logs, extract result, deserialize."""
     try:
-        batch = _read_batch_with_log_check(reader, on_log)
+        batch = _read_batch_with_log_check(reader, on_log, external_config)
     except RpcError:
         _drain_stream(reader)
         raise
@@ -1248,9 +1325,10 @@ def _read_unary_response(
 def _read_stream_response(
     reader: ipc.RecordBatchStreamReader,
     on_log: Callable[[Message], None] | None,
+    external_config: ExternalLocationConfig | None = None,
 ) -> StreamSession:
     """Wrap a response reader in a StreamSession."""
-    return StreamSession(reader, on_log)
+    return StreamSession(reader, on_log, external_config=external_config)
 
 
 class StreamSession:
@@ -1260,22 +1338,25 @@ class StreamSession:
     Log batches are delivered to the ``on_log`` callback.
     """
 
-    __slots__ = ("_reader", "_on_log")
+    __slots__ = ("_reader", "_on_log", "_external_config")
 
     def __init__(
         self,
         reader: ipc.RecordBatchStreamReader,
         on_log: Callable[[Message], None] | None = None,
+        *,
+        external_config: ExternalLocationConfig | None = None,
     ) -> None:
         """Initialize with an IPC reader and optional log callback."""
         self._reader = reader
         self._on_log = on_log
+        self._external_config = external_config
 
     def __iter__(self) -> Iterator[AnnotatedBatch]:  # noqa: D105
         try:
             while True:
                 try:
-                    yield _read_batch_with_log_check(self._reader, self._on_log)
+                    yield _read_batch_with_log_check(self._reader, self._on_log, self._external_config)
                 except StopIteration:
                     break
         except RpcError:
@@ -1291,13 +1372,23 @@ class BidiSession:
     Supports context manager for resource cleanup.
     """
 
-    __slots__ = ("_writer_stream", "_reader_stream", "_on_log", "_input_writer", "_output_reader", "_closed")
+    __slots__ = (
+        "_writer_stream",
+        "_reader_stream",
+        "_on_log",
+        "_input_writer",
+        "_output_reader",
+        "_closed",
+        "_external_config",
+    )
 
     def __init__(
         self,
         writer_stream: IOBase,
         reader_stream: IOBase,
         on_log: Callable[[Message], None] | None = None,
+        *,
+        external_config: ExternalLocationConfig | None = None,
     ) -> None:
         """Initialize with writer/reader streams and optional log callback."""
         self._writer_stream = writer_stream
@@ -1306,6 +1397,7 @@ class BidiSession:
         self._input_writer: ipc.RecordBatchStreamWriter | None = None
         self._output_reader: ipc.RecordBatchStreamReader | None = None
         self._closed = False
+        self._external_config = external_config
 
     def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch, receive the output batch.
@@ -1314,18 +1406,25 @@ class BidiSession:
         On RpcError, the session is automatically closed so the transport
         is clean for the next RPC call.
         """
+        batch_to_write = input.batch
+        cm_to_write = input.custom_metadata
+
+        # Client-side production for large bidi inputs
+        if self._external_config is not None:
+            batch_to_write, cm_to_write = maybe_externalize_batch(batch_to_write, cm_to_write, self._external_config)
+
         if self._input_writer is None:
-            self._input_writer = ipc.new_stream(self._writer_stream, input.batch.schema)
-        if input.custom_metadata is not None:
-            self._input_writer.write_batch(input.batch, custom_metadata=input.custom_metadata)
+            self._input_writer = ipc.new_stream(self._writer_stream, batch_to_write.schema)
+        if cm_to_write is not None:
+            self._input_writer.write_batch(batch_to_write, custom_metadata=cm_to_write)
         else:
-            self._input_writer.write_batch(input.batch)
+            self._input_writer.write_batch(batch_to_write)
 
         if self._output_reader is None:
             self._output_reader = ipc.open_stream(self._reader_stream)
 
         try:
-            return _read_batch_with_log_check(self._output_reader, self._on_log)
+            return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
         except RpcError:
             self.close()
             raise
@@ -1341,10 +1440,14 @@ class BidiSession:
             with ipc.new_stream(self._writer_stream, _EMPTY_SCHEMA):
                 pass
         if self._output_reader is None:
-            self._output_reader = ipc.open_stream(self._reader_stream)
-        with contextlib.suppress(StopIteration, RpcError):
-            while True:
-                _read_batch_with_log_check(self._output_reader, self._on_log)
+            try:
+                self._output_reader = ipc.open_stream(self._reader_stream)
+            except (pa.ArrowInvalid, OSError, StopIteration):
+                return
+        _MAX_DRAIN = 10_000
+        with contextlib.suppress(StopIteration, RpcError, pa.ArrowInvalid, OSError):
+            for _ in range(_MAX_DRAIN):
+                _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
 
     def __enter__(self) -> BidiSession:  # noqa: D105
         return self
@@ -1366,18 +1469,25 @@ def _send_request(writer: IOBase, info: RpcMethodInfo, kwargs: dict[str, Any]) -
 
 
 class _RpcProxy:
-    """Dynamic proxy that implements RPC method calls through a transport."""
+    """Dynamic proxy that implements RPC method calls through a transport.
+
+    Not thread-safe: each proxy serialises calls over a single transport.
+    Do not share a proxy across threads; create one connection per thread instead.
+    """
 
     def __init__(
         self,
         protocol: type,
         transport: RpcTransport,
         on_log: Callable[[Message], None] | None = None,
+        *,
+        external_config: ExternalLocationConfig | None = None,
     ) -> None:
         self._protocol = protocol
         self._transport = transport
         self._methods = rpc_methods(protocol)
         self._on_log = on_log
+        self._external_config = external_config
 
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
@@ -1399,32 +1509,35 @@ class _RpcProxy:
     def _make_unary_caller(self, info: RpcMethodInfo) -> Callable[..., object]:
         transport = self._transport
         on_log = self._on_log
+        ext_cfg = self._external_config
 
         def caller(**kwargs: object) -> object:
             _send_request(transport.writer, info, kwargs)
             reader = ipc.open_stream(transport.reader)
-            return _read_unary_response(reader, info, on_log)
+            return _read_unary_response(reader, info, on_log, ext_cfg)
 
         return caller
 
     def _make_stream_caller(self, info: RpcMethodInfo) -> Callable[..., StreamSession]:
         transport = self._transport
         on_log = self._on_log
+        ext_cfg = self._external_config
 
         def caller(**kwargs: object) -> StreamSession:
             _send_request(transport.writer, info, kwargs)
             reader = ipc.open_stream(transport.reader)
-            return _read_stream_response(reader, on_log)
+            return _read_stream_response(reader, on_log, ext_cfg)
 
         return caller
 
     def _make_bidi_caller(self, info: RpcMethodInfo) -> Callable[..., BidiSession]:
         transport = self._transport
         on_log = self._on_log
+        ext_cfg = self._external_config
 
         def caller(**kwargs: object) -> BidiSession:
             _send_request(transport.writer, info, kwargs)
-            return BidiSession(transport.writer, transport.reader, on_log)
+            return BidiSession(transport.writer, transport.reader, on_log, external_config=ext_cfg)
 
         return caller
 
@@ -1444,22 +1557,25 @@ class RpcConnection:
 
     """
 
-    __slots__ = ("_protocol", "_transport", "_on_log")
+    __slots__ = ("_protocol", "_transport", "_on_log", "_external_config")
 
     def __init__(
         self,
         protocol: type,
         transport: RpcTransport,
         on_log: Callable[[Message], None] | None = None,
+        *,
+        external_location: ExternalLocationConfig | None = None,
     ) -> None:
         """Initialize with a protocol type and transport."""
         self._protocol = protocol
         self._transport = transport
         self._on_log = on_log
+        self._external_config = external_location
 
     def __enter__(self) -> _RpcProxy:
         """Enter the context and return a typed proxy."""
-        return _RpcProxy(self._protocol, self._transport, self._on_log)
+        return _RpcProxy(self._protocol, self._transport, self._on_log, external_config=self._external_config)
 
     def __exit__(
         self,
@@ -1512,6 +1628,7 @@ def connect(
     cmd: list[str],
     *,
     on_log: Callable[[Message], None] | None = None,
+    external_location: ExternalLocationConfig | None = None,
 ) -> Iterator[_RpcProxy]:
     """Connect to a subprocess RPC server.
 
@@ -1522,6 +1639,8 @@ def connect(
         protocol: The Protocol class defining the RPC interface.
         cmd: Command to spawn the subprocess worker.
         on_log: Optional callback for log messages from the server.
+        external_location: Optional ExternalLocation configuration for
+            resolving and producing externalized batches.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -1529,7 +1648,7 @@ def connect(
     """
     transport = SubprocessTransport(cmd)
     try:
-        with RpcConnection(protocol, transport, on_log=on_log) as proxy:
+        with RpcConnection(protocol, transport, on_log=on_log, external_location=external_location) as proxy:
             yield proxy
     finally:
         transport.close()
@@ -1541,6 +1660,7 @@ def serve_pipe(
     implementation: object,
     *,
     on_log: Callable[[Message], None] | None = None,
+    external_location: ExternalLocationConfig | None = None,
 ) -> Iterator[_RpcProxy]:
     """Start an in-process pipe server and yield a typed client proxy.
 
@@ -1551,21 +1671,24 @@ def serve_pipe(
         protocol: The Protocol class defining the RPC interface.
         implementation: The implementation object.
         on_log: Optional callback for log messages from the server.
+        external_location: Optional ExternalLocation configuration for
+            resolving and producing externalized batches.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
 
     """
     client_transport, server_transport = make_pipe_pair()
-    server = RpcServer(protocol, implementation)
+    server = RpcServer(protocol, implementation, external_location=external_location)
     thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
     thread.start()
     try:
-        with RpcConnection(protocol, client_transport, on_log=on_log) as proxy:
+        with RpcConnection(protocol, client_transport, on_log=on_log, external_location=external_location) as proxy:
             yield proxy
     finally:
         client_transport.close()
         thread.join(timeout=5)
+        server_transport.close()
 
 
 # ---------------------------------------------------------------------------

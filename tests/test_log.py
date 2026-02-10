@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from vgi_rpc.log import Level, Message
 
 # ---------------------------------------------------------------------------
@@ -12,16 +14,16 @@ from vgi_rpc.log import Level, Message
 class TestMessageEq:
     """Tests for Message equality and inequality."""
 
-    def test_eq_same(self) -> None:
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            (Message(Level.INFO, "hello"), Message(Level.INFO, "hello")),
+            (Message(Level.DEBUG, "x", key="val"), Message(Level.DEBUG, "x", key="val")),
+        ],
+        ids=["same", "with_extra"],
+    )
+    def test_eq(self, a: Message, b: Message) -> None:
         """Two identical messages are equal."""
-        a = Message(Level.INFO, "hello")
-        b = Message(Level.INFO, "hello")
-        assert a == b
-
-    def test_eq_with_extra(self) -> None:
-        """Two messages with same extra are equal."""
-        a = Message(Level.DEBUG, "x", key="val")
-        b = Message(Level.DEBUG, "x", key="val")
         assert a == b
 
     def test_neq_different_level(self) -> None:
@@ -84,58 +86,36 @@ class TestMessageRepr:
 class TestMessageFactories:
     """Tests for convenience factory methods."""
 
-    def test_exception(self) -> None:
-        """Message.exception() creates EXCEPTION level."""
+    @pytest.mark.parametrize(
+        ("factory", "level"),
+        [
+            (Message.exception, Level.EXCEPTION),
+            (Message.error, Level.ERROR),
+            (Message.warn, Level.WARN),
+            (Message.info, Level.INFO),
+            (Message.debug, Level.DEBUG),
+            (Message.trace, Level.TRACE),
+        ],
+    )
+    def test_factory_creates_correct_level(self, factory: object, level: Level) -> None:
+        """Each factory creates the correct level with the given message."""
+        from collections.abc import Callable
+
+        assert callable(factory)
+        f: Callable[..., Message] = factory
+        m = f("msg")
+        assert m.level == level
+        assert m.message == "msg"
+
+    def test_factory_with_extras(self) -> None:
+        """Factory methods pass through extra kwargs."""
         m = Message.exception("boom", detail="info")
-        assert m.level == Level.EXCEPTION
-        assert m.message == "boom"
         assert m.extra == {"detail": "info"}
-
-    def test_error(self) -> None:
-        """Message.error() creates ERROR level."""
-        m = Message.error("fail")
-        assert m.level == Level.ERROR
-        assert m.message == "fail"
-        assert m.extra is None
-
-    def test_warn(self) -> None:
-        """Message.warn() creates WARN level."""
-        m = Message.warn("careful")
-        assert m.level == Level.WARN
-
-    def test_info(self) -> None:
-        """Message.info() creates INFO level."""
-        m = Message.info("ok")
-        assert m.level == Level.INFO
-
-    def test_debug(self) -> None:
-        """Message.debug() creates DEBUG level."""
-        m = Message.debug("dbg", x=1)
-        assert m.level == Level.DEBUG
-        assert m.extra == {"x": 1}
-
-    def test_trace(self) -> None:
-        """Message.trace() creates TRACE level."""
-        m = Message.trace("fine")
-        assert m.level == Level.TRACE
 
 
 # ---------------------------------------------------------------------------
 # should_terminate
 # ---------------------------------------------------------------------------
-
-
-class TestShouldTerminate:
-    """Tests for should_terminate()."""
-
-    def test_exception_terminates(self) -> None:
-        """EXCEPTION level should terminate."""
-        assert Message(Level.EXCEPTION, "x").should_terminate() is True
-
-    def test_non_exception_does_not_terminate(self) -> None:
-        """Non-EXCEPTION levels should not terminate."""
-        for level in (Level.ERROR, Level.WARN, Level.INFO, Level.DEBUG, Level.TRACE):
-            assert Message(level, "x").should_terminate() is False
 
 
 # ---------------------------------------------------------------------------

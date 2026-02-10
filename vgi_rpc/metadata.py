@@ -10,17 +10,38 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+__all__ = [
+    "LOCATION_FETCH_MS_KEY",
+    "LOCATION_KEY",
+    "LOCATION_SOURCE_KEY",
+    "LOG_EXTRA_KEY",
+    "LOG_LEVEL_KEY",
+    "LOG_MESSAGE_KEY",
+    "REQUEST_VERSION",
+    "REQUEST_VERSION_KEY",
+    "RPC_METHOD_KEY",
+    "STATE_KEY",
+    "decode_metadata",
+    "encode_metadata",
+    "merge_metadata",
+    "strip_keys",
+]
+
 # ---------------------------------------------------------------------------
 # Well-known metadata keys (bytes, matching what appears on the wire)
 # ---------------------------------------------------------------------------
 
 RPC_METHOD_KEY = b"vgi_rpc.method"
-BIDI_STATE_KEY = b"vgi_rpc.bidi_state"
+STATE_KEY = b"vgi_rpc.bidi_state"
 LOG_LEVEL_KEY = b"vgi_rpc.log_level"
 LOG_MESSAGE_KEY = b"vgi_rpc.log_message"
 LOG_EXTRA_KEY = b"vgi_rpc.log_extra"
 REQUEST_VERSION_KEY = b"vgi_rpc.request_version"
 REQUEST_VERSION = b"1"
+
+LOCATION_KEY = b"vgi_rpc.location"
+LOCATION_FETCH_MS_KEY = b"vgi_rpc.location.fetch_ms"
+LOCATION_SOURCE_KEY = b"vgi_rpc.location.source"
 
 # ---------------------------------------------------------------------------
 # Encode / decode

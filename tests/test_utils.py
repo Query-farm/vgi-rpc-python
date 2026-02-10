@@ -235,6 +235,34 @@ class TestInferArrowType:
         with pytest.raises(TypeError, match="Cannot infer Arrow type"):
             _infer_arrow_type(object)
 
+    def test_subscripted_list(self) -> None:
+        """list[str] maps to pa.list_(pa.string())."""
+        assert _infer_arrow_type(list[str]) == pa.list_(pa.string())
+
+    def test_subscripted_dict(self) -> None:
+        """dict[str, float] maps to pa.map_(pa.string(), pa.float64())."""
+        assert _infer_arrow_type(dict[str, float]) == pa.map_(pa.string(), pa.float64())
+
+    def test_subscripted_frozenset(self) -> None:
+        """frozenset[int] maps to pa.list_(pa.int64())."""
+        assert _infer_arrow_type(frozenset[int]) == pa.list_(pa.int64())
+
+    def test_nested_list(self) -> None:
+        """list[list[int]] maps to pa.list_(pa.list_(pa.int64()))."""
+        assert _infer_arrow_type(list[list[int]]) == pa.list_(pa.list_(pa.int64()))
+
+    def test_list_of_enum(self) -> None:
+        """list[Color] maps to pa.list_ of dictionary-encoded string."""
+        result = _infer_arrow_type(list[Color])
+        assert isinstance(result, pa.ListType)
+        assert isinstance(result.value_type, pa.DictionaryType)
+
+    def test_list_of_dataclass(self) -> None:
+        """list[Inner] maps to pa.list_ of struct."""
+        result = _infer_arrow_type(list[Inner])
+        assert isinstance(result, pa.ListType)
+        assert isinstance(result.value_type, pa.StructType)
+
 
 # ---------------------------------------------------------------------------
 # TestIsOptionalType
@@ -673,55 +701,6 @@ class TestReadSingleRecordBatch:
 
 
 # ---------------------------------------------------------------------------
-# TestInferArrowType — additional coverage
-# ---------------------------------------------------------------------------
-
-
-class TestInferArrowTypeExtra:
-    """Additional _infer_arrow_type tests for missing primitive branches."""
-
-    def test_str_type(self) -> None:
-        """Python str maps to pa.string()."""
-        assert _infer_arrow_type(str) == pa.string()
-
-    def test_float_type(self) -> None:
-        """Python float maps to pa.float64()."""
-        assert _infer_arrow_type(float) == pa.float64()
-
-    def test_int_type(self) -> None:
-        """Python int maps to pa.int64()."""
-        assert _infer_arrow_type(int) == pa.int64()
-
-    def test_subscripted_list(self) -> None:
-        """list[str] maps to pa.list_(pa.string())."""
-        assert _infer_arrow_type(list[str]) == pa.list_(pa.string())
-
-    def test_subscripted_dict(self) -> None:
-        """dict[str, float] maps to pa.map_(pa.string(), pa.float64())."""
-        assert _infer_arrow_type(dict[str, float]) == pa.map_(pa.string(), pa.float64())
-
-    def test_subscripted_frozenset(self) -> None:
-        """frozenset[int] maps to pa.list_(pa.int64())."""
-        assert _infer_arrow_type(frozenset[int]) == pa.list_(pa.int64())
-
-    def test_nested_list(self) -> None:
-        """list[list[int]] maps to pa.list_(pa.list_(pa.int64()))."""
-        assert _infer_arrow_type(list[list[int]]) == pa.list_(pa.list_(pa.int64()))
-
-    def test_list_of_enum(self) -> None:
-        """list[Color] maps to pa.list_ of dictionary-encoded string."""
-        result = _infer_arrow_type(list[Color])
-        assert isinstance(result, pa.ListType)
-        assert isinstance(result.value_type, pa.DictionaryType)
-
-    def test_list_of_dataclass(self) -> None:
-        """list[Inner] maps to pa.list_ of struct."""
-        result = _infer_arrow_type(list[Inner])
-        assert isinstance(result, pa.ListType)
-        assert isinstance(result.value_type, pa.StructType)
-
-
-# ---------------------------------------------------------------------------
 # TestIsOptionalType — additional coverage
 # ---------------------------------------------------------------------------
 
@@ -759,12 +738,6 @@ class TestIsOptionalTypeExtra:
 
 class TestSchemaCaching:
     """Tests for ARROW_SCHEMA descriptor caching."""
-
-    def test_schema_is_cached(self) -> None:
-        """Second access returns the same object (cached)."""
-        schema1 = Inner.ARROW_SCHEMA
-        schema2 = Inner.ARROW_SCHEMA
-        assert schema1 is schema2
 
     def test_subclass_gets_own_schema(self) -> None:
         """Each subclass gets its own cached schema."""

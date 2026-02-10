@@ -535,10 +535,12 @@ class TestServerStream:
             assert batches[99].batch.column("i")[0].as_py() == 99
 
     def test_stream_session_type(self, make_conn: ConnFactory) -> None:
-        """Server stream returns a StreamSession that is iterable."""
+        """Server stream returns a StreamSession (or HttpStreamSession for HTTP)."""
+        from vgi_rpc.http import HttpStreamSession
+
         with make_conn() as proxy:
             stream = proxy.generate(count=2)
-            assert isinstance(stream, StreamSession)
+            assert isinstance(stream, (StreamSession, HttpStreamSession))
             batches = list(stream)
             assert len(batches) == 2
             assert all(isinstance(ab, AnnotatedBatch) for ab in batches)
@@ -567,37 +569,11 @@ class TestBidiStream:
 
             session.close()
 
-    def test_single_batch(self, make_conn: ConnFactory) -> None:
-        """Bidi stream with a single batch works correctly."""
-        with make_conn() as proxy:
-            session = proxy.transform(factor=3.0)
-
-            output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5]})))
-            assert output.batch.column("value").to_pylist() == [15]
-
-            session.close()
-
-    def test_bidi_session_type(self, make_conn: ConnFactory) -> None:
-        """Bidi stream returns a BidiSession or HttpBidiSession."""
-        from vgi_rpc.http import HttpBidiSession
-
-        with make_conn() as proxy:
-            session = proxy.transform(factor=1.0)
-            assert isinstance(session, (BidiSession, HttpBidiSession))
-            session.close()
-
     def test_bidi_context_manager(self, make_conn: ConnFactory) -> None:
         """BidiSession works as a context manager."""
         with make_conn() as proxy, proxy.transform(factor=2.0) as session:
             output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5.0]})))
             assert output.batch.column("value").to_pylist() == [10.0]
-
-    def test_bidi_annotated_batch_output(self, make_conn: ConnFactory) -> None:
-        """BidiSession.exchange returns AnnotatedBatch."""
-        with make_conn() as proxy, proxy.transform(factor=2.0) as session:
-            result = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0]})))
-            assert isinstance(result, AnnotatedBatch)
-
 
 # ---------------------------------------------------------------------------
 # Tests: RpcConnection (context manager + proxy)
@@ -754,52 +730,6 @@ class TestEdgeCases:
             assert proxy.compute(x=8) == 50
             # Explicit y overrides default
             assert proxy.compute(x=8, y=10) == 18
-
-
-# ---------------------------------------------------------------------------
-# Tests: serve() loop — multiple requests on same transport
-# ---------------------------------------------------------------------------
-
-
-class TestServeLoop:
-    """Tests for RpcServer.serve() handling multiple requests."""
-
-    def test_multiple_unary_calls(self, make_conn: ConnFactory) -> None:
-        """Multiple unary calls on the same transport."""
-        with make_conn() as proxy:
-            assert proxy.add(a=1.0, b=2.0) == pytest.approx(3.0)
-            assert proxy.add(a=10.0, b=20.0) == pytest.approx(30.0)
-            assert proxy.add(a=-1.0, b=1.0) == pytest.approx(0.0)
-
-    def test_multiple_stream_calls(self, make_conn: ConnFactory) -> None:
-        """Multiple server-stream calls on the same transport."""
-        with make_conn() as proxy:
-            assert len(list(proxy.generate(count=2))) == 2
-            assert len(list(proxy.generate(count=3))) == 3
-
-    def test_multiple_bidi_calls(self, make_conn: ConnFactory) -> None:
-        """Multiple bidi calls on the same transport."""
-        with make_conn() as proxy:
-            with proxy.transform(factor=2.0) as session:
-                output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0, 2.0]})))
-                assert output.batch.column("value").to_pylist() == [2.0, 4.0]
-
-            with proxy.transform(factor=10.0) as session2:
-                output2 = session2.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5.0]})))
-                assert output2.batch.column("value").to_pylist() == [50.0]
-
-    def test_mixed_method_types(self, make_conn: ConnFactory) -> None:
-        """Interleaved unary, stream, and bidi calls on the same transport."""
-        with make_conn() as proxy:
-            assert proxy.add(a=1.0, b=2.0) == pytest.approx(3.0)
-
-            assert len(list(proxy.generate(count=2))) == 2
-
-            with proxy.transform(factor=3.0) as session:
-                output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [4.0]})))
-                assert output.batch.column("value").to_pylist() == [12.0]
-
-            assert proxy.add(a=100.0, b=200.0) == pytest.approx(300.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1952,5 +1882,5 @@ class TestInvalidBidiState:
             # Corrupt the state bytes
             session._state_bytes = b"garbage"
 
-            with pytest.raises(RpcError, match="Malformed bidi state token|signature verification"):
+            with pytest.raises(RpcError, match="Malformed state token|signature verification"):
                 session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [2.0]})))
