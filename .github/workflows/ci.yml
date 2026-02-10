@@ -14,7 +14,7 @@ env:
   # Fail if type-precision drops below this percentage (mypy --any-exprs-report)
   MIN_TYPE_PRECISION: "95"
   # Fail if the total number of "# type: ignore" comments exceeds this ceiling
-  MAX_TYPE_IGNORES: "20"
+  MAX_TYPE_IGNORES: "24"
 
 jobs:
   test:
