@@ -50,10 +50,6 @@ from vgi_rpc.log import Message
 from vgi_rpc.metadata import STATE_KEY, merge_metadata, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
-    _EMPTY_TRANSPORT_METADATA,
-    _TransportContext,
-    _current_transport,
-    _get_auth_and_metadata,
     AnnotatedBatch,
     AuthContext,
     BidiStream,
@@ -67,15 +63,18 @@ from vgi_rpc.rpc import (
     ServerStream,
     ServerStreamState,
     VersionError,
+    _current_transport,
     _deserialize_params,
     _dispatch_log_or_error,
     _drain_stream,
     _flush_collector,
+    _get_auth_and_metadata,
     _LogSink,
     _read_batch_with_log_check,
     _read_request,
     _read_unary_response,
     _send_request,
+    _TransportContext,
     _validate_params,
     _validate_result,
     _write_error_batch,
@@ -760,7 +759,7 @@ class _AuthMiddleware:
     def __init__(self, authenticate: Callable[[falcon.Request], AuthContext]) -> None:
         self._authenticate = authenticate
 
-    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:  # noqa: ARG002
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Authenticate the request and populate the transport contextvar.
 
         Only ``ValueError`` and ``PermissionError`` are caught and mapped to
@@ -787,9 +786,9 @@ class _AuthMiddleware:
     def process_response(
         self,
         req: falcon.Request,
-        resp: falcon.Response,  # noqa: ARG002
-        resource: object,  # noqa: ARG002
-        req_succeeded: bool,  # noqa: ARG002
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
     ) -> None:
         """Reset the transport contextvar after each request."""
         token = getattr(req.context, "transport_token", None)
