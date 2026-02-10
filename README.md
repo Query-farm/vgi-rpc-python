@@ -11,6 +11,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Three method types** — unary, server-streaming, and bidirectional streaming
 - **Transport-agnostic** — in-process pipes, subprocess, or HTTP
 - **Automatic schema inference** — Python type annotations map to Arrow types
+- **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
 - **Large batch support** — transparent externalization to S3/GCS for oversized data
 
 ## Installation
@@ -264,12 +265,13 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `prefix` | `"/vgi"` | URL prefix for all RPC endpoints |
 | `signing_key` | random 32 bytes | HMAC key for signing state tokens |
 | `max_stream_response_bytes` | `None` | Split server-stream responses across multiple HTTP exchanges |
+| `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |
 
 ## Streaming
 
 ### Server Streams
 
-A server stream method returns `ServerStream[S]` where `S` is a `ServerStreamState` subclass. The state's `produce(out)` method is called repeatedly until `out.finish()` is called:
+A server stream method returns `ServerStream[S]` where `S` is a `ServerStreamState` subclass. The state's `produce(out, ctx)` method is called repeatedly until `out.finish()` is called:
 
 ```python
 from dataclasses import dataclass
@@ -277,7 +279,7 @@ from typing import Protocol
 
 import pyarrow as pa
 
-from vgi_rpc import OutputCollector, ServerStream, ServerStreamState
+from vgi_rpc import CallContext, OutputCollector, ServerStream, ServerStreamState
 
 
 @dataclass
@@ -286,7 +288,7 @@ class CountdownState(ServerStreamState):
 
     n: int
 
-    def produce(self, out: OutputCollector) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next countdown value, or finish."""
         if self.n <= 0:
             out.finish()
@@ -325,7 +327,7 @@ with serve_pipe(CountdownService, CountdownServiceImpl()) as proxy:
 
 ### Bidi Streams
 
-A bidi stream method returns `BidiStream[S]` where `S` is a `BidiStreamState` subclass. The state's `process(input, out)` method is called once per input batch. State is mutated in-place across exchanges:
+A bidi stream method returns `BidiStream[S]` where `S` is a `BidiStreamState` subclass. The state's `process(input, out, ctx)` method is called once per input batch. State is mutated in-place across exchanges:
 
 ```python
 from dataclasses import dataclass
@@ -336,6 +338,7 @@ from vgi_rpc import (
     AnnotatedBatch,
     BidiStream,
     BidiStreamState,
+    CallContext,
     OutputCollector,
 )
 
@@ -346,7 +349,7 @@ class RunningSum(BidiStreamState):
 
     total: float = 0.0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Add input values to running total."""
         values = input.batch.column("value")
         for v in values:
@@ -374,29 +377,29 @@ with serve_pipe(SumService, SumServiceImpl()) as proxy:
 
 ### Server-side logging
 
-Server method implementations can emit log messages by accepting an `emit_log` parameter (type `EmitLog`). The framework injects it automatically — it does **not** appear in the Protocol definition:
+Server method implementations can emit log messages by accepting a `ctx` parameter (type `CallContext`). The framework injects it automatically — it does **not** appear in the Protocol definition:
 
 ```python
-from vgi_rpc import EmitLog, Message
+from vgi_rpc import CallContext, Level
 
 
 class MyServiceImpl:
     """Implementation with logging."""
 
-    def process(self, data: str, emit_log: EmitLog) -> str:
+    def process(self, data: str, ctx: CallContext) -> str:
         """Process data with logging."""
-        emit_log(Message.info("Processing started", input_size=str(len(data))))
+        ctx.log(Level.INFO, "Processing started", input_size=str(len(data)))
         result = data.upper()
-        emit_log(Message.debug("Processing complete"))
+        ctx.log(Level.DEBUG, "Processing complete")
         return result
 ```
 
-In streaming methods, use `OutputCollector.log()`:
+In streaming methods, `ctx` is passed to `produce()` and `process()`. You can also use `OutputCollector.log()`:
 
 ```python
-def produce(self, out: OutputCollector) -> None:
+def produce(self, out: OutputCollector, ctx: CallContext) -> None:
     """Produce with logging."""
-    out.log(Level.INFO, "generating batch")
+    ctx.log(Level.INFO, "generating batch")
     out.emit_pydict({"value": [42]})
 ```
 
@@ -441,6 +444,86 @@ except RpcError as e:
 ```
 
 Errors are transmitted as zero-row batches with `EXCEPTION`-level log metadata. The transport remains clean for subsequent requests — a single failed call does not poison the connection.
+
+## Authentication
+
+### AuthContext
+
+`AuthContext` is a frozen dataclass representing the authentication state for a request:
+
+```python
+from vgi_rpc import AuthContext
+
+# Created by your authenticate callback
+ctx = AuthContext(domain="jwt", authenticated=True, principal="alice", claims={"role": "admin"})
+
+# Anonymous (default for pipe transport)
+anon = AuthContext.anonymous()
+```
+
+Fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `domain` | `str \| None` | Authentication scheme (e.g. `"jwt"`, `"api_key"`, `"mtls"`) |
+| `authenticated` | `bool` | Whether the caller was successfully authenticated |
+| `principal` | `str \| None` | Identity of the caller |
+| `claims` | `Mapping[str, Any]` | Arbitrary claims from the authentication token |
+
+### HTTP authentication
+
+Pass an `authenticate` callback to `make_wsgi_app`. The callback receives a Falcon `Request` and returns an `AuthContext`. Raise `ValueError` or `PermissionError` to reject the request (mapped to HTTP 401):
+
+```python
+import falcon
+
+from vgi_rpc import AuthContext, RpcServer, make_wsgi_app
+
+
+def authenticate(req: falcon.Request) -> AuthContext:
+    """Validate a Bearer token and return auth context."""
+    auth_header = req.get_header("Authorization") or ""
+    if not auth_header.startswith("Bearer "):
+        raise ValueError("Missing Bearer token")
+    token = auth_header.removeprefix("Bearer ")
+    # ... validate token, extract claims ...
+    return AuthContext(domain="jwt", authenticated=True, principal="alice")
+
+
+server = RpcServer(MyService, MyServiceImpl())
+app = make_wsgi_app(server, authenticate=authenticate)
+```
+
+### Using auth in methods
+
+Methods that declare a `ctx: CallContext` parameter receive the authentication context. Use `ctx.auth.require_authenticated()` to gate access:
+
+```python
+from vgi_rpc import CallContext
+
+
+class MyServiceImpl:
+    """Implementation with auth checks."""
+
+    def public(self) -> str:
+        """No ctx — works for all callers."""
+        return "ok"
+
+    def whoami(self, ctx: CallContext) -> str:
+        """Return the caller's principal."""
+        return ctx.auth.principal or "anonymous"
+
+    def secret(self, ctx: CallContext) -> str:
+        """Require authentication."""
+        ctx.auth.require_authenticated()  # raises PermissionError if not authenticated
+        return f"secret for {ctx.auth.principal}"
+```
+
+Over pipe transport, `ctx.auth` is always `AuthContext.anonymous()` (unauthenticated).
+
+### Transport metadata
+
+`ctx.transport_metadata` provides transport-level information (e.g. `remote_addr`, `user_agent` for HTTP). This is a read-only mapping populated by the transport layer.
 
 ## External Location (Large Batch Support)
 
@@ -532,6 +615,7 @@ All framework metadata keys live in the `vgi_rpc.` namespace:
 | `vgi_rpc.log_level` | batch metadata | Log level on zero-row log/error batches |
 | `vgi_rpc.log_message` | batch metadata | Log message text |
 | `vgi_rpc.log_extra` | batch metadata | JSON-encoded extra fields |
+| `vgi_rpc.server_id` | batch metadata | Server instance identifier (log/error tracing) |
 | `vgi_rpc.location` | batch metadata | External storage URL for large batches |
 | `vgi_rpc.location.fetch_ms` | batch metadata | Fetch duration (diagnostics) |
 | `vgi_rpc.location.source` | batch metadata | Fetch source (diagnostics) |
