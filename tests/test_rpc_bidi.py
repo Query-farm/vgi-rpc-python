@@ -994,5 +994,3 @@ class TestBidiSubprocess:
         # Should recover for unary
         result = proxy.add(a=1.0, b=2.0)
         assert result == pytest.approx(3.0)
-
-

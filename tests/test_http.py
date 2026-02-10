@@ -284,9 +284,7 @@ class TestHttpExternalStorage:
             retry_delay_seconds=0.0,
         )
 
-    def _make_client(
-        self, config: ExternalLocationConfig
-    ) -> _SyncTestClient:
+    def _make_client(self, config: ExternalLocationConfig) -> _SyncTestClient:
         """Create a _SyncTestClient wrapping an RpcServer with external storage."""
         server = RpcServer(_ExternalService, _ExternalServiceImpl(), external_location=config)
         return make_sync_client(server, signing_key=b"test-key")

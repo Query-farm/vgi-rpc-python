@@ -787,6 +787,7 @@ class TestEmitLogInjection:
         server = RpcServer(P, Impl())
         assert "method" not in server.emit_log_methods
 
+
 # ===================================================================
 # 12. run_server argument validation
 # ===================================================================
@@ -1122,4 +1123,3 @@ class TestRpcError:
         assert err.error_type == "ValueError"
         assert err.error_message == "msg"
         assert err.remote_traceback == "tb"
-

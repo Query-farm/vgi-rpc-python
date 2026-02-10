@@ -302,9 +302,7 @@ class TestFetchChunkValidation:
 
             def _ignore_range_callback(url_: Any, **kwargs: Any) -> CallbackResult:
                 # Server ignores Range and returns full body with 200
-                return CallbackResult(
-                    status=200, body=data, headers={"Content-Length": str(len(data))}
-                )
+                return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
 
             with aioresponses() as mock:
                 _register_head(mock, url, data)
@@ -618,9 +616,7 @@ class TestFetchPool:
             call_count = 0
             original_fetch = AsyncMock()
 
-            async def _side_effect(
-                url_arg: str, config_arg: FetchConfig, client: aiohttp.ClientSession
-            ) -> bytes:
+            async def _side_effect(url_arg: str, config_arg: FetchConfig, client: aiohttp.ClientSession) -> bytes:
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:

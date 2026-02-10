@@ -1294,9 +1294,7 @@ def _read_batch_with_log_check(
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         if not _dispatch_log_or_error(batch, custom_metadata, on_log):
-            resolved_batch, resolved_cm = resolve_external_location(
-                batch, custom_metadata, external_config, on_log
-            )
+            resolved_batch, resolved_cm = resolve_external_location(batch, custom_metadata, external_config, on_log)
             return AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm)
 
 

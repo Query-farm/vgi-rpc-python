@@ -248,9 +248,7 @@ def resolve_external_location(
         )
         return retryer(_fetch_and_resolve, batch.schema, url, config, on_log)
     except (*retry_types,) as exc:
-        raise RuntimeError(
-            f"Failed to resolve ExternalLocation after {max_retries + 1} attempts: {url}"
-        ) from exc
+        raise RuntimeError(f"Failed to resolve ExternalLocation after {max_retries + 1} attempts: {url}") from exc
 
 
 def _fetch_and_resolve(

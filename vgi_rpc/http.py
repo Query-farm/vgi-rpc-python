@@ -355,9 +355,7 @@ class _HttpRpcApp:
         token = custom_metadata.get(STATE_KEY) if custom_metadata is not None else None
 
         # Resolve ExternalLocation on input batch
-        input_batch, resolved_cm = resolve_external_location(
-            input_batch, custom_metadata, self._server.external_config
-        )
+        input_batch, resolved_cm = resolve_external_location(input_batch, custom_metadata, self._server.external_config)
         if token is None:
             raise _RpcHttpError(
                 RuntimeError("Missing state token in exchange request"),
@@ -499,7 +497,6 @@ class _HttpRpcApp:
             )
 
         return self._produce_stream_response(output_schema, state)
-
 
     def _unpack_and_recover_state(
         self,

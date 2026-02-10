@@ -76,9 +76,7 @@ class MockStorage(ExternalStorage):
 
 
 @contextmanager
-def _mock_aio(
-    storage: MockStorage, *, content_encoding: str | None = None
-) -> Iterator[aioresponses_ctx]:
+def _mock_aio(storage: MockStorage, *, content_encoding: str | None = None) -> Iterator[aioresponses_ctx]:
     """Context manager that registers all MockStorage URLs in aioresponses."""
     enc = content_encoding or storage.content_encoding
     with aioresponses_ctx() as mock:
@@ -734,9 +732,7 @@ class _ExternalServiceImpl:
         return BidiStream(output_schema=schema, state=_LargeBidiState(factor=factor))
 
 
-def _mock_aio_dynamic(
-    storage: MockStorage, mock: aioresponses_ctx, *, content_encoding: str | None = None
-) -> None:
+def _mock_aio_dynamic(storage: MockStorage, mock: aioresponses_ctx, *, content_encoding: str | None = None) -> None:
     """Register pattern-based HEAD + GET callbacks that serve from MockStorage dynamically."""
     pattern = re.compile(r"^https://mock\.storage/.*$")
     enc = content_encoding or storage.content_encoding
@@ -1173,9 +1169,7 @@ class TestGCSStorage:
         with patch("google.cloud.storage.Client", return_value=mock_client) as mock_cls:
             yield mock_cls, mock_client, mock_bucket, mock_blob
 
-    def test_upload_and_signed_url(
-        self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
-    ) -> None:
+    def test_upload_and_signed_url(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
         """Upload IPC data, verify signed URL is generated."""
         from vgi_rpc.gcs import GCSStorage
 
@@ -1196,9 +1190,7 @@ class TestGCSStorage:
         assert call_kwargs.kwargs["version"] == "v4"
         assert call_kwargs.kwargs["method"] == "GET"
 
-    def test_full_roundtrip(
-        self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
-    ) -> None:
+    def test_full_roundtrip(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
         """Full round-trip with mocked GCS + aioresponses."""
         from vgi_rpc.gcs import GCSStorage
 
@@ -1236,9 +1228,7 @@ class TestGCSStorage:
 
         assert resolved.num_rows == 100
 
-    def test_custom_project(
-        self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
-    ) -> None:
+    def test_custom_project(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
         """Verify project kwarg is passed to Client()."""
         from vgi_rpc.gcs import GCSStorage
 
@@ -1251,9 +1241,7 @@ class TestGCSStorage:
 
         mock_cls.assert_called_once_with(project="my-project")
 
-    def test_custom_prefix(
-        self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
-    ) -> None:
+    def test_custom_prefix(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
         """Verify blob name starts with custom prefix."""
         from vgi_rpc.gcs import GCSStorage
 
@@ -1268,9 +1256,7 @@ class TestGCSStorage:
         assert blob_name.startswith("custom/prefix/")
         assert blob_name.endswith(".arrow")
 
-    def test_upload_with_content_encoding(
-        self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
-    ) -> None:
+    def test_upload_with_content_encoding(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
         """Blob content_encoding set before upload when configured."""
         from vgi_rpc.gcs import GCSStorage
 
@@ -1304,9 +1290,7 @@ class TestGCSStorage:
         assert blob_name.endswith(".arrow")
         assert not blob_name.endswith(".arrow.zst")
 
-    def test_file_extension_zst(
-        self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
-    ) -> None:
+    def test_file_extension_zst(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
         """Blob name ends in .arrow.zst when content_encoding is zstd."""
         from vgi_rpc.gcs import GCSStorage
 
@@ -1457,9 +1441,7 @@ class TestCompression:
     def test_compression_enabled_externalize_batch(self) -> None:
         """Compressed data is uploaded (verify uploaded bytes are zstd-compressed)."""
         storage = MockStorage()
-        config = ExternalLocationConfig(
-            storage=storage, threshold_bytes=10, compression="zstd"
-        )
+        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, compression="zstd")
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         maybe_externalize_batch(batch, None, config)
@@ -1471,9 +1453,7 @@ class TestCompression:
     def test_compression_enabled_externalize_collector(self) -> None:
         """Collector output compressed when enabled."""
         storage = MockStorage()
-        config = ExternalLocationConfig(
-            storage=storage, threshold_bytes=10, compression="zstd"
-        )
+        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, compression="zstd")
 
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
@@ -1488,9 +1468,7 @@ class TestCompression:
     def test_compressed_resolve(self) -> None:
         """Resolve round-trip: externalize with compression → mock HTTP with Content-Encoding → resolve."""
         storage = MockStorage(content_encoding="zstd")
-        config = ExternalLocationConfig(
-            storage=storage, threshold_bytes=10, compression="zstd", max_retries=0
-        )
+        config = ExternalLocationConfig(storage=storage, threshold_bytes=10, compression="zstd", max_retries=0)
 
         batch = pa.RecordBatch.from_pydict({"value": [42, 43, 44]}, schema=_SCHEMA)
         ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
@@ -1570,9 +1548,7 @@ class TestCompression:
 class TestPipeIntegrationCompressed:
     """Integration tests using pipe transport with compressed external storage."""
 
-    def _make_config(
-        self, storage: MockStorage, threshold: int = 100
-    ) -> ExternalLocationConfig:
+    def _make_config(self, storage: MockStorage, threshold: int = 100) -> ExternalLocationConfig:
         """Create compressed ExternalLocationConfig for testing."""
         return ExternalLocationConfig(
             storage=storage,

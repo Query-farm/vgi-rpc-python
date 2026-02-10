@@ -240,9 +240,7 @@ async def _read_response_body(resp: aiohttp.ClientResponse, config: FetchConfig)
     async for chunk in resp.content.iter_chunked(65536):
         total += len(chunk)
         if total > config.max_fetch_bytes:
-            raise RuntimeError(
-                f"ExternalLocation fetch exceeded max_fetch_bytes ({config.max_fetch_bytes} bytes)"
-            )
+            raise RuntimeError(f"ExternalLocation fetch exceeded max_fetch_bytes ({config.max_fetch_bytes} bytes)")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -289,9 +287,7 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
         try:
             data = zstandard.ZstdDecompressor().decompress(data)
         except zstandard.ZstdError as exc:
-            raise RuntimeError(
-                f"Failed to decompress zstd data ({len(data)} compressed bytes) from {url}"
-            ) from exc
+            raise RuntimeError(f"Failed to decompress zstd data ({len(data)} compressed bytes) from {url}") from exc
 
     return data
 
@@ -366,8 +362,7 @@ async def _fetch_one_chunk(
             resp.raise_for_status()
             if resp.status != 206:
                 raise RuntimeError(
-                    f"Expected HTTP 206 for Range request, got {resp.status} "
-                    f"(bytes={start}-{end} of {url})"
+                    f"Expected HTTP 206 for Range request, got {resp.status} (bytes={start}-{end} of {url})"
                 )
             data = await resp.read()
             if len(data) != expected_size:

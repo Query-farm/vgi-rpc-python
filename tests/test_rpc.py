@@ -17,7 +17,6 @@ from vgi_rpc.http import _HttpProxy, http_connect
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import (
     AnnotatedBatch,
-    BidiSession,
     BidiStream,
     BidiStreamState,
     EmitLog,
@@ -574,6 +573,7 @@ class TestBidiStream:
         with make_conn() as proxy, proxy.transform(factor=2.0) as session:
             output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5.0]})))
             assert output.batch.column("value").to_pylist() == [10.0]
+
 
 # ---------------------------------------------------------------------------
 # Tests: RpcConnection (context manager + proxy)
