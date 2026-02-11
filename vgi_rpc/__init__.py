@@ -43,7 +43,14 @@ from vgi_rpc.rpc import (
     serve_pipe,
     serve_stdio,
 )
-from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType, IPCError
+from vgi_rpc.utils import (
+    ArrowSerializableDataclass,
+    ArrowType,
+    IPCError,
+    IpcValidation,
+    ValidatedReader,
+    validate_batch,
+)
 
 # HTTP (optional — requires `pip install vgi-rpc[http]`)
 with contextlib.suppress(ImportError):
@@ -110,6 +117,10 @@ __all__ = [
     # Serialization
     "ArrowSerializableDataclass",
     "ArrowType",
+    # Validation
+    "IpcValidation",
+    "ValidatedReader",
+    "validate_batch",
     # Protocol version
     "REQUEST_VERSION",
     # ExternalLocation

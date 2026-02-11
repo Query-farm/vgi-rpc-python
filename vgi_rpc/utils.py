@@ -21,7 +21,7 @@ from dataclasses import MISSING, Field, dataclass
 from dataclasses import fields as dataclass_fields
 from enum import Enum
 from io import BytesIO, IOBase
-from types import UnionType
+from types import TracebackType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -43,10 +43,13 @@ __all__ = [
     "ArrowSerializableDataclass",
     "ArrowType",
     "IPCError",
+    "IpcValidation",
+    "ValidatedReader",
     "deserialize_record_batch",
     "empty_batch",
     "read_single_record_batch",
     "serialize_record_batch",
+    "validate_batch",
 ]
 
 
@@ -59,6 +62,97 @@ class _BytesSerializable(Protocol):
 
 class IPCError(Exception):
     """Error during IPC message reading or writing."""
+
+
+class IpcValidation(Enum):
+    """Level of validation applied to incoming IPC record batches.
+
+    Attributes:
+        NONE: No validation — batches are used as-is.
+        STANDARD: Call ``batch.validate()`` to check schema/column consistency.
+        FULL: Call ``batch.validate(full=True)`` to also verify data buffers.
+
+    """
+
+    NONE = "none"
+    STANDARD = "standard"
+    FULL = "full"
+
+
+def validate_batch(batch: pa.RecordBatch, ipc_validation: IpcValidation) -> None:
+    """Validate a RecordBatch at the specified level.
+
+    Args:
+        batch: The batch to validate.
+        ipc_validation: Validation level (NONE, STANDARD, or FULL).
+
+    Raises:
+        IPCError: If validation fails.
+
+    """
+    if ipc_validation is IpcValidation.NONE:
+        return
+    try:
+        batch.validate(full=ipc_validation is IpcValidation.FULL)
+    except pa.ArrowInvalid as exc:
+        raise IPCError(f"IPC batch validation failed: {exc}") from exc
+
+
+class ValidatedReader:
+    """Wrapper around ``ipc.RecordBatchStreamReader`` that validates every batch on read.
+
+    Proxies the subset of the reader API used by the RPC framework
+    (``read_next_batch``, ``read_next_batch_with_custom_metadata``,
+    ``schema``, and the context manager protocol).  Downstream code
+    needs **zero changes** — just wrap ``ipc.open_stream(...)`` in
+    ``ValidatedReader(..., ipc_validation)``.
+
+    When *ipc_validation* is ``IpcValidation.NONE``, each read still
+    delegates to the inner reader with minimal extra overhead.
+    """
+
+    __slots__ = ("_ipc_validation", "_reader")
+
+    def __init__(self, reader: ipc.RecordBatchStreamReader, ipc_validation: IpcValidation) -> None:
+        """Wrap *reader* so every batch is validated at *ipc_validation* level."""
+        self._reader = reader
+        self._ipc_validation = ipc_validation
+
+    @property
+    def ipc_validation(self) -> IpcValidation:
+        """The validation level applied to every batch read."""
+        return self._ipc_validation
+
+    def read_next_batch(self) -> pa.RecordBatch:
+        """Read the next batch, validating it before returning."""
+        batch: pa.RecordBatch = self._reader.read_next_batch()
+        validate_batch(batch, self._ipc_validation)
+        return batch
+
+    def read_next_batch_with_custom_metadata(self) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
+        """Read the next batch with custom metadata, validating before returning."""
+        batch, cm = self._reader.read_next_batch_with_custom_metadata()
+        validate_batch(batch, self._ipc_validation)
+        return batch, cm
+
+    @property
+    def schema(self) -> pa.Schema:
+        """The schema of the underlying IPC stream."""
+        return self._reader.schema
+
+    def __enter__(self) -> Self:
+        """Enter the context manager."""
+        self._reader.__enter__()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit the context manager."""
+        self._reader.__exit__(exc_type, exc_val, exc_tb)  # type: ignore[no-untyped-call]
 
 
 def empty_batch(schema: pa.Schema) -> pa.RecordBatch:
@@ -114,11 +208,13 @@ def serialize_record_batch_bytes(
 
 def deserialize_record_batch(
     data: bytes,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Deserialize bytes back to a RecordBatch with custom metadata.
 
     Args:
         data: Bytes containing a serialized RecordBatch in Arrow IPC stream format.
+        ipc_validation: Validation level for the deserialized batch.
 
     Returns:
         Tuple of (RecordBatch, custom_metadata). The custom_metadata may be None
@@ -128,7 +224,7 @@ def deserialize_record_batch(
         IPCError: If no batches are found in the data.
 
     """
-    with ipc.open_stream(pa.BufferReader(data)) as reader:
+    with ValidatedReader(ipc.open_stream(pa.BufferReader(data)), ipc_validation) as reader:
         try:
             batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         except StopIteration:
@@ -140,6 +236,7 @@ def deserialize_record_batch(
 def read_single_record_batch(
     stream: IOBase,
     context: str = "batch",
+    ipc_validation: IpcValidation = IpcValidation.NONE,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Read a single record batch from a stream.
 
@@ -147,6 +244,7 @@ def read_single_record_batch(
         stream: Stream to read from (must support binary reads, e.g., stdin pipe,
             BufferedReader).
         context: Description for error messages (e.g., "invocation", "init_input").
+        ipc_validation: Validation level for the deserialized batch.
 
     Returns:
         Tuple of (RecordBatch, custom_metadata). The custom_metadata may be None
@@ -158,7 +256,7 @@ def read_single_record_batch(
 
     """
     try:
-        with ipc.open_stream(stream) as reader:
+        with ValidatedReader(ipc.open_stream(stream), ipc_validation) as reader:
             try:
                 batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
             except StopIteration:
@@ -570,12 +668,15 @@ class ArrowSerializableDataclass:
         cls,
         batch: pa.RecordBatch,
         custom_metadata: pa.KeyValueMetadata | None = None,
+        *,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
     ) -> Self:
         """Deserialize an instance from an Arrow RecordBatch.
 
         Args:
             batch: Single-row RecordBatch containing the serialized data.
             custom_metadata: Optional metadata from the batch (for batch type).
+            ipc_validation: Validation level for nested IPC batches.
 
         Returns:
             Deserialized instance of this class.
@@ -627,13 +728,15 @@ class ArrowSerializableDataclass:
                 field_type = args[0] if args else field_type
 
             # Convert value based on field type
-            value = cls._convert_value_for_deserialization(value, field_type)
+            value = cls._convert_value_for_deserialization(value, field_type, ipc_validation)
             kwargs[field.name] = value
 
         return cls(**kwargs)
 
     @classmethod
-    def _convert_value_for_deserialization(cls, value: Any, field_type: Any) -> Any:
+    def _convert_value_for_deserialization(
+        cls, value: Any, field_type: Any, ipc_validation: IpcValidation = IpcValidation.NONE
+    ) -> Any:
         """Convert a deserialized value back to the expected Python type."""
         if value is None:
             return None
@@ -651,14 +754,14 @@ class ArrowSerializableDataclass:
         if inner_type is pa.RecordBatch:
             if not isinstance(value, bytes):
                 raise TypeError(f"Expected bytes for pa.RecordBatch deserialization, got {type(value).__name__}")
-            reader = pa.ipc.open_stream(value)
+            reader = ValidatedReader(pa.ipc.open_stream(value), ipc_validation)
             return reader.read_next_batch()
 
         # Handle types with deserialize_from_bytes class method (e.g., Arguments)
         if isinstance(inner_type, type) and hasattr(inner_type, "deserialize_from_bytes") and isinstance(value, bytes):
             deserialize_method = inner_type.deserialize_from_bytes
             if callable(deserialize_method):
-                return deserialize_method(value)
+                return deserialize_method(value, ipc_validation)
 
         # Handle Enum reconstruction from name (uppercase) or value (legacy lowercase)
         if isinstance(inner_type, type) and issubclass(inner_type, Enum):
@@ -693,7 +796,9 @@ class ArrowSerializableDataclass:
                 f_type = nested_hints.get(f.name, f.type)
                 if get_origin(f_type) is Annotated:
                     f_type = get_args(f_type)[0]
-                nested_kwargs[f.name] = cls._convert_value_for_deserialization(value.get(f.name), f_type)
+                nested_kwargs[f.name] = cls._convert_value_for_deserialization(
+                    value.get(f.name), f_type, ipc_validation
+                )
             return inner_type(**nested_kwargs)
 
         # Handle frozenset reconstruction
@@ -710,16 +815,17 @@ class ArrowSerializableDataclass:
             args = get_args(inner_type)
             if args and isinstance(value, list):
                 element_type = args[0]
-                return [cls._convert_value_for_deserialization(v, element_type) for v in value]
+                return [cls._convert_value_for_deserialization(v, element_type, ipc_validation) for v in value]
 
         return value
 
     @classmethod
-    def deserialize_from_bytes(cls, data: bytes) -> Self:
+    def deserialize_from_bytes(cls, data: bytes, ipc_validation: IpcValidation = IpcValidation.NONE) -> Self:
         """Deserialize an instance from Arrow IPC bytes.
 
         Args:
             data: Arrow IPC stream bytes containing a single-row RecordBatch.
+            ipc_validation: Validation level for the deserialized batch.
 
         Returns:
             Deserialized instance of this class.
@@ -728,4 +834,5 @@ class ArrowSerializableDataclass:
             ValueError: If the batch is invalid (wrong row count or missing fields).
 
         """
-        return cls.deserialize_from_batch(*deserialize_record_batch(data))
+        batch, cm = deserialize_record_batch(data, ipc_validation)
+        return cls.deserialize_from_batch(batch, cm, ipc_validation=ipc_validation)

@@ -38,7 +38,7 @@ from vgi_rpc.rpc import (
     run_server,
     serve_pipe,
 )
-from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
+from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType, IpcValidation, ValidatedReader
 
 from .conftest import ConnFactory, _worker_cmd
 
@@ -1815,7 +1815,7 @@ class TestMalformedInput:
 
         # Error response was written before the raise
         resp_buf.seek(0)
-        reader = ipc.open_stream(resp_buf)
+        reader = ValidatedReader(ipc.open_stream(resp_buf), IpcValidation.NONE)
         with pytest.raises(RpcError, match="ArrowInvalid"):
             while True:
                 batch, cm = reader.read_next_batch_with_custom_metadata()
@@ -1839,7 +1839,7 @@ class TestMalformedInput:
             server.serve_one(transport)
 
         resp_buf.seek(0)
-        reader = ipc.open_stream(resp_buf)
+        reader = ValidatedReader(ipc.open_stream(resp_buf), IpcValidation.NONE)
         with pytest.raises(RpcError):
             while True:
                 batch, cm = reader.read_next_batch_with_custom_metadata()
@@ -1900,7 +1900,7 @@ class TestRequestVersion:
         server.serve_one(transport)
 
         resp_buf.seek(0)
-        reader = pa.ipc.open_stream(resp_buf)
+        reader = ValidatedReader(pa.ipc.open_stream(resp_buf), IpcValidation.NONE)
         with pytest.raises(RpcError, match="Unsupported request version") as exc_info:
             while True:
                 batch, cm = reader.read_next_batch_with_custom_metadata()
@@ -1932,7 +1932,7 @@ class TestRequestVersion:
         server.serve_one(transport)
 
         resp_buf.seek(0)
-        reader = pa.ipc.open_stream(resp_buf)
+        reader = ValidatedReader(pa.ipc.open_stream(resp_buf), IpcValidation.NONE)
         with pytest.raises(RpcError, match=r"Missing vgi_rpc\.request_version") as exc_info:
             while True:
                 batch, cm = reader.read_next_batch_with_custom_metadata()

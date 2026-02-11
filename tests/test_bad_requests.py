@@ -21,7 +21,7 @@ from vgi_rpc.http import (
 )
 from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
 from vgi_rpc.rpc import RpcError, RpcServer, _dispatch_log_or_error, _drain_stream
-from vgi_rpc.utils import empty_batch
+from vgi_rpc.utils import IpcValidation, ValidatedReader, empty_batch
 
 from .test_rpc import RpcFixtureService, RpcFixtureServiceImpl
 
@@ -51,7 +51,7 @@ def _post(
 
 def _extract_error(content: bytes) -> RpcError:
     """Parse an Arrow IPC error stream, return the RpcError."""
-    reader = ipc.open_stream(BytesIO(content))
+    reader = ValidatedReader(ipc.open_stream(BytesIO(content)), IpcValidation.NONE)
     try:
         while True:
             batch, cm = reader.read_next_batch_with_custom_metadata()

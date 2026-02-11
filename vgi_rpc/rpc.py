@@ -137,7 +137,14 @@ from vgi_rpc.metadata import (
     encode_metadata,
     merge_metadata,
 )
-from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_optional_type, empty_batch
+from vgi_rpc.utils import (
+    ArrowSerializableDataclass,
+    IpcValidation,
+    ValidatedReader,
+    _infer_arrow_type,
+    _is_optional_type,
+    empty_batch,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1062,7 +1069,9 @@ def _write_result_batch(
     writer.write_batch(batch)
 
 
-def _read_request(reader_stream: IOBase) -> tuple[str, dict[str, Any]]:
+def _read_request(
+    reader_stream: IOBase, ipc_validation: IpcValidation = IpcValidation.NONE
+) -> tuple[str, dict[str, Any]]:
     """Read a request IPC stream, return (method_name, kwargs).
 
     Extracts ``vgi_rpc.method`` and validates ``vgi_rpc.request_version``
@@ -1074,7 +1083,7 @@ def _read_request(reader_stream: IOBase) -> tuple[str, dict[str, Any]]:
             does not match ``REQUEST_VERSION``.
 
     """
-    reader = ipc.open_stream(reader_stream)
+    reader = ValidatedReader(ipc.open_stream(reader_stream), ipc_validation)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
     method_name_bytes = custom_metadata.get(RPC_METHOD_KEY) if custom_metadata else None
     if method_name_bytes is None:
@@ -1143,7 +1152,7 @@ def _dispatch_log_or_error(
     return True
 
 
-def _deserialize_value(value: object, type_hint: Any) -> object:
+def _deserialize_value(value: object, type_hint: Any, ipc_validation: IpcValidation = IpcValidation.NONE) -> object:
     """Deserialize a single value based on its type hint.
 
     Inverse of ``_convert_for_arrow``.  Handles ArrowSerializableDataclass,
@@ -1155,9 +1164,9 @@ def _deserialize_value(value: object, type_hint: Any) -> object:
     if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
         if not isinstance(value, bytes):
             return value
-        reader = ipc.open_stream(value)
+        reader = ValidatedReader(ipc.open_stream(value), ipc_validation)
         batch, metadata = reader.read_next_batch_with_custom_metadata()
-        return base.deserialize_from_batch(batch, metadata)
+        return base.deserialize_from_batch(batch, metadata, ipc_validation=ipc_validation)
     if isinstance(base, type) and issubclass(base, Enum):
         if not isinstance(value, str):
             return value
@@ -1170,7 +1179,9 @@ def _deserialize_value(value: object, type_hint: Any) -> object:
     return value
 
 
-def _deserialize_params(kwargs: dict[str, Any], param_types: dict[str, Any]) -> None:
+def _deserialize_params(
+    kwargs: dict[str, Any], param_types: dict[str, Any], ipc_validation: IpcValidation = IpcValidation.NONE
+) -> None:
     """Deserialize params that lose type fidelity through as_py() in-place.
 
     Handles ArrowSerializableDataclass (bytes), Enum (str→member),
@@ -1182,7 +1193,7 @@ def _deserialize_params(kwargs: dict[str, Any], param_types: dict[str, Any]) -> 
         ptype = param_types.get(name)
         if ptype is None:
             continue
-        kwargs[name] = _deserialize_value(value, ptype)
+        kwargs[name] = _deserialize_value(value, ptype, ipc_validation)
 
 
 def _validate_params(method_name: str, kwargs: dict[str, Any], param_types: dict[str, Any]) -> None:
@@ -1217,7 +1228,7 @@ def _validate_result(method_name: str, value: object, result_type: Any) -> None:
         raise TypeError(f"{method_name}() expected a non-None return value but got None")
 
 
-def _drain_stream(reader: ipc.RecordBatchStreamReader) -> None:
+def _drain_stream(reader: ValidatedReader) -> None:
     """Consume remaining batches so the IPC EOS marker is read."""
     while True:
         try:
@@ -1544,6 +1555,7 @@ class RpcServer:
         "_describe_batch",
         "_external_config",
         "_impl",
+        "_ipc_validation",
         "_methods",
         "_protocol",
         "_server_id",
@@ -1557,6 +1569,7 @@ class RpcServer:
         external_location: ExternalLocationConfig | None = None,
         server_id: str | None = None,
         enable_describe: bool = False,
+        ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> None:
         """Initialize with a protocol type and its implementation.
 
@@ -1567,10 +1580,13 @@ class RpcServer:
             server_id: Optional server identifier; auto-generated if ``None``.
             enable_describe: When ``True``, the server handles ``__describe__``
                 requests returning machine-readable method metadata.
+            ipc_validation: Validation level for incoming IPC batches.
+                Defaults to ``FULL`` for maximum safety.
 
         """
         self._protocol = protocol
         self._impl = implementation
+        self._ipc_validation = ipc_validation
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
         self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]
@@ -1649,6 +1665,11 @@ class RpcServer:
         """Whether ``__describe__`` introspection is enabled."""
         return self._describe_batch is not None
 
+    @property
+    def ipc_validation(self) -> IpcValidation:
+        """Validation level for incoming IPC batches."""
+        return self._ipc_validation
+
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""
         while True:
@@ -1678,7 +1699,7 @@ class RpcServer:
 
         """
         try:
-            method_name, kwargs = _read_request(transport.reader)
+            method_name, kwargs = _read_request(transport.reader, self._ipc_validation)
         except pa.ArrowInvalid as exc:
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
@@ -1698,7 +1719,7 @@ class RpcServer:
             )
             return
 
-        _deserialize_params(kwargs, info.param_types)
+        _deserialize_params(kwargs, info.param_types, self._ipc_validation)
 
         try:
             _validate_params(info.name, kwargs, info.param_types)
@@ -1881,7 +1902,7 @@ class RpcServer:
         expected_input_schema = result.input_schema
         state = result.state
 
-        input_reader = ipc.open_stream(transport.reader)
+        input_reader = ValidatedReader(ipc.open_stream(transport.reader), self._ipc_validation)
 
         try:
             with ipc.new_stream(transport.writer, output_schema) as output_writer:
@@ -1896,7 +1917,10 @@ class RpcServer:
 
                         # Resolve ExternalLocation on input batch
                         input_batch, resolved_cm = resolve_external_location(
-                            input_batch, custom_metadata, self._external_config
+                            input_batch,
+                            custom_metadata,
+                            self._external_config,
+                            ipc_validation=self._ipc_validation,
                         )
 
                         if expected_input_schema is not None and input_batch.schema != expected_input_schema:
@@ -1950,7 +1974,7 @@ class RpcServer:
 
 
 def _read_batch_with_log_check(
-    reader: ipc.RecordBatchStreamReader,
+    reader: ValidatedReader,
     on_log: Callable[[Message], None] | None = None,
     external_config: ExternalLocationConfig | None = None,
 ) -> AnnotatedBatch:
@@ -1968,12 +1992,14 @@ def _read_batch_with_log_check(
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         if not _dispatch_log_or_error(batch, custom_metadata, on_log):
-            resolved_batch, resolved_cm = resolve_external_location(batch, custom_metadata, external_config, on_log)
+            resolved_batch, resolved_cm = resolve_external_location(
+                batch, custom_metadata, external_config, on_log, reader.ipc_validation
+            )
             return AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm)
 
 
 def _read_unary_response(
-    reader: ipc.RecordBatchStreamReader,
+    reader: ValidatedReader,
     info: RpcMethodInfo,
     on_log: Callable[[Message], None] | None,
     external_config: ExternalLocationConfig | None = None,
@@ -1991,11 +2017,11 @@ def _read_unary_response(
     _validate_result(info.name, value, info.result_type)
     if value is None:
         return None
-    return _deserialize_value(value, info.result_type)
+    return _deserialize_value(value, info.result_type, reader.ipc_validation)
 
 
 def _read_stream_response(
-    reader: ipc.RecordBatchStreamReader,
+    reader: ValidatedReader,
     on_log: Callable[[Message], None] | None,
     external_config: ExternalLocationConfig | None = None,
 ) -> StreamSession:
@@ -2014,7 +2040,7 @@ class StreamSession:
 
     def __init__(
         self,
-        reader: ipc.RecordBatchStreamReader,
+        reader: ValidatedReader,
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
@@ -2048,6 +2074,7 @@ class BidiSession:
         "_closed",
         "_external_config",
         "_input_writer",
+        "_ipc_validation",
         "_on_log",
         "_output_reader",
         "_reader_stream",
@@ -2061,15 +2088,17 @@ class BidiSession:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
     ) -> None:
         """Initialize with writer/reader streams and optional log callback."""
         self._writer_stream = writer_stream
         self._reader_stream = reader_stream
         self._on_log = on_log
         self._input_writer: ipc.RecordBatchStreamWriter | None = None
-        self._output_reader: ipc.RecordBatchStreamReader | None = None
+        self._output_reader: ValidatedReader | None = None
         self._closed = False
         self._external_config = external_config
+        self._ipc_validation = ipc_validation
 
     def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch, receive the output batch.
@@ -2093,7 +2122,7 @@ class BidiSession:
             self._input_writer.write_batch(batch_to_write)
 
         if self._output_reader is None:
-            self._output_reader = ipc.open_stream(self._reader_stream)
+            self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
 
         try:
             return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
@@ -2113,7 +2142,7 @@ class BidiSession:
                 pass
         if self._output_reader is None:
             try:
-                self._output_reader = ipc.open_stream(self._reader_stream)
+                self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
             except (pa.ArrowInvalid, OSError, StopIteration):
                 return
         _MAX_DRAIN = 10_000
@@ -2154,12 +2183,14 @@ class _RpcProxy:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
     ) -> None:
         self._protocol = protocol
         self._transport = transport
         self._methods = rpc_methods(protocol)
         self._on_log = on_log
         self._external_config = external_config
+        self._ipc_validation = ipc_validation
 
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
@@ -2182,10 +2213,11 @@ class _RpcProxy:
         transport = self._transport
         on_log = self._on_log
         ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> object:
             _send_request(transport.writer, info, kwargs)
-            reader = ipc.open_stream(transport.reader)
+            reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
             return _read_unary_response(reader, info, on_log, ext_cfg)
 
         return caller
@@ -2194,10 +2226,11 @@ class _RpcProxy:
         transport = self._transport
         on_log = self._on_log
         ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> StreamSession:
             _send_request(transport.writer, info, kwargs)
-            reader = ipc.open_stream(transport.reader)
+            reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
             return _read_stream_response(reader, on_log, ext_cfg)
 
         return caller
@@ -2206,10 +2239,13 @@ class _RpcProxy:
         transport = self._transport
         on_log = self._on_log
         ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> BidiSession:
             _send_request(transport.writer, info, kwargs)
-            return BidiSession(transport.writer, transport.reader, on_log, external_config=ext_cfg)
+            return BidiSession(
+                transport.writer, transport.reader, on_log, external_config=ext_cfg, ipc_validation=ipc_validation
+            )
 
         return caller
 
@@ -2230,7 +2266,7 @@ class RpcConnection[P]:
 
     """
 
-    __slots__ = ("_external_config", "_on_log", "_protocol", "_transport")
+    __slots__ = ("_external_config", "_ipc_validation", "_on_log", "_protocol", "_transport")
 
     def __init__(
         self,
@@ -2239,16 +2275,27 @@ class RpcConnection[P]:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_location: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
     ) -> None:
         """Initialize with a protocol type and transport."""
         self._protocol = protocol
         self._transport = transport
         self._on_log = on_log
         self._external_config = external_location
+        self._ipc_validation = ipc_validation
 
     def __enter__(self) -> P:
         """Enter the context and return a typed proxy."""
-        return cast(P, _RpcProxy(self._protocol, self._transport, self._on_log, external_config=self._external_config))
+        return cast(
+            P,
+            _RpcProxy(
+                self._protocol,
+                self._transport,
+                self._on_log,
+                external_config=self._external_config,
+                ipc_validation=self._ipc_validation,
+            ),
+        )
 
     def __exit__(
         self,
@@ -2304,6 +2351,7 @@ def connect[P](
     external_location: ExternalLocationConfig | None = None,
     stderr: StderrMode = StderrMode.INHERIT,
     stderr_logger: logging.Logger | None = None,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
 ) -> Iterator[P]:
     """Connect to a subprocess RPC server.
 
@@ -2320,6 +2368,7 @@ def connect[P](
         stderr_logger: Logger for ``StderrMode.PIPE`` output; ignored for
             other modes.  Defaults to
             ``logging.getLogger("vgi_rpc.subprocess.stderr")``.
+        ipc_validation: Validation level for incoming IPC batches.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -2327,7 +2376,9 @@ def connect[P](
     """
     transport = SubprocessTransport(cmd, stderr=stderr, stderr_logger=stderr_logger)
     try:
-        with RpcConnection(protocol, transport, on_log=on_log, external_location=external_location) as proxy:
+        with RpcConnection(
+            protocol, transport, on_log=on_log, external_location=external_location, ipc_validation=ipc_validation
+        ) as proxy:
             yield proxy
     finally:
         transport.close()
@@ -2340,6 +2391,7 @@ def serve_pipe[P](
     *,
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation | None = None,
 ) -> Iterator[P]:
     """Start an in-process pipe server and yield a typed client proxy.
 
@@ -2352,17 +2404,32 @@ def serve_pipe[P](
         on_log: Optional callback for log messages from the server.
         external_location: Optional ExternalLocation configuration for
             resolving and producing externalized batches.
+        ipc_validation: Validation level for incoming IPC batches.
+            When ``None`` (the default), each component uses its own
+            default — ``RpcServer`` gets ``FULL``, ``RpcConnection``
+            gets ``NONE``.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
 
     """
     client_transport, server_transport = make_pipe_pair()
-    server = RpcServer(protocol, implementation, external_location=external_location)
+    server = RpcServer(
+        protocol,
+        implementation,
+        external_location=external_location,
+        ipc_validation=ipc_validation if ipc_validation is not None else IpcValidation.FULL,
+    )
     thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
     thread.start()
     try:
-        with RpcConnection(protocol, client_transport, on_log=on_log, external_location=external_location) as proxy:
+        with RpcConnection(
+            protocol,
+            client_transport,
+            on_log=on_log,
+            external_location=external_location,
+            ipc_validation=ipc_validation if ipc_validation is not None else IpcValidation.NONE,
+        ) as proxy:
             yield proxy
     finally:
         client_transport.close()

@@ -38,6 +38,7 @@ from vgi_rpc.metadata import (
     LOG_LEVEL_KEY,
     merge_metadata,
 )
+from vgi_rpc.utils import IpcValidation, ValidatedReader
 
 if TYPE_CHECKING:
     from vgi_rpc.rpc import OutputCollector
@@ -209,6 +210,7 @@ def resolve_external_location(
     custom_metadata: pa.KeyValueMetadata | None,
     config: ExternalLocationConfig | None,
     on_log: _OnLog = None,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Resolve an ExternalLocation pointer batch, or return it unchanged.
 
@@ -230,6 +232,7 @@ def resolve_external_location(
         on_log: Optional callback for log messages found in the
             fetched stream.  If ``None``, log batches are silently
             discarded.
+        ipc_validation: Validation level for batches in the fetched stream.
 
     Returns:
         ``(batch, custom_metadata)`` unchanged if not a pointer,
@@ -264,7 +267,7 @@ def resolve_external_location(
             retry=retry_if_exception_type(retry_types),
             reraise=True,
         )
-        return retryer(_fetch_and_resolve, batch.schema, url, config, on_log)
+        return retryer(_fetch_and_resolve, batch.schema, url, config, on_log, ipc_validation)
     except (*retry_types,) as exc:
         _logger.error(
             "ExternalLocation resolution failed: %s (attempts=%d)",
@@ -280,6 +283,7 @@ def _fetch_and_resolve(
     url: str,
     config: ExternalLocationConfig,
     on_log: _OnLog,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Fetch URL and extract the data batch from the IPC stream."""
     from vgi_rpc.rpc import _dispatch_log_or_error
@@ -288,7 +292,7 @@ def _fetch_and_resolve(
     data = fetch_url(url, config.fetch_config)
     elapsed_ms = (time.monotonic() - t0) * 1000
 
-    reader = ipc.open_stream(BytesIO(data))
+    reader = ValidatedReader(ipc.open_stream(BytesIO(data)), ipc_validation)
     data_batches: list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]] = []
 
     while True:

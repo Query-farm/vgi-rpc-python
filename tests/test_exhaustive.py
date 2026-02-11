@@ -51,7 +51,14 @@ from vgi_rpc.rpc import (
     rpc_methods,
     serve_pipe,
 )
-from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_optional_type, empty_batch
+from vgi_rpc.utils import (
+    ArrowSerializableDataclass,
+    IpcValidation,
+    ValidatedReader,
+    _infer_arrow_type,
+    _is_optional_type,
+    empty_batch,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -911,7 +918,7 @@ class TestDrainStream:
         with ipc.new_stream(buf, batch.schema) as writer:
             writer.write_batch(batch)
         buf.seek(0)
-        reader = ipc.open_stream(buf)
+        reader = ValidatedReader(ipc.open_stream(buf), IpcValidation.NONE)
         reader.read_next_batch()
         # Stream is now exhausted — drain should not raise
         _drain_stream(reader)
@@ -925,7 +932,7 @@ class TestDrainStream:
             writer.write_batch(batch)
             writer.write_batch(batch)
         buf.seek(0)
-        reader = ipc.open_stream(buf)
+        reader = ValidatedReader(ipc.open_stream(buf), IpcValidation.NONE)
         # Read only one batch
         reader.read_next_batch()
         # Drain should consume the remaining two without error
@@ -947,7 +954,7 @@ class TestStreamSession:
         with ipc.new_stream(buf, schema):
             pass  # No batches
         buf.seek(0)
-        reader = ipc.open_stream(buf)
+        reader = ValidatedReader(ipc.open_stream(buf), IpcValidation.NONE)
         session = StreamSession(reader)
         assert list(session) == []
 
@@ -960,7 +967,7 @@ class TestStreamSession:
             md = encode_metadata(msg.add_to_metadata())
             writer.write_batch(empty_batch(schema), custom_metadata=md)
         buf.seek(0)
-        reader = ipc.open_stream(buf)
+        reader = ValidatedReader(ipc.open_stream(buf), IpcValidation.NONE)
         logs: list[Message] = []
         session = StreamSession(reader, on_log=logs.append)
         data_batches = list(session)

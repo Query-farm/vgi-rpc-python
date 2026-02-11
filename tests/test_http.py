@@ -46,6 +46,7 @@ from vgi_rpc.rpc import (
     _dispatch_log_or_error,
     _drain_stream,
 )
+from vgi_rpc.utils import IpcValidation, ValidatedReader
 
 from .test_external import (
     MockStorage,
@@ -106,7 +107,7 @@ class TestMakeWsgiApp:
 
 def _extract_rpc_error(resp: _SyncTestResponse) -> RpcError:
     """Parse an Arrow IPC error stream from a response body, return the RpcError."""
-    reader = ipc.open_stream(BytesIO(resp.content))
+    reader = ValidatedReader(ipc.open_stream(BytesIO(resp.content)), IpcValidation.NONE)
     try:
         while True:
             batch, cm = reader.read_next_batch_with_custom_metadata()

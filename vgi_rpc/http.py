@@ -85,7 +85,7 @@ from vgi_rpc.rpc import (
     _write_result_batch,
     rpc_methods,
 )
-from vgi_rpc.utils import empty_batch
+from vgi_rpc.utils import IpcValidation, ValidatedReader, empty_batch
 
 if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
@@ -328,10 +328,10 @@ class _HttpRpcApp:
 
         """
         try:
-            ipc_method, kwargs = _read_request(stream)
+            ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
             if ipc_method != method_name:
                 raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
-            _deserialize_params(kwargs, info.param_types)
+            _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
@@ -404,10 +404,10 @@ class _HttpRpcApp:
     def _bidi_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run bidi init synchronously."""
         try:
-            ipc_method, kwargs = _read_request(stream)
+            ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
             if ipc_method != method_name:
                 raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
-            _deserialize_params(kwargs, info.param_types)
+            _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
@@ -495,7 +495,7 @@ class _HttpRpcApp:
 
         # Read the input batch + extract token from metadata
         try:
-            req_reader = ipc.open_stream(stream)
+            req_reader = ValidatedReader(ipc.open_stream(stream), self._server.ipc_validation)
             input_batch, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
             _drain_stream(req_reader)
         except pa.ArrowInvalid as exc:
@@ -508,7 +508,10 @@ class _HttpRpcApp:
         # Resolve ExternalLocation on input batch
         try:
             input_batch, resolved_cm = resolve_external_location(
-                input_batch, custom_metadata, self._server.external_config
+                input_batch,
+                custom_metadata,
+                self._server.external_config,
+                ipc_validation=self._server.ipc_validation,
             )
         except Exception as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
@@ -661,10 +664,10 @@ class _HttpRpcApp:
     def _server_stream_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run a server-stream method synchronously with resumable support."""
         try:
-            ipc_method, kwargs = _read_request(stream)
+            ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
             if ipc_method != method_name:
                 raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
-            _deserialize_params(kwargs, info.param_types)
+            _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
@@ -743,7 +746,7 @@ class _HttpRpcApp:
 
         # Read the request batch + extract token from metadata
         try:
-            req_reader = ipc.open_stream(stream)
+            req_reader = ValidatedReader(ipc.open_stream(stream), self._server.ipc_validation)
             _, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
             _drain_stream(req_reader)
         except pa.ArrowInvalid as exc:
@@ -827,7 +830,7 @@ class _HttpRpcApp:
             ) from exc
 
         try:
-            state_obj = state_cls.deserialize_from_bytes(state_bytes)
+            state_obj = state_cls.deserialize_from_bytes(state_bytes, self._server.ipc_validation)
         except Exception as exc:
             raise _RpcHttpError(
                 RuntimeError(f"Failed to deserialize state: {exc}"),
@@ -1162,15 +1165,20 @@ def make_sync_client(
 # ---------------------------------------------------------------------------
 
 
-def _open_response_stream(content: bytes, status_code: int) -> ipc.RecordBatchStreamReader:
+def _open_response_stream(
+    content: bytes,
+    status_code: int,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
+) -> ValidatedReader:
     """Open an Arrow IPC stream from HTTP response bytes.
 
     Args:
         content: Response body bytes.
         status_code: HTTP status code (used in error messages).
+        ipc_validation: Validation level for batches read from the stream.
 
     Returns:
-        An open IPC stream reader.
+        A ``ValidatedReader`` wrapping the IPC stream.
 
     Raises:
         RpcError: If the server returns 401 (``AuthenticationError``) or
@@ -1183,7 +1191,7 @@ def _open_response_stream(content: bytes, status_code: int) -> ipc.RecordBatchSt
     if status_code == HTTPStatus.UNAUTHORIZED:
         raise RpcError("AuthenticationError", content.decode(errors="replace"), "")
     try:
-        return ipc.open_stream(BytesIO(content))
+        return ValidatedReader(ipc.open_stream(BytesIO(content)), ipc_validation)
     except pa.ArrowInvalid:
         raise RpcError(
             "HttpError",
@@ -1207,7 +1215,16 @@ class HttpBidiSession:
     Supports context manager protocol for convenience.
     """
 
-    __slots__ = ("_client", "_external_config", "_method", "_on_log", "_output_schema", "_state_bytes", "_url_prefix")
+    __slots__ = (
+        "_client",
+        "_external_config",
+        "_ipc_validation",
+        "_method",
+        "_on_log",
+        "_output_schema",
+        "_state_bytes",
+        "_url_prefix",
+    )
 
     def __init__(
         self,
@@ -1219,6 +1236,7 @@ class HttpBidiSession:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
     ) -> None:
         """Initialize with HTTP client, method details, and initial state."""
         self._client = client
@@ -1228,6 +1246,7 @@ class HttpBidiSession:
         self._output_schema = output_schema
         self._on_log = on_log
         self._external_config = external_config
+        self._ipc_validation = ipc_validation
 
     def exchange(self, input_batch: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch and receive the output batch.
@@ -1263,7 +1282,7 @@ class HttpBidiSession:
         )
 
         # Read response — log batches + data batch with state
-        reader = _open_response_stream(resp.content, resp.status_code)
+        reader = _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
         try:
             ab = _read_batch_with_log_check(reader, self._on_log, self._external_config)
         except RpcError:
@@ -1314,7 +1333,7 @@ class HttpStreamSession:
         client: httpx.Client | _SyncTestClient,
         url_prefix: str,
         method: str,
-        reader: ipc.RecordBatchStreamReader,
+        reader: ValidatedReader,
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
@@ -1327,7 +1346,7 @@ class HttpStreamSession:
         self._on_log = on_log
         self._external_config = external_config
 
-    def _send_continuation(self, token: bytes) -> ipc.RecordBatchStreamReader:
+    def _send_continuation(self, token: bytes) -> ValidatedReader:
         """Send a continuation request and return the new response reader."""
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: token})
@@ -1339,7 +1358,7 @@ class HttpStreamSession:
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
-        return _open_response_stream(resp.content, resp.status_code)
+        return _open_response_stream(resp.content, resp.status_code, self._reader.ipc_validation)
 
     def __iter__(self) -> Iterator[AnnotatedBatch]:  # noqa: D105
         try:
@@ -1364,7 +1383,7 @@ class HttpStreamSession:
                     continue
 
                 resolved_batch, resolved_cm = resolve_external_location(
-                    batch, custom_metadata, self._external_config, self._on_log
+                    batch, custom_metadata, self._external_config, self._on_log, self._reader.ipc_validation
                 )
                 yield AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm)
         except RpcError:
@@ -1381,6 +1400,7 @@ def http_connect[P](
     on_log: Callable[[Message], None] | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
     external_location: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
 ) -> Iterator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -1396,6 +1416,7 @@ def http_connect[P](
             or a ``_SyncTestClient`` from ``make_sync_client()`` for testing.
         external_location: Optional ExternalLocation configuration for
             resolving and producing externalized batches.
+        ipc_validation: Validation level for incoming IPC batches.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -1412,7 +1433,12 @@ def http_connect[P](
 
     url_prefix = prefix
     try:
-        yield cast(P, _HttpProxy(protocol, client, url_prefix, on_log, external_config=external_location))
+        yield cast(
+            P,
+            _HttpProxy(
+                protocol, client, url_prefix, on_log, external_config=external_location, ipc_validation=ipc_validation
+            ),
+        )
     finally:
         if own_client:
             client.close()
@@ -1423,6 +1449,7 @@ def http_introspect(
     *,
     prefix: str = "/vgi",
     client: httpx.Client | _SyncTestClient | None = None,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
 ) -> ServiceDescription:
     """Send a ``__describe__`` request over HTTP and return a ``ServiceDescription``.
 
@@ -1431,6 +1458,7 @@ def http_introspect(
             Required when *client* is ``None``.
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        ipc_validation: Validation level for incoming IPC batches.
 
     Returns:
         A ``ServiceDescription`` with all method metadata.
@@ -1470,7 +1498,7 @@ def http_introspect(
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
 
-        reader = _open_response_stream(resp.content, resp.status_code)
+        reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
         # Skip log batches
         while True:
             batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
@@ -1501,6 +1529,7 @@ class _HttpProxy:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
     ) -> None:
         self._protocol = protocol
         self._client = client
@@ -1508,6 +1537,7 @@ class _HttpProxy:
         self._methods = rpc_methods(protocol)
         self._on_log = on_log
         self._external_config = external_config
+        self._ipc_validation = ipc_validation
 
     def __getattr__(self, name: str) -> Any:
         """Resolve RPC method names to callable proxies, caching on first access.
@@ -1537,6 +1567,7 @@ class _HttpProxy:
         url_prefix = self._url_prefix
         on_log = self._on_log
         ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> object:
             req_buf = BytesIO()
@@ -1548,7 +1579,7 @@ class _HttpProxy:
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
 
-            reader = _open_response_stream(resp.content, resp.status_code)
+            reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
             return _read_unary_response(reader, info, on_log, ext_cfg)
 
         return caller
@@ -1558,6 +1589,7 @@ class _HttpProxy:
         url_prefix = self._url_prefix
         on_log = self._on_log
         ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> HttpStreamSession:
             req_buf = BytesIO()
@@ -1569,7 +1601,7 @@ class _HttpProxy:
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
 
-            reader = _open_response_stream(resp.content, resp.status_code)
+            reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
             return HttpStreamSession(
                 client=client,
                 url_prefix=url_prefix,
@@ -1586,6 +1618,7 @@ class _HttpProxy:
         url_prefix = self._url_prefix
         on_log = self._on_log
         ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> HttpBidiSession:
             # Send init request
@@ -1599,7 +1632,7 @@ class _HttpProxy:
             )
 
             # Read response — log batches + zero-row batch with state
-            reader = _open_response_stream(resp.content, resp.status_code)
+            reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
             output_schema = reader.schema
             state_bytes: bytes | None = None
 
@@ -1624,6 +1657,7 @@ class _HttpProxy:
                 output_schema=output_schema,
                 on_log=on_log,
                 external_config=ext_cfg,
+                ipc_validation=ipc_validation,
             )
 
         return caller

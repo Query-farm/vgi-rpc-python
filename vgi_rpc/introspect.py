@@ -41,7 +41,7 @@ from vgi_rpc.rpc import (
     _dispatch_log_or_error,
     _drain_stream,
 )
-from vgi_rpc.utils import _is_optional_type
+from vgi_rpc.utils import IpcValidation, ValidatedReader, _is_optional_type
 
 __all__ = [
     "DESCRIBE_METHOD_NAME",
@@ -387,11 +387,15 @@ def parse_describe_batch(batch: pa.RecordBatch) -> ServiceDescription:
 # ---------------------------------------------------------------------------
 
 
-def introspect(transport: RpcTransport) -> ServiceDescription:
+def introspect(
+    transport: RpcTransport,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
+) -> ServiceDescription:
     """Send a ``__describe__`` request over a pipe/subprocess transport.
 
     Args:
         transport: An open ``RpcTransport`` (pipe or subprocess).
+        ipc_validation: Validation level for incoming IPC batches.
 
     Returns:
         A ``ServiceDescription`` with all method metadata.
@@ -410,7 +414,7 @@ def introspect(transport: RpcTransport) -> ServiceDescription:
         writer.write_batch(empty_batch, custom_metadata=request_metadata)
 
     # Read response
-    reader = ipc.open_stream(transport.reader)
+    reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
     # Skip log batches, collect the data batch
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
