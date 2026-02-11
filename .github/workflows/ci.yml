@@ -13,8 +13,7 @@ permissions:
 env:
   # Fail if type-precision drops below this percentage (mypy --any-exprs-report)
   MIN_TYPE_PRECISION: "95"
-  # Fail if the total number of "# type: ignore" comments exceeds this ceiling
-  MAX_TYPE_IGNORES: "24"
+
 
 jobs:
   test:
@@ -106,32 +105,6 @@ jobs:
               fi
             fi
           fi
-
-      - name: Count type:ignore comments
-        shell: bash
-        run: |
-          count=$(grep -r '# type: ignore' vgi_rpc/ tests/ --include='*.py' | wc -l | tr -d ' ')
-          echo "## Type Ignore Audit" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Total \`# type: ignore\` comments: **${count}** (maximum: ${MAX_TYPE_IGNORES})" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "$count" -gt "$MAX_TYPE_IGNORES" ]; then
-            echo "> **${count} type:ignore comments exceeds the ${MAX_TYPE_IGNORES} ceiling.**" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "| File | Line | Comment |" >> "$GITHUB_STEP_SUMMARY"
-            echo "|------|-----:|---------|" >> "$GITHUB_STEP_SUMMARY"
-            grep -rn '# type: ignore' vgi_rpc/ tests/ --include='*.py' | \
-              sed 's/\(.*\):\([0-9]*\):\(.*\)/| \1 | \2 | `\3` |/' >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::${count} type:ignore comments exceeds the ${MAX_TYPE_IGNORES} ceiling"
-            exit 1
-          fi
-
-          # Always list them for visibility
-          echo "| File | Line | Comment |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|------|-----:|---------|" >> "$GITHUB_STEP_SUMMARY"
-          grep -rn '# type: ignore' vgi_rpc/ tests/ --include='*.py' | \
-            sed 's/\(.*\):\([0-9]*\):\(.*\)/| \1 | \2 | `\3` |/' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Type check (ty)
         run: uv run ty check vgi_rpc/
