@@ -290,6 +290,7 @@ class CallContext:
             ``server_id`` and ``method``; conditionally includes
             ``principal``, ``auth_domain``, and ``remote_addr``
             when available.
+
         """
         if self._logger is None:
             base = logging.getLogger(f"vgi_rpc.service.{self._protocol_name}")

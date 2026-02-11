@@ -7,7 +7,7 @@ import logging
 import sys
 import textwrap
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import pyarrow as pa
 import pytest
@@ -26,6 +26,12 @@ from vgi_rpc.rpc import (
     connect,
     serve_pipe,
 )
+
+
+def _extra(record: logging.LogRecord, key: str) -> Any:
+    """Read a dynamic extra field from a log record without ``type: ignore``."""
+    return record.__dict__[key]
+
 
 # ---------------------------------------------------------------------------
 # Test Protocol + Implementation for logging tests
@@ -154,10 +160,10 @@ class TestContextLoggerAdapter:
 
         assert len(caplog.records) == 1
         record = caplog.records[0]
-        assert record.server_id == "srv42"  # type: ignore[attr-defined]
-        assert record.method == "greet"  # type: ignore[attr-defined]
-        assert record.principal == "alice"  # type: ignore[attr-defined]
-        assert record.auth_domain == "jwt"  # type: ignore[attr-defined]
+        assert _extra(record, "server_id") == "srv42"
+        assert _extra(record, "method") == "greet"
+        assert _extra(record, "principal") == "alice"
+        assert _extra(record, "auth_domain") == "jwt"
 
     def test_remote_addr_in_extra(self, caplog: pytest.LogCaptureFixture) -> None:
         """ctx.logger should include remote_addr when available."""
@@ -173,7 +179,7 @@ class TestContextLoggerAdapter:
             ctx.logger.info("test")
 
         record = caplog.records[0]
-        assert record.remote_addr == "10.0.0.1"  # type: ignore[attr-defined]
+        assert _extra(record, "remote_addr") == "10.0.0.1"
 
     def test_lazy_initialization(self) -> None:
         """Logger should not be created until .logger is accessed."""
@@ -215,8 +221,8 @@ class TestContextLoggerAdapter:
             ctx.logger.info("test", extra={"server_id": "HACKED", "custom_field": "ok"})
 
         record = caplog.records[0]
-        assert record.server_id == "srv1"  # type: ignore[attr-defined]
-        assert record.custom_field == "ok"  # type: ignore[attr-defined]
+        assert _extra(record, "server_id") == "srv1"
+        assert _extra(record, "custom_field") == "ok"
 
     def test_logger_name(self) -> None:
         """Logger name should be vgi_rpc.service.<ProtocolName>."""
@@ -266,11 +272,11 @@ class TestAccessLog:
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
         assert len(access_records) >= 1
         record = access_records[0]
-        assert record.status == "ok"  # type: ignore[attr-defined]
-        assert record.method == "greet"  # type: ignore[attr-defined]
-        assert record.method_type == "unary"  # type: ignore[attr-defined]
-        assert record.duration_ms >= 0  # type: ignore[attr-defined]
-        assert record.error_type == ""  # type: ignore[attr-defined]
+        assert _extra(record, "status") == "ok"
+        assert _extra(record, "method") == "greet"
+        assert _extra(record, "method_type") == "unary"
+        assert _extra(record, "duration_ms") >= 0
+        assert _extra(record, "error_type") == ""
 
     def test_unary_error_access_log(self, caplog: pytest.LogCaptureFixture) -> None:
         """Failed unary call should emit access log with status=error."""
@@ -284,9 +290,9 @@ class TestAccessLog:
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
         assert len(access_records) >= 1
         record = access_records[0]
-        assert record.status == "error"  # type: ignore[attr-defined]
-        assert record.error_type == "ValueError"  # type: ignore[attr-defined]
-        assert record.duration_ms >= 0  # type: ignore[attr-defined]
+        assert _extra(record, "status") == "error"
+        assert _extra(record, "error_type") == "ValueError"
+        assert _extra(record, "duration_ms") >= 0
 
     def test_access_log_includes_protocol_name(self, caplog: pytest.LogCaptureFixture) -> None:
         """Access log should include the protocol name."""
@@ -298,7 +304,7 @@ class TestAccessLog:
 
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
         assert len(access_records) >= 1
-        assert access_records[0].protocol == "LoggingService"  # type: ignore[attr-defined]
+        assert _extra(access_records[0], "protocol") == "LoggingService"
 
     def test_access_log_includes_auth_domain(self, caplog: pytest.LogCaptureFixture) -> None:
         """Access log should include auth_domain field."""
@@ -315,7 +321,7 @@ class TestAccessLog:
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
-        assert record.auth_domain == "jwt"  # type: ignore[attr-defined]
+        assert _extra(record, "auth_domain") == "jwt"
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +340,9 @@ class TestLifecycleLogging:
         init_records = [r for r in caplog.records if r.name == "vgi_rpc.rpc" and "RpcServer created" in r.message]
         assert len(init_records) == 1
         record = init_records[0]
-        assert record.server_id == "test123"  # type: ignore[attr-defined]
-        assert record.protocol == "LoggingService"  # type: ignore[attr-defined]
-        assert record.method_count == 2  # type: ignore[attr-defined]  # greet + fail
+        assert _extra(record, "server_id") == "test123"
+        assert _extra(record, "protocol") == "LoggingService"
+        assert _extra(record, "method_count") == 2  # greet + fail
 
     def test_error_method_logs_with_exc_info(self, caplog: pytest.LogCaptureFixture) -> None:
         """Method exception should emit ERROR log with exc_info."""
@@ -373,9 +379,9 @@ class TestCtxLoggerEndToEnd:
         assert len(service_records) >= 1
         record = service_records[0]
         assert record.message == "Processing greet"
-        assert record.input_name == "Alice"  # type: ignore[attr-defined]
+        assert _extra(record, "input_name") == "Alice"
         assert hasattr(record, "server_id")
-        assert record.method == "greet"  # type: ignore[attr-defined]
+        assert _extra(record, "method") == "greet"
 
 
 # ---------------------------------------------------------------------------
@@ -615,8 +621,8 @@ class TestEmitAccessLog:
         assert len(access_records) == 1
         record = access_records[0]
         assert record.levelno == logging.INFO
-        assert record.duration_ms == 42.5  # type: ignore[attr-defined]
-        assert record.status == "ok"  # type: ignore[attr-defined]
+        assert _extra(record, "duration_ms") == 42.5
+        assert _extra(record, "status") == "ok"
 
     def test_duration_rounding(self, caplog: pytest.LogCaptureFixture) -> None:
         """_emit_access_log should round duration_ms to 2 decimal places."""
@@ -633,7 +639,7 @@ class TestEmitAccessLog:
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
-        assert record.duration_ms == 42.56  # type: ignore[attr-defined]
+        assert _extra(record, "duration_ms") == 42.56
 
     def test_error_type_in_extra(self, caplog: pytest.LogCaptureFixture) -> None:
         """error_type should appear in extra when provided."""
@@ -651,8 +657,8 @@ class TestEmitAccessLog:
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
-        assert record.error_type == "ValueError"  # type: ignore[attr-defined]
-        assert record.status == "error"  # type: ignore[attr-defined]
+        assert _extra(record, "error_type") == "ValueError"
+        assert _extra(record, "status") == "error"
 
     def test_http_status_included_when_provided(self, caplog: pytest.LogCaptureFixture) -> None:
         """http_status should appear in extra when provided."""
@@ -670,7 +676,7 @@ class TestEmitAccessLog:
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
-        assert record.http_status == 200  # type: ignore[attr-defined]
+        assert _extra(record, "http_status") == 200
 
     def test_no_http_status_for_pipe(self, caplog: pytest.LogCaptureFixture) -> None:
         """http_status should not be present when not provided."""
@@ -723,8 +729,8 @@ class TestHttpAccessLog:
         http_records = [r for r in caplog.records if r.name == "vgi_rpc.http" and "WSGI app created" in r.message]
         assert len(http_records) == 1
         record = http_records[0]
-        assert record.server_id == "http_srv"  # type: ignore[attr-defined]
-        assert record.protocol == "LoggingService"  # type: ignore[attr-defined]
+        assert _extra(record, "server_id") == "http_srv"
+        assert _extra(record, "protocol") == "LoggingService"
 
     def test_http_unary_access_log(self, caplog: pytest.LogCaptureFixture) -> None:
         """HTTP unary call should emit access log with http_status."""
@@ -743,8 +749,8 @@ class TestHttpAccessLog:
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
         assert len(access_records) >= 1
         record = access_records[0]
-        assert record.http_status == 200  # type: ignore[attr-defined]
-        assert record.status == "ok"  # type: ignore[attr-defined]
+        assert _extra(record, "http_status") == 200
+        assert _extra(record, "status") == "ok"
 
     def test_http_auth_middleware_error_fields(self, caplog: pytest.LogCaptureFixture) -> None:
         """Auth middleware should log error_type and auth_error fields."""
@@ -772,8 +778,8 @@ class TestHttpAccessLog:
         warning_records = [r for r in caplog.records if r.name == "vgi_rpc.http" and r.levelno == logging.WARNING]
         assert len(warning_records) >= 1
         record = warning_records[0]
-        assert record.error_type == "ValueError"  # type: ignore[attr-defined]
-        assert record.auth_error == "bad token"  # type: ignore[attr-defined]
+        assert _extra(record, "error_type") == "ValueError"
+        assert _extra(record, "auth_error") == "bad token"
 
 
 # ---------------------------------------------------------------------------
@@ -925,11 +931,7 @@ class TestHttpServerStreamAccessLog:
         # Should have at least 2 access log entries: initial + continuation(s)
         assert len(access_records) >= 2
         # Check that continuation entries have server_stream method type
-        continuation_records = [
-            r
-            for r in access_records
-            if r.method_type == "server_stream"  # type: ignore[attr-defined]
-        ]
+        continuation_records = [r for r in access_records if _extra(r, "method_type") == "server_stream"]
         assert len(continuation_records) >= 2
 
     def test_server_stream_produce_error_reports_status_error(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -949,5 +951,5 @@ class TestHttpServerStreamAccessLog:
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
         assert len(access_records) >= 1
         record = access_records[0]
-        assert record.status == "error"  # type: ignore[attr-defined]
-        assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
+        assert _extra(record, "status") == "error"
+        assert _extra(record, "error_type") == "RuntimeError"
