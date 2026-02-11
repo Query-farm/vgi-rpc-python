@@ -8,7 +8,9 @@ uploads IPC data to S3 and returns pre-signed URLs for retrieval.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +18,8 @@ from typing import Any
 import pyarrow as pa
 
 from vgi_rpc.external import ExternalStorage
+
+_logger = logging.getLogger(__name__)
 
 __all__ = ["S3Storage"]
 
@@ -90,12 +94,32 @@ class S3Storage:
         if content_encoding is not None:
             put_kwargs["ContentEncoding"] = content_encoding
 
-        client.put_object(**put_kwargs)
+        t0 = time.monotonic()
+        try:
+            client.put_object(**put_kwargs)
+        except Exception as exc:
+            _logger.error(
+                "S3 upload failed: bucket=%s key=%s",
+                self.bucket,
+                key,
+                exc_info=True,
+                extra={"bucket": self.bucket, "key": key, "error_type": type(exc).__name__},
+            )
+            raise
+        duration_ms = (time.monotonic() - t0) * 1000
 
         url: str = client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": key},
             ExpiresIn=self.presign_expiry_seconds,
+        )
+        _logger.debug(
+            "S3 upload completed: bucket=%s key=%s (%d bytes, %.1fms)",
+            self.bucket,
+            key,
+            len(data),
+            duration_ms,
+            extra={"bucket": self.bucket, "key": key, "size_bytes": len(data), "duration_ms": round(duration_ms, 2)},
         )
         return url
 

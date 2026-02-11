@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import math
 import threading
 import time
@@ -37,6 +38,8 @@ __all__ = [
     "FetchConfig",
     "fetch_url",
 ]
+
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +164,16 @@ async def _create_session(timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSessi
     return aiohttp.ClientSession(timeout=timeout)
 
 
-def _reset_session(config: FetchConfig) -> None:
+def _reset_session(config: FetchConfig, *, url: str = "") -> None:
     """Close the current session and create a fresh one on the same loop.
 
     Used after ``ServerDisconnectedError`` to recover from stale pooled
     connections.
     """
+    _logger.warning(
+        "Resetting aiohttp session due to stale connection",
+        extra={"url": url},
+    )
     pool = config._pool
     with pool.lock:
         if pool.loop is None or pool.loop.is_closed():
@@ -207,6 +214,7 @@ def fetch_url(url: str, config: FetchConfig) -> bytes:
         aiohttp.ClientResponseError: On HTTP error responses.
 
     """
+    t0 = time.monotonic()
     pool = _ensure_pool(config)
     if pool.loop is None or pool.session is None:  # pragma: no cover
         raise RuntimeError("FetchPool not properly initialized")
@@ -215,9 +223,9 @@ def fetch_url(url: str, config: FetchConfig) -> bytes:
         pool.loop,
     )
     try:
-        return future.result()
+        data = future.result()
     except (aiohttp.ServerDisconnectedError, ConnectionResetError):
-        _reset_session(config)
+        _reset_session(config, url=url)
         new_pool = config._pool
         if new_pool.loop is None or new_pool.session is None:  # pragma: no cover
             raise RuntimeError("FetchPool not properly initialized after reset") from None
@@ -225,7 +233,16 @@ def fetch_url(url: str, config: FetchConfig) -> bytes:
             _fetch_with_probe(url, config, new_pool.session),
             new_pool.loop,
         )
-        return retry_future.result()
+        data = retry_future.result()
+    duration_ms = (time.monotonic() - t0) * 1000
+    _logger.debug(
+        "Fetch completed: %s (%d bytes, %.1fms)",
+        url,
+        len(data),
+        duration_ms,
+        extra={"url": url, "size_bytes": len(data), "duration_ms": round(duration_ms, 2)},
+    )
+    return data
 
 
 # ---------------------------------------------------------------------------

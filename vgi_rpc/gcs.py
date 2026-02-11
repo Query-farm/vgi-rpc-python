@@ -8,7 +8,9 @@ uploads IPC data to GCS and returns signed URLs for retrieval.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -17,6 +19,8 @@ from typing import Any
 import pyarrow as pa
 
 from vgi_rpc.external import ExternalStorage
+
+_logger = logging.getLogger(__name__)
 
 __all__ = ["GCSStorage"]
 
@@ -78,12 +82,37 @@ class GCSStorage:
         blob = bucket.blob(blob_name)
         if content_encoding is not None:
             blob.content_encoding = content_encoding
-        blob.upload_from_string(data, content_type="application/octet-stream")
+        t0 = time.monotonic()
+        try:
+            blob.upload_from_string(data, content_type="application/octet-stream")
+        except Exception as exc:
+            _logger.error(
+                "GCS upload failed: bucket=%s key=%s",
+                self.bucket,
+                blob_name,
+                exc_info=True,
+                extra={"bucket": self.bucket, "key": blob_name, "error_type": type(exc).__name__},
+            )
+            raise
+        duration_ms = (time.monotonic() - t0) * 1000
 
         url: str = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(seconds=self.presign_expiry_seconds),
             method="GET",
+        )
+        _logger.debug(
+            "GCS upload completed: bucket=%s key=%s (%d bytes, %.1fms)",
+            self.bucket,
+            blob_name,
+            len(data),
+            duration_ms,
+            extra={
+                "bucket": self.bucket,
+                "key": blob_name,
+                "size_bytes": len(data),
+                "duration_ms": round(duration_ms, 2),
+            },
         )
         return url
 

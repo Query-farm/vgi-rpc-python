@@ -93,8 +93,9 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
@@ -103,7 +104,9 @@ from types import MappingProxyType, TracebackType
 from typing import (
     Annotated,
     Any,
+    BinaryIO,
     Final,
+    Literal,
     Protocol,
     Self,
     cast,
@@ -142,6 +145,7 @@ from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_opt
 
 _EMPTY_SCHEMA = pa.schema([])
 _logger = logging.getLogger(__name__)
+_access_logger = logging.getLogger("vgi_rpc.access")
 
 ClientLog = Callable[[Message], None]
 """Callback type for emitting client-directed log messages from RPC method implementations."""
@@ -164,6 +168,7 @@ __all__ = [
     "RpcTransport",
     "ServerStream",
     "ServerStreamState",
+    "StderrMode",
     "StreamSession",
     "SubprocessTransport",
     "connect",
@@ -223,6 +228,22 @@ _ANONYMOUS: Final[AuthContext] = AuthContext(domain=None, authenticated=False)
 _EMPTY_TRANSPORT_METADATA: Final[Mapping[str, Any]] = MappingProxyType({})
 
 
+class _ContextLoggerAdapter(logging.LoggerAdapter[logging.Logger]):
+    """LoggerAdapter that preserves framework-bound extra fields.
+
+    User-supplied ``extra`` in individual log calls is merged, but
+    framework fields take precedence on key conflicts.  Fields always
+    present: ``server_id``, ``method``.  Conditionally present when
+    available: ``principal``, ``auth_domain``, ``remote_addr``.
+    """
+
+    def process(self, msg: str, kwargs: MutableMapping[str, Any]) -> tuple[str, MutableMapping[str, Any]]:
+        """Merge user extra with framework extra, framework wins on conflict."""
+        user_extra = kwargs.get("extra", {})
+        kwargs["extra"] = {**user_extra, **(self.extra or {})}
+        return msg, kwargs
+
+
 class CallContext:
     """Request-scoped context injected into methods that declare a ``ctx`` parameter.
 
@@ -230,18 +251,61 @@ class CallContext:
     injection point.
     """
 
-    __slots__ = ("auth", "emit_client_log", "transport_metadata")
+    __slots__ = (
+        "_logger",
+        "_method_name",
+        "_protocol_name",
+        "_server_id",
+        "auth",
+        "emit_client_log",
+        "transport_metadata",
+    )
 
     def __init__(
         self,
         auth: AuthContext,
         emit_client_log: ClientLog,
         transport_metadata: Mapping[str, Any] | None = None,
+        *,
+        server_id: str = "",
+        method_name: str = "",
+        protocol_name: str = "",
     ) -> None:
-        """Initialize with auth context, client-log callback, and optional transport metadata."""
+        """Initialize with auth context, client-log callback, and optional server context fields."""
         self.auth = auth
         self.emit_client_log = emit_client_log
         self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
+        self._server_id = server_id
+        self._method_name = method_name
+        self._protocol_name = protocol_name
+        self._logger: _ContextLoggerAdapter | None = None
+
+    @property
+    def logger(self) -> logging.LoggerAdapter[logging.Logger]:
+        """Server-side logger with request context pre-bound.
+
+        Returns:
+            A ``LoggerAdapter`` with logger name
+            ``vgi_rpc.service.<ProtocolName>``.  Always includes
+            ``server_id`` and ``method``; conditionally includes
+            ``principal``, ``auth_domain``, and ``remote_addr``
+            when available.
+        """
+        if self._logger is None:
+            base = logging.getLogger(f"vgi_rpc.service.{self._protocol_name}")
+            extra: dict[str, object] = {
+                "server_id": self._server_id,
+                "method": self._method_name,
+            }
+            if self.auth.principal:
+                extra["principal"] = self.auth.principal
+            if self.auth.domain:
+                extra["auth_domain"] = self.auth.domain
+            remote = self.transport_metadata.get("remote_addr")
+            if remote:
+                extra["remote_addr"] = remote
+            self._logger = _ContextLoggerAdapter(base, extra)
+        return self._logger
 
     def client_log(self, level: Level, message: str, **extra: str) -> None:
         """Emit a client-directed log message (convenience wrapper)."""
@@ -1234,11 +1298,41 @@ def make_pipe_pair() -> tuple[PipeTransport, PipeTransport]:
     return client, server
 
 
+class StderrMode(Enum):
+    """How to handle child process stderr in SubprocessTransport.
+
+    Members:
+        INHERIT: Child stderr goes to parent's stderr (default).
+        PIPE: Parent drains child stderr via a daemon thread and
+            forwards each line to a ``logging.Logger``.
+        DEVNULL: Child stderr discarded at OS level.
+    """
+
+    INHERIT = "inherit"
+    PIPE = "pipe"
+    DEVNULL = "devnull"
+
+
+def _drain_stderr(pipe: BinaryIO, logger: logging.Logger) -> None:
+    """Drain child stderr line-by-line. Runs in parent as daemon thread."""
+    try:
+        for raw_line in pipe:
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            if line:
+                logger.info(line)
+    except (OSError, ValueError):
+        pass
+    except Exception:
+        _logger.debug("Unexpected error in stderr drain", exc_info=True)
+    with contextlib.suppress(OSError, ValueError):
+        pipe.close()
+
+
 class SubprocessTransport:
     """Transport that communicates with a child process over stdin/stdout.
 
     Spawns a command via ``subprocess.Popen`` with ``stdin=PIPE``,
-    ``stdout=PIPE``, and ``stderr=None`` (inherits the parent's stderr).
+    ``stdout=PIPE``, and configurable stderr handling via :class:`StderrMode`.
 
     The writer (child's stdin) is kept unbuffered (``bufsize=0``) so IPC
     data is flushed immediately.  The reader (child's stdout) is wrapped
@@ -1247,15 +1341,36 @@ class SubprocessTransport:
     return fewer (POSIX short-read semantics).
     """
 
-    __slots__ = ("_closed", "_proc", "_reader", "_writer")
+    __slots__ = ("_closed", "_proc", "_reader", "_stderr_thread", "_writer")
 
-    def __init__(self, cmd: list[str]) -> None:
-        """Spawn the subprocess and wire up stdin/stdout as the transport."""
+    def __init__(
+        self,
+        cmd: list[str],
+        *,
+        stderr: StderrMode = StderrMode.INHERIT,
+        stderr_logger: logging.Logger | None = None,
+    ) -> None:
+        """Spawn the subprocess and wire up stdin/stdout as the transport.
+
+        Args:
+            cmd: Command to spawn.
+            stderr: How to handle the child's stderr stream.
+            stderr_logger: Logger for ``StderrMode.PIPE`` output.
+                Defaults to ``logging.getLogger("vgi_rpc.subprocess.stderr")``.
+
+        """
+        if stderr == StderrMode.DEVNULL:
+            stderr_arg: int | None = subprocess.DEVNULL
+        elif stderr == StderrMode.PIPE:
+            stderr_arg = subprocess.PIPE
+        else:
+            stderr_arg = None
+
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=None,
+            stderr=stderr_arg,
             bufsize=0,
         )
         assert self._proc.stdout is not None
@@ -1263,6 +1378,18 @@ class SubprocessTransport:
         self._reader: IOBase = os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False)
         self._writer: IOBase = cast(IOBase, self._proc.stdin)
         self._closed = False
+        self._stderr_thread: threading.Thread | None = None
+
+        if stderr == StderrMode.PIPE:
+            assert self._proc.stderr is not None
+            if stderr_logger is None:
+                stderr_logger = logging.getLogger("vgi_rpc.subprocess.stderr")
+            self._stderr_thread = threading.Thread(
+                target=_drain_stderr,
+                args=(self._proc.stderr, stderr_logger),
+                daemon=True,
+            )
+            self._stderr_thread.start()
 
     @property
     def proc(self) -> subprocess.Popen[bytes]:
@@ -1291,6 +1418,8 @@ class SubprocessTransport:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=5)
         self._reader.close()
 
 
@@ -1339,6 +1468,66 @@ def _flush_collector(
                 writer.write_batch(ab.batch, custom_metadata=ab.custom_metadata)
             else:
                 writer.write_batch(ab.batch)
+
+
+def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc: BaseException) -> str:
+    """Log an RPC method error and return the exception class name.
+
+    Returns:
+        The exception class name (for use as ``error_type``).
+
+    """
+    error_type = type(exc).__name__
+    _logger.error(
+        "Error in %s.%s: %s",
+        protocol_name,
+        method_name,
+        exc,
+        exc_info=True,
+        extra={"server_id": server_id, "method": method_name, "error_type": error_type},
+    )
+    return error_type
+
+
+def _emit_access_log(
+    protocol_name: str,
+    method_name: str,
+    method_type: str,
+    server_id: str,
+    auth: AuthContext,
+    transport_metadata: Mapping[str, Any],
+    duration_ms: float,
+    status: Literal["ok", "error"],
+    error_type: str = "",
+    http_status: int | None = None,
+) -> None:
+    """Emit a structured access log record for a completed RPC call."""
+    if not _access_logger.isEnabledFor(logging.INFO):
+        return
+    try:
+        extra: dict[str, object] = {
+            "server_id": server_id,
+            "protocol": protocol_name,
+            "method": method_name,
+            "method_type": method_type,
+            "principal": auth.principal or "",
+            "auth_domain": auth.domain or "",
+            "remote_addr": transport_metadata.get("remote_addr", ""),
+            "duration_ms": round(duration_ms, 2),
+            "status": status,
+            "error_type": error_type,
+        }
+        if http_status is not None:
+            extra["http_status"] = http_status
+        _access_logger.info(
+            "%s.%s %s",
+            protocol_name,
+            method_name,
+            status,
+            extra=extra,
+        )
+    except Exception:
+        _logger.debug("Access log emission failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1416,6 +1605,14 @@ class RpcServer:
             and "ctx" in inspect.signature(method).parameters
         )
 
+        _logger.info(
+            "RpcServer created for %s (server_id=%s, methods=%d)",
+            protocol.__name__,
+            self._server_id,
+            len(self._methods),
+            extra={"server_id": self._server_id, "protocol": protocol.__name__, "method_count": len(self._methods)},
+        )
+
     @property
     def methods(self) -> Mapping[str, RpcMethodInfo]:
         """Return method metadata for this server's protocol."""
@@ -1437,6 +1634,11 @@ class RpcServer:
         return self._server_id
 
     @property
+    def protocol_name(self) -> str:
+        """Name of the Protocol class this server implements."""
+        return self._protocol.__name__
+
+    @property
     def ctx_methods(self) -> frozenset[str]:
         """Method names whose implementations accept a ctx parameter."""
         return self._ctx_methods
@@ -1454,7 +1656,11 @@ class RpcServer:
             except (EOFError, StopIteration):
                 break
             except pa.ArrowInvalid:
-                _logger.warning("serve loop ending due to ArrowInvalid", exc_info=True)
+                _logger.warning(
+                    "serve loop ending due to ArrowInvalid",
+                    exc_info=True,
+                    extra={"server_id": self._server_id},
+                )
                 break
 
     def serve_one(self, transport: RpcTransport) -> None:
@@ -1514,7 +1720,14 @@ class RpcServer:
         sink = _ClientLogSink(server_id=self._server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if info.name in self._ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(
+                auth=auth,
+                emit_client_log=sink,
+                transport_metadata=transport_metadata,
+                server_id=self._server_id,
+                method_name=info.name,
+                protocol_name=self.protocol_name,
+            )
         return sink, auth, transport_metadata
 
     def _serve_unary(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
@@ -1525,60 +1738,143 @@ class RpcServer:
             return
 
         schema = info.result_schema
-        sink, _, _ = self._prepare_method_call(info, kwargs)
-        with ipc.new_stream(transport.writer, schema) as writer:
-            sink.flush_contents(writer, schema)
-            try:
-                result = getattr(self._impl, info.name)(**kwargs)
-                _validate_result(info.name, result, info.result_type)
-            except Exception as exc:
-                _write_error_batch(writer, schema, exc, server_id=self._server_id)
-                return
-            _write_result_batch(writer, info.result_schema, result, self._external_config)
+        sink, auth, transport_md = self._prepare_method_call(info, kwargs)
+        protocol_name = self.protocol_name
+        start = time.monotonic()
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
+        try:
+            with ipc.new_stream(transport.writer, schema) as writer:
+                sink.flush_contents(writer, schema)
+                try:
+                    result = getattr(self._impl, info.name)(**kwargs)
+                    _validate_result(info.name, result, info.result_type)
+                except Exception as exc:
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    _write_error_batch(writer, schema, exc, server_id=self._server_id)
+                    return
+                _write_result_batch(writer, info.result_schema, result, self._external_config)
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                info.name,
+                info.method_type.value,
+                self._server_id,
+                auth,
+                transport_md,
+                duration_ms,
+                status,
+                error_type,
+            )
 
     def _serve_server_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
+        protocol_name = self.protocol_name
+        start = time.monotonic()
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
+        # NOTE: Two finally blocks — the inner one handles init errors (with early return),
+        # the outer one handles streaming errors.  Only one access log fires per call.
         try:
             result: ServerStream[ServerStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
+            status = "error"
+            error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
+        finally:
+            if status == "error":
+                duration_ms = (time.monotonic() - start) * 1000
+                _emit_access_log(
+                    protocol_name,
+                    info.name,
+                    info.method_type.value,
+                    self._server_id,
+                    auth,
+                    transport_md,
+                    duration_ms,
+                    status,
+                    error_type,
+                )
 
         schema = result.output_schema
         state = result.state
 
-        with ipc.new_stream(transport.writer, schema) as stream_writer:
-            sink.flush_contents(stream_writer, schema)
-            cumulative_bytes = 0
-            try:
-                while True:
-                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
-                    produce_ctx = CallContext(
-                        auth=auth,
-                        emit_client_log=out.emit_client_log_message,
-                        transport_metadata=transport_md,
-                    )
-                    state.produce(out, produce_ctx)
-                    if not out.finished:
-                        out.validate()
-                    _flush_collector(stream_writer, out, self._external_config)
-                    if out.finished:
-                        break
-                    cumulative_bytes = out.total_data_bytes
-            except Exception as exc:
-                with contextlib.suppress(BrokenPipeError, OSError):
-                    _write_error_batch(stream_writer, schema, exc, server_id=self._server_id)
+        try:
+            with ipc.new_stream(transport.writer, schema) as stream_writer:
+                sink.flush_contents(stream_writer, schema)
+                cumulative_bytes = 0
+                try:
+                    while True:
+                        out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
+                        produce_ctx = CallContext(
+                            auth=auth,
+                            emit_client_log=out.emit_client_log_message,
+                            transport_metadata=transport_md,
+                            server_id=self._server_id,
+                            method_name=info.name,
+                            protocol_name=protocol_name,
+                        )
+                        state.produce(out, produce_ctx)
+                        if not out.finished:
+                            out.validate()
+                        _flush_collector(stream_writer, out, self._external_config)
+                        if out.finished:
+                            break
+                        cumulative_bytes = out.total_data_bytes
+                except Exception as exc:
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    with contextlib.suppress(BrokenPipeError, OSError):
+                        _write_error_batch(stream_writer, schema, exc, server_id=self._server_id)
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                info.name,
+                info.method_type.value,
+                self._server_id,
+                auth,
+                transport_md,
+                duration_ms,
+                status,
+                error_type,
+            )
 
     def _serve_bidi_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
+        protocol_name = self.protocol_name
+        start = time.monotonic()
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
 
+        # NOTE: Two finally blocks — the inner one handles init errors (with early return),
+        # the outer one handles streaming errors.  Only one access log fires per call.
         try:
             result: BidiStream[BidiStreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
+            status = "error"
+            error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
+        finally:
+            if status == "error":
+                duration_ms = (time.monotonic() - start) * 1000
+                _emit_access_log(
+                    protocol_name,
+                    info.name,
+                    info.method_type.value,
+                    self._server_id,
+                    auth,
+                    transport_md,
+                    duration_ms,
+                    status,
+                    error_type,
+                )
 
         output_schema = result.output_schema
         expected_input_schema = result.input_schema
@@ -1586,40 +1882,61 @@ class RpcServer:
 
         input_reader = ipc.open_stream(transport.reader)
 
-        with ipc.new_stream(transport.writer, output_schema) as output_writer:
-            sink.flush_contents(output_writer, output_schema)
-            cumulative_bytes = 0
-            try:
-                while True:
-                    try:
-                        input_batch, custom_metadata = input_reader.read_next_batch_with_custom_metadata()
-                    except StopIteration:
-                        break
+        try:
+            with ipc.new_stream(transport.writer, output_schema) as output_writer:
+                sink.flush_contents(output_writer, output_schema)
+                cumulative_bytes = 0
+                try:
+                    while True:
+                        try:
+                            input_batch, custom_metadata = input_reader.read_next_batch_with_custom_metadata()
+                        except StopIteration:
+                            break
 
-                    # Resolve ExternalLocation on input batch
-                    input_batch, resolved_cm = resolve_external_location(
-                        input_batch, custom_metadata, self._external_config
-                    )
-
-                    if expected_input_schema is not None and input_batch.schema != expected_input_schema:
-                        raise TypeError(
-                            f"Input schema mismatch: expected {expected_input_schema}, got {input_batch.schema}"
+                        # Resolve ExternalLocation on input batch
+                        input_batch, resolved_cm = resolve_external_location(
+                            input_batch, custom_metadata, self._external_config
                         )
 
-                    ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
-                    out = OutputCollector(output_schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
-                    process_ctx = CallContext(
-                        auth=auth,
-                        emit_client_log=out.emit_client_log_message,
-                        transport_metadata=transport_md,
-                    )
-                    state.process(ab_in, out, process_ctx)
-                    out.validate()
-                    _flush_collector(output_writer, out, self._external_config)
-                    cumulative_bytes = out.total_data_bytes
-            except Exception as exc:
-                with contextlib.suppress(BrokenPipeError, OSError):
-                    _write_error_batch(output_writer, output_schema, exc, server_id=self._server_id)
+                        if expected_input_schema is not None and input_batch.schema != expected_input_schema:
+                            raise TypeError(
+                                f"Input schema mismatch: expected {expected_input_schema}, got {input_batch.schema}"
+                            )
+
+                        ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
+                        out = OutputCollector(
+                            output_schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id
+                        )
+                        process_ctx = CallContext(
+                            auth=auth,
+                            emit_client_log=out.emit_client_log_message,
+                            transport_metadata=transport_md,
+                            server_id=self._server_id,
+                            method_name=info.name,
+                            protocol_name=protocol_name,
+                        )
+                        state.process(ab_in, out, process_ctx)
+                        out.validate()
+                        _flush_collector(output_writer, out, self._external_config)
+                        cumulative_bytes = out.total_data_bytes
+                except Exception as exc:
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    with contextlib.suppress(BrokenPipeError, OSError):
+                        _write_error_batch(output_writer, output_schema, exc, server_id=self._server_id)
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                info.name,
+                info.method_type.value,
+                self._server_id,
+                auth,
+                transport_md,
+                duration_ms,
+                status,
+                error_type,
+            )
 
         # Drain remaining input so transport is clean for next request
         with contextlib.suppress(pa.ArrowInvalid, OSError):
@@ -1984,6 +2301,8 @@ def connect[P](
     *,
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
+    stderr: StderrMode = StderrMode.INHERIT,
+    stderr_logger: logging.Logger | None = None,
 ) -> Iterator[P]:
     """Connect to a subprocess RPC server.
 
@@ -1996,12 +2315,16 @@ def connect[P](
         on_log: Optional callback for log messages from the server.
         external_location: Optional ExternalLocation configuration for
             resolving and producing externalized batches.
+        stderr: How to handle the child's stderr stream (see :class:`StderrMode`).
+        stderr_logger: Logger for ``StderrMode.PIPE`` output; ignored for
+            other modes.  Defaults to
+            ``logging.getLogger("vgi_rpc.subprocess.stderr")``.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
 
     """
-    transport = SubprocessTransport(cmd)
+    transport = SubprocessTransport(cmd, stderr=stderr, stderr_logger=stderr_logger)
     try:
         with RpcConnection(protocol, transport, on_log=on_log, external_location=external_location) as proxy:
             yield proxy

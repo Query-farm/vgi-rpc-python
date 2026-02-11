@@ -25,14 +25,16 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
+import logging
 import os
 import struct
+import time
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from http import HTTPStatus
 from io import BytesIO, IOBase
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, cast, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args, get_origin, get_type_hints
 from urllib.parse import urlparse
 
 import falcon
@@ -68,7 +70,9 @@ from vgi_rpc.rpc import (
     _deserialize_params,
     _dispatch_log_or_error,
     _drain_stream,
+    _emit_access_log,
     _flush_collector,
+    _log_method_error,
     _get_auth_and_metadata,
     _read_batch_with_log_check,
     _read_request,
@@ -96,6 +100,7 @@ __all__ = [
 ]
 
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
+_logger = logging.getLogger(__name__)
 
 
 class _RpcHttpError(Exception):
@@ -332,6 +337,7 @@ class _HttpRpcApp:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Pre-built __describe__ batch — write directly, skip implementation call.
+        # __describe__ is metadata introspection — no access log.
         describe_batch = self._server._describe_batch
         if describe_batch is not None and method_name == "__describe__":
             resp_buf = BytesIO()
@@ -341,26 +347,56 @@ class _HttpRpcApp:
             return resp_buf, HTTPStatus.OK
 
         server_id = self._server.server_id
+        protocol_name = self._server.protocol_name
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(
+                auth=auth,
+                emit_client_log=sink,
+                transport_metadata=transport_metadata,
+                server_id=server_id,
+                method_name=method_name,
+                protocol_name=protocol_name,
+            )
 
         schema = info.result_schema
         resp_buf = BytesIO()
         http_status = HTTPStatus.OK
-        with ipc.new_stream(resp_buf, schema) as writer:
-            sink.flush_contents(writer, schema)
-            try:
-                result = getattr(self._server.implementation, method_name)(**kwargs)
-                _validate_result(info.name, result, info.result_type)
-                _write_result_batch(writer, schema, result, self._server.external_config)
-            except (TypeError, pa.ArrowInvalid) as exc:
-                _write_error_batch(writer, schema, exc, server_id=server_id)
-                http_status = HTTPStatus.BAD_REQUEST
-            except Exception as exc:
-                _write_error_batch(writer, schema, exc, server_id=server_id)
-                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        start = time.monotonic()
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
+        try:
+            with ipc.new_stream(resp_buf, schema) as writer:
+                sink.flush_contents(writer, schema)
+                try:
+                    result = getattr(self._server.implementation, method_name)(**kwargs)
+                    _validate_result(info.name, result, info.result_type)
+                    _write_result_batch(writer, schema, result, self._server.external_config)
+                except (TypeError, pa.ArrowInvalid) as exc:
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                    _write_error_batch(writer, schema, exc, server_id=server_id)
+                    http_status = HTTPStatus.BAD_REQUEST
+                except Exception as exc:
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                    _write_error_batch(writer, schema, exc, server_id=server_id)
+                    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                method_name,
+                info.method_type.value,
+                server_id,
+                auth,
+                transport_metadata,
+                duration_ms,
+                status,
+                error_type,
+                http_status=http_status.value,
+            )
 
         resp_buf.seek(0)
         return resp_buf, http_status
@@ -377,36 +413,73 @@ class _HttpRpcApp:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Inject ctx if the implementation accepts it
-        sink = _ClientLogSink(server_id=self._server.server_id)
+        server_id = self._server.server_id
+        protocol_name = self._server.protocol_name
+        sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(
+                auth=auth,
+                emit_client_log=sink,
+                transport_metadata=transport_metadata,
+                server_id=server_id,
+                method_name=method_name,
+                protocol_name=protocol_name,
+            )
 
+        start = time.monotonic()
+        http_status = HTTPStatus.OK
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
         try:
-            result: BidiStream[BidiStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
-        except (TypeError, pa.ArrowInvalid) as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
-        except Exception as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
+            try:
+                result: BidiStream[BidiStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
+            except (TypeError, pa.ArrowInvalid) as exc:
+                status = "error"
+                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                http_status = HTTPStatus.BAD_REQUEST
+                raise _RpcHttpError(exc, status_code=http_status) from exc
+            except Exception as exc:
+                status = "error"
+                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                raise _RpcHttpError(exc, status_code=http_status) from exc
 
-        try:
-            state = result.state
-            output_schema = result.output_schema
+            try:
+                state = result.state
+                output_schema = result.output_schema
 
-            # Pack state + schema into a signed token
-            state_bytes = state.serialize_to_bytes()
-            schema_bytes = output_schema.serialize().to_pybytes()
-            token = _pack_state_token(state_bytes, schema_bytes, self._signing_key)
+                # Pack state + schema into a signed token
+                state_bytes = state.serialize_to_bytes()
+                schema_bytes = output_schema.serialize().to_pybytes()
+                token = _pack_state_token(state_bytes, schema_bytes, self._signing_key)
 
-            # Write response: log batches + zero-row batch with token in metadata
-            resp_buf = BytesIO()
-            with ipc.new_stream(resp_buf, output_schema) as writer:
-                sink.flush_contents(writer, output_schema)
-                state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
-                zero_batch = empty_batch(output_schema)
-                writer.write_batch(zero_batch, custom_metadata=state_metadata)
-        except Exception as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
+                # Write response: log batches + zero-row batch with token in metadata
+                resp_buf = BytesIO()
+                with ipc.new_stream(resp_buf, output_schema) as writer:
+                    sink.flush_contents(writer, output_schema)
+                    state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
+                    zero_batch = empty_batch(output_schema)
+                    writer.write_batch(zero_batch, custom_metadata=state_metadata)
+            except Exception as exc:
+                status = "error"
+                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                raise _RpcHttpError(exc, status_code=http_status) from exc
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                method_name,
+                info.method_type.value,
+                server_id,
+                auth,
+                transport_metadata,
+                duration_ms,
+                status,
+                error_type,
+                http_status=http_status.value,
+            )
 
         resp_buf.seek(0)
         return resp_buf
@@ -455,18 +528,27 @@ class _HttpRpcApp:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        server_id = self._server.server_id
+        protocol_name = self._server.protocol_name
+        auth, transport_md = _get_auth_and_metadata()
+        start = time.monotonic()
+        http_status = HTTPStatus.OK
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
         try:
             # Strip state token from metadata visible to process()
             user_cm = strip_keys(resolved_cm, STATE_KEY)
 
             ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
-            out = OutputCollector(output_schema, server_id=self._server.server_id)
+            out = OutputCollector(output_schema, server_id=server_id)
 
-            auth, transport_md = _get_auth_and_metadata()
             process_ctx = CallContext(
                 auth=auth,
                 emit_client_log=out.emit_client_log_message,
                 transport_metadata=transport_md,
+                server_id=server_id,
+                method_name=method_name,
+                protocol_name=protocol_name,
             )
             state_obj.process(ab_in, out, process_ctx)
             out.validate()
@@ -482,7 +564,24 @@ class _HttpRpcApp:
             with ipc.new_stream(resp_buf, output_schema) as writer:
                 _flush_collector(writer, out, self._server.external_config)
         except Exception as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR, schema=output_schema) from exc
+            status = "error"
+            error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+            http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+            raise _RpcHttpError(exc, status_code=http_status, schema=output_schema) from exc
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                method_name,
+                "bidi_stream",
+                server_id,
+                auth,
+                transport_md,
+                duration_ms,
+                status,
+                error_type,
+                http_status=http_status.value,
+            )
 
         resp_buf.seek(0)
         return resp_buf
@@ -493,20 +592,23 @@ class _HttpRpcApp:
         state: ServerStreamState,
         sink: _ClientLogSink | None = None,
         *,
+        method_name: str,
         auth: AuthContext | None = None,
         transport_metadata: Mapping[str, Any] | None = None,
-    ) -> BytesIO:
+    ) -> tuple[BytesIO, str | None]:
         """Run the produce loop for a server stream, with optional size-based continuation.
 
         Args:
             schema: The output schema for the stream.
             state: The server-stream state object.
             sink: Optional log sink to flush before producing (initial request only).
+            method_name: The RPC method name (for logging context).
             auth: Auth context; falls back to contextvar when ``None`` (continuation path).
             transport_metadata: Transport metadata; falls back to contextvar when ``None``.
 
         Returns:
-            A ``BytesIO`` containing the IPC response stream.
+            A ``(BytesIO, error_type)`` tuple — the IPC response stream and the
+            exception class name on produce-loop failure (``None`` on success).
 
         """
         if auth is None or transport_metadata is None:
@@ -515,8 +617,10 @@ class _HttpRpcApp:
             transport_metadata = transport_metadata if transport_metadata is not None else cv_md
 
         server_id = self._server.server_id
+        protocol_name = self._server.protocol_name
         resp_buf = BytesIO()
         max_bytes = self._max_stream_response_bytes
+        produce_error_type: str | None = None
         with ipc.new_stream(resp_buf, schema) as writer:
             if sink is not None:
                 sink.flush_contents(writer, schema)
@@ -528,6 +632,9 @@ class _HttpRpcApp:
                         auth=auth,
                         emit_client_log=out.emit_client_log_message,
                         transport_metadata=transport_metadata,
+                        server_id=server_id,
+                        method_name=method_name,
+                        protocol_name=protocol_name,
                     )
                     state.produce(out, produce_ctx)
                     if not out.finished:
@@ -546,9 +653,10 @@ class _HttpRpcApp:
                         writer.write_batch(empty_batch(schema), custom_metadata=state_metadata)
                         break
             except Exception as exc:
+                produce_error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                 _write_error_batch(writer, schema, exc, server_id=server_id)
         resp_buf.seek(0)
-        return resp_buf
+        return resp_buf, produce_error_type
 
     def _server_stream_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run a server-stream method synchronously with resumable support."""
@@ -562,25 +670,67 @@ class _HttpRpcApp:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
         # Inject ctx if the implementation accepts it
-        sink = _ClientLogSink(server_id=self._server.server_id)
+        server_id = self._server.server_id
+        protocol_name = self._server.protocol_name
+        sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(auth=auth, emit_client_log=sink, transport_metadata=transport_metadata)
+            kwargs["ctx"] = CallContext(
+                auth=auth,
+                emit_client_log=sink,
+                transport_metadata=transport_metadata,
+                server_id=server_id,
+                method_name=method_name,
+                protocol_name=protocol_name,
+            )
 
+        start = time.monotonic()
+        http_status = HTTPStatus.OK
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
         try:
-            result: ServerStream[ServerStreamState] = getattr(self._server.implementation, method_name)(**kwargs)
-        except (TypeError, pa.ArrowInvalid) as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
-        except Exception as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
+            try:
+                result: ServerStream[ServerStreamState] = getattr(
+                    self._server.implementation,
+                    method_name,
+                )(**kwargs)
+            except (TypeError, pa.ArrowInvalid) as exc:
+                status = "error"
+                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                http_status = HTTPStatus.BAD_REQUEST
+                raise _RpcHttpError(exc, status_code=http_status) from exc
+            except Exception as exc:
+                status = "error"
+                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                raise _RpcHttpError(exc, status_code=http_status) from exc
 
-        return self._produce_stream_response(
-            result.output_schema,
-            result.state,
-            sink,
-            auth=auth,
-            transport_metadata=transport_metadata,
-        )
+            resp_buf, produce_error_type = self._produce_stream_response(
+                result.output_schema,
+                result.state,
+                sink,
+                method_name=method_name,
+                auth=auth,
+                transport_metadata=transport_metadata,
+            )
+            if produce_error_type is not None:
+                status = "error"
+                error_type = produce_error_type
+            return resp_buf
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                method_name,
+                info.method_type.value,
+                server_id,
+                auth,
+                transport_metadata,
+                duration_ms,
+                status,
+                error_type,
+                http_status=http_status.value,
+            )
 
     def _server_stream_continue_sync(self, method_name: str, stream: IOBase) -> BytesIO:
         """Resume a server-stream from a continuation token."""
@@ -615,7 +765,37 @@ class _HttpRpcApp:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
-        return self._produce_stream_response(output_schema, state)
+        server_id = self._server.server_id
+        protocol_name = self._server.protocol_name
+        auth, transport_metadata = _get_auth_and_metadata()
+        start = time.monotonic()
+        http_status = HTTPStatus.OK
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
+        try:
+            resp_buf, produce_error_type = self._produce_stream_response(
+                output_schema,
+                state,
+                method_name=method_name,
+            )
+            if produce_error_type is not None:
+                status = "error"
+                error_type = produce_error_type
+            return resp_buf
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                method_name,
+                "server_stream",
+                server_id,
+                auth,
+                transport_metadata,
+                duration_ms,
+                status,
+                error_type,
+                http_status=http_status.value,
+            )
 
     def _unpack_and_recover_state(
         self,
@@ -790,6 +970,16 @@ class _AuthMiddleware:
         try:
             auth = self._authenticate(req)
         except (ValueError, PermissionError) as exc:
+            _logger.warning(
+                "Auth failure from %s: %s",
+                req.remote_addr,
+                exc,
+                extra={
+                    "remote_addr": req.remote_addr or "",
+                    "error_type": type(exc).__name__,
+                    "auth_error": str(exc),
+                },
+            )
             raise falcon.HTTPUnauthorized(description=str(exc)) from exc
         transport_metadata: dict[str, str] = {}
         if req.remote_addr:
@@ -873,6 +1063,21 @@ def make_wsgi_app(
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/bidi", _BidiInitResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))
+
+    _logger.info(
+        "WSGI app created for %s (server_id=%s, prefix=%s, auth=%s)",
+        server.protocol_name,
+        server.server_id,
+        prefix,
+        "enabled" if authenticate is not None else "disabled",
+        extra={
+            "server_id": server.server_id,
+            "protocol": server.protocol_name,
+            "prefix": prefix,
+            "auth_enabled": authenticate is not None,
+        },
+    )
+
     return app
 
 

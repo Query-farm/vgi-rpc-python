@@ -16,6 +16,7 @@ back all batches from the external stream, dispatches log batches via
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -40,6 +41,8 @@ from vgi_rpc.metadata import (
 
 if TYPE_CHECKING:
     from vgi_rpc.rpc import OutputCollector
+
+_logger = logging.getLogger(__name__)
 
 __all__ = [
     "Compression",
@@ -263,6 +266,12 @@ def resolve_external_location(
         )
         return retryer(_fetch_and_resolve, batch.schema, url, config, on_log)
     except (*retry_types,) as exc:
+        _logger.error(
+            "ExternalLocation resolution failed: %s (attempts=%d)",
+            url,
+            max_retries + 1,
+            extra={"url": url, "attempts": max_retries + 1, "error_type": type(exc).__name__},
+        )
         raise RuntimeError(f"Failed to resolve ExternalLocation after {max_retries + 1} attempts: {url}") from exc
 
 
@@ -380,6 +389,13 @@ def maybe_externalize_collector(
         content_encoding = config.compression.algorithm
 
     url = config.storage.upload(ipc_bytes, out.output_schema, content_encoding=content_encoding)
+    _logger.debug(
+        "Batch externalized: %s (%d bytes, compressed=%s)",
+        url,
+        len(ipc_bytes),
+        content_encoding is not None,
+        extra={"url": url, "size_bytes": len(ipc_bytes), "compressed": content_encoding is not None},
+    )
 
     pointer_batch, pointer_cm = make_external_location_batch(out.output_schema, url)
     return [(pointer_batch, pointer_cm)]
@@ -436,5 +452,12 @@ def maybe_externalize_batch(
         content_encoding = config.compression.algorithm
 
     url = config.storage.upload(ipc_bytes, batch.schema, content_encoding=content_encoding)
+    _logger.debug(
+        "Batch externalized: %s (%d bytes, compressed=%s)",
+        url,
+        len(ipc_bytes),
+        content_encoding is not None,
+        extra={"url": url, "size_bytes": len(ipc_bytes), "compressed": content_encoding is not None},
+    )
 
     return make_external_location_batch(batch.schema, url)

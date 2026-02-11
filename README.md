@@ -506,6 +506,139 @@ with serve_pipe(MyService, MyServiceImpl(), on_log=handle_log) as proxy:
     # [DEBUG] Processing complete
 ```
 
+### Server-side logging
+
+vgi-rpc uses stdlib `logging` for server-side observability. Three features work together:
+
+- **`ctx.logger`** — a pre-configured logger with request context (server_id, method, principal, remote_addr) automatically bound to every log record
+- **Automatic access logging** — one structured INFO record per RPC call on the `vgi_rpc.access` logger, with duration, status, and error details
+- **Logger hierarchy** — fine-grained control over what gets logged, from individual services to storage backends
+
+#### ctx.logger in a service method
+
+```python
+import logging
+
+from vgi_rpc import CallContext
+
+logging.basicConfig(level=logging.DEBUG)
+
+
+class MyServiceImpl:
+    """Implementation with server-side logging."""
+
+    def process(self, data: str, ctx: CallContext) -> str:
+        """Process data with server-side debug logging."""
+        ctx.logger.info("Processing request", extra={"input_size": len(data)})
+        result = data.upper()
+        ctx.logger.debug("Transform complete", extra={"output_size": len(result)})
+        return result
+```
+
+Each log record always includes `server_id` and `method` in its extra dict. When available, `principal`, `auth_domain`, and `remote_addr` are also included. The logger name is `vgi_rpc.service.<ProtocolName>`.
+
+#### Access log (automatic)
+
+Every completed RPC call emits one structured INFO record on the `vgi_rpc.access` logger:
+
+```python
+import logging
+
+# Enable access logging
+logging.getLogger("vgi_rpc.access").setLevel(logging.INFO)
+logging.getLogger("vgi_rpc.access").addHandler(logging.StreamHandler())
+```
+
+Access log extra fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `server_id` | `str` | Server instance identifier |
+| `protocol` | `str` | Protocol class name |
+| `method` | `str` | Method name |
+| `method_type` | `str` | `"unary"`, `"server_stream"`, or `"bidi_stream"` |
+| `principal` | `str` | Caller identity (empty if anonymous) |
+| `auth_domain` | `str` | Authentication scheme (empty if anonymous) |
+| `remote_addr` | `str` | Client address (HTTP only) |
+| `duration_ms` | `float` | Call duration in milliseconds |
+| `status` | `str` | `"ok"` or `"error"` |
+| `error_type` | `str` | Exception class name (empty on success) |
+| `http_status` | `int` | HTTP response status code (HTTP transport only; reflects the HTTP layer, not the RPC-level `status`) |
+
+> **Note:** Access logs include `principal` and `remote_addr`, which may be PII under GDPR/CCPA. Configure appropriate log retention and access controls.
+
+#### Production JSON logging
+
+```python
+import logging
+
+from vgi_rpc.logging_utils import VgiJsonFormatter
+
+handler = logging.StreamHandler()
+handler.setFormatter(VgiJsonFormatter())
+logging.getLogger("vgi_rpc").addHandler(handler)
+logging.getLogger("vgi_rpc").setLevel(logging.INFO)
+```
+
+Sample JSON output:
+
+```json
+{"timestamp": "2026-01-15 10:30:00,123", "level": "INFO", "logger": "vgi_rpc.access", "message": "MyService.process ok", "server_id": "a1b2c3d4e5f6", "protocol": "MyService", "method": "process", "method_type": "unary", "principal": "", "auth_domain": "", "remote_addr": "", "duration_ms": 3.45, "status": "ok", "error_type": ""}
+```
+
+#### Per-service log levels
+
+```python
+import logging
+
+# All framework logs at WARNING
+logging.getLogger("vgi_rpc").setLevel(logging.WARNING)
+# DEBUG for one specific service
+logging.getLogger("vgi_rpc.service.MyService").setLevel(logging.DEBUG)
+# Access log always on
+logging.getLogger("vgi_rpc.access").setLevel(logging.INFO)
+```
+
+#### Subprocess stderr handling
+
+```python
+from vgi_rpc import StderrMode, connect
+
+# Forward child stderr to Python logging (prevents pipe buffer stalls)
+with connect(MyService, ["python", "worker.py"], stderr=StderrMode.PIPE) as proxy:
+    proxy.process("hello")
+
+# Discard child stderr entirely
+with connect(MyService, ["python", "worker.py"], stderr=StderrMode.DEVNULL) as proxy:
+    proxy.process("hello")
+```
+
+`StderrMode.PIPE` starts a daemon thread that drains the child's stderr line-by-line into the `vgi_rpc.subprocess.stderr` logger. `StderrMode.INHERIT` (default) sends stderr to the parent's stderr. Only applies to subprocess transport.
+
+#### OpenTelemetry integration
+
+```python
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+
+handler = LoggingHandler(logger_provider=provider)
+logging.getLogger("vgi_rpc").addHandler(handler)
+# All structured fields become OTel log record attributes automatically.
+```
+
+#### Logger hierarchy
+
+| Logger name | Purpose |
+|---|---|
+| `vgi_rpc` | Root — add handlers here |
+| `vgi_rpc.access` | Auto access log (one per call) |
+| `vgi_rpc.service.<Protocol>` | Developer `ctx.logger` per service |
+| `vgi_rpc.rpc` | Framework lifecycle (server init, errors) |
+| `vgi_rpc.http` | HTTP transport lifecycle |
+| `vgi_rpc.external` | External storage operations |
+| `vgi_rpc.external_fetch` | URL fetch operations |
+| `vgi_rpc.s3` / `vgi_rpc.gcs` | Storage backend operations |
+| `vgi_rpc.subprocess.stderr` | Child process stderr (`StderrMode.PIPE`) |
+
 ## Error Handling
 
 Server exceptions are propagated to the client as `RpcError`:

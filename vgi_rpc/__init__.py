@@ -1,6 +1,7 @@
 """Transport-agnostic RPC framework built on Apache Arrow IPC serialization."""
 
 import contextlib
+import logging
 
 from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage
 from vgi_rpc.external_fetch import FetchConfig
@@ -30,6 +31,7 @@ from vgi_rpc.rpc import (
     RpcTransport,
     ServerStream,
     ServerStreamState,
+    StderrMode,
     StreamSession,
     SubprocessTransport,
     VersionError,
@@ -78,6 +80,7 @@ __all__ = [
     # Transports
     "PipeTransport",
     "SubprocessTransport",
+    "StderrMode",
     "make_pipe_pair",
     "serve_stdio",
     # Streaming
@@ -130,3 +133,8 @@ if "HttpBidiSession" in dir():
         "make_wsgi_app",
         "make_sync_client",
     ]
+
+# Attach NullHandler to the root logger so library users don't get
+# "No handler found" warnings.  Must come after all imports so the
+# logger hierarchy is fully populated.
+logging.getLogger("vgi_rpc").addHandler(logging.NullHandler())
