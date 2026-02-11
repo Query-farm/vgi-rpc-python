@@ -1303,7 +1303,17 @@ def serve_stdio(server: RpcServer) -> None:
     pipes).  The writer is unbuffered (``buffering=0``) so IPC data is
     flushed immediately.  Uses ``closefd=False`` so the original stdio
     descriptors are not closed on exit.
+
+    Emits a diagnostic warning to stderr when stdin or stdout is connected
+    to a terminal, since the process expects binary Arrow IPC data.
     """
+    if sys.stdin.isatty() or sys.stdout.isatty():
+        sys.stderr.write(
+            "WARNING: This process communicates via Arrow IPC on stdin/stdout "
+            "and is not intended to be run interactively.\n"
+            "It should be launched as a subprocess by an RPC client "
+            "(e.g. vgi_rpc.connect()).\n"
+        )
     reader = os.fdopen(sys.stdin.fileno(), "rb", closefd=False)
     writer = os.fdopen(sys.stdout.fileno(), "wb", buffering=0, closefd=False)
     transport = PipeTransport(reader, writer)
