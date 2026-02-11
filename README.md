@@ -68,10 +68,10 @@ class CalculatorImpl:
 # 3. Serve and call methods through a typed proxy
 with serve_pipe(Calculator, CalculatorImpl()) as proxy:
     # proxy is typed as Calculator — IDE shows add(), greet() with full signatures
-    result = proxy.add(2.0, 3.0)
+    result = proxy.add(a=2.0, b=3.0)
     print(result)  # 5.0
 
-    greeting = proxy.greet("World")
+    greeting = proxy.greet(name="World")
     print(greeting)  # Hello, World!
 ```
 
@@ -275,7 +275,7 @@ class DataService(Protocol):
 from vgi_rpc import serve_pipe
 
 with serve_pipe(Calculator, CalculatorImpl()) as proxy:
-    print(proxy.add(1.0, 2.0))  # 3.0
+    print(proxy.add(a=1.0, b=2.0))  # 3.0
 ```
 
 ### Subprocess
@@ -299,7 +299,7 @@ import sys
 from vgi_rpc import connect
 
 with connect(MyService, [sys.executable, "worker.py"]) as proxy:
-    result = proxy.echo("hello")  # proxy is typed as MyService
+    result = proxy.echo(message="hello")  # proxy is typed as MyService
 ```
 
 ### HTTP
@@ -316,7 +316,7 @@ app = make_wsgi_app(server)
 
 # Client
 with http_connect(MyService, "http://localhost:8080") as proxy:
-    result = proxy.echo("hello")  # proxy is typed as MyService
+    result = proxy.echo(message="hello")  # proxy is typed as MyService
 ```
 
 `make_wsgi_app` options:
@@ -394,7 +394,7 @@ The client iterates over the result — the proxy type preserves `ServerStream`'
 
 ```python
 with serve_pipe(CountdownService, CountdownServiceImpl()) as proxy:
-    for batch in proxy.countdown(3):  # batch: AnnotatedBatch
+    for batch in proxy.countdown(n=3):  # batch: AnnotatedBatch
         print(batch.batch.to_pydict())
     # {'value': [3]}
     # {'value': [2]}
@@ -437,7 +437,7 @@ The client uses the result as a context manager with `exchange()` for lockstep c
 
 ```python
 with serve_pipe(SumService, SumServiceImpl()) as proxy:
-    with proxy.accumulate(0.0) as session:  # session supports exchange() and close()
+    with proxy.accumulate(initial=0.0) as session:  # session supports exchange() and close()
         result = session.exchange(
             AnnotatedBatch.from_pydict({"value": [1.0, 2.0]})
         )
@@ -501,7 +501,7 @@ def handle_log(msg: Message) -> None:
 
 
 with serve_pipe(MyService, MyServiceImpl(), on_log=handle_log) as proxy:
-    proxy.process("hello")
+    proxy.process(data="hello")
     # [INFO] Processing started
     # [DEBUG] Processing complete
 ```
@@ -606,11 +606,11 @@ from vgi_rpc import StderrMode, connect
 
 # Forward child stderr to Python logging (prevents pipe buffer stalls)
 with connect(MyService, ["python", "worker.py"], stderr=StderrMode.PIPE) as proxy:
-    proxy.process("hello")
+    proxy.process(data="hello")
 
 # Discard child stderr entirely
 with connect(MyService, ["python", "worker.py"], stderr=StderrMode.DEVNULL) as proxy:
-    proxy.process("hello")
+    proxy.process(data="hello")
 ```
 
 `StderrMode.PIPE` starts a daemon thread that drains the child's stderr line-by-line into the `vgi_rpc.subprocess.stderr` logger. `StderrMode.INHERIT` (default) sends stderr to the parent's stderr. Only applies to subprocess transport.
