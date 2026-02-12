@@ -42,13 +42,13 @@ Verify "ty" type checking too.
 
 ### Core modules (`vgi_rpc/`)
 
-- **`rpc.py`** — The RPC framework. Defines the wire protocol, method types (UNARY, SERVER_STREAM, BIDI_STREAM), and the core classes: `RpcServer`, `RpcConnection`, `RpcTransport`, `PipeTransport`. Also defines `AuthContext` (frozen dataclass for authentication state), `CallContext` (request-scoped context injected into methods via `ctx` parameter), and `_TransportContext` (contextvar bridge for HTTP auth). Introspects Protocol classes via `rpc_methods()` to extract `RpcMethodInfo` (schemas, method type). Client gets a typed proxy from `RpcConnection`; server dispatches via `RpcServer.serve()`.
+- **`rpc.py`** — The RPC framework. Defines the wire protocol, method types (UNARY, STREAM), and the core classes: `RpcServer`, `RpcConnection`, `RpcTransport`, `PipeTransport`. Also defines `AuthContext` (frozen dataclass for authentication state), `CallContext` (request-scoped context injected into methods via `ctx` parameter), and `_TransportContext` (contextvar bridge for HTTP auth). Introspects Protocol classes via `rpc_methods()` to extract `RpcMethodInfo` (schemas, method type). Client gets a typed proxy from `RpcConnection`; server dispatches via `RpcServer.serve()`.
 
 - **`utils.py`** — Arrow serialization layer. `ArrowSerializableDataclass` mixin auto-generates `ARROW_SCHEMA` from dataclass field annotations and provides `serialize()`/`deserialize_from_batch()`. Handles type inference from Python types to Arrow types (including generics, Enum, Optional, nested dataclasses). Also provides low-level IPC stream read/write helpers.
 
 - **`log.py`** — Structured log messages (`Message` with `Level` enum). Messages are serialized out-of-band as zero-row batches with metadata keys `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`. Server methods access logging via the `CallContext` (see below).
 
-- **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.bidi_state`, `vgi_rpc.log_level`, `vgi_rpc.server_id`, etc.) and provides encoding, merging, and key-stripping utilities used by `rpc.py`, `http.py`, `utils.py`, `log.py`, and `external.py`.
+- **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.stream_state`, `vgi_rpc.log_level`, `vgi_rpc.server_id`, etc.) and provides encoding, merging, and key-stripping utilities used by `rpc.py`, `http.py`, `utils.py`, `log.py`, and `external.py`.
 
 - **`external.py`** — ExternalLocation batch support for large data. When batches exceed a configurable size threshold, they are uploaded to pluggable `ExternalStorage` (e.g. S3) and replaced with zero-row pointer batches containing a `vgi_rpc.location` URL metadata key. Readers resolve pointers transparently via `external_fetch.fetch_url()` (aiohttp-based parallel fetching); writers externalize batches above the threshold. Provides `ExternalLocationConfig`, `ExternalStorage` protocol, and production/resolution functions. Supports optional zstd compression.
 
@@ -58,21 +58,20 @@ Verify "ty" type checking too.
 
 - **`gcs.py`** *(optional — `pip install vgi-rpc[gcs]`)* — Google Cloud Storage backend implementing `ExternalStorage`. Uses google-cloud-storage to upload IPC data and generate V4 signed URLs. Relies on Application Default Credentials.
 
-- **`http.py`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport using Falcon (server) and httpx (client). Exposes `make_wsgi_app()` to serve an `RpcServer` as a Falcon WSGI app, and `http_connect()` for the client side. Bidi streaming is stateless: each exchange carries serialized `BidiStreamState` in Arrow custom metadata. Supports pluggable authentication via an `authenticate` callback and `_AuthMiddleware`.
+- **`http.py`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport using Falcon (server) and httpx (client). Exposes `make_wsgi_app()` to serve an `RpcServer` as a Falcon WSGI app, and `http_connect()` for the client side. Streaming is stateless: each exchange carries serialized `StreamState` in a signed token in Arrow custom metadata. Supports pluggable authentication via an `authenticate` callback and `_AuthMiddleware`.
 
 ### Wire protocol
 
 Multiple IPC streams are written sequentially on the same pipe. Each method call writes one request stream and reads one response stream:
 
 - **Unary**: Client sends params batch → Server replies with log batches + result/error batch
-- **Server Stream**: Client sends params batch → Server replies with interleaved log and data batches
-- **Bidi Stream**: Initial params exchange, then lockstep: client sends input batch, server replies with log batches + output batch, repeating until EOS
+- **Stream**: Initial params exchange, then lockstep: client sends input batch (tick for producer, real data for exchange), server replies with log batches + output batch, repeating until EOS
 
 ### Key patterns
 
-**Defining an RPC service**: Write a `Protocol` class where return types determine method type — plain types for unary, `ServerStream[S]` for server streaming, `BidiStream[S]` for bidirectional.
+**Defining an RPC service**: Write a `Protocol` class where return types determine method type — plain types for unary, `Stream[S]` for streaming (both producer and exchange patterns).
 
-**Stream state**: Streaming methods return a state object (`ServerStreamState` or `BidiStreamState` subclass) that drives iteration via `produce(out, ctx)` or `process(input, out, ctx)` callbacks on `OutputCollector`.
+**Stream state**: Streaming methods return a `Stream[S]` where `S` is a `StreamState` subclass. The state's `process(input, out, ctx)` method is called once per iteration. Producer streams (default `input_schema=_EMPTY_SCHEMA`) ignore the input and call `out.finish()` to end. Exchange streams set `input_schema` to a real schema and process client data.
 
 **CallContext injection**: Server method implementations can accept an optional `ctx: CallContext` parameter. `CallContext` provides `auth` (`AuthContext`), `client_log()` (client-directed logging), `emit_client_log` (raw `ClientLog` callback), and `transport_metadata` (e.g. `remote_addr` from HTTP). The parameter is injected by the framework — it does **not** appear in the Protocol definition.
 

@@ -12,7 +12,7 @@ from typing import Any, Protocol
 import pyarrow as pa
 import pytest
 
-from vgi_rpc import OutputCollector, ServerStream, ServerStreamState
+from vgi_rpc import AnnotatedBatch, OutputCollector, Stream, StreamState
 from vgi_rpc.logging_utils import VgiJsonFormatter
 from vgi_rpc.rpc import (
     AuthContext,
@@ -69,12 +69,12 @@ class LoggingServiceImpl:
 
 
 @dataclass
-class _CountState(ServerStreamState):
+class _CountState(StreamState):
     """Counts down from remaining to 1."""
 
     remaining: int
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce next countdown value."""
         if self.remaining <= 0:
             out.finish()
@@ -84,18 +84,18 @@ class _CountState(ServerStreamState):
 
 
 @dataclass
-class _FailProduceState(ServerStreamState):
+class _FailProduceState(StreamState):
     """Always fails on first produce."""
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Raise on produce."""
         raise RuntimeError("produce exploded")
 
 
 class _StreamService(Protocol):
-    """Protocol for server-stream logging tests."""
+    """Protocol for producer stream logging tests."""
 
-    def count(self, n: int) -> ServerStream[ServerStreamState]:
+    def count(self, n: int) -> Stream[StreamState]:
         """Count down."""
         ...
 
@@ -103,16 +103,16 @@ class _StreamService(Protocol):
 class _StreamServiceImpl:
     """Implementation for _StreamService."""
 
-    def count(self, n: int) -> ServerStream[_CountState]:
+    def count(self, n: int) -> Stream[_CountState]:
         """Count down from n."""
         schema = pa.schema([pa.field("value", pa.int64())])
-        return ServerStream(output_schema=schema, state=_CountState(remaining=n))
+        return Stream(output_schema=schema, state=_CountState(remaining=n))
 
 
 class _FailStreamService(Protocol):
-    """Protocol for failing server-stream test."""
+    """Protocol for failing producer stream test."""
 
-    def fail_stream(self) -> ServerStream[ServerStreamState]:
+    def fail_stream(self) -> Stream[StreamState]:
         """Fail unconditionally."""
         ...
 
@@ -120,10 +120,10 @@ class _FailStreamService(Protocol):
 class _FailStreamServiceImpl:
     """Implementation for _FailStreamService."""
 
-    def fail_stream(self) -> ServerStream[_FailProduceState]:
+    def fail_stream(self) -> Stream[_FailProduceState]:
         """Fail unconditionally."""
         schema = pa.schema([pa.field("value", pa.int64())])
-        return ServerStream(output_schema=schema, state=_FailProduceState())
+        return Stream(output_schema=schema, state=_FailProduceState())
 
 
 # ---------------------------------------------------------------------------
@@ -900,15 +900,15 @@ class TestVgiJsonFormatterReservedKeys:
 
 
 # ---------------------------------------------------------------------------
-# HTTP server-stream access log tests
+# HTTP producer stream access log tests
 # ---------------------------------------------------------------------------
 
 
 class TestHttpServerStreamAccessLog:
-    """Tests for HTTP server-stream access logging."""
+    """Tests for HTTP producer stream access logging."""
 
     def test_server_stream_continuation_emits_access_log(self, caplog: pytest.LogCaptureFixture) -> None:
-        """Server-stream continuation should emit access log."""
+        """Producer stream continuation should emit access log."""
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_StreamService, _StreamServiceImpl(), server_id="stream_srv")
@@ -930,12 +930,12 @@ class TestHttpServerStreamAccessLog:
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
         # Should have at least 2 access log entries: initial + continuation(s)
         assert len(access_records) >= 2
-        # Check that continuation entries have server_stream method type
-        continuation_records = [r for r in access_records if _extra(r, "method_type") == "server_stream"]
+        # Check that continuation entries have stream method type
+        continuation_records = [r for r in access_records if _extra(r, "method_type") == "stream"]
         assert len(continuation_records) >= 2
 
     def test_server_stream_produce_error_reports_status_error(self, caplog: pytest.LogCaptureFixture) -> None:
-        """Produce-loop failure should result in status='error' in access log."""
+        """Producer stream produce-loop failure should result in status='error' in access log."""
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_FailStreamService, _FailStreamServiceImpl(), server_id="fail_srv")

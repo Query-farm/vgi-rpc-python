@@ -19,8 +19,6 @@ from vgi_rpc.rpc import (
     _ANONYMOUS,
     AnnotatedBatch,
     AuthContext,
-    BidiStream,
-    BidiStreamState,
     CallContext,
     MethodType,
     OutputCollector,
@@ -28,9 +26,9 @@ from vgi_rpc.rpc import (
     RpcConnection,
     RpcError,
     RpcServer,
-    ServerStream,
-    ServerStreamState,
+    Stream,
     StreamSession,
+    StreamState,
     connect,
     describe_rpc,
     make_pipe_pair,
@@ -43,6 +41,7 @@ from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType, IpcValidation, 
 from .conftest import ConnFactory, _worker_cmd
 
 _DUMMY_CTX = CallContext(auth=AuthContext.anonymous(), emit_client_log=lambda _: None)
+_TICK = AnnotatedBatch(batch=pa.RecordBatch.from_pylist([], schema=pa.schema([])))
 
 # ---------------------------------------------------------------------------
 # Enum for type fidelity tests
@@ -63,13 +62,13 @@ class Color(Enum):
 
 
 @dataclass
-class GenerateState(ServerStreamState):
-    """State for the generate server stream."""
+class GenerateState(StreamState):
+    """State for the generate producer stream."""
 
     count: int
     current: int = 0
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next batch."""
         if self.current >= self.count:
             out.finish()
@@ -79,8 +78,8 @@ class GenerateState(ServerStreamState):
 
 
 @dataclass
-class TransformState(BidiStreamState):
-    """State for the transform bidi stream."""
+class TransformState(StreamState):
+    """State for the transform exchange stream."""
 
     factor: float
 
@@ -91,12 +90,12 @@ class TransformState(BidiStreamState):
 
 
 @dataclass
-class FailStreamState(ServerStreamState):
+class FailStreamState(StreamState):
     """State for a stream that fails after the first batch."""
 
     emitted: bool = False
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce a batch, then fail on the next call."""
         if not self.emitted:
             self.emitted = True
@@ -106,7 +105,7 @@ class FailStreamState(ServerStreamState):
 
 
 @dataclass
-class FailBidiMidState(BidiStreamState):
+class FailBidiMidState(StreamState):
     """State for a bidi that fails after processing one batch."""
 
     factor: float
@@ -122,13 +121,13 @@ class FailBidiMidState(BidiStreamState):
 
 
 @dataclass
-class GenerateWithLogsState(ServerStreamState):
+class GenerateWithLogsState(StreamState):
     """State for generate with interleaved log messages."""
 
     count: int
     current: int = 0
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next batch with a log message."""
         if self.current >= self.count:
             out.finish()
@@ -139,7 +138,7 @@ class GenerateWithLogsState(ServerStreamState):
 
 
 @dataclass
-class TransformWithLogsState(BidiStreamState):
+class TransformWithLogsState(StreamState):
     """State for bidi transform with log messages per exchange."""
 
     factor: float
@@ -152,8 +151,8 @@ class TransformWithLogsState(BidiStreamState):
 
 
 @dataclass
-class PassthroughState(BidiStreamState):
-    """State for a passthrough bidi stream."""
+class PassthroughState(StreamState):
+    """State for a passthrough exchange stream."""
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Pass through the input batch unchanged."""
@@ -161,10 +160,10 @@ class PassthroughState(BidiStreamState):
 
 
 @dataclass
-class EmptyStreamState(ServerStreamState):
+class EmptyStreamState(StreamState):
     """State for a stream that immediately finishes."""
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Finish immediately."""
         out.finish()
 
@@ -197,11 +196,11 @@ class RpcFixtureService(Protocol):
         """Do nothing."""
         ...
 
-    def generate(self, count: int) -> ServerStream[ServerStreamState]:
+    def generate(self, count: int) -> Stream[StreamState]:
         """Generate count batches."""
         ...
 
-    def transform(self, factor: float) -> BidiStream[BidiStreamState]:
+    def transform(self, factor: float) -> Stream[StreamState]:
         """Scale values by factor."""
         ...
 
@@ -209,11 +208,11 @@ class RpcFixtureService(Protocol):
         """Raise ValueError."""
         ...
 
-    def fail_stream(self) -> ServerStream[ServerStreamState]:
+    def fail_stream(self) -> Stream[StreamState]:
         """Stream that fails mid-iteration."""
         ...
 
-    def fail_bidi_mid(self, factor: float) -> BidiStream[BidiStreamState]:
+    def fail_bidi_mid(self, factor: float) -> Stream[StreamState]:
         """Bidi that fails after first batch."""
         ...
 
@@ -245,11 +244,11 @@ class RpcFixtureService(Protocol):
         """Greet by name, emitting log messages."""
         ...
 
-    def generate_with_logs(self, count: int) -> ServerStream[ServerStreamState]:
+    def generate_with_logs(self, count: int) -> Stream[StreamState]:
         """Generate batches with interleaved log messages."""
         ...
 
-    def transform_with_logs(self, factor: float) -> BidiStream[BidiStreamState]:
+    def transform_with_logs(self, factor: float) -> Stream[StreamState]:
         """Bidi transform with log messages per exchange."""
         ...
 
@@ -269,29 +268,29 @@ class RpcFixtureServiceImpl:
         """Do nothing."""
         return None
 
-    def generate(self, count: int) -> ServerStream[GenerateState]:
+    def generate(self, count: int) -> Stream[GenerateState]:
         """Generate count batches."""
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
-        return ServerStream(output_schema=schema, state=GenerateState(count=count))
+        return Stream(output_schema=schema, state=GenerateState(count=count))
 
-    def transform(self, factor: float) -> BidiStream[TransformState]:
+    def transform(self, factor: float) -> Stream[TransformState]:
         """Scale values by factor."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=TransformState(factor=factor))
+        return Stream(output_schema=schema, state=TransformState(factor=factor), input_schema=schema)
 
     def fail_unary(self) -> str:
         """Raise ValueError."""
         raise ValueError("unary boom")
 
-    def fail_stream(self) -> ServerStream[FailStreamState]:
+    def fail_stream(self) -> Stream[FailStreamState]:
         """Stream that fails mid-iteration."""
         schema = pa.schema([pa.field("x", pa.int64())])
-        return ServerStream(output_schema=schema, state=FailStreamState())
+        return Stream(output_schema=schema, state=FailStreamState())
 
-    def fail_bidi_mid(self, factor: float) -> BidiStream[FailBidiMidState]:
+    def fail_bidi_mid(self, factor: float) -> Stream[FailBidiMidState]:
         """Bidi that fails after processing one batch."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=FailBidiMidState(factor=factor))
+        return Stream(output_schema=schema, state=FailBidiMidState(factor=factor), input_schema=schema)
 
     def describe(self) -> DescribeResult:
         """Return a dataclass with schema and sample batch."""
@@ -326,18 +325,18 @@ class RpcFixtureServiceImpl:
             ctx.client_log(Level.DEBUG, "debug detail", detail="extra-info")
         return f"Hello, {name}!"
 
-    def generate_with_logs(self, count: int, ctx: CallContext | None = None) -> ServerStream[GenerateWithLogsState]:
+    def generate_with_logs(self, count: int, ctx: CallContext | None = None) -> Stream[GenerateWithLogsState]:
         """Generate batches with interleaved log messages."""
         schema = pa.schema([pa.field("i", pa.int64())])
         # Emit log BEFORE creating the stream — exercises _ClientLogSink buffering
         if ctx:
             ctx.client_log(Level.INFO, "pre-stream log")
-        return ServerStream(output_schema=schema, state=GenerateWithLogsState(count=count))
+        return Stream(output_schema=schema, state=GenerateWithLogsState(count=count))
 
-    def transform_with_logs(self, factor: float, ctx: CallContext | None = None) -> BidiStream[TransformWithLogsState]:
+    def transform_with_logs(self, factor: float, ctx: CallContext | None = None) -> Stream[TransformWithLogsState]:
         """Bidi transform with log messages per exchange."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=TransformWithLogsState(factor=factor))
+        return Stream(output_schema=schema, state=TransformWithLogsState(factor=factor), input_schema=schema)
 
 
 # ---------------------------------------------------------------------------
@@ -408,16 +407,16 @@ class TestRpcMethods:
         assert methods["noop"].has_return is False
 
     def test_server_stream_detection(self) -> None:
-        """ServerStream return types are detected as server stream."""
+        """Producer stream return types are detected as stream."""
         methods = rpc_methods(RpcFixtureService)
         assert "generate" in methods
-        assert methods["generate"].method_type == MethodType.SERVER_STREAM
+        assert methods["generate"].method_type == MethodType.STREAM
 
     def test_bidi_stream_detection(self) -> None:
-        """BidiStream return type is detected as bidi stream."""
+        """Exchange stream return type is detected as stream."""
         methods = rpc_methods(RpcFixtureService)
         assert "transform" in methods
-        assert methods["transform"].method_type == MethodType.BIDI_STREAM
+        assert methods["transform"].method_type == MethodType.STREAM
         assert methods["transform"].has_return is False
 
     def test_params_schema(self) -> None:
@@ -439,8 +438,8 @@ class TestRpcMethods:
         """A protocol with all three method types is correctly introspected."""
         methods = rpc_methods(RpcFixtureService)
         assert methods["add"].method_type == MethodType.UNARY
-        assert methods["generate"].method_type == MethodType.SERVER_STREAM
-        assert methods["transform"].method_type == MethodType.BIDI_STREAM
+        assert methods["generate"].method_type == MethodType.STREAM
+        assert methods["transform"].method_type == MethodType.STREAM
 
     def test_method_doc(self) -> None:
         """Method docstrings are captured when available."""
@@ -507,15 +506,15 @@ class TestUnary:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Server stream over pipe transport
+# Tests: Producer stream over pipe transport
 # ---------------------------------------------------------------------------
 
 
 class TestServerStream:
-    """Tests for server stream RPC calls over pipe and subprocess transports."""
+    """Tests for producer stream RPC calls over pipe and subprocess transports."""
 
     def test_generate(self, make_conn: ConnFactory) -> None:
-        """Server stream yields the expected AnnotatedBatch objects."""
+        """Producer stream yields the expected AnnotatedBatch objects."""
         with make_conn() as proxy:
             batches = list(proxy.generate(count=3))
             assert len(batches) == 3
@@ -524,7 +523,7 @@ class TestServerStream:
             assert batches[2].batch.column("i")[0].as_py() == 2
 
     def test_empty_stream(self, make_conn: ConnFactory) -> None:
-        """Server stream with count=0 yields no batches."""
+        """Producer stream with count=0 yields no batches."""
         with make_conn() as proxy:
             batches = list(proxy.generate(count=0))
             assert len(batches) == 0
@@ -537,7 +536,7 @@ class TestServerStream:
             assert batches[99].batch.column("i")[0].as_py() == 99
 
     def test_stream_session_type(self, make_conn: ConnFactory) -> None:
-        """Server stream returns a StreamSession (or HttpStreamSession for HTTP)."""
+        """Producer stream returns a StreamSession (or HttpStreamSession for HTTP)."""
         from vgi_rpc.http import HttpStreamSession
 
         with make_conn() as proxy:
@@ -549,30 +548,30 @@ class TestServerStream:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Bidi stream over pipe transport (state + process pattern)
+# Tests: Exchange stream over pipe transport (state + process pattern)
 # ---------------------------------------------------------------------------
 
 
 class TestBidiStream:
-    """Tests for bidi stream RPC calls using state + process pattern."""
+    """Tests for exchange stream RPC calls using state + process pattern."""
 
     def test_bidi_exchange(self, make_conn: ConnFactory) -> None:
-        """Bidi stream exchanges batches correctly via BidiSession."""
+        """Exchange stream exchanges batches correctly via StreamSession."""
         with make_conn() as proxy:
             session = proxy.transform(factor=2.0)
 
-            input1 = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1, 2, 3]}))
+            input1 = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0, 2.0, 3.0]}))
             output1 = session.exchange(input1)
-            assert output1.batch.column("value").to_pylist() == [2, 4, 6]
+            assert output1.batch.column("value").to_pylist() == [2.0, 4.0, 6.0]
 
-            input2 = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [10, 20]}))
+            input2 = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [10.0, 20.0]}))
             output2 = session.exchange(input2)
-            assert output2.batch.column("value").to_pylist() == [20, 40]
+            assert output2.batch.column("value").to_pylist() == [20.0, 40.0]
 
             session.close()
 
     def test_bidi_context_manager(self, make_conn: ConnFactory) -> None:
-        """BidiSession works as a context manager."""
+        """StreamSession works as a context manager."""
         with make_conn() as proxy, proxy.transform(factor=2.0) as session:
             output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5.0]})))
             assert output.batch.column("value").to_pylist() == [10.0]
@@ -592,19 +591,19 @@ class TestRpcConnection:
             assert svc.add(a=10.0, b=20.0) == pytest.approx(30.0)
 
     def test_stream_via_connection(self) -> None:
-        """Server stream works through RpcConnection context manager."""
+        """Producer stream works through RpcConnection context manager."""
         with rpc_server_transport() as transport, RpcConnection(RpcFixtureService, transport) as svc:
             assert len(list(svc.generate(count=2))) == 2
 
     def test_bidi_via_connection(self) -> None:
-        """Bidi stream works through RpcConnection context manager."""
+        """Exchange stream works through RpcConnection context manager."""
         with (
             rpc_server_transport() as transport,
             RpcConnection(RpcFixtureService, transport) as svc,
             svc.transform(factor=10.0) as session,
         ):
-            output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1, 2]})))
-            assert output.batch.column("value").to_pylist() == [10, 20]
+            output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0, 2.0]})))
+            assert output.batch.column("value").to_pylist() == [10.0, 20.0]
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +627,7 @@ class TestErrors:
             proxy.nonexistent()
 
     def test_stream_error_propagates(self, make_conn: ConnFactory) -> None:
-        """Errors from server stream methods are raised as RpcError with error details."""
+        """Errors from producer stream methods are raised as RpcError with error details."""
         with make_conn() as proxy, pytest.raises(RpcError, match="stream boom") as exc_info:
             list(proxy.fail_stream())
         assert exc_info.value.error_type == "RuntimeError"
@@ -648,8 +647,8 @@ class TestDescribeRpc:
         desc = describe_rpc(RpcFixtureService)
         assert desc.startswith("RPC Protocol: RpcFixtureService\n")
         assert "  add(unary)" in desc
-        assert "  generate(server_stream)" in desc
-        assert "  transform(bidi_stream)" in desc
+        assert "  generate(stream)" in desc
+        assert "  transform(stream)" in desc
         assert "    doc: Add two numbers." in desc
         assert "double" in desc  # Arrow calls float64 "double"
 
@@ -828,7 +827,7 @@ class TestMultiMethodSession:
             # 3. Void unary
             assert proxy.noop() is None
 
-            # 4. Server stream
+            # 4. Producer stream
             batches = list(proxy.generate(count=3))
             assert len(batches) == 3
             assert batches[0].batch.column("i").to_pylist() == [0]
@@ -841,7 +840,7 @@ class TestMultiMethodSession:
             # 6. Prove connection still works after error
             assert proxy.add(a=10.0, b=20.0) == pytest.approx(30.0)
 
-            # 7. Bidi stream
+            # 7. Exchange stream
             with proxy.transform(factor=3.0) as session:
                 out = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0, 2.0, 3.0]})))
                 assert out.batch.column("value").to_pylist() == [3.0, 6.0, 9.0]
@@ -904,14 +903,14 @@ class TestMultiMethodSession:
                 assert "boom" not in result
 
     def test_interleaved_stream_types(self, make_conn: ConnFactory) -> None:
-        """Alternate between server-stream and bidi-stream calls."""
+        """Alternate between producer stream and exchange stream calls."""
         with make_conn() as proxy:
             for i in range(1, 6):
-                # Server stream
+                # Producer stream
                 batches = list(proxy.generate(count=i))
                 assert len(batches) == i
 
-                # Bidi stream
+                # Exchange stream
                 with proxy.transform(factor=float(i)) as session:
                     out = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [1.0]})))
                     assert out.batch.column("value").to_pylist() == [float(i)]
@@ -926,7 +925,7 @@ class TestMultiMethodSession:
             with pytest.raises(RpcError):
                 proxy.fail_unary()
 
-            # Server stream OK
+            # Producer stream OK
             assert len(list(proxy.generate(count=2))) == 2
 
             # Error
@@ -984,7 +983,7 @@ class TestMultiMethodSession:
             assert "BLUE:True" in result
 
     def test_bidi_multi_exchange_after_stream_error(self, make_conn: ConnFactory) -> None:
-        """Multiple bidi exchanges work after a server-stream error."""
+        """Multiple exchange calls work after a producer stream error."""
         with make_conn() as proxy:
             # Stream error
             with pytest.raises(RpcError, match="stream boom"):
@@ -1098,12 +1097,12 @@ class NullValidationService(Protocol):
         """Non-optional return type."""
         ...
 
-    def stream_non_optional(self, a: float) -> ServerStream[ServerStreamState]:
-        """Server stream with non-optional param."""
+    def stream_non_optional(self, a: float) -> Stream[StreamState]:
+        """Return a producer stream with non-optional param."""
         ...
 
-    def bidi_non_optional(self, factor: float) -> BidiStream[BidiStreamState]:
-        """Bidi stream with non-optional param."""
+    def bidi_non_optional(self, factor: float) -> Stream[StreamState]:
+        """Return an exchange stream with non-optional param."""
         ...
 
 
@@ -1126,15 +1125,15 @@ class NullValidationServiceImpl:
         """Return None (invalid for non-optional return)."""
         return None  # type: ignore[return-value]  # intentionally wrong
 
-    def stream_non_optional(self, a: float) -> ServerStream[EmptyStreamState]:
+    def stream_non_optional(self, a: float) -> Stream[EmptyStreamState]:
         """Return an empty stream."""
         schema = pa.schema([pa.field("x", pa.float64())])
-        return ServerStream(output_schema=schema, state=EmptyStreamState())
+        return Stream(output_schema=schema, state=EmptyStreamState())
 
-    def bidi_non_optional(self, factor: float) -> BidiStream[PassthroughState]:
-        """Return a passthrough bidi stream."""
+    def bidi_non_optional(self, factor: float) -> Stream[PassthroughState]:
+        """Return a passthrough exchange stream."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=PassthroughState())
+        return Stream(output_schema=schema, state=PassthroughState(), input_schema=schema)
 
 
 def _null_conn() -> contextlib.AbstractContextManager[NullValidationService]:
@@ -1205,7 +1204,7 @@ class TestCallContextClientLogging:
             assert result == "Hello, Bob!"
 
     def test_server_stream_client_log(self, make_conn: ConnFactory) -> None:
-        """Server stream delivers log messages from OutputCollector to on_log callback."""
+        """Producer stream delivers log messages from OutputCollector to on_log callback."""
         logs: list[Message] = []
         with make_conn(on_log=logs.append) as proxy:
             batches = list(proxy.generate_with_logs(count=3))
@@ -1219,7 +1218,7 @@ class TestCallContextClientLogging:
             assert "generating batch 2" in logs[3].message
 
     def test_bidi_client_log(self, make_conn: ConnFactory) -> None:
-        """Bidi stream delivers log messages from OutputCollector during exchange."""
+        """Exchange stream delivers log messages from OutputCollector during exchange."""
         logs: list[Message] = []
         with make_conn(on_log=logs.append) as proxy:
             with proxy.transform_with_logs(factor=2.0) as session:
@@ -1290,14 +1289,14 @@ class TestCallContextClientLogging:
             assert logs[0].message == "about to fail"
 
     def test_client_log_buffered_before_stream(self) -> None:
-        """Logs emitted before ServerStream opens are buffered and delivered."""
+        """Logs emitted before Stream opens are buffered and delivered."""
 
         @dataclass
-        class EarlyLogStreamState(ServerStreamState):
+        class EarlyLogStreamState(StreamState):
             count: int
             current: int = 0
 
-            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
                 if self.current >= self.count:
                     out.finish()
                     return
@@ -1305,17 +1304,15 @@ class TestCallContextClientLogging:
                 self.current += 1
 
         class BufferedLogService(Protocol):
-            def stream_with_early_log(self, count: int) -> ServerStream[ServerStreamState]: ...
+            def stream_with_early_log(self, count: int) -> Stream[StreamState]: ...
 
         class BufferedLogServiceImpl:
-            def stream_with_early_log(
-                self, count: int, ctx: CallContext | None = None
-            ) -> ServerStream[EarlyLogStreamState]:
+            def stream_with_early_log(self, count: int, ctx: CallContext | None = None) -> Stream[EarlyLogStreamState]:
                 # Emit log BEFORE creating the stream — exercises _ClientLogSink buffering
                 if ctx:
                     ctx.client_log(Level.INFO, "before stream open")
                 schema = pa.schema([pa.field("i", pa.int64())])
-                return ServerStream(output_schema=schema, state=EarlyLogStreamState(count=count))
+                return Stream(output_schema=schema, state=EarlyLogStreamState(count=count))
 
         logs: list[Message] = []
         with rpc_conn(BufferedLogService, BufferedLogServiceImpl(), on_log=logs.append) as proxy:
@@ -1432,15 +1429,15 @@ class TestOutputCollector:
         out.emit(batch)
         assert out.total_data_bytes == batch.get_total_buffer_size()
 
-    def test_total_data_bytes_cumulative_across_produce_calls(self) -> None:
-        """Simulates the server loop: cumulative bytes grow across produce calls."""
+    def test_total_data_bytes_cumulative_across_process_calls(self) -> None:
+        """Simulates the server loop: cumulative bytes grow across process calls."""
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
         state = GenerateState(count=3)
 
         cumulative_bytes = 0
         for _ in range(3):
             out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
-            state.produce(out, _DUMMY_CTX)
+            state.process(_TICK, out, _DUMMY_CTX)
             assert not out.finished
             assert out.total_data_bytes > cumulative_bytes
             cumulative_bytes = out.total_data_bytes
@@ -1451,13 +1448,13 @@ class TestOutputCollector:
         """A stream state can use total_data_bytes to stop early."""
 
         @dataclass
-        class ByteLimitedState(ServerStreamState):
+        class ByteLimitedState(StreamState):
             """Stops when total_data_bytes exceeds a threshold."""
 
             max_bytes: int
             emitted: int = 0
 
-            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
                 """Emit a batch or finish if byte threshold reached."""
                 if out.total_data_bytes >= self.max_bytes:
                     out.finish()
@@ -1476,7 +1473,7 @@ class TestOutputCollector:
         batches_produced = 0
         while True:
             out = OutputCollector(schema, prior_data_bytes=cumulative_bytes)
-            state.produce(out, _DUMMY_CTX)
+            state.process(_TICK, out, _DUMMY_CTX)
             if out.finished:
                 break
             out.validate()
@@ -1535,18 +1532,18 @@ class TestAnnotatedBatch:
 
 
 class TestInputSchemaValidation:
-    """Tests for BidiStream.input_schema validation."""
+    """Tests for Stream.input_schema validation."""
 
     def test_input_schema_mismatch_raises(self) -> None:
         """Sending a batch with wrong schema raises TypeError."""
 
         class SchemaCheckService(Protocol):
-            def checked_transform(self, factor: float) -> BidiStream[BidiStreamState]: ...
+            def checked_transform(self, factor: float) -> Stream[StreamState]: ...
 
         class SchemaCheckServiceImpl:
-            def checked_transform(self, factor: float) -> BidiStream[TransformState]:
+            def checked_transform(self, factor: float) -> Stream[TransformState]:
                 expected = pa.schema([pa.field("value", pa.float64())])
-                return BidiStream(
+                return Stream(
                     output_schema=expected,
                     state=TransformState(factor=factor),
                     input_schema=expected,
@@ -1562,12 +1559,12 @@ class TestInputSchemaValidation:
         """Sending a batch with correct schema works normally."""
 
         class SchemaCheckService(Protocol):
-            def checked_transform(self, factor: float) -> BidiStream[BidiStreamState]: ...
+            def checked_transform(self, factor: float) -> Stream[StreamState]: ...
 
         class SchemaCheckServiceImpl:
-            def checked_transform(self, factor: float) -> BidiStream[TransformState]:
+            def checked_transform(self, factor: float) -> Stream[TransformState]:
                 expected = pa.schema([pa.field("value", pa.float64())])
-                return BidiStream(
+                return Stream(
                     output_schema=expected,
                     state=TransformState(factor=factor),
                     input_schema=expected,
@@ -1587,35 +1584,35 @@ class TestInputSchemaValidation:
 
 
 class TestStateMutation:
-    """Tests verifying state is mutated across produce/process calls."""
+    """Tests verifying state is mutated across process calls."""
 
     def test_server_stream_state_mutation(self) -> None:
-        """GenerateState.current increments across produce() calls."""
+        """Producer stream GenerateState.current increments across process() calls."""
         state = GenerateState(count=3)
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
 
         out1 = OutputCollector(schema)
-        state.produce(out1, _DUMMY_CTX)
+        state.process(_TICK, out1, _DUMMY_CTX)
         assert state.current == 1
         assert not out1.finished
 
         out2 = OutputCollector(schema)
-        state.produce(out2, _DUMMY_CTX)
+        state.process(_TICK, out2, _DUMMY_CTX)
         assert state.current == 2
 
         out3 = OutputCollector(schema)
-        state.produce(out3, _DUMMY_CTX)
+        state.process(_TICK, out3, _DUMMY_CTX)
         assert state.current == 3
 
         out4 = OutputCollector(schema)
-        state.produce(out4, _DUMMY_CTX)
+        state.process(_TICK, out4, _DUMMY_CTX)
         assert out4.finished
 
     def test_bidi_state_across_exchanges(self) -> None:
         """Bidi state persists across multiple process() calls."""
 
         @dataclass
-        class CountingState(BidiStreamState):
+        class CountingState(StreamState):
             factor: float
             call_count: int = 0
 
@@ -1636,30 +1633,21 @@ class TestStateMutation:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Generic ServerStream/BidiStream type introspection
+# Tests: Generic Stream type introspection
 # ---------------------------------------------------------------------------
 
 
 class TestGenericStreamIntrospection:
-    """Tests that generic ServerStream[S] / BidiStream[S] are correctly introspected."""
+    """Tests that generic Stream[S] are correctly introspected."""
 
     def test_generic_server_stream_detected(self) -> None:
-        """ServerStream[SomeState] return types are detected as server_stream."""
+        """Producer stream Stream[SomeState] return types are detected as stream."""
 
         class GenericService(Protocol):
-            def gen(self, n: int) -> ServerStream[GenerateState]: ...
+            def gen(self, n: int) -> Stream[GenerateState]: ...
 
         methods = rpc_methods(GenericService)
-        assert methods["gen"].method_type == MethodType.SERVER_STREAM
-
-    def test_generic_bidi_stream_detected(self) -> None:
-        """BidiStream[SomeState] return types are detected as bidi_stream."""
-
-        class GenericService(Protocol):
-            def xform(self, f: float) -> BidiStream[TransformState]: ...
-
-        methods = rpc_methods(GenericService)
-        assert methods["xform"].method_type == MethodType.BIDI_STREAM
+        assert methods["gen"].method_type == MethodType.STREAM
 
 
 # ---------------------------------------------------------------------------
@@ -1671,7 +1659,7 @@ class TestStateSerializationRoundTrip:
     """Tests that stream state can be serialized and deserialized for HTTP transport."""
 
     def test_server_stream_state_roundtrip(self) -> None:
-        """ServerStreamState can be serialized, deserialized, and continue producing."""
+        """Producer stream state can be serialized, deserialized, and continue processing."""
         state = GenerateState(count=5, current=2)
 
         # Serialize
@@ -1682,16 +1670,16 @@ class TestStateSerializationRoundTrip:
         assert restored.count == 5
         assert restored.current == 2
 
-        # Continue producing from restored state
+        # Continue processing from restored state
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
         out = OutputCollector(schema)
-        restored.produce(out, _DUMMY_CTX)
+        restored.process(_TICK, out, _DUMMY_CTX)
         assert not out.finished
         assert out.batches[0].batch.column("i")[0].as_py() == 2
         assert restored.current == 3
 
     def test_bidi_stream_state_roundtrip(self) -> None:
-        """BidiStreamState can be serialized, deserialized, and continue processing."""
+        """Exchange stream state can be serialized, deserialized, and continue processing."""
         state = TransformState(factor=3.0)
 
         # Serialize
@@ -1740,13 +1728,13 @@ class TestConvenienceFunctions:
             assert svc.add(a=1.0, b=2.0) == pytest.approx(3.0)
 
     def test_serve_pipe_stream(self) -> None:
-        """serve_pipe yields a working proxy for server stream calls."""
+        """serve_pipe yields a working proxy for producer stream calls."""
         with serve_pipe(RpcFixtureService, RpcFixtureServiceImpl()) as svc:
             batches = list(svc.generate(count=3))
             assert len(batches) == 3
 
     def test_serve_pipe_bidi(self) -> None:
-        """serve_pipe yields a working proxy for bidi stream calls."""
+        """serve_pipe yields a working proxy for exchange stream calls."""
         with serve_pipe(RpcFixtureService, RpcFixtureServiceImpl()) as svc, svc.transform(factor=2.0) as session:
             out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
             assert out.batch.column("value").to_pylist() == [10.0]
@@ -1959,7 +1947,7 @@ class TestInvalidBidiState:
             assert out.batch.column("value").to_pylist() == [2.0]
 
             # Corrupt the state bytes
-            session._state_bytes = b"garbage"  # type: ignore[attr-defined]  # accessing HttpBidiSession internals
+            session._state_bytes = b"garbage"  # type: ignore[attr-defined]  # accessing HttpStreamSession internals
 
             with pytest.raises(RpcError, match=r"Malformed state token|signature verification"):
                 session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [2.0]})))
@@ -2047,15 +2035,15 @@ class TestCallContext:
         assert logs[0].level == Level.INFO
         assert logs[0].message == "hello from ctx"
 
-    def test_ctx_in_produce(self) -> None:
-        """Verify ctx is accessible in ServerStreamState.produce."""
+    def test_ctx_in_process_producer(self) -> None:
+        """Verify ctx is accessible in StreamState.process for producer streams."""
         captured: list[AuthContext] = []
 
         @dataclass
-        class ProbeStreamState(ServerStreamState):
+        class ProbeStreamState(StreamState):
             done: bool = False
 
-            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
                 captured.append(ctx.auth)
                 if self.done:
                     out.finish()
@@ -2064,12 +2052,12 @@ class TestCallContext:
                 out.emit_pydict({"x": [1]})
 
         class StreamProbe(Protocol):
-            def stream_probe(self) -> ServerStream[ServerStreamState]: ...
+            def stream_probe(self) -> Stream[StreamState]: ...
 
         class StreamProbeImpl:
-            def stream_probe(self) -> ServerStream[ProbeStreamState]:
+            def stream_probe(self) -> Stream[ProbeStreamState]:
                 schema = pa.schema([pa.field("x", pa.int64())])
-                return ServerStream(output_schema=schema, state=ProbeStreamState())
+                return Stream(output_schema=schema, state=ProbeStreamState())
 
         with rpc_conn(StreamProbe, StreamProbeImpl()) as proxy:
             batches = list(proxy.stream_probe())
@@ -2078,23 +2066,23 @@ class TestCallContext:
         assert len(captured) == 2
         assert all(not a.authenticated for a in captured)
 
-    def test_ctx_in_process(self) -> None:
-        """Verify ctx is accessible in BidiStreamState.process."""
+    def test_ctx_in_process_exchange(self) -> None:
+        """Verify ctx is accessible in StreamState.process for exchange streams."""
         captured: list[AuthContext] = []
 
         @dataclass
-        class ProbeBidiState(BidiStreamState):
+        class ProbeBidiState(StreamState):
             def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
                 captured.append(ctx.auth)
                 out.emit(input.batch)
 
         class BidiProbe(Protocol):
-            def bidi_probe(self) -> BidiStream[BidiStreamState]: ...
+            def bidi_probe(self) -> Stream[StreamState]: ...
 
         class BidiProbeImpl:
-            def bidi_probe(self) -> BidiStream[ProbeBidiState]:
+            def bidi_probe(self) -> Stream[ProbeBidiState]:
                 schema = pa.schema([pa.field("v", pa.int64())])
-                return BidiStream(output_schema=schema, state=ProbeBidiState())
+                return Stream(output_schema=schema, state=ProbeBidiState(), input_schema=schema)
 
         with rpc_conn(BidiProbe, BidiProbeImpl()) as proxy, proxy.bidi_probe() as session:
             session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"v": [1]})))

@@ -7,8 +7,7 @@ serialization.
 Method Types (derived from return type annotation)
 --------------------------------------------------
 - **Unary**: ``def method(self, ...) -> T`` — single request, single response
-- **Server stream**: ``def method(self, ...) -> ServerStream`` — request, stream of batches
-- **Bidi stream**: ``def method(self, ...) -> BidiStream`` — bidirectional
+- **Stream**: ``def method(self, ...) -> Stream`` — stateful streaming
 
 Wire Protocol
 -------------
@@ -33,44 +32,31 @@ on the batch.
     Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
     Server→Client: [IPC stream: result_schema + 0..N log batches + 1 result/error batch + EOS]
 
-**Server stream** (pipe transport)::
+**Stream** (pipe transport — lockstep)::
 
-    Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
-    Server→Client: [IPC stream: output_schema + (log_batch | data_batch)* + EOS]
-                 On error, the final batch is 0-row with error metadata.
+    Phase 1 — request params (same as unary):
+      Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
 
-Over HTTP, when ``max_stream_response_bytes`` is set, the response may be
-split across multiple exchanges.  The server writes a zero-row batch with a
-signed continuation token (``vgi_rpc.bidi_state`` metadata key) when the
-response size limit is reached.  The client transparently resumes via
-``POST /vgi/{method}/exchange``.
+    Phase 2 — lockstep exchange (both within a single IPC stream per direction):
+      Client→Server: [IPC stream: input batch₁ + input batch₂ + ... + EOS]
+      Server→Client: [IPC stream: (log_batch* + output_batch)* + EOS]
 
-**Bidi stream** (state + process)::
+    Producer streams (input_schema == _EMPTY_SCHEMA): client sends tick
+    batches, server calls process(tick, out, ctx) and may call out.finish().
+    Exchange streams: client sends real data, server calls process(input,
+    out, ctx) and always returns a data batch.
 
-    Pipe transport:
-      Phase 1 — request params (same as unary/stream):
-        Client→Server: [IPC stream: params_schema + 1 request batch + EOS]
-
-      Phase 2 — lockstep exchange (both within a single IPC stream per direction):
-        Client→Server: [IPC stream: input batch₁ + input batch₂ + ... + EOS]
-        Server→Client: [IPC stream: (log_batch* + output_batch)* + EOS]
-
-      Each input batch produces one output batch (1:1 lockstep).
-      Log batches may appear before each output batch.
-      Client closes its input stream (EOS) to signal end of exchange.
-      On error, the final output batch is 0-row with error metadata.
-
-Over HTTP, bidi streaming is stateless: each exchange is a separate
+Over HTTP, streaming is stateless: each exchange is a separate
 ``POST /vgi/{method}/exchange`` carrying the input batch and serialized
-``BidiStreamState`` in Arrow custom metadata (``vgi_rpc.bidi_state``).
+``StreamState`` in Arrow custom metadata (``vgi_rpc.stream_state``).
 
 State-Based Stream Model
 -------------------------
-Server stream and bidi stream methods return ``ServerStream[S]`` or
-``BidiStream[S]`` where ``S`` is a state object with explicit ``produce()``
-or ``process()`` methods.  State objects extend ``ArrowSerializableDataclass``
-so they can be serialized between requests — this enables stateless HTTP bidi
-exchanges and resumable server-stream continuations.
+Stream methods return ``Stream[S]`` where ``S`` is a state object with an
+explicit ``process()`` method.  State objects extend
+``ArrowSerializableDataclass`` so they can be serialized between requests —
+this enables stateless HTTP exchanges and resumable producer-stream
+continuations.
 
 Call Context
 ------------
@@ -160,9 +146,6 @@ ClientLog = Callable[[Message], None]
 __all__ = [
     "AnnotatedBatch",
     "AuthContext",
-    "BidiSession",
-    "BidiStream",
-    "BidiStreamState",
     "CallContext",
     "ClientLog",
     "MethodType",
@@ -173,10 +156,10 @@ __all__ = [
     "RpcMethodInfo",
     "RpcServer",
     "RpcTransport",
-    "ServerStream",
-    "ServerStreamState",
     "StderrMode",
+    "Stream",
     "StreamSession",
+    "StreamState",
     "SubprocessTransport",
     "connect",
     "describe_rpc",
@@ -348,8 +331,7 @@ class MethodType(Enum):
     """Classification of RPC method patterns."""
 
     UNARY = "unary"
-    SERVER_STREAM = "server_stream"
-    BIDI_STREAM = "bidi_stream"
+    STREAM = "stream"
 
 
 # ---------------------------------------------------------------------------
@@ -511,36 +493,28 @@ class OutputCollector:
         """Emit a zero-row client-directed log batch with log metadata."""
         self.emit_client_log_message(Message(level, message, **extra))
 
-    # --- Stream completion (ServerStream only) ---
+    # --- Stream completion (producer streams only) ---
 
     def finish(self) -> None:
-        """Signal stream completion. Emits a zero-row non-log batch."""
+        """Signal stream completion for producer streams.
+
+        Producer streams (``input_schema == _EMPTY_SCHEMA``) call this
+        to signal that no more data will be produced.
+        """
         self._finished = True
 
 
-class ServerStreamState(ArrowSerializableDataclass, abc.ABC):
-    """Base class for server-stream state objects.
-
-    Subclasses must be dataclasses that define ``produce(out, ctx)`` which is
-    called repeatedly to generate output batches.  Call ``out.finish()``
-    to signal stream end.
-
-    Extends ``ArrowSerializableDataclass`` so that state can be serialized
-    between requests (required for HTTP transport).
-    """
-
-    @abc.abstractmethod
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
-        """Produce output batches into the collector."""
-        ...
-
-
-class BidiStreamState(ArrowSerializableDataclass, abc.ABC):
-    """Base class for bidi-stream state objects.
+class StreamState(ArrowSerializableDataclass, abc.ABC):
+    """Base class for stream state objects.
 
     Subclasses must be dataclasses that define ``process(input, out, ctx)``
-    which is called once per input batch.  State is mutated in-place
-    across calls.
+    which is called once per input batch.
+
+    For producer streams, ``input`` is a zero-row empty-schema tick
+    batch that can be ignored; call ``out.finish()`` to signal stream end.
+
+    For exchange streams (old bidi pattern), ``input`` is real data.
+    State is mutated in-place across calls.
 
     Extends ``ArrowSerializableDataclass`` so that state can be serialized
     between requests (required for HTTP transport).
@@ -552,61 +526,48 @@ class BidiStreamState(ArrowSerializableDataclass, abc.ABC):
         ...
 
 
+_TICK_BATCH = AnnotatedBatch(batch=empty_batch(_EMPTY_SCHEMA))
+"""Cached zero-row empty-schema batch used as tick input for producer streams."""
+
+
 @dataclass(frozen=True)
-class ServerStream[S: ServerStreamState]:
-    """Return type for server-stream RPC methods.
+class Stream[S: StreamState]:
+    """Return type for stream RPC methods.
 
-    Bundles the output schema with a state object whose ``produce(out)`` method
-    is called repeatedly to generate output batches.  The state object calls
-    ``out.finish()`` to signal stream completion.
+    Bundles the output schema with a state object whose ``process(input, out, ctx)``
+    method is called once per input batch.
 
-    On the client side, the proxy returns this type so that ``for batch in
-    proxy.method(...)`` type-checks correctly via the ``__iter__`` stub.
+    For producer streams, ``input_schema`` is ``_EMPTY_SCHEMA`` (the default)
+    and the client iterates via ``__iter__`` / ``tick()``.  For exchange
+    streams, ``input_schema`` is set to the real input schema and the client
+    uses ``exchange()`` / context manager.
+
+    Client-side stub methods provide accurate types for IDE autocompletion.
     """
 
     output_schema: pa.Schema
     state: S
+    input_schema: pa.Schema = _EMPTY_SCHEMA
 
     def __iter__(self) -> Iterator[AnnotatedBatch]:
-        """Iterate over output batches (client-side stub).
+        """Iterate over output batches (client-side stub for producer streams).
 
         Raises:
             NotImplementedError: Always — this is a server-side type.
                 Use ``StreamSession`` on the client.
 
         """
-        raise NotImplementedError("ServerStream is a server-side type; iterate StreamSession on the client")
-
-
-@dataclass(frozen=True)
-class BidiStream[S: BidiStreamState]:
-    """Return type for bidirectional-stream RPC methods.
-
-    Bundles the output schema with a state object whose ``process(input, out)``
-    method is called once per input batch.  State is mutated in-place across calls.
-
-    If ``input_schema`` is provided, the framework validates each input batch
-    against it before passing to ``process()``.  When ``None`` (the default),
-    the input schema is implicit from the client's first batch.
-
-    Client-side stub methods (``__enter__``, ``__exit__``, ``exchange``,
-    ``close``) provide accurate types for IDE autocompletion when the proxy
-    return type is ``BidiStream[S]``.
-    """
-
-    output_schema: pa.Schema
-    state: S
-    input_schema: pa.Schema | None = None
+        raise NotImplementedError("Stream is a server-side type; iterate StreamSession on the client")
 
     def __enter__(self) -> Self:
-        """Enter context manager (client-side stub).
+        """Enter context manager (client-side stub for exchange streams).
 
         Raises:
             NotImplementedError: Always — this is a server-side type.
-                Use ``BidiSession`` on the client.
+                Use ``StreamSession`` on the client.
 
         """
-        raise NotImplementedError("BidiStream is a server-side type; use BidiSession on the client")
+        raise NotImplementedError("Stream is a server-side type; use StreamSession on the client")
 
     def __exit__(
         self,
@@ -630,7 +591,17 @@ class BidiStream[S: BidiStreamState]:
 
         Raises:
             NotImplementedError: Always — this is a server-side type.
-                Use ``BidiSession`` on the client.
+                Use ``StreamSession`` on the client.
+
+        """
+        raise NotImplementedError
+
+    def tick(self) -> AnnotatedBatch:
+        """Send a tick and receive output (client-side stub for producer streams).
+
+        Raises:
+            NotImplementedError: Always — this is a server-side type.
+                Use ``StreamSession`` on the client.
 
         """
         raise NotImplementedError
@@ -640,7 +611,7 @@ class BidiStream[S: BidiStreamState]:
 
         Raises:
             NotImplementedError: Always — this is a server-side type.
-                Use ``BidiSession`` on the client.
+                Use ``StreamSession`` on the client.
 
         """
         raise NotImplementedError
@@ -685,9 +656,8 @@ class RpcMethodInfo:
         result_schema: Arrow schema for the serialized response (unary only;
             empty schema for stream methods).
         result_type: The raw Python return-type annotation (e.g. ``float``,
-            ``ServerStream[MyState]``).
-        method_type: Whether this is a ``UNARY``, ``SERVER_STREAM``, or
-            ``BIDI_STREAM`` call.
+            ``Stream[MyState]``).
+        method_type: Whether this is a ``UNARY`` or ``STREAM`` call.
         has_return: ``True`` when the unary method returns a value (``False``
             for ``-> None`` or stream methods).
         doc: The method's docstring from the Protocol class, or ``None`` if
@@ -726,21 +696,16 @@ def _classify_return_type(hint: Any) -> tuple[MethodType, Any, bool]:
     """Classify a return type hint into a MethodType.
 
     Returns (method_type, result_type, has_return).
-    Handles both bare ``ServerStream`` / ``BidiStream`` and generic forms
-    like ``ServerStream[MyState]``.
+    Handles both bare ``Stream`` and generic forms like ``Stream[MyState]``.
     """
     # Bare class reference
-    if hint is ServerStream:
-        return MethodType.SERVER_STREAM, hint, False
-    if hint is BidiStream:
-        return MethodType.BIDI_STREAM, hint, False
+    if hint is Stream:
+        return MethodType.STREAM, hint, False
 
-    # Generic form: ServerStream[S] / BidiStream[S]
+    # Generic form: Stream[S]
     origin = get_origin(hint)
-    if origin is ServerStream:
-        return MethodType.SERVER_STREAM, hint, False
-    if origin is BidiStream:
-        return MethodType.BIDI_STREAM, hint, False
+    if origin is Stream:
+        return MethodType.STREAM, hint, False
 
     # Everything else -> UNARY
     has_return = hint is not type(None) and hint is not None
@@ -1730,10 +1695,8 @@ class RpcServer:
 
         if info.method_type == MethodType.UNARY:
             self._serve_unary(transport, info, kwargs)
-        elif info.method_type == MethodType.SERVER_STREAM:
-            self._serve_server_stream(transport, info, kwargs)
-        elif info.method_type == MethodType.BIDI_STREAM:
-            self._serve_bidi_stream(transport, info, kwargs)
+        elif info.method_type == MethodType.STREAM:
+            self._serve_stream(transport, info, kwargs)
 
     def _prepare_method_call(
         self, info: RpcMethodInfo, kwargs: dict[str, Any]
@@ -1791,82 +1754,7 @@ class RpcServer:
                 error_type,
             )
 
-    def _serve_server_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
-        sink, auth, transport_md = self._prepare_method_call(info, kwargs)
-        protocol_name = self.protocol_name
-        start = time.monotonic()
-        status: Literal["ok", "error"] = "ok"
-        error_type = ""
-        # NOTE: Two finally blocks — the inner one handles init errors (with early return),
-        # the outer one handles streaming errors.  Only one access log fires per call.
-        try:
-            result: ServerStream[ServerStreamState] = getattr(self._impl, info.name)(**kwargs)
-        except Exception as exc:
-            status = "error"
-            error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
-            with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
-            return
-        finally:
-            if status == "error":
-                duration_ms = (time.monotonic() - start) * 1000
-                _emit_access_log(
-                    protocol_name,
-                    info.name,
-                    info.method_type.value,
-                    self._server_id,
-                    auth,
-                    transport_md,
-                    duration_ms,
-                    status,
-                    error_type,
-                )
-
-        schema = result.output_schema
-        state = result.state
-
-        try:
-            with ipc.new_stream(transport.writer, schema) as stream_writer:
-                sink.flush_contents(stream_writer, schema)
-                cumulative_bytes = 0
-                try:
-                    while True:
-                        out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id)
-                        produce_ctx = CallContext(
-                            auth=auth,
-                            emit_client_log=out.emit_client_log_message,
-                            transport_metadata=transport_md,
-                            server_id=self._server_id,
-                            method_name=info.name,
-                            protocol_name=protocol_name,
-                        )
-                        state.produce(out, produce_ctx)
-                        if not out.finished:
-                            out.validate()
-                        _flush_collector(stream_writer, out, self._external_config)
-                        if out.finished:
-                            break
-                        cumulative_bytes = out.total_data_bytes
-                except Exception as exc:
-                    status = "error"
-                    error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
-                    with contextlib.suppress(BrokenPipeError, OSError):
-                        _write_error_batch(stream_writer, schema, exc, server_id=self._server_id)
-        finally:
-            duration_ms = (time.monotonic() - start) * 1000
-            _emit_access_log(
-                protocol_name,
-                info.name,
-                info.method_type.value,
-                self._server_id,
-                auth,
-                transport_md,
-                duration_ms,
-                status,
-                error_type,
-            )
-
-    def _serve_bidi_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
+    def _serve_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
         protocol_name = self.protocol_name
         start = time.monotonic()
@@ -1876,7 +1764,7 @@ class RpcServer:
         # NOTE: Two finally blocks — the inner one handles init errors (with early return),
         # the outer one handles streaming errors.  Only one access log fires per call.
         try:
-            result: BidiStream[BidiStreamState] = getattr(self._impl, info.name)(**kwargs)
+            result: Stream[StreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
             status = "error"
             error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
@@ -1899,7 +1787,7 @@ class RpcServer:
                 )
 
         output_schema = result.output_schema
-        expected_input_schema = result.input_schema
+        input_schema = result.input_schema
         state = result.state
 
         input_reader = ValidatedReader(ipc.open_stream(transport.reader), self._ipc_validation)
@@ -1923,10 +1811,8 @@ class RpcServer:
                             ipc_validation=self._ipc_validation,
                         )
 
-                        if expected_input_schema is not None and input_batch.schema != expected_input_schema:
-                            raise TypeError(
-                                f"Input schema mismatch: expected {expected_input_schema}, got {input_batch.schema}"
-                            )
+                        if input_batch.schema != input_schema:
+                            raise TypeError(f"Input schema mismatch: expected {input_schema}, got {input_batch.schema}")
 
                         ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
                         out = OutputCollector(
@@ -1941,8 +1827,11 @@ class RpcServer:
                             protocol_name=protocol_name,
                         )
                         state.process(ab_in, out, process_ctx)
-                        out.validate()
+                        if not out.finished:
+                            out.validate()
                         _flush_collector(output_writer, out, self._external_config)
+                        if out.finished:
+                            break
                         cumulative_bytes = out.total_data_bytes
                 except Exception as exc:
                     status = "error"
@@ -2020,54 +1909,12 @@ def _read_unary_response(
     return _deserialize_value(value, info.result_type, reader.ipc_validation)
 
 
-def _read_stream_response(
-    reader: ValidatedReader,
-    on_log: Callable[[Message], None] | None,
-    external_config: ExternalLocationConfig | None = None,
-) -> StreamSession:
-    """Wrap a response reader in a StreamSession."""
-    return StreamSession(reader, on_log, external_config=external_config)
-
-
 class StreamSession:
-    """Client-side handle for a server stream call.
+    """Client-side handle for a stream call (both producer and exchange patterns).
 
-    Iterates over ``AnnotatedBatch`` objects from the server.
+    For producer streams, use ``__iter__()`` or ``tick()``.
+    For exchange streams, use ``exchange()`` with context manager.
     Log batches are delivered to the ``on_log`` callback.
-    """
-
-    __slots__ = ("_external_config", "_on_log", "_reader")
-
-    def __init__(
-        self,
-        reader: ValidatedReader,
-        on_log: Callable[[Message], None] | None = None,
-        *,
-        external_config: ExternalLocationConfig | None = None,
-    ) -> None:
-        """Initialize with an IPC reader and optional log callback."""
-        self._reader = reader
-        self._on_log = on_log
-        self._external_config = external_config
-
-    def __iter__(self) -> Iterator[AnnotatedBatch]:  # noqa: D105
-        try:
-            while True:
-                try:
-                    yield _read_batch_with_log_check(self._reader, self._on_log, self._external_config)
-                except StopIteration:
-                    break
-        except RpcError:
-            _drain_stream(self._reader)
-            raise
-
-
-class BidiSession:
-    """Client-side handle for a bidi stream call.
-
-    Call ``exchange(input)`` to send an input batch and receive the output batch.
-    Log batches are delivered to the ``on_log`` callback.
-    Supports context manager for resource cleanup.
     """
 
     __slots__ = (
@@ -2100,17 +1947,12 @@ class BidiSession:
         self._external_config = external_config
         self._ipc_validation = ipc_validation
 
-    def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
-        """Send an input batch, receive the output batch.
-
-        Log batches are delivered to on_log callback before returning.
-        On RpcError, the session is automatically closed so the transport
-        is clean for the next RPC call.
-        """
+    def _write_batch(self, input: AnnotatedBatch) -> None:
+        """Write a batch to the input stream, opening it on first use."""
         batch_to_write = input.batch
         cm_to_write = input.custom_metadata
 
-        # Client-side production for large bidi inputs
+        # Client-side externalization for large inputs
         if self._external_config is not None:
             batch_to_write, cm_to_write = maybe_externalize_batch(batch_to_write, cm_to_write, self._external_config)
 
@@ -2121,14 +1963,58 @@ class BidiSession:
         else:
             self._input_writer.write_batch(batch_to_write)
 
+    def _read_response(self) -> AnnotatedBatch:
+        """Read the next data batch from the output stream, skipping log batches."""
         if self._output_reader is None:
             self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
+        return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
 
+    def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
+        """Send an input batch, receive the output batch.
+
+        Always returns an ``AnnotatedBatch``. Log batches are delivered to
+        the ``on_log`` callback before returning. On ``RpcError``, the
+        session is automatically closed so the transport is clean.
+        """
+        self._write_batch(input)
         try:
-            return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
+            return self._read_response()
         except RpcError:
             self.close()
             raise
+
+    def tick(self) -> AnnotatedBatch:
+        """Send a tick batch (producer streams) and receive the output batch.
+
+        Returns:
+            The next output batch.
+
+        Raises:
+            StopIteration: When the producer stream has finished.
+            RpcError: On server-side errors.
+
+        """
+        self._write_batch(_TICK_BATCH)
+        try:
+            return self._read_response()
+        except StopIteration:
+            self.close()
+            raise
+        except RpcError:
+            self.close()
+            raise
+
+    def __iter__(self) -> Iterator[AnnotatedBatch]:
+        """Iterate over output batches from a producer stream.
+
+        Sends tick batches and yields output batches until the server
+        signals stream completion.
+        """
+        while True:
+            try:
+                yield self.tick()
+            except StopIteration:
+                break
 
     def close(self) -> None:
         """Close input stream (signals EOS) and drain remaining output."""
@@ -2150,15 +2036,17 @@ class BidiSession:
             for _ in range(_MAX_DRAIN):
                 _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
 
-    def __enter__(self) -> BidiSession:  # noqa: D105
+    def __enter__(self) -> StreamSession:
+        """Enter context manager."""
         return self
 
-    def __exit__(  # noqa: D105
+    def __exit__(
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        """Exit context manager."""
         self.close()
 
 
@@ -2199,10 +2087,8 @@ class _RpcProxy:
 
         if info.method_type == MethodType.UNARY:
             caller = self._make_unary_caller(info)
-        elif info.method_type == MethodType.SERVER_STREAM:
+        elif info.method_type == MethodType.STREAM:
             caller = self._make_stream_caller(info)
-        elif info.method_type == MethodType.BIDI_STREAM:
-            caller = self._make_bidi_caller(info)
         else:
             raise AttributeError(f"Unknown method type for '{name}'")
 
@@ -2230,20 +2116,7 @@ class _RpcProxy:
 
         def caller(**kwargs: object) -> StreamSession:
             _send_request(transport.writer, info, kwargs)
-            reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
-            return _read_stream_response(reader, on_log, ext_cfg)
-
-        return caller
-
-    def _make_bidi_caller(self, info: RpcMethodInfo) -> Callable[..., BidiSession]:
-        transport = self._transport
-        on_log = self._on_log
-        ext_cfg = self._external_config
-        ipc_validation = self._ipc_validation
-
-        def caller(**kwargs: object) -> BidiSession:
-            _send_request(transport.writer, info, kwargs)
-            return BidiSession(
+            return StreamSession(
                 transport.writer, transport.reader, on_log, external_config=ext_cfg, ipc_validation=ipc_validation
             )
 

@@ -16,9 +16,6 @@ from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
-    BidiSession,
-    BidiStream,
-    BidiStreamState,
     CallContext,
     ClientLog,
     MethodType,
@@ -29,10 +26,10 @@ from vgi_rpc.rpc import (
     RpcMethodInfo,
     RpcServer,
     RpcTransport,
-    ServerStream,
-    ServerStreamState,
     StderrMode,
+    Stream,
     StreamSession,
+    StreamState,
     SubprocessTransport,
     VersionError,
     connect,
@@ -55,7 +52,6 @@ from vgi_rpc.utils import (
 # HTTP (optional — requires `pip install vgi-rpc[http]`)
 with contextlib.suppress(ImportError):
     from vgi_rpc.http import (
-        HttpBidiSession,
         HttpStreamSession,
         http_connect,
         http_introspect,
@@ -91,12 +87,9 @@ __all__ = [
     "make_pipe_pair",
     "serve_stdio",
     # Streaming
-    "ServerStream",
-    "ServerStreamState",
-    "BidiStream",
-    "BidiStreamState",
+    "Stream",
+    "StreamState",
     "StreamSession",
-    "BidiSession",
     "OutputCollector",
     "AnnotatedBatch",
     # Introspection
@@ -135,9 +128,8 @@ if "S3Storage" in dir():
     __all__.append("S3Storage")
 if "GCSStorage" in dir():
     __all__.append("GCSStorage")
-if "HttpBidiSession" in dir():
+if "HttpStreamSession" in dir():
     __all__ += [
-        "HttpBidiSession",
         "HttpStreamSession",
         "http_connect",
         "http_introspect",

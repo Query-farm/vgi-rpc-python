@@ -40,12 +40,10 @@ from vgi_rpc.metadata import (
 )
 from vgi_rpc.rpc import (
     AnnotatedBatch,
-    BidiStream,
-    BidiStreamState,
     CallContext,
     OutputCollector,
-    ServerStream,
-    ServerStreamState,
+    Stream,
+    StreamState,
     serve_pipe,
 )
 from vgi_rpc.utils import empty_batch
@@ -672,14 +670,14 @@ class TestMaybeExternalizeBatch:
 
 
 @dataclass
-class _LargeStreamState(ServerStreamState):
-    """Server stream that produces large batches with logs."""
+class _LargeStreamState(StreamState):
+    """Producer stream state that produces large batches with logs."""
 
     count: int
     size: int
     current: int = 0
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce a large batch with a log message."""
         if self.current >= self.count:
             out.finish()
@@ -690,8 +688,8 @@ class _LargeStreamState(ServerStreamState):
 
 
 @dataclass
-class _LargeBidiState(BidiStreamState):
-    """Bidi stream that produces large output."""
+class _LargeBidiState(StreamState):
+    """Exchange stream state that produces large output."""
 
     factor: float
 
@@ -708,11 +706,11 @@ class _ExternalService(Protocol):
         """Return the data back (may be externalized if large)."""
         ...
 
-    def stream_large(self, count: int, size: int) -> ServerStream[ServerStreamState]:
+    def stream_large(self, count: int, size: int) -> Stream[StreamState]:
         """Stream large batches."""
         ...
 
-    def bidi_large(self, factor: float) -> BidiStream[BidiStreamState]:
+    def bidi_large(self, factor: float) -> Stream[StreamState]:
         """Bidi with potentially large input/output."""
         ...
 
@@ -724,15 +722,19 @@ class _ExternalServiceImpl:
         """Return the data back."""
         return data
 
-    def stream_large(self, count: int, size: int) -> ServerStream[_LargeStreamState]:
+    def stream_large(self, count: int, size: int) -> Stream[_LargeStreamState]:
         """Stream large batches."""
         schema = pa.schema([pa.field("value", pa.int64())])
-        return ServerStream(output_schema=schema, state=_LargeStreamState(count=count, size=size))
+        return Stream(output_schema=schema, state=_LargeStreamState(count=count, size=size))
 
-    def bidi_large(self, factor: float) -> BidiStream[_LargeBidiState]:
+    def bidi_large(self, factor: float) -> Stream[_LargeBidiState]:
         """Bidi with potentially large input/output."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=_LargeBidiState(factor=factor))
+        return Stream(
+            output_schema=schema,
+            input_schema=pa.schema([pa.field("value", pa.float64())]),
+            state=_LargeBidiState(factor=factor),
+        )
 
 
 def _mock_aio_dynamic(storage: MockStorage, mock: aioresponses_ctx, *, content_encoding: str | None = None) -> None:
@@ -811,7 +813,7 @@ class TestPipeIntegration:
         assert len(storage.data) == 0
 
     def test_server_stream_large_externalized(self) -> None:
-        """Large server-stream batches are externalized with logs."""
+        """Large producer stream batches are externalized with logs."""
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 
@@ -835,7 +837,7 @@ class TestPipeIntegration:
         assert all(m.level == Level.INFO for m in received_logs)
 
     def test_server_stream_logs_from_external(self) -> None:
-        """Verify logs embedded in externalized stream are dispatched to on_log."""
+        """Verify logs embedded in externalized producer stream are dispatched to on_log."""
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 
@@ -950,7 +952,7 @@ class TestExternalDisabled:
         assert result == "x" * 200
 
     def test_server_stream_no_config(self) -> None:
-        """Server streaming works with no ExternalLocationConfig."""
+        """Producer streaming works with no ExternalLocationConfig."""
         received_logs: list[Message] = []
 
         with serve_pipe(
@@ -966,7 +968,7 @@ class TestExternalDisabled:
         assert len(received_logs) == 3
 
     def test_server_stream_storage_none(self) -> None:
-        """Server streaming works with ExternalLocationConfig(storage=None)."""
+        """Producer streaming works with ExternalLocationConfig(storage=None)."""
         config = ExternalLocationConfig(storage=None)
 
         with serve_pipe(
@@ -981,7 +983,7 @@ class TestExternalDisabled:
             assert ab.batch.num_rows == 50
 
     def test_bidi_no_config(self) -> None:
-        """Bidi streaming works with no ExternalLocationConfig."""
+        """Exchange streaming works with no ExternalLocationConfig."""
         with serve_pipe(_ExternalService, _ExternalServiceImpl()) as svc:
             bidi = svc.bidi_large(factor=2.0)
             with bidi:
@@ -996,7 +998,7 @@ class TestExternalDisabled:
         assert result.batch.column("value")[2].as_py() == 6.0
 
     def test_bidi_storage_none(self) -> None:
-        """Bidi streaming works with ExternalLocationConfig(storage=None)."""
+        """Exchange streaming works with ExternalLocationConfig(storage=None)."""
         config = ExternalLocationConfig(storage=None)
 
         with serve_pipe(
@@ -1570,7 +1572,7 @@ class TestPipeIntegrationCompressed:
             assert data[:4] == b"\x28\xb5\x2f\xfd"
 
     def test_server_stream_compressed(self) -> None:
-        """Server stream + compression + logs works end-to-end."""
+        """Producer stream + compression + logs works end-to-end."""
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 

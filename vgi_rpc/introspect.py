@@ -172,14 +172,14 @@ def _safe_defaults_json(defaults: dict[str, Any]) -> str | None:
 class MethodDescription:
     """Description of a single RPC method from introspection.
 
-    For ``SERVER_STREAM`` and ``BIDI_STREAM`` methods, ``result_schema``
-    reflects the Protocol-level return type (typically empty).  The actual
-    stream output schema is determined at runtime by the implementation and
-    cannot be reported statically.
+    For ``STREAM`` methods, ``result_schema`` reflects the Protocol-level
+    return type (typically empty).  The actual stream output schema is
+    determined at runtime by the implementation and cannot be reported
+    statically.
 
     Attributes:
         name: Method name as it appears on the Protocol.
-        method_type: Whether this is UNARY, SERVER_STREAM, or BIDI_STREAM.
+        method_type: Whether this is UNARY or STREAM.
         doc: The method's docstring, or ``None``.
         has_return: ``True`` for unary methods that return a value.
         params_schema: Arrow schema for request parameters.

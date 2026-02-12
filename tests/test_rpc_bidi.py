@@ -1,4 +1,4 @@
-"""Exhaustive tests for bidi stream RPC calls.
+"""Exhaustive tests for exchange stream RPC calls.
 
 Covers edge cases, error handling, state management, session lifecycle,
 metadata propagation, schema validation, and stress scenarios for bidi
@@ -16,17 +16,17 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
-from vgi_rpc.http import HttpBidiSession
+from vgi_rpc.http import HttpStreamSession
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import (
     AnnotatedBatch,
-    BidiSession,
-    BidiStream,
-    BidiStreamState,
     CallContext,
     OutputCollector,
     RpcConnection,
     RpcError,
+    Stream,
+    StreamSession,
+    StreamState,
     _RpcProxy,
     serve_pipe,
 )
@@ -45,7 +45,7 @@ from .test_rpc import (
 
 
 @dataclass
-class AccumulatingState(BidiStreamState):
+class AccumulatingState(StreamState):
     """State that accumulates a running sum across exchanges."""
 
     running_sum: float = 0.0
@@ -60,7 +60,7 @@ class AccumulatingState(BidiStreamState):
 
 
 @dataclass
-class FailFirstState(BidiStreamState):
+class FailFirstState(StreamState):
     """State that fails on the very first process() call."""
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
@@ -69,7 +69,7 @@ class FailFirstState(BidiStreamState):
 
 
 @dataclass
-class FailOnNthState(BidiStreamState):
+class FailOnNthState(StreamState):
     """State that fails on the Nth process() call."""
 
     fail_on: int
@@ -84,7 +84,7 @@ class FailOnNthState(BidiStreamState):
 
 
 @dataclass
-class MultiLogState(BidiStreamState):
+class MultiLogState(StreamState):
     """State that emits multiple log messages per exchange."""
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
@@ -96,7 +96,7 @@ class MultiLogState(BidiStreamState):
 
 
 @dataclass
-class MetadataEchoState(BidiStreamState):
+class MetadataEchoState(StreamState):
     """State that attaches custom metadata to output."""
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
@@ -105,7 +105,7 @@ class MetadataEchoState(BidiStreamState):
 
 
 @dataclass
-class EmptyBatchState(BidiStreamState):
+class EmptyBatchState(StreamState):
     """State that handles 0-row input batches gracefully."""
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
@@ -114,7 +114,7 @@ class EmptyBatchState(BidiStreamState):
 
 
 @dataclass
-class HistoryState(BidiStreamState):
+class HistoryState(StreamState):
     """State that tracks a list of all seen values (growing state)."""
 
     history: list[float] = field(default_factory=list)
@@ -127,7 +127,7 @@ class HistoryState(BidiStreamState):
 
 
 @dataclass
-class LargeBatchState(BidiStreamState):
+class LargeBatchState(StreamState):
     """State for testing large batch throughput."""
 
     factor: float
@@ -146,104 +146,107 @@ class LargeBatchState(BidiStreamState):
 class BidiEdgeCaseService(Protocol):
     """Service for testing bidi edge cases."""
 
-    def accumulate(self) -> BidiStream[BidiStreamState]:
+    def accumulate(self) -> Stream[StreamState]:
         """Accumulate values across exchanges."""
         ...
 
-    def fail_first(self) -> BidiStream[BidiStreamState]:
+    def fail_first(self) -> Stream[StreamState]:
         """Bidi that fails on first exchange."""
         ...
 
-    def fail_on_nth(self, fail_on: int) -> BidiStream[BidiStreamState]:
+    def fail_on_nth(self, fail_on: int) -> Stream[StreamState]:
         """Bidi that fails on the Nth exchange."""
         ...
 
-    def multi_log(self) -> BidiStream[BidiStreamState]:
+    def multi_log(self) -> Stream[StreamState]:
         """Bidi with multiple logs per exchange."""
         ...
 
-    def metadata_echo(self) -> BidiStream[BidiStreamState]:
+    def metadata_echo(self) -> Stream[StreamState]:
         """Bidi that echoes metadata."""
         ...
 
-    def empty_batch_handler(self) -> BidiStream[BidiStreamState]:
+    def empty_batch_handler(self) -> Stream[StreamState]:
         """Bidi that handles empty batches."""
         ...
 
-    def history_tracker(self) -> BidiStream[BidiStreamState]:
+    def history_tracker(self) -> Stream[StreamState]:
         """Bidi that tracks value history in growing state."""
         ...
 
-    def large_batch(self, factor: float) -> BidiStream[BidiStreamState]:
+    def large_batch(self, factor: float) -> Stream[StreamState]:
         """Bidi for large batch throughput."""
         ...
 
-    def fail_init(self) -> BidiStream[BidiStreamState]:
+    def fail_init(self) -> Stream[StreamState]:
         """Bidi where init itself raises."""
         ...
 
-    def log_during_init(self) -> BidiStream[BidiStreamState]:
-        """Bidi that emits logs during init (before BidiStream returned)."""
+    def log_during_init(self) -> Stream[StreamState]:
+        """Bidi that emits logs during init (before Stream returned)."""
         ...
 
-    def passthrough_with_input_schema(self) -> BidiStream[BidiStreamState]:
+    def passthrough_with_input_schema(self) -> Stream[StreamState]:
         """Bidi with explicit input_schema."""
         ...
+
+
+_VALUE_INPUT_SCHEMA = pa.schema([pa.field("value", pa.float64())])
 
 
 class BidiEdgeCaseServiceImpl:
     """Implementation of BidiEdgeCaseService."""
 
-    def accumulate(self) -> BidiStream[AccumulatingState]:
+    def accumulate(self) -> Stream[AccumulatingState]:
         """Accumulate values across exchanges."""
         fields: list[pa.Field[pa.DataType]] = [
             pa.field("running_sum", pa.float64()),
             pa.field("exchange_count", pa.int64()),
         ]
         schema = pa.schema(fields)
-        return BidiStream(output_schema=schema, state=AccumulatingState())
+        return Stream(output_schema=schema, state=AccumulatingState(), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def fail_first(self) -> BidiStream[FailFirstState]:
+    def fail_first(self) -> Stream[FailFirstState]:
         """Bidi that fails on first exchange."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=FailFirstState())
+        return Stream(output_schema=schema, state=FailFirstState(), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def fail_on_nth(self, fail_on: int) -> BidiStream[FailOnNthState]:
+    def fail_on_nth(self, fail_on: int) -> Stream[FailOnNthState]:
         """Bidi that fails on the Nth exchange."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=FailOnNthState(fail_on=fail_on))
+        return Stream(output_schema=schema, state=FailOnNthState(fail_on=fail_on), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def multi_log(self) -> BidiStream[MultiLogState]:
+    def multi_log(self) -> Stream[MultiLogState]:
         """Bidi with multiple logs per exchange."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=MultiLogState())
+        return Stream(output_schema=schema, state=MultiLogState(), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def metadata_echo(self) -> BidiStream[MetadataEchoState]:
+    def metadata_echo(self) -> Stream[MetadataEchoState]:
         """Bidi that echoes metadata."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=MetadataEchoState())
+        return Stream(output_schema=schema, state=MetadataEchoState(), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def empty_batch_handler(self) -> BidiStream[EmptyBatchState]:
+    def empty_batch_handler(self) -> Stream[EmptyBatchState]:
         """Bidi that handles empty batches."""
         schema = pa.schema([pa.field("row_count", pa.int64())])
-        return BidiStream(output_schema=schema, state=EmptyBatchState())
+        return Stream(output_schema=schema, state=EmptyBatchState(), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def history_tracker(self) -> BidiStream[HistoryState]:
+    def history_tracker(self) -> Stream[HistoryState]:
         """Bidi that tracks value history in growing state."""
         schema = pa.schema([pa.field("history_len", pa.int64())])
-        return BidiStream(output_schema=schema, state=HistoryState())
+        return Stream(output_schema=schema, state=HistoryState(), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def large_batch(self, factor: float) -> BidiStream[LargeBatchState]:
+    def large_batch(self, factor: float) -> Stream[LargeBatchState]:
         """Bidi for large batch throughput."""
         schema = pa.schema([pa.field("value", pa.float64())])
-        return BidiStream(output_schema=schema, state=LargeBatchState(factor=factor))
+        return Stream(output_schema=schema, state=LargeBatchState(factor=factor), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def fail_init(self) -> BidiStream[BidiStreamState]:
+    def fail_init(self) -> Stream[StreamState]:
         """Bidi where init itself raises."""
         raise ValueError("init boom")
 
-    def log_during_init(self, ctx: CallContext | None = None) -> BidiStream[AccumulatingState]:
-        """Bidi that emits logs during init (before BidiStream returned)."""
+    def log_during_init(self, ctx: CallContext | None = None) -> Stream[AccumulatingState]:
+        """Bidi that emits logs during init (before Stream returned)."""
         if ctx:
             ctx.client_log(Level.INFO, "bidi init log")
             ctx.client_log(Level.DEBUG, "bidi init detail", tag="init")
@@ -252,13 +255,13 @@ class BidiEdgeCaseServiceImpl:
             pa.field("exchange_count", pa.int64()),
         ]
         schema = pa.schema(fields)
-        return BidiStream(output_schema=schema, state=AccumulatingState())
+        return Stream(output_schema=schema, state=AccumulatingState(), input_schema=_VALUE_INPUT_SCHEMA)
 
-    def passthrough_with_input_schema(self) -> BidiStream[EmptyBatchState]:
+    def passthrough_with_input_schema(self) -> Stream[EmptyBatchState]:
         """Bidi with explicit input_schema."""
         expected = pa.schema([pa.field("value", pa.float64())])
         output = pa.schema([pa.field("row_count", pa.int64())])
-        return BidiStream(output_schema=output, state=EmptyBatchState(), input_schema=expected)
+        return Stream(output_schema=output, state=EmptyBatchState(), input_schema=expected)
 
 
 @contextlib.contextmanager
@@ -312,8 +315,8 @@ class TestBidiEmptySession:
 # ---------------------------------------------------------------------------
 
 
-class TestBidiSessionLifecycle:
-    """Tests for BidiSession/HttpBidiSession lifecycle edge cases."""
+class TestStreamSessionLifecycle:
+    """Tests for StreamSession/HttpStreamSession lifecycle edge cases."""
 
     def test_close_called_twice(self, make_conn: ConnFactory) -> None:
         """Calling close() twice should be idempotent."""
@@ -346,14 +349,14 @@ class TestBidiSessionLifecycle:
             session = proxy.transform(factor=2.0)
             session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
             session.close()
-            assert isinstance(session, BidiSession)
+            assert isinstance(session, StreamSession)
             # After close, the input writer is closed. Trying to exchange should fail.
             with pytest.raises((pa.ArrowInvalid, OSError)):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
 
 
 # ---------------------------------------------------------------------------
-# Tests: Error handling in bidi streams
+# Tests: Error handling in exchange streams
 # ---------------------------------------------------------------------------
 
 
@@ -410,7 +413,7 @@ class TestBidiErrorHandling:
     def test_error_during_init_visible_on_exchange(self) -> None:
         """Error during bidi init is visible on first exchange (pipe transport).
 
-        On pipe transport, proxy.fail_init() returns a BidiSession without
+        On pipe transport, proxy.fail_init() returns a StreamSession without
         reading the server response.  The error is only raised when the
         client tries the first exchange().
         """
@@ -433,13 +436,13 @@ class TestBidiErrorHandling:
             assert proxy.greet(name="test") == "Hello, test!"
 
     def test_bidi_error_then_stream_on_shared_transport(self, make_conn: ConnFactory) -> None:
-        """Bidi error followed by successful server stream on the same transport."""
+        """Exchange error followed by successful producer stream on the same transport."""
         with make_conn() as proxy:
             session = proxy.fail_bidi_mid(factor=2.0)
             session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
             with pytest.raises(RpcError, match="bidi boom"):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
-            # Server stream should work
+            # Producer stream should work
             batches = list(proxy.generate(count=3))
             assert len(batches) == 3
 
@@ -592,7 +595,7 @@ class TestBidiMetadata:
         """Custom metadata on input batches reaches the process() method (pipe)."""
 
         @dataclass
-        class MetadataReadState(BidiStreamState):
+        class MetadataReadState(StreamState):
             last_meta_value: str = ""
 
             def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
@@ -603,12 +606,13 @@ class TestBidiMetadata:
                 out.emit_pydict({"meta_value": [self.last_meta_value]})
 
         class MetaService(Protocol):
-            def meta_bidi(self) -> BidiStream[BidiStreamState]: ...
+            def meta_bidi(self) -> Stream[StreamState]: ...
 
         class MetaServiceImpl:
-            def meta_bidi(self) -> BidiStream[MetadataReadState]:
+            def meta_bidi(self) -> Stream[MetadataReadState]:
                 schema = pa.schema([pa.field("meta_value", pa.utf8())])
-                return BidiStream(output_schema=schema, state=MetadataReadState())
+                input_s = pa.schema([pa.field("value", pa.float64())])
+                return Stream(output_schema=schema, state=MetadataReadState(), input_schema=input_s)
 
         with rpc_conn(MetaService, MetaServiceImpl()) as proxy:
             session = proxy.meta_bidi()
@@ -625,7 +629,7 @@ class TestBidiMetadata:
 
 
 class TestBidiInputSchemaValidation:
-    """Tests for BidiStream.input_schema validation."""
+    """Tests for Stream.input_schema validation."""
 
     def test_wrong_column_name_raises(self) -> None:
         """Wrong column name raises RpcError with schema mismatch."""
@@ -740,7 +744,7 @@ class TestBidiBatchSizes:
 
 
 class TestBidiStress:
-    """Stress tests for bidi streaming."""
+    """Stress tests for exchange streaming."""
 
     def test_many_exchanges(self, make_conn: ConnFactory) -> None:
         """100 exchanges on a single bidi session work correctly."""
@@ -776,7 +780,7 @@ class TestBidiMixedScenarios:
     """Tests for complex mixed scenarios involving bidi with other method types."""
 
     def test_bidi_between_stream_calls(self, make_conn: ConnFactory) -> None:
-        """Bidi session between two server-stream calls."""
+        """Exchange session between two producer stream calls."""
         with make_conn() as proxy:
             batches1 = list(proxy.generate(count=3))
             assert len(batches1) == 3
@@ -830,10 +834,10 @@ class TestBidiPipeTransport:
             assert out.batch.column("value").to_pylist() == [12.0]
 
     def test_bidi_session_is_correct_type_pipe(self) -> None:
-        """Pipe transport returns BidiSession (not HttpBidiSession)."""
+        """Pipe transport returns StreamSession (not HttpStreamSession)."""
         with rpc_conn() as proxy:
             session = proxy.transform(factor=1.0)
-            assert isinstance(session, BidiSession)
+            assert isinstance(session, StreamSession)
             session.close()
 
     def test_bidi_with_on_log_via_connection(self) -> None:
@@ -853,14 +857,14 @@ class TestBidiHttpTransport:
     """Tests specific to HTTP transport bidi behavior."""
 
     def test_bidi_session_is_correct_type_http(self, http_server_port: int) -> None:
-        """HTTP transport returns HttpBidiSession."""
+        """HTTP transport returns HttpStreamSession."""
         with http_conn(http_server_port) as proxy:
             session = proxy.transform(factor=1.0)
-            assert isinstance(session, HttpBidiSession)
+            assert isinstance(session, HttpStreamSession)
             session.close()
 
     def test_http_bidi_close_is_noop(self, http_server_port: int) -> None:
-        """HttpBidiSession.close() is a no-op (stateless HTTP)."""
+        """HttpStreamSession.close() is a no-op (stateless HTTP)."""
         with http_conn(http_server_port) as proxy:
             session = proxy.transform(factor=2.0)
             out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
@@ -875,7 +879,7 @@ class TestBidiHttpTransport:
         on every exchange. Verifies the state_bytes is updated.
         """
         with http_conn(http_server_port) as proxy, proxy.transform(factor=2.0) as session:
-            assert isinstance(session, HttpBidiSession)
+            assert isinstance(session, HttpStreamSession)
 
             session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
             # State bytes may or may not change for TransformState (no mutation)

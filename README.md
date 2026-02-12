@@ -8,7 +8,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 
 - **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
 - **Apache Arrow IPC wire format** — zero-copy serialization for structured data
-- **Three method types** — unary, server-streaming, and bidirectional streaming
+- **Two method types** — unary and streaming (producer and exchange patterns)
 - **Transport-agnostic** — in-process pipes, subprocess, or HTTP
 - **Automatic schema inference** — Python type annotations map to Arrow types
 - **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
@@ -82,28 +82,27 @@ Services are defined as `Protocol` classes. The return type annotation determine
 | Return type | Method type | Description |
 |---|---|---|
 | `-> T` | **Unary** | Single request, single response |
-| `-> ServerStream[S]` | **Server stream** | Single request, stream of batches |
-| `-> BidiStream[S]` | **Bidi stream** | Bidirectional lockstep exchange |
+| `-> Stream[S]` | **Stream** | Stateful streaming (producer or exchange) |
 
 ```python
 from typing import Protocol
 
-from vgi_rpc import BidiStream, BidiStreamState, ServerStream, ServerStreamState
+from vgi_rpc import Stream, StreamState
 
 
 class MyService(Protocol):
-    """Example service with all three method types."""
+    """Example service with both method types."""
 
     def echo(self, message: str) -> str:
         """Unary: single request/response."""
         ...
 
-    def generate(self, count: int) -> ServerStream[ServerStreamState]:
-        """Server stream: produces multiple batches."""
+    def generate(self, count: int) -> Stream[StreamState]:
+        """Producer stream: produces multiple batches."""
         ...
 
-    def transform(self, factor: float) -> BidiStream[BidiStreamState]:
-        """Bidi stream: lockstep input/output exchange."""
+    def transform(self, factor: float) -> Stream[StreamState]:
+        """Exchange stream: lockstep input/output exchange."""
         ...
 ```
 
@@ -205,7 +204,7 @@ Each `MethodDescription` contains:
 | Field | Type | Description |
 |---|---|---|
 | `name` | `str` | Method name |
-| `method_type` | `MethodType` | `UNARY`, `SERVER_STREAM`, or `BIDI_STREAM` |
+| `method_type` | `MethodType` | `UNARY` or `STREAM` |
 | `doc` | `str \| None` | Method docstring |
 | `has_return` | `bool` | Whether the method returns a value |
 | `params_schema` | `pa.Schema` | Arrow schema for request parameters |
@@ -325,7 +324,7 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 |---|---|---|
 | `prefix` | `"/vgi"` | URL prefix for all RPC endpoints |
 | `signing_key` | random 32 bytes | HMAC key for signing state tokens |
-| `max_stream_response_bytes` | `None` | Split server-stream responses across multiple HTTP exchanges |
+| `max_stream_response_bytes` | `None` | Split producer stream responses across multiple HTTP exchanges |
 | `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |
 | `cors_origins` | `None` | Allowed CORS origins — `"*"` for all, a string, or list of strings |
 
@@ -345,9 +344,14 @@ This uses Falcon's built-in `CORSMiddleware`, which handles preflight `OPTIONS` 
 
 ## Streaming
 
-### Server Streams
+Streaming methods return `Stream[S]` where `S` is a `StreamState` subclass. The state's `process(input, out, ctx)` method is called once per iteration. There are two patterns:
 
-A server stream method returns `ServerStream[S]` where `S` is a `ServerStreamState` subclass. The state's `produce(out, ctx)` method is called repeatedly until `out.finish()` is called:
+- **Producer streams** — server pushes data; client iterates. `input_schema` defaults to empty. Call `out.finish()` to end.
+- **Exchange streams** — client sends data; server responds. Set `input_schema` to the expected input schema. Client controls termination via `close()`.
+
+### Producer Streams
+
+A producer stream ignores the `input` parameter and calls `out.finish()` when done:
 
 ```python
 from dataclasses import dataclass
@@ -355,16 +359,16 @@ from typing import Protocol
 
 import pyarrow as pa
 
-from vgi_rpc import CallContext, OutputCollector, ServerStream, ServerStreamState
+from vgi_rpc import AnnotatedBatch, CallContext, OutputCollector, Stream, StreamState
 
 
 @dataclass
-class CountdownState(ServerStreamState):
+class CountdownState(StreamState):
     """Counts down from n to 1."""
 
     n: int
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next countdown value, or finish."""
         if self.n <= 0:
             out.finish()
@@ -374,9 +378,9 @@ class CountdownState(ServerStreamState):
 
 
 class CountdownService(Protocol):
-    """Service with a server stream."""
+    """Service with a producer stream."""
 
-    def countdown(self, n: int) -> ServerStream[ServerStreamState]:
+    def countdown(self, n: int) -> Stream[StreamState]:
         """Count down from n."""
         ...
 
@@ -384,13 +388,13 @@ class CountdownService(Protocol):
 class CountdownServiceImpl:
     """Countdown implementation."""
 
-    def countdown(self, n: int) -> ServerStream[CountdownState]:
+    def countdown(self, n: int) -> Stream[CountdownState]:
         """Count down from n."""
         schema = pa.schema([pa.field("value", pa.int64())])
-        return ServerStream(output_schema=schema, state=CountdownState(n=n))
+        return Stream(output_schema=schema, state=CountdownState(n=n))
 ```
 
-The client iterates over the result — the proxy type preserves `ServerStream`'s `__iter__` signature, so IDEs know each `batch` is an `AnnotatedBatch`:
+The client iterates over the result — the proxy type preserves `Stream`'s `__iter__` signature, so IDEs know each `batch` is an `AnnotatedBatch`:
 
 ```python
 with serve_pipe(CountdownService, CountdownServiceImpl()) as proxy:
@@ -401,26 +405,20 @@ with serve_pipe(CountdownService, CountdownServiceImpl()) as proxy:
     # {'value': [1]}
 ```
 
-### Bidi Streams
+### Exchange Streams
 
-A bidi stream method returns `BidiStream[S]` where `S` is a `BidiStreamState` subclass. The state's `process(input, out, ctx)` method is called once per input batch. State is mutated in-place across exchanges:
+An exchange stream sets `input_schema` to a real schema. The `process()` method receives client data and emits a response. State is mutated in-place across exchanges:
 
 ```python
 from dataclasses import dataclass
 
 import pyarrow as pa
 
-from vgi_rpc import (
-    AnnotatedBatch,
-    BidiStream,
-    BidiStreamState,
-    CallContext,
-    OutputCollector,
-)
+from vgi_rpc import AnnotatedBatch, CallContext, OutputCollector, Stream, StreamState
 
 
 @dataclass
-class RunningSum(BidiStreamState):
+class RunningSum(StreamState):
     """Accumulates a running sum across exchanges."""
 
     total: float = 0.0
@@ -433,7 +431,7 @@ class RunningSum(BidiStreamState):
         out.emit_pydict({"total": [self.total]})
 ```
 
-The client uses the result as a context manager with `exchange()` for lockstep communication — the proxy type preserves `BidiStream`'s context manager and `exchange` signatures:
+The client uses the result as a context manager with `exchange()` for lockstep communication — the proxy type preserves `Stream`'s context manager and `exchange` signatures:
 
 ```python
 with serve_pipe(SumService, SumServiceImpl()) as proxy:
@@ -472,11 +470,11 @@ class MyServiceImpl:
         return result
 ```
 
-In streaming methods, `ctx` is passed to `produce()` and `process()`. You can also use `OutputCollector.client_log()`:
+In streaming methods, `ctx` is passed to `process()`. You can also use `OutputCollector.client_log()`:
 
 ```python
-def produce(self, out: OutputCollector, ctx: CallContext) -> None:
-    """Produce with logging."""
+def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    """Process with logging."""
     ctx.client_log(Level.INFO, "generating batch")
     out.emit_pydict({"value": [42]})
 ```
@@ -556,7 +554,7 @@ Access log extra fields:
 | `server_id` | `str` | Server instance identifier |
 | `protocol` | `str` | Protocol class name |
 | `method` | `str` | Method name |
-| `method_type` | `str` | `"unary"`, `"server_stream"`, or `"bidi_stream"` |
+| `method_type` | `str` | `"unary"` or `"stream"` |
 | `principal` | `str` | Caller identity (empty if anonymous) |
 | `auth_domain` | `str` | Authentication scheme (empty if anonymous) |
 | `remote_addr` | `str` | Client address (HTTP only) |
@@ -822,7 +820,7 @@ All framework metadata keys live in the `vgi_rpc.` namespace:
 |---|---|---|
 | `vgi_rpc.method` | schema metadata | Target RPC method name |
 | `vgi_rpc.request_version` | batch metadata | Wire protocol version (`"1"`) |
-| `vgi_rpc.bidi_state` | batch metadata | Serialized stream state (HTTP transport) |
+| `vgi_rpc.stream_state` | batch metadata | Serialized stream state (HTTP transport) |
 | `vgi_rpc.log_level` | batch metadata | Log level on zero-row log/error batches |
 | `vgi_rpc.log_message` | batch metadata | Log message text |
 | `vgi_rpc.log_extra` | batch metadata | JSON-encoded extra fields |
@@ -840,16 +838,9 @@ Client → Server:  [IPC stream: params_schema + 1 request batch + EOS]
 Server → Client:  [IPC stream: result_schema + 0..N log batches + 1 result/error batch + EOS]
 ```
 
-### Server stream wire format (pipe)
+### Stream wire format (pipe)
 
-```
-Client → Server:  [IPC stream: params_schema + 1 request batch + EOS]
-Server → Client:  [IPC stream: output_schema + (log_batch | data_batch)* + EOS]
-```
-
-On error, the final batch is zero-row with EXCEPTION-level log metadata.
-
-### Bidi stream wire format (pipe)
+All streams use the same lockstep exchange protocol:
 
 **Phase 1 — request params** (same as unary):
 
@@ -864,7 +855,9 @@ Client → Server:  [IPC stream: input_batch₁ + input_batch₂ + ... + EOS]
 Server → Client:  [IPC stream: (log_batch* + output_batch)* + EOS]
 ```
 
-Each input batch produces exactly one output batch (1:1 lockstep). Log batches may appear before each output batch. The client closes its input stream (EOS) to signal end of exchange.
+Each input batch produces exactly one output batch (1:1 lockstep). For producer streams, input batches are zero-row ticks on an empty schema. For exchange streams, input batches carry real data.
+
+Log batches may appear before each output batch. The client closes its input stream (EOS) to signal end of exchange. For producer streams, the server closes its output stream (EOS) when `out.finish()` is called.
 
 ### HTTP endpoints
 
@@ -872,23 +865,27 @@ All endpoints use `Content-Type: application/vnd.apache.arrow.stream`.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `{prefix}/{method}` | POST | Unary and server-stream calls |
-| `{prefix}/{method}/bidi` | POST | Bidi stream initialization |
-| `{prefix}/{method}/exchange` | POST | Bidi and server-stream continuation |
+| `{prefix}/{method}` | POST | Unary calls |
+| `{prefix}/{method}/init` | POST | Stream initialization (producer and exchange) |
+| `{prefix}/{method}/exchange` | POST | Stream continuation (producer and exchange) |
 
-Over HTTP, bidi streaming is **stateless**: each exchange carries serialized `BidiStreamState` in a signed token in the `vgi_rpc.bidi_state` batch metadata key.
+Over HTTP, streaming is **stateless**: each exchange carries serialized `StreamState` in a signed token in the `vgi_rpc.stream_state` batch metadata key. Producer stream init returns data batches directly; exchange stream init returns a state token.
 
 ### State tokens (HTTP)
 
 State tokens use HMAC-SHA256 signing to prevent tampering:
 
 ```
-[4 bytes: state_len  (uint32 LE)]
+[4 bytes: state_len        (uint32 LE)]
 [state_len bytes: state_bytes]
-[4 bytes: schema_len (uint32 LE)]
-[schema_len bytes: schema_bytes]
-[32 bytes: HMAC-SHA256(key, state_bytes + schema_bytes)]
+[4 bytes: output_schema_len (uint32 LE)]
+[output_schema_len bytes: output_schema_bytes]
+[4 bytes: input_schema_len  (uint32 LE)]
+[input_schema_len bytes: input_schema_bytes]
+[32 bytes: HMAC-SHA256(key, all preceding bytes)]
 ```
+
+For producer streams, `input_schema_bytes` is the serialized empty schema (small fixed-size blob).
 
 ### Log and error batches
 

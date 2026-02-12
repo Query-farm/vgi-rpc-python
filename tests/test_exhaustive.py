@@ -23,17 +23,15 @@ from pyarrow import ipc
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import encode_metadata
 from vgi_rpc.rpc import (
-    BidiStream,
-    BidiStreamState,
+    AnnotatedBatch,
     CallContext,
     MethodType,
     OutputCollector,
     PipeTransport,
     RpcError,
     RpcServer,
-    ServerStream,
-    ServerStreamState,
-    StreamSession,
+    Stream,
+    StreamState,
     _build_params_schema,
     _build_result_schema,
     _classify_return_type,
@@ -206,28 +204,16 @@ class TestClassifyReturnType:
         assert mt == MethodType.UNARY
         assert has_ret is False
 
-    def test_bare_server_stream(self) -> None:
-        """Bare ServerStream (no type param) classifies correctly."""
-        mt, _, has_ret = _classify_return_type(ServerStream)
-        assert mt == MethodType.SERVER_STREAM
+    def test_bare_stream(self) -> None:
+        """Bare Stream (no type param) classifies correctly."""
+        mt, _, has_ret = _classify_return_type(Stream)
+        assert mt == MethodType.STREAM
         assert has_ret is False
 
-    def test_bare_bidi_stream(self) -> None:
-        """Bare BidiStream (no type param) classifies correctly."""
-        mt, _, has_ret = _classify_return_type(BidiStream)
-        assert mt == MethodType.BIDI_STREAM
-        assert has_ret is False
-
-    def test_generic_server_stream(self) -> None:
-        """ServerStream[S] classifies correctly."""
-        mt, _, has_ret = _classify_return_type(ServerStream[ServerStreamState])
-        assert mt == MethodType.SERVER_STREAM
-        assert has_ret is False
-
-    def test_generic_bidi_stream(self) -> None:
-        """BidiStream[S] classifies correctly."""
-        mt, _, has_ret = _classify_return_type(BidiStream[BidiStreamState])
-        assert mt == MethodType.BIDI_STREAM
+    def test_generic_stream(self) -> None:
+        """Stream[S] classifies correctly."""
+        mt, _, has_ret = _classify_return_type(Stream[StreamState])
+        assert mt == MethodType.STREAM
         assert has_ret is False
 
     def test_primitive_return(self) -> None:
@@ -655,28 +641,28 @@ class TestWireProtocolEdgeCases:
     """End-to-end edge cases over the pipe transport."""
 
     def test_empty_server_stream(self) -> None:
-        """Server stream that finishes immediately yields no batches."""
+        """Producer stream that finishes immediately yields no batches."""
 
         @dataclass
-        class EmptyState(ServerStreamState):
+        class EmptyState(StreamState):
             """Immediately finishes."""
 
-            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
                 """Finish immediately."""
                 out.finish()
 
         class P(Protocol):
             """Protocol."""
 
-            def stream(self) -> ServerStream[ServerStreamState]: ...
+            def stream(self) -> Stream[StreamState]: ...
 
         class Impl:
             """Implementation."""
 
-            def stream(self) -> ServerStream[EmptyState]:
+            def stream(self) -> Stream[EmptyState]:
                 """Return empty stream."""
                 schema = pa.schema([pa.field("x", pa.int64())])
-                return ServerStream(output_schema=schema, state=EmptyState())
+                return Stream(output_schema=schema, state=EmptyState())
 
         with _pipe_conn(P, Impl()) as proxy:
             batches = list(proxy.stream())
@@ -749,17 +735,17 @@ class TestWireProtocolEdgeCases:
             assert proxy.maybe() == 42
 
     def test_server_error_during_init_propagates(self) -> None:
-        """Error in server-stream method init (not produce) propagates."""
+        """Error in stream method init propagates."""
 
         class P(Protocol):
             """Protocol."""
 
-            def stream(self) -> ServerStream[ServerStreamState]: ...
+            def stream(self) -> Stream[StreamState]: ...
 
         class Impl:
             """Implementation."""
 
-            def stream(self) -> ServerStream[ServerStreamState]:
+            def stream(self) -> Stream[StreamState]:
                 """Raise during init."""
                 raise ValueError("init boom")
 
@@ -948,29 +934,58 @@ class TestStreamSession:
     """Edge cases for StreamSession iteration."""
 
     def test_empty_stream(self) -> None:
-        """StreamSession over empty IPC stream yields nothing."""
-        schema = pa.schema([pa.field("x", pa.int64())])
-        buf = BytesIO()
-        with ipc.new_stream(buf, schema):
-            pass  # No batches
-        buf.seek(0)
-        reader = ValidatedReader(ipc.open_stream(buf), IpcValidation.NONE)
-        session = StreamSession(reader)
-        assert list(session) == []
+        """StreamSession over empty producer stream yields nothing."""
+
+        @dataclass
+        class EmptyState(StreamState):
+            """Immediately finishes."""
+
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+                """Finish immediately."""
+                out.finish()
+
+        class P(Protocol):
+            """Protocol."""
+
+            def s(self) -> Stream[StreamState]: ...
+
+        class Impl:
+            """Implementation."""
+
+            def s(self) -> Stream[EmptyState]:
+                """Return empty stream."""
+                return Stream(output_schema=pa.schema([pa.field("x", pa.int64())]), state=EmptyState())
+
+        with serve_pipe(P, Impl()) as proxy:
+            assert list(proxy.s()) == []
 
     def test_stream_with_logs_only(self) -> None:
         """StreamSession with only log batches yields nothing (logs go to callback)."""
-        schema = pa.schema([pa.field("x", pa.int64())])
-        buf = BytesIO()
-        with ipc.new_stream(buf, schema) as writer:
-            msg = Message.info("test log")
-            md = encode_metadata(msg.add_to_metadata())
-            writer.write_batch(empty_batch(schema), custom_metadata=md)
-        buf.seek(0)
-        reader = ValidatedReader(ipc.open_stream(buf), IpcValidation.NONE)
+
+        @dataclass
+        class LogOnlyState(StreamState):
+            """Emits a log then finishes."""
+
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+                """Emit a log then finish."""
+                out.client_log(Level.INFO, "test log")
+                out.finish()
+
+        class P(Protocol):
+            """Protocol."""
+
+            def s(self) -> Stream[StreamState]: ...
+
+        class Impl:
+            """Implementation."""
+
+            def s(self) -> Stream[LogOnlyState]:
+                """Return log-only stream."""
+                return Stream(output_schema=pa.schema([pa.field("x", pa.int64())]), state=LogOnlyState())
+
         logs: list[Message] = []
-        session = StreamSession(reader, on_log=logs.append)
-        data_batches = list(session)
+        with serve_pipe(P, Impl(), on_log=logs.append) as proxy:
+            data_batches = list(proxy.s())
         assert data_batches == []
         assert len(logs) == 1
         assert logs[0].message == "test log"
@@ -1087,44 +1102,6 @@ class TestServeOneServerErrors:
         schema = pa.schema([pa.field("x", pa.int64())])
         with pytest.raises(RpcError, match="not optional"):
             _serve_one_roundtrip(server, "need", schema, {"x": None})
-
-    def test_server_stream_init_error(self) -> None:
-        """serve_one returns RpcError when a server-stream method raises during init."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def broken_stream(self) -> ServerStream[ServerStreamState]: ...
-
-        class Impl:
-            """Implementation."""
-
-            def broken_stream(self) -> ServerStream[ServerStreamState]:
-                """Raise before returning a stream."""
-                raise ValueError("stream init failed")
-
-        server = RpcServer(P, Impl())
-        with pytest.raises(RpcError, match="stream init failed"):
-            _serve_one_roundtrip(server, "broken_stream", pa.schema([]), {})
-
-    def test_bidi_stream_init_error(self) -> None:
-        """serve_one returns RpcError when a bidi-stream method raises during init."""
-
-        class P(Protocol):
-            """Protocol."""
-
-            def broken_bidi(self) -> BidiStream[BidiStreamState]: ...
-
-        class Impl:
-            """Implementation."""
-
-            def broken_bidi(self) -> BidiStream[BidiStreamState]:
-                """Raise before returning a bidi stream."""
-                raise ValueError("bidi init failed")
-
-        server = RpcServer(P, Impl())
-        with pytest.raises(RpcError, match="bidi init failed"):
-            _serve_one_roundtrip(server, "broken_bidi", pa.schema([]), {})
 
 
 # ===================================================================

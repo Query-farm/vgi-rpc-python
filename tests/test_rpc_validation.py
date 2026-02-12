@@ -7,12 +7,10 @@ from typing import Protocol
 import pytest
 
 from vgi_rpc.rpc import (
-    BidiStream,
-    BidiStreamState,
     CallContext,
     RpcServer,
-    ServerStream,
-    ServerStreamState,
+    Stream,
+    StreamState,
     rpc_methods,
 )
 
@@ -36,17 +34,17 @@ class SimpleService(Protocol):
 class StreamService(Protocol):
     """Protocol with stream and bidi methods."""
 
-    def generate(self, count: int) -> ServerStream[ServerStreamState]:
+    def generate(self, count: int) -> Stream[StreamState]:
         """Generate batches."""
         ...
 
-    def transform(self, factor: float) -> BidiStream[BidiStreamState]:
+    def transform(self, factor: float) -> Stream[StreamState]:
         """Scale values."""
         ...
 
 
 class MixedService(Protocol):
-    """Protocol with unary, stream, bidi, and zero-param methods."""
+    """Protocol with unary, stream, and zero-param methods."""
 
     def noop(self) -> None:
         """Do nothing."""
@@ -56,11 +54,11 @@ class MixedService(Protocol):
         """Add two numbers."""
         ...
 
-    def generate(self, count: int) -> ServerStream[ServerStreamState]:
+    def generate(self, count: int) -> Stream[StreamState]:
         """Generate batches."""
         ...
 
-    def transform(self, factor: float) -> BidiStream[BidiStreamState]:
+    def transform(self, factor: float) -> Stream[StreamState]:
         """Scale values."""
         ...
 
@@ -112,7 +110,7 @@ class TestMissingMethod:
         """Missing stream/bidi methods are reported with correct signatures."""
 
         class Impl:
-            def generate(self, count: int) -> ServerStream[ServerStreamState]:
+            def generate(self, count: int) -> Stream[StreamState]:
                 raise NotImplementedError
 
             # transform is missing
@@ -127,10 +125,10 @@ class TestMissingMethod:
             def add(self, a: float, b: float) -> float:
                 return a + b
 
-            def generate(self, count: int) -> ServerStream[ServerStreamState]:
+            def generate(self, count: int) -> Stream[StreamState]:
                 raise NotImplementedError
 
-            def transform(self, factor: float) -> BidiStream[BidiStreamState]:
+            def transform(self, factor: float) -> Stream[StreamState]:
                 raise NotImplementedError
 
         with pytest.raises(TypeError, match=r"missing method noop\(\)"):
@@ -444,10 +442,10 @@ class TestValidImplementation:
         """Impl matching a stream/bidi protocol passes."""
 
         class Impl:
-            def generate(self, count: int) -> ServerStream[ServerStreamState]:
+            def generate(self, count: int) -> Stream[StreamState]:
                 raise NotImplementedError
 
-            def transform(self, factor: float) -> BidiStream[BidiStreamState]:
+            def transform(self, factor: float) -> Stream[StreamState]:
                 raise NotImplementedError
 
         server = RpcServer(StreamService, Impl())
@@ -463,10 +461,10 @@ class TestValidImplementation:
             def add(self, a: float, b: float) -> float:
                 return a + b
 
-            def generate(self, count: int) -> ServerStream[ServerStreamState]:
+            def generate(self, count: int) -> Stream[StreamState]:
                 raise NotImplementedError
 
-            def transform(self, factor: float) -> BidiStream[BidiStreamState]:
+            def transform(self, factor: float) -> Stream[StreamState]:
                 raise NotImplementedError
 
         server = RpcServer(MixedService, Impl())

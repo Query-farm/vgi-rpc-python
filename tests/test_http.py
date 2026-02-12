@@ -35,14 +35,12 @@ from vgi_rpc.log import Message
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
-    BidiStream,
-    BidiStreamState,
     CallContext,
     OutputCollector,
     RpcError,
     RpcServer,
-    ServerStream,
-    ServerStreamState,
+    Stream,
+    StreamState,
     _dispatch_log_or_error,
     _drain_stream,
 )
@@ -135,22 +133,22 @@ class TestHttpErrorCases:
         assert err.error_type == "AttributeError"
         assert "nonexistent" in err.error_message
 
-    def test_non_bidi_on_bidi_endpoint_400(self, client: _SyncTestClient) -> None:
-        """Non-bidi method on the /bidi endpoint returns 400 with Arrow IPC error."""
+    def test_non_stream_on_init_endpoint_400(self, client: _SyncTestClient) -> None:
+        """Non-stream method on the /init endpoint returns 400 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/add/bidi",
+            f"{_BASE_URL}/vgi/add/init",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
         assert resp.status_code == 400
         err = _extract_rpc_error(resp)
         assert err.error_type == "TypeError"
-        assert "not a bidi stream" in err.error_message
+        assert "not a stream" in err.error_message
 
-    def test_malformed_body_bidi_init_400(self, client: _SyncTestClient) -> None:
-        """Garbage bytes on a bidi init endpoint return 400 with Arrow IPC error."""
+    def test_malformed_body_stream_init_400(self, client: _SyncTestClient) -> None:
+        """Garbage bytes on a stream init endpoint return 400 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/transform/bidi",
+            f"{_BASE_URL}/vgi/transform/init",
             content=b"garbage bytes",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -158,8 +156,8 @@ class TestHttpErrorCases:
         err = _extract_rpc_error(resp)
         assert "ArrowInvalid" in err.error_type
 
-    def test_malformed_body_bidi_exchange_400(self, client: _SyncTestClient) -> None:
-        """Garbage bytes on a bidi exchange endpoint return 400."""
+    def test_malformed_body_stream_exchange_400(self, client: _SyncTestClient) -> None:
+        """Garbage bytes on a stream exchange endpoint return 400."""
         resp = client.post(
             f"{_BASE_URL}/vgi/transform/exchange",
             content=b"garbage bytes",
@@ -195,12 +193,12 @@ class TestHttpErrorCases:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Resumable server-stream over HTTP
+# Tests: Resumable producer stream over HTTP
 # ---------------------------------------------------------------------------
 
 
 class TestResumableServerStream:
-    """Tests for resumable server-stream with continuation tokens."""
+    """Tests for resumable producer stream with continuation tokens."""
 
     def test_basic_resumable(self, resumable_client: _SyncTestClient) -> None:
         """All batches received across continuation boundaries."""
@@ -356,7 +354,7 @@ class TestHttpExternalStorage:
         client.close()
 
     def test_server_stream_large_externalized(self) -> None:
-        """Large server-stream batches are externalized and resolved by client."""
+        """Large producer stream batches are externalized and resolved by client."""
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
         client = self._make_client(config)
@@ -378,7 +376,7 @@ class TestHttpExternalStorage:
         client.close()
 
     def test_server_stream_with_logs(self) -> None:
-        """Log messages from externalized stream batches are dispatched via on_log."""
+        """Log messages from externalized producer stream batches are dispatched via on_log."""
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
         client = self._make_client(config)
@@ -463,13 +461,13 @@ class TestHttpExternalStorage:
 
 
 @dataclass
-class _AuthStreamState(ServerStreamState):
-    """Stream state that checks auth in produce()."""
+class _AuthStreamState(StreamState):
+    """Stream state that checks auth in process()."""
 
     count: int
     current: int = 0
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce a batch containing the caller's principal."""
         if self.current >= self.count:
             out.finish()
@@ -479,8 +477,8 @@ class _AuthStreamState(ServerStreamState):
 
 
 @dataclass
-class _AuthBidiState(BidiStreamState):
-    """Bidi state that checks auth in process()."""
+class _AuthBidiState(StreamState):
+    """Stream state that checks auth in process()."""
 
     factor: float
 
@@ -505,12 +503,12 @@ class _AuthService(Protocol):
         """Require authentication and return a secret."""
         ...
 
-    def auth_stream(self, count: int) -> ServerStream[ServerStreamState]:
+    def auth_stream(self, count: int) -> Stream[StreamState]:
         """Stream that includes principal in output."""
         ...
 
-    def auth_bidi(self, factor: float) -> BidiStream[BidiStreamState]:
-        """Bidi that includes principal in output."""
+    def auth_bidi(self, factor: float) -> Stream[StreamState]:
+        """Stream that includes principal in output."""
         ...
 
 
@@ -530,20 +528,24 @@ class _AuthServiceImpl:
         ctx.auth.require_authenticated()
         return f"secret for {ctx.auth.principal}"
 
-    def auth_stream(self, count: int, ctx: CallContext) -> ServerStream[_AuthStreamState]:
+    def auth_stream(self, count: int, ctx: CallContext) -> Stream[_AuthStreamState]:
         """Stream that passes principal to state."""
         fields: list[pa.Field[Any]] = [pa.field("i", pa.int64()), pa.field("principal", pa.utf8())]
         schema = pa.schema(fields)
-        return ServerStream(
+        return Stream(
             output_schema=schema,
             state=_AuthStreamState(count=count),
         )
 
-    def auth_bidi(self, factor: float) -> BidiStream[_AuthBidiState]:
-        """Bidi that tags output with principal."""
+    def auth_bidi(self, factor: float) -> Stream[_AuthBidiState]:
+        """Stream that tags output with principal."""
         fields: list[pa.Field[Any]] = [pa.field("value", pa.float64()), pa.field("principal", pa.utf8())]
         schema = pa.schema(fields)
-        return BidiStream(output_schema=schema, state=_AuthBidiState(factor=factor))
+        return Stream(
+            output_schema=schema,
+            state=_AuthBidiState(factor=factor),
+            input_schema=pa.schema([pa.field("value", pa.float64())]),
+        )
 
 
 def _test_authenticate(req: falcon.Request) -> AuthContext:
@@ -663,7 +665,7 @@ class TestAuthentication:
         client.close()
 
     def test_authenticated_server_stream(self) -> None:
-        """Auth context is available in ServerStreamState.produce over HTTP."""
+        """Auth context is available in producer stream StreamState.process over HTTP."""
         client = _make_auth_client(principal="dave")
         with http_connect(_AuthService, client=client) as proxy:
             batches = list(proxy.auth_stream(count=3))
@@ -673,7 +675,7 @@ class TestAuthentication:
         client.close()
 
     def test_authenticated_bidi(self) -> None:
-        """Auth context is available in BidiStreamState.process over HTTP."""
+        """Auth context is available in StreamState.process over HTTP."""
         client = _make_auth_client(principal="eve")
         with http_connect(_AuthService, client=client) as proxy:
             bidi = proxy.auth_bidi(factor=2.0)

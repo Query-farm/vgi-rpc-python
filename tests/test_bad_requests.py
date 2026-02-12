@@ -188,7 +188,7 @@ class TestBadMethodNames:
     def test_method_with_slashes(self, client: _SyncTestClient) -> None:
         """Slashes in method name are handled by routing."""
         status, _ = _post(client, "/vgi/add/extra/path", _craft_valid_add())
-        # Falcon routes: /vgi/{method}, /vgi/{method}/bidi, /vgi/{method}/exchange
+        # Falcon routes: /vgi/{method}, /vgi/{method}/init, /vgi/{method}/exchange
         # /vgi/add/extra/path won't match any route
         assert status in (400, 404)
 
@@ -416,23 +416,23 @@ class TestBadRowCounts:
 class TestEndpointRouting:
     """Tests for wrong endpoint/method-type combinations."""
 
-    def test_bidi_method_on_unary_endpoint(self, client: _SyncTestClient) -> None:
-        """Bidi method on the /vgi/{method} endpoint returns 400."""
+    def test_stream_method_on_unary_endpoint(self, client: _SyncTestClient) -> None:
+        """Stream method on the /vgi/{method} endpoint returns 400."""
         schema = pa.schema([pa.field("factor", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"factor": [2.0]}, schema=schema)
         body = _craft_request("transform", schema, batch)
         status, content = _post(client, "/vgi/transform", body)
         assert status == 400
         err = _extract_error(content)
-        assert "bidi" in err.error_message.lower() or "Bidi" in err.error_message
+        assert "stream" in err.error_message.lower()
 
-    def test_unary_method_on_bidi_endpoint(self, client: _SyncTestClient) -> None:
-        """Unary method on /bidi endpoint returns 400."""
+    def test_unary_method_on_init_endpoint(self, client: _SyncTestClient) -> None:
+        """Unary method on /init endpoint returns 400."""
         body = _craft_valid_add()
-        status, content = _post(client, "/vgi/add/bidi", body)
+        status, content = _post(client, "/vgi/add/init", body)
         assert status == 400
         err = _extract_error(content)
-        assert "not a bidi stream" in err.error_message
+        assert "not a stream" in err.error_message
 
     def test_unary_method_on_exchange_endpoint(self, client: _SyncTestClient) -> None:
         """Unary method on /exchange endpoint returns 400."""
@@ -442,10 +442,10 @@ class TestEndpointRouting:
         err = _extract_error(content)
         assert "does not support /exchange" in err.error_message
 
-    def test_unknown_method_on_bidi_endpoint(self, client: _SyncTestClient) -> None:
-        """Unknown method on /bidi endpoint returns 404."""
+    def test_unknown_method_on_init_endpoint(self, client: _SyncTestClient) -> None:
+        """Unknown method on /init endpoint returns 404."""
         body = _craft_valid_add()
-        status, _content = _post(client, "/vgi/nonexistent/bidi", body)
+        status, _content = _post(client, "/vgi/nonexistent/init", body)
         assert status == 404
 
     def test_unknown_method_on_exchange_endpoint(self, client: _SyncTestClient) -> None:
@@ -454,9 +454,9 @@ class TestEndpointRouting:
         status, _content = _post(client, "/vgi/nonexistent/exchange", body)
         assert status == 404
 
-    def test_garbage_on_bidi_init(self, client: _SyncTestClient) -> None:
-        """Garbage bytes on bidi init returns 400."""
-        status, _ = _post(client, "/vgi/transform/bidi", b"not ipc")
+    def test_garbage_on_stream_init(self, client: _SyncTestClient) -> None:
+        """Garbage bytes on stream init returns 400."""
+        status, _ = _post(client, "/vgi/transform/init", b"not ipc")
         assert status == 400
 
     def test_garbage_on_exchange(self, client: _SyncTestClient) -> None:
@@ -464,9 +464,9 @@ class TestEndpointRouting:
         status, _ = _post(client, "/vgi/transform/exchange", b"not ipc")
         assert status == 400
 
-    def test_empty_body_on_bidi_init(self, client: _SyncTestClient) -> None:
-        """Empty body on bidi init returns 400."""
-        status, _ = _post(client, "/vgi/transform/bidi", b"")
+    def test_empty_body_on_stream_init(self, client: _SyncTestClient) -> None:
+        """Empty body on stream init returns 400."""
+        status, _ = _post(client, "/vgi/transform/init", b"")
         assert status == 400
 
     def test_empty_body_on_exchange(self, client: _SyncTestClient) -> None:
@@ -603,7 +603,7 @@ class TestServerRecovery:
         _post(client, "/vgi/add", b"\x00" * 1000)
         _post(client, "/vgi/nonexistent", _craft_valid_add())
         _post(client, "/vgi/add", _craft_valid_add(), content_type="text/html")
-        _post(client, "/vgi/add/bidi", _craft_valid_add())
+        _post(client, "/vgi/add/init", _craft_valid_add())
         # Valid request succeeds
         body = _craft_valid_add(a=100.0, b=200.0)
         status, content = _post(client, "/vgi/add", body)

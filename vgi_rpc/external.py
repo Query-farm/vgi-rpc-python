@@ -6,7 +6,7 @@ pointer batches containing a ``vgi_rpc.location`` metadata key.
 Readers resolve the pointers transparently; writers externalize batches
 above the threshold.
 
-Key design point: when externalizing server-stream/bidi output, the
+Key design point: when externalizing stream output, the
 external IPC stream contains ALL batches from one ``OutputCollector``
 cycle (log batches + the single data batch). The pointer batch replaces
 the entire cycle in the response stream.  On resolution, the client reads

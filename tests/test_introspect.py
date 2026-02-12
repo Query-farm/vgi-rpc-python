@@ -28,8 +28,6 @@ from vgi_rpc.metadata import REQUEST_VERSION_KEY, SERVER_ID_KEY
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
-    BidiStream,
-    BidiStreamState,
     CallContext,
     MethodType,
     OutputCollector,
@@ -37,8 +35,8 @@ from vgi_rpc.rpc import (
     RpcConnection,
     RpcError,
     RpcServer,
-    ServerStream,
-    ServerStreamState,
+    Stream,
+    StreamState,
     make_pipe_pair,
     rpc_methods,
 )
@@ -67,12 +65,12 @@ class Point(ArrowSerializableDataclass):
 
 
 @dataclass
-class _SimpleStreamState(ServerStreamState):
+class _SimpleStreamState(StreamState):
     """Minimal stream state for test protocol."""
 
     done: bool = False
 
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Produce once then finish."""
         if self.done:
             out.finish()
@@ -82,7 +80,7 @@ class _SimpleStreamState(ServerStreamState):
 
 
 @dataclass
-class _SimpleBidiState(BidiStreamState):
+class _SimpleBidiState(StreamState):
     """Minimal bidi state for test protocol."""
 
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
@@ -105,11 +103,11 @@ class _TestProto(Protocol):
         """Do nothing."""
         ...
 
-    def stream_data(self, count: int) -> ServerStream[ServerStreamState]:
+    def stream_data(self, count: int) -> Stream[StreamState]:
         """Stream data batches."""
         ...
 
-    def bidi(self, factor: float) -> BidiStream[BidiStreamState]:
+    def bidi(self, factor: float) -> Stream[StreamState]:
         """Bidirectional stream."""
         ...
 
@@ -136,14 +134,15 @@ class _TestProtoImpl:
     def noop(self) -> None:
         """Do nothing."""
 
-    def stream_data(self, count: int) -> ServerStream[_SimpleStreamState]:
+    def stream_data(self, count: int) -> Stream[_SimpleStreamState]:
         """Stream data batches."""
-        return ServerStream(output_schema=pa.schema([pa.field("v", pa.int64())]), state=_SimpleStreamState())
+        return Stream(output_schema=pa.schema([pa.field("v", pa.int64())]), state=_SimpleStreamState())
 
-    def bidi(self, factor: float) -> BidiStream[_SimpleBidiState]:
+    def bidi(self, factor: float) -> Stream[_SimpleBidiState]:
         """Bidirectional stream."""
-        return BidiStream(
+        return Stream(
             output_schema=pa.schema([pa.field("value", pa.float64())]),
+            input_schema=pa.schema([pa.field("value", pa.float64())]),
             state=_SimpleBidiState(),
         )
 
@@ -317,8 +316,8 @@ class TestBuildDescribeBatch:
         rows = batch.to_pydict()
         name_to_type = dict(zip(rows["name"], rows["method_type"], strict=True))
         assert name_to_type["add"] == "unary"
-        assert name_to_type["stream_data"] == "server_stream"
-        assert name_to_type["bidi"] == "bidi_stream"
+        assert name_to_type["stream_data"] == "stream"
+        assert name_to_type["bidi"] == "stream"
 
     def test_has_return_column(self) -> None:
         """has_return is True for unary returning value, False for None/streams."""
@@ -329,6 +328,7 @@ class TestBuildDescribeBatch:
         assert name_to_ret["add"] is True
         assert name_to_ret["noop"] is False
         assert name_to_ret["stream_data"] is False
+        # bidi returns Stream which has no unary return
         assert name_to_ret["bidi"] is False
 
     def test_schemas_deserializable(self) -> None:
@@ -462,8 +462,8 @@ class TestServiceDescriptionStr:
         assert "TestProto" in text
         assert "srv123" in text
         assert "add(unary)" in text
-        assert "stream_data(server_stream)" in text
-        assert "bidi(bidi_stream)" in text
+        assert "stream_data(stream)" in text
+        assert "bidi(stream)" in text
 
     def test_doc_in_output(self) -> None:
         """Methods with docs show doc line in __str__."""
@@ -567,22 +567,6 @@ class TestIntrospectPipe:
             with RpcConnection(_TestProto, client_transport) as proxy:
                 result = proxy.add(a=3.0, b=4.0)
                 assert result == 7.0
-        finally:
-            client_transport.close()
-            thread.join(timeout=5)
-            server_transport.close()
-
-    def test_all_method_types_described(self) -> None:
-        """All three method types are correctly described."""
-        server = RpcServer(_TestProto, _TestProtoImpl(), enable_describe=True)
-        client_transport, server_transport = make_pipe_pair()
-        thread = threading.Thread(target=_run_server_thread, args=(server, server_transport), daemon=True)
-        thread.start()
-        try:
-            desc = introspect(client_transport)
-            assert desc.methods["add"].method_type == MethodType.UNARY
-            assert desc.methods["stream_data"].method_type == MethodType.SERVER_STREAM
-            assert desc.methods["bidi"].method_type == MethodType.BIDI_STREAM
         finally:
             client_transport.close()
             thread.join(timeout=5)
