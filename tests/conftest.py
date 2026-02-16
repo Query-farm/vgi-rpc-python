@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -80,7 +81,7 @@ def subprocess_worker() -> Iterator[SubprocessTransport]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(params=["pipe", "subprocess", "http"])
+@pytest.fixture(params=["pipe", "shm_pipe", "subprocess", "http"])
 def make_conn(
     request: pytest.FixtureRequest,
     http_server_port: int,
@@ -88,12 +89,13 @@ def make_conn(
 ) -> ConnFactory:
     """Return a factory that creates an RPC connection context manager.
 
-    Parametrized over pipe, subprocess, and http transports so tests
-    automatically run against all three.
+    Parametrized over pipe, shm_pipe, subprocess, and http transports so
+    tests automatically run against all four.
     """
     from vgi_rpc.http import http_connect
     from vgi_rpc.log import Message
-    from vgi_rpc.rpc import serve_pipe
+    from vgi_rpc.rpc import RpcServer, ShmPipeTransport, make_pipe_pair, serve_pipe
+    from vgi_rpc.shm import ShmSegment
 
     from .test_rpc import RpcFixtureService, RpcFixtureServiceImpl
 
@@ -102,6 +104,29 @@ def make_conn(
     ) -> contextlib.AbstractContextManager[Any]:
         if request.param == "pipe":
             return serve_pipe(RpcFixtureService, RpcFixtureServiceImpl(), on_log=on_log)
+        elif request.param == "shm_pipe":
+
+            @contextlib.contextmanager
+            def _shm_conn() -> Iterator[_RpcProxy]:
+                shm = ShmSegment.create(4 * 1024 * 1024)  # 4 MB
+                try:
+                    client_pipe, server_pipe = make_pipe_pair()
+                    client_transport = ShmPipeTransport(client_pipe, shm)
+                    server_transport = ShmPipeTransport(server_pipe, shm)
+                    rpc_server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+                    thread = threading.Thread(target=rpc_server.serve, args=(server_transport,), daemon=True)
+                    thread.start()
+                    try:
+                        yield _RpcProxy(RpcFixtureService, client_transport, on_log)
+                    finally:
+                        client_transport.close()
+                        thread.join(timeout=5)
+                finally:
+                    shm.unlink()
+                    with contextlib.suppress(BufferError):
+                        shm.close()
+
+            return _shm_conn()
         elif request.param == "subprocess":
 
             @contextlib.contextmanager

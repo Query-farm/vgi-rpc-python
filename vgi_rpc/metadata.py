@@ -21,6 +21,9 @@ __all__ = [
     "REQUEST_VERSION_KEY",
     "RPC_METHOD_KEY",
     "SERVER_ID_KEY",
+    "SHM_LENGTH_KEY",
+    "SHM_OFFSET_KEY",
+    "SHM_SOURCE_KEY",
     "STATE_KEY",
     "encode_metadata",
     "merge_metadata",
@@ -44,6 +47,13 @@ SERVER_ID_KEY = b"vgi_rpc.server_id"
 LOCATION_KEY = b"vgi_rpc.location"
 LOCATION_FETCH_MS_KEY = b"vgi_rpc.location.fetch_ms"
 LOCATION_SOURCE_KEY = b"vgi_rpc.location.source"
+
+# Shared memory pointer batch (on data batch metadata)
+SHM_OFFSET_KEY = b"vgi_rpc.shm_offset"
+SHM_LENGTH_KEY = b"vgi_rpc.shm_length"
+
+# Shared memory provenance (on resolved batch metadata — mirrors LOCATION_SOURCE_KEY)
+SHM_SOURCE_KEY = b"vgi_rpc.shm_source"
 
 # ---------------------------------------------------------------------------
 # Encode / decode

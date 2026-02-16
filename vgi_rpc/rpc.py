@@ -123,6 +123,7 @@ from vgi_rpc.metadata import (
     encode_metadata,
     merge_metadata,
 )
+from vgi_rpc.shm import ShmSegment, maybe_write_to_shm, resolve_shm_batch
 from vgi_rpc.utils import (
     ArrowSerializableDataclass,
     IpcValidation,
@@ -156,6 +157,7 @@ __all__ = [
     "RpcMethodInfo",
     "RpcServer",
     "RpcTransport",
+    "ShmPipeTransport",
     "StderrMode",
     "Stream",
     "StreamSession",
@@ -348,6 +350,17 @@ class AnnotatedBatch:
 
     batch: pa.RecordBatch
     custom_metadata: pa.KeyValueMetadata | None = None
+    _release_fn: Callable[[], None] | None = field(default=None, repr=False, compare=False, hash=False)
+
+    def release(self) -> None:
+        """Release associated shared memory region.
+
+        After calling release(), the batch data may be overwritten —
+        accessing batch column data after release is undefined behavior.
+        No-op if the batch did not come from shared memory.
+        """
+        if self._release_fn is not None:
+            self._release_fn()
 
     @classmethod
     def from_pydict(
@@ -1017,6 +1030,8 @@ def _write_result_batch(
     result_schema: pa.Schema,
     value: object,
     external_config: ExternalLocationConfig | None = None,
+    *,
+    shm: ShmSegment | None = None,
 ) -> None:
     """Write a unary result batch to an already-open IPC stream writer."""
     if len(result_schema) == 0:
@@ -1026,7 +1041,12 @@ def _write_result_batch(
         batch = pa.RecordBatch.from_arrays(
             [pa.array([wire_value], type=result_schema.field(0).type)], schema=result_schema
         )
-    if external_config is not None:
+    if shm is not None:
+        batch, cm = maybe_write_to_shm(batch, None, shm)
+        if cm is not None:
+            writer.write_batch(batch, custom_metadata=cm)
+            return
+    elif external_config is not None:
         batch, cm = maybe_externalize_batch(batch, None, external_config)
         if cm is not None:
             writer.write_batch(batch, custom_metadata=cm)
@@ -1275,6 +1295,40 @@ def make_pipe_pair() -> tuple[PipeTransport, PipeTransport]:
     return client, server
 
 
+class ShmPipeTransport:
+    """Pipe transport with shared memory side-channel for batch data.
+
+    Does NOT own the ``ShmSegment`` — caller manages segment lifecycle.
+    Closing the transport closes the pipe only.
+    """
+
+    __slots__ = ("_pipe", "_shm")
+
+    def __init__(self, pipe: PipeTransport, shm: ShmSegment) -> None:
+        """Initialize with a pipe transport and a shared memory segment."""
+        self._pipe = pipe
+        self._shm = shm
+
+    @property
+    def reader(self) -> IOBase:
+        """Readable binary stream (delegated to pipe)."""
+        return self._pipe.reader
+
+    @property
+    def writer(self) -> IOBase:
+        """Writable binary stream (delegated to pipe)."""
+        return self._pipe.writer
+
+    @property
+    def shm(self) -> ShmSegment:
+        """The shared memory segment."""
+        return self._shm
+
+    def close(self) -> None:
+        """Close the pipe transport (does NOT close/unlink shm)."""
+        self._pipe.close()
+
+
 class StderrMode(Enum):
     """How to handle child process stderr in SubprocessTransport.
 
@@ -1430,9 +1484,19 @@ def _flush_collector(
     writer: ipc.RecordBatchStreamWriter,
     out: OutputCollector,
     external_config: ExternalLocationConfig | None = None,
+    *,
+    shm: ShmSegment | None = None,
 ) -> None:
     """Write all accumulated batches from an OutputCollector to an IPC stream writer."""
-    if external_config is not None:
+    if shm is not None:
+        # Log batches go to pipe; data batch goes to SHM if possible
+        for ab in out.batches:
+            batch, cm = maybe_write_to_shm(ab.batch, ab.custom_metadata, shm)
+            if cm is not None:
+                writer.write_batch(batch, custom_metadata=cm)
+            else:
+                writer.write_batch(batch)
+    elif external_config is not None:
         batch_list = maybe_externalize_collector(out, external_config)
         for batch, cm in batch_list:
             if cm is not None:
@@ -1693,10 +1757,11 @@ class RpcServer:
             _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
             return
 
+        shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
         if info.method_type == MethodType.UNARY:
-            self._serve_unary(transport, info, kwargs)
+            self._serve_unary(transport, info, kwargs, shm=shm)
         elif info.method_type == MethodType.STREAM:
-            self._serve_stream(transport, info, kwargs)
+            self._serve_stream(transport, info, kwargs, shm=shm)
 
     def _prepare_method_call(
         self, info: RpcMethodInfo, kwargs: dict[str, Any]
@@ -1715,7 +1780,14 @@ class RpcServer:
             )
         return sink, auth, transport_metadata
 
-    def _serve_unary(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
+    def _serve_unary(
+        self,
+        transport: RpcTransport,
+        info: RpcMethodInfo,
+        kwargs: dict[str, Any],
+        *,
+        shm: ShmSegment | None = None,
+    ) -> None:
         # Pre-built __describe__ batch — write directly, skip implementation call.
         if self._describe_batch is not None and info.name == "__describe__":
             with ipc.new_stream(transport.writer, self._describe_batch.schema) as writer:
@@ -1739,7 +1811,7 @@ class RpcServer:
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
                     _write_error_batch(writer, schema, exc, server_id=self._server_id)
                     return
-                _write_result_batch(writer, info.result_schema, result, self._external_config)
+                _write_result_batch(writer, info.result_schema, result, self._external_config, shm=shm)
         finally:
             duration_ms = (time.monotonic() - start) * 1000
             _emit_access_log(
@@ -1754,7 +1826,14 @@ class RpcServer:
                 error_type,
             )
 
-    def _serve_stream(self, transport: RpcTransport, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
+    def _serve_stream(
+        self,
+        transport: RpcTransport,
+        info: RpcMethodInfo,
+        kwargs: dict[str, Any],
+        *,
+        shm: ShmSegment | None = None,
+    ) -> None:
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
         protocol_name = self.protocol_name
         start = time.monotonic()
@@ -1792,6 +1871,7 @@ class RpcServer:
 
         input_reader = ValidatedReader(ipc.open_stream(transport.reader), self._ipc_validation)
 
+        prev_input: AnnotatedBatch | None = None
         try:
             with ipc.new_stream(transport.writer, output_schema) as output_writer:
                 sink.flush_contents(output_writer, output_schema)
@@ -1811,10 +1891,16 @@ class RpcServer:
                             ipc_validation=self._ipc_validation,
                         )
 
+                        # Resolve SHM pointer on input batch
+                        input_batch, resolved_cm, release_fn = resolve_shm_batch(input_batch, resolved_cm, shm)
+
                         if input_batch.schema != input_schema:
                             raise TypeError(f"Input schema mismatch: expected {input_schema}, got {input_batch.schema}")
 
-                        ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm)
+                        ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm, _release_fn=release_fn)
+                        if prev_input is not None:
+                            prev_input.release()
+                        prev_input = ab_in
                         out = OutputCollector(
                             output_schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id
                         )
@@ -1829,7 +1915,7 @@ class RpcServer:
                         state.process(ab_in, out, process_ctx)
                         if not out.finished:
                             out.validate()
-                        _flush_collector(output_writer, out, self._external_config)
+                        _flush_collector(output_writer, out, self._external_config, shm=shm)
                         if out.finished:
                             break
                         cumulative_bytes = out.total_data_bytes
@@ -1866,6 +1952,8 @@ def _read_batch_with_log_check(
     reader: ValidatedReader,
     on_log: Callable[[Message], None] | None = None,
     external_config: ExternalLocationConfig | None = None,
+    *,
+    shm: ShmSegment | None = None,
 ) -> AnnotatedBatch:
     """Read the next non-log batch, dispatching log batches to *on_log*.
 
@@ -1874,9 +1962,8 @@ def _read_batch_with_log_check(
     ``AnnotatedBatch``.  ``StopIteration`` and ``RpcError`` propagate
     to the caller.
 
-    If *external_config* is provided and the batch is an ExternalLocation
-    pointer, resolves it transparently (dispatching embedded logs via
-    *on_log*).
+    If *shm* is provided and the batch is a shared memory
+    pointer, resolves it via zero-copy read from shared memory.
     """
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
@@ -1884,7 +1971,8 @@ def _read_batch_with_log_check(
             resolved_batch, resolved_cm = resolve_external_location(
                 batch, custom_metadata, external_config, on_log, reader.ipc_validation
             )
-            return AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm)
+            resolved_batch, resolved_cm, release_fn = resolve_shm_batch(resolved_batch, resolved_cm, shm)
+            return AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm, _release_fn=release_fn)
 
 
 def _read_unary_response(
@@ -1892,10 +1980,12 @@ def _read_unary_response(
     info: RpcMethodInfo,
     on_log: Callable[[Message], None] | None,
     external_config: ExternalLocationConfig | None = None,
+    *,
+    shm: ShmSegment | None = None,
 ) -> object:
     """Read a unary response: skip logs, extract result, deserialize."""
     try:
-        batch = _read_batch_with_log_check(reader, on_log, external_config)
+        batch = _read_batch_with_log_check(reader, on_log, external_config, shm=shm)
     except RpcError:
         _drain_stream(reader)
         raise
@@ -1925,6 +2015,7 @@ class StreamSession:
         "_on_log",
         "_output_reader",
         "_reader_stream",
+        "_shm",
         "_writer_stream",
     )
 
@@ -1936,6 +2027,7 @@ class StreamSession:
         *,
         external_config: ExternalLocationConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.NONE,
+        shm: ShmSegment | None = None,
     ) -> None:
         """Initialize with writer/reader streams and optional log callback."""
         self._writer_stream = writer_stream
@@ -1946,14 +2038,17 @@ class StreamSession:
         self._closed = False
         self._external_config = external_config
         self._ipc_validation = ipc_validation
+        self._shm = shm
 
     def _write_batch(self, input: AnnotatedBatch) -> None:
         """Write a batch to the input stream, opening it on first use."""
         batch_to_write = input.batch
         cm_to_write = input.custom_metadata
 
-        # Client-side externalization for large inputs
-        if self._external_config is not None:
+        # Client-side SHM for large inputs (preferred over external)
+        if self._shm is not None:
+            batch_to_write, cm_to_write = maybe_write_to_shm(batch_to_write, cm_to_write, self._shm)
+        elif self._external_config is not None:
             batch_to_write, cm_to_write = maybe_externalize_batch(batch_to_write, cm_to_write, self._external_config)
 
         if self._input_writer is None:
@@ -1967,7 +2062,7 @@ class StreamSession:
         """Read the next data batch from the output stream, skipping log batches."""
         if self._output_reader is None:
             self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
-        return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
+        return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config, shm=self._shm)
 
     def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch, receive the output batch.
@@ -2034,7 +2129,7 @@ class StreamSession:
         _MAX_DRAIN = 10_000
         with contextlib.suppress(StopIteration, RpcError, pa.ArrowInvalid, OSError):
             for _ in range(_MAX_DRAIN):
-                _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config)
+                _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config, shm=self._shm)
 
     def __enter__(self) -> StreamSession:
         """Enter context manager."""
@@ -2079,6 +2174,7 @@ class _RpcProxy:
         self._on_log = on_log
         self._external_config = external_config
         self._ipc_validation = ipc_validation
+        self._shm: ShmSegment | None = transport.shm if isinstance(transport, ShmPipeTransport) else None
 
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
@@ -2100,11 +2196,12 @@ class _RpcProxy:
         on_log = self._on_log
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
+        shm = self._shm
 
         def caller(**kwargs: object) -> object:
             _send_request(transport.writer, info, kwargs)
             reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
-            return _read_unary_response(reader, info, on_log, ext_cfg)
+            return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
 
         return caller
 
@@ -2113,11 +2210,17 @@ class _RpcProxy:
         on_log = self._on_log
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
+        shm = self._shm
 
         def caller(**kwargs: object) -> StreamSession:
             _send_request(transport.writer, info, kwargs)
             return StreamSession(
-                transport.writer, transport.reader, on_log, external_config=ext_cfg, ipc_validation=ipc_validation
+                transport.writer,
+                transport.reader,
+                on_log,
+                external_config=ext_cfg,
+                ipc_validation=ipc_validation,
+                shm=shm,
             )
 
         return caller

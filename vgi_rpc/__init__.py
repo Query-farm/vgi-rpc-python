@@ -26,6 +26,7 @@ from vgi_rpc.rpc import (
     RpcMethodInfo,
     RpcServer,
     RpcTransport,
+    ShmPipeTransport,
     StderrMode,
     Stream,
     StreamSession,
@@ -82,6 +83,7 @@ __all__ = [
     "serve_pipe",
     # Transports
     "PipeTransport",
+    "ShmPipeTransport",
     "SubprocessTransport",
     "StderrMode",
     "make_pipe_pair",
