@@ -17,7 +17,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-dependencies = ["aiohttp>=3.9", "pyarrow>=14.0", "tenacity>=8.0", "zstandard>=0.20"]
+dependencies = ["aiohttp>=3.9", "pyarrow>=14.0", "tenacity>=8.0", "tzdata>=2024.1; sys_platform == 'win32'", "zstandard>=0.20"]
 
 [project.urls]
 Homepage = "https://github.com/Query-farm/vgi-rpc-python"
