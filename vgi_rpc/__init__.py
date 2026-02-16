@@ -3,7 +3,7 @@
 import contextlib
 import logging
 
-from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage
+from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider
 from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.introspect import (
     DESCRIBE_METHOD_NAME,
@@ -53,14 +53,17 @@ from vgi_rpc.utils import (
 # HTTP (optional — requires `pip install vgi-rpc[http]`)
 with contextlib.suppress(ImportError):
     from vgi_rpc.http import (
+        MAX_REQUEST_BYTES_HEADER,
+        MAX_UPLOAD_BYTES_HEADER,
+        UPLOAD_URL_HEADER,
         HttpServerCapabilities,
         HttpStreamSession,
-        MAX_REQUEST_BYTES_HEADER,
         http_capabilities,
         http_connect,
         http_introspect,
         make_sync_client,
         make_wsgi_app,
+        request_upload_urls,
     )
 
 # S3 storage backend (optional — requires `pip install vgi-rpc[s3]`)
@@ -126,6 +129,9 @@ __all__ = [
     "ExternalLocationConfig",
     "ExternalStorage",
     "FetchConfig",
+    # Upload URLs
+    "UploadUrl",
+    "UploadUrlProvider",
 ]
 
 # Conditionally include optional backend names only when actually imported
@@ -138,11 +144,14 @@ if "HttpStreamSession" in dir():
         "HttpServerCapabilities",
         "HttpStreamSession",
         "MAX_REQUEST_BYTES_HEADER",
+        "MAX_UPLOAD_BYTES_HEADER",
+        "UPLOAD_URL_HEADER",
         "http_capabilities",
         "http_connect",
         "http_introspect",
         "make_wsgi_app",
         "make_sync_client",
+        "request_upload_urls",
     ]
 
 # Attach NullHandler to the root logger so library users don't get

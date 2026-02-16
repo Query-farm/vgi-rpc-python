@@ -13,12 +13,12 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pyarrow as pa
 
-from vgi_rpc.external import ExternalStorage
+from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider
 
 _logger = logging.getLogger(__name__)
 
@@ -116,11 +116,52 @@ class GCSStorage:
         )
         return url
 
+    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
+        """Generate signed PUT and GET URLs for client-side upload.
 
-# Runtime check that GCSStorage satisfies ExternalStorage protocol
+        Args:
+            schema: The Arrow schema of the data to be uploaded
+                (unused but available for metadata hints).
+
+        Returns:
+            An ``UploadUrl`` with PUT and GET signed URLs for the
+            same GCS object.
+
+        """
+        client = self._get_client()
+        bucket = client.bucket(self.bucket)
+        blob_name = f"{self.prefix}{uuid.uuid4().hex}.arrow"
+        blob = bucket.blob(blob_name)
+        expiration = timedelta(seconds=self.presign_expiry_seconds)
+        expires_at = datetime.now(UTC) + expiration
+
+        put_url: str = blob.generate_signed_url(
+            version="v4",
+            expiration=expiration,
+            method="PUT",
+            content_type="application/octet-stream",
+        )
+        get_url: str = blob.generate_signed_url(
+            version="v4",
+            expiration=expiration,
+            method="GET",
+        )
+
+        _logger.debug(
+            "GCS upload URL generated: bucket=%s key=%s",
+            self.bucket,
+            blob_name,
+            extra={"bucket": self.bucket, "key": blob_name},
+        )
+        return UploadUrl(upload_url=put_url, download_url=get_url, expires_at=expires_at)
+
+
+# Runtime check that GCSStorage satisfies ExternalStorage and UploadUrlProvider protocols
 def _check_protocol() -> None:
-    """Verify GCSStorage satisfies ExternalStorage at import time."""
-    _storage: ExternalStorage = GCSStorage(bucket="test")
+    """Verify GCSStorage satisfies ExternalStorage and UploadUrlProvider at import time."""
+    _inst = GCSStorage(bucket="test")
+    _storage: ExternalStorage = _inst
+    _provider: UploadUrlProvider = _inst
 
 
 _check_protocol()

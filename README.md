@@ -328,6 +328,8 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |
 | `max_request_bytes` | `None` | Advertise max request body size via `VGI-Max-Request-Bytes` header (no enforcement) |
 | `cors_origins` | `None` | Allowed CORS origins — `"*"` for all, a string, or list of strings |
+| `upload_url_provider` | `None` | `UploadUrlProvider` for generating pre-signed upload URLs (enables `__upload_url__/init` endpoint) |
+| `max_upload_bytes` | `None` | Advertise max upload size via `VGI-Max-Upload-Bytes` header (requires `upload_url_provider`) |
 
 ### CORS (browser clients)
 
@@ -353,6 +355,37 @@ from vgi_rpc import http_capabilities
 caps = http_capabilities("http://localhost:8080")
 if caps.max_request_bytes is not None:
     print(f"Server accepts up to {caps.max_request_bytes} bytes")
+```
+
+### Server-vended upload URLs
+
+When clients need to upload large payloads that exceed the server's HTTP POST size limit, the server can vend pre-signed upload URLs. The server has storage credentials (S3/GCS); the client uploads directly to storage, then sends pointer batches referencing the download URLs.
+
+Enable it by passing an `upload_url_provider` (any `ExternalStorage` backend that implements `UploadUrlProvider`) to `make_wsgi_app`:
+
+```python
+from vgi_rpc import S3Storage, make_wsgi_app, RpcServer
+
+storage = S3Storage(bucket="my-bucket", prefix="uploads/")
+app = make_wsgi_app(
+    server,
+    upload_url_provider=storage,
+    max_upload_bytes=100_000_000,  # optional: advertise 100 MB limit
+)
+```
+
+Clients discover support via `http_capabilities()` and request URLs with `request_upload_urls()`:
+
+```python
+from vgi_rpc import http_capabilities, request_upload_urls
+
+caps = http_capabilities("http://localhost:8080")
+if caps.upload_url_support:
+    urls = request_upload_urls("http://localhost:8080", count=3)
+    for url in urls:
+        # Upload data directly to storage via pre-signed PUT URL
+        httpx.put(url.upload_url, content=data)
+        # url.download_url goes into vgi_rpc.location pointer batches
 ```
 
 ## Streaming

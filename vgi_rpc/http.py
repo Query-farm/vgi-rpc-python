@@ -46,6 +46,8 @@ from pyarrow import ipc
 
 from vgi_rpc.external import (
     ExternalLocationConfig,
+    UploadUrl,
+    UploadUrlProvider,
     maybe_externalize_batch,
     resolve_external_location,
 )
@@ -82,6 +84,7 @@ from vgi_rpc.rpc import (
     _validate_params,
     _validate_result,
     _write_error_batch,
+    _write_request,
     _write_result_batch,
     rpc_methods,
 )
@@ -94,16 +97,33 @@ __all__ = [
     "HttpServerCapabilities",
     "HttpStreamSession",
     "MAX_REQUEST_BYTES_HEADER",
+    "MAX_UPLOAD_BYTES_HEADER",
+    "UPLOAD_URL_HEADER",
     "http_capabilities",
     "http_connect",
     "http_introspect",
     "make_sync_client",
     "make_wsgi_app",
+    "request_upload_urls",
 ]
 
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes"
+UPLOAD_URL_HEADER = "VGI-Upload-URL-Support"
+MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes"
 _logger = logging.getLogger(__name__)
+
+_MAX_UPLOAD_URL_COUNT = 100
+
+_UPLOAD_URL_METHOD = "__upload_url__"
+_upload_url_params_fields: list[pa.Field[Any]] = [pa.field("count", pa.int64())]
+_UPLOAD_URL_PARAMS_SCHEMA = pa.schema(_upload_url_params_fields)
+_upload_url_fields: list[pa.Field[Any]] = [
+    pa.field("upload_url", pa.utf8()),
+    pa.field("download_url", pa.utf8()),
+    pa.field("expires_at", pa.timestamp("us", tz="UTC")),
+]
+_UPLOAD_URL_SCHEMA = pa.schema(_upload_url_fields)
 
 
 class _RpcHttpError(Exception):
@@ -303,7 +323,15 @@ def _resolve_state_types(
 class _HttpRpcApp:
     """Internal helper that wraps an RpcServer and manages stream state."""
 
-    __slots__ = ("_max_request_bytes", "_max_stream_response_bytes", "_server", "_signing_key", "_state_types")
+    __slots__ = (
+        "_max_request_bytes",
+        "_max_stream_response_bytes",
+        "_max_upload_bytes",
+        "_server",
+        "_signing_key",
+        "_state_types",
+        "_upload_url_provider",
+    )
 
     def __init__(
         self,
@@ -311,12 +339,16 @@ class _HttpRpcApp:
         signing_key: bytes,
         max_stream_response_bytes: int | None = None,
         max_request_bytes: int | None = None,
+        upload_url_provider: UploadUrlProvider | None = None,
+        max_upload_bytes: int | None = None,
     ) -> None:
         self._server = server
         self._signing_key = signing_key
         self._state_types = _resolve_state_types(server)
         self._max_stream_response_bytes = max_stream_response_bytes
         self._max_request_bytes = max_request_bytes
+        self._upload_url_provider = upload_url_provider
+        self._max_upload_bytes = max_upload_bytes
 
     def _resolve_method(self, req: falcon.Request, method: str) -> RpcMethodInfo:
         """Validate content type and resolve method info.
@@ -881,6 +913,88 @@ class _ExchangeResource:
         resp.stream = result_stream
 
 
+class _UploadUrlResource:
+    """Falcon resource for upload URL generation: ``POST {prefix}/__upload_url__/init``."""
+
+    def __init__(self, app: _HttpRpcApp) -> None:
+        self._app = app
+
+    def on_post(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Handle upload URL generation requests."""
+        try:
+            _check_content_type(req)
+            # Route is only registered when upload_url_provider is set.
+            provider = self._app._upload_url_provider
+            assert provider is not None
+
+            # Read request using standard wire protocol
+            try:
+                ipc_method, kwargs = _read_request(req.bounded_stream, self._app._server.ipc_validation)
+                if ipc_method != _UPLOAD_URL_METHOD:
+                    raise TypeError(f"Method mismatch: expected '{_UPLOAD_URL_METHOD}', got '{ipc_method}'")
+            except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+                raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+
+            count = kwargs.get("count", 1)
+            if not isinstance(count, int):
+                count = 1
+            count = max(1, min(count, _MAX_UPLOAD_URL_COUNT))
+        except _RpcHttpError as e:
+            _set_error_response(resp, e.cause, status_code=e.status_code, server_id=self._app._server.server_id)
+            return
+
+        # Execute: follows the same response pattern as _unary_sync —
+        # log sink, inline error batches, access logging.
+        server_id = self._app._server.server_id
+        protocol_name = self._app._server.protocol_name
+        sink = _ClientLogSink(server_id=server_id)
+        auth, transport_metadata = _get_auth_and_metadata()
+
+        resp_buf = BytesIO()
+        http_status = HTTPStatus.OK
+        start = time.monotonic()
+        status: Literal["ok", "error"] = "ok"
+        error_type = ""
+        try:
+            with ipc.new_stream(resp_buf, _UPLOAD_URL_SCHEMA) as writer:
+                sink.flush_contents(writer, _UPLOAD_URL_SCHEMA)
+                try:
+                    urls = [provider.generate_upload_url(pa.schema([])) for _ in range(count)]
+                    result_batch = pa.RecordBatch.from_pydict(
+                        {
+                            "upload_url": [u.upload_url for u in urls],
+                            "download_url": [u.download_url for u in urls],
+                            "expires_at": [u.expires_at for u in urls],
+                        },
+                        schema=_UPLOAD_URL_SCHEMA,
+                    )
+                    writer.write_batch(result_batch)
+                except Exception as exc:
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, _UPLOAD_URL_METHOD, server_id, exc)
+                    _write_error_batch(writer, _UPLOAD_URL_SCHEMA, exc, server_id=server_id)
+                    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            _emit_access_log(
+                protocol_name,
+                _UPLOAD_URL_METHOD,
+                "unary",
+                server_id,
+                auth,
+                transport_metadata,
+                duration_ms,
+                status,
+                error_type,
+                http_status=http_status.value,
+            )
+
+        resp_buf.seek(0)
+        resp.content_type = _ARROW_CONTENT_TYPE
+        resp.stream = resp_buf
+        resp.status = str(http_status.value)
+
+
 class _AuthMiddleware:
     """Falcon middleware that runs an ``authenticate`` callback on each request.
 
@@ -946,13 +1060,13 @@ class _AuthMiddleware:
             _current_transport.reset(token)
 
 
-class _MaxRequestBytesMiddleware:
-    """Falcon middleware that sets ``VGI-Max-Request-Bytes`` on every response."""
+class _CapabilitiesMiddleware:
+    """Falcon middleware that sets capability headers on every response."""
 
-    __slots__ = ("_value",)
+    __slots__ = ("_headers",)
 
-    def __init__(self, value: int) -> None:
-        self._value = str(value)
+    def __init__(self, headers: dict[str, str]) -> None:
+        self._headers = headers
 
     def process_response(
         self,
@@ -961,8 +1075,9 @@ class _MaxRequestBytesMiddleware:
         resource: object,
         req_succeeded: bool,
     ) -> None:
-        """Set the max request bytes header on every response."""
-        resp.set_header(MAX_REQUEST_BYTES_HEADER, self._value)
+        """Set capability headers on every response."""
+        for name, value in self._headers.items():
+            resp.set_header(name, value)
 
 
 def make_wsgi_app(
@@ -974,6 +1089,8 @@ def make_wsgi_app(
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     cors_origins: str | Iterable[str] | None = None,
+    upload_url_provider: UploadUrlProvider | None = None,
+    max_upload_bytes: int | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -1008,6 +1125,14 @@ def make_wsgi_app(
             disables CORS headers.  Uses Falcon's built-in
             ``CORSMiddleware`` which also handles preflight OPTIONS
             requests automatically.
+        upload_url_provider: Optional provider for generating pre-signed
+            upload URLs.  When set, the ``__upload_url__/init`` endpoint
+            is enabled and ``VGI-Upload-URL-Support: true`` is advertised
+            on every response.
+        max_upload_bytes: When set (and ``upload_url_provider`` is set),
+            advertised via the ``VGI-Max-Upload-Bytes`` header.  Informs
+            clients of the maximum size they may upload to vended URLs.
+            Advertisement only — no server-side enforcement.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -1021,11 +1146,24 @@ def make_wsgi_app(
             stacklevel=2,
         )
         signing_key = os.urandom(32)
-    app_handler = _HttpRpcApp(server, signing_key, max_stream_response_bytes, max_request_bytes)
+    app_handler = _HttpRpcApp(
+        server, signing_key, max_stream_response_bytes, max_request_bytes, upload_url_provider, max_upload_bytes
+    )
     middleware: list[Any] = []
     cors_expose: list[str] = []
+
+    # Build capability headers
+    capability_headers: dict[str, str] = {}
     if max_request_bytes is not None:
+        capability_headers[MAX_REQUEST_BYTES_HEADER] = str(max_request_bytes)
         cors_expose.append(MAX_REQUEST_BYTES_HEADER)
+    if upload_url_provider is not None:
+        capability_headers[UPLOAD_URL_HEADER] = "true"
+        cors_expose.append(UPLOAD_URL_HEADER)
+        if max_upload_bytes is not None:
+            capability_headers[MAX_UPLOAD_BYTES_HEADER] = str(max_upload_bytes)
+            cors_expose.append(MAX_UPLOAD_BYTES_HEADER)
+
     if cors_origins is not None:
         cors_kwargs: dict[str, Any] = {"allow_origins": cors_origins}
         if cors_expose:
@@ -1033,12 +1171,14 @@ def make_wsgi_app(
         middleware.append(falcon.CORSMiddleware(**cors_kwargs))
     if authenticate is not None:
         middleware.append(_AuthMiddleware(authenticate))
-    if max_request_bytes is not None:
-        middleware.append(_MaxRequestBytesMiddleware(max_request_bytes))
+    if capability_headers:
+        middleware.append(_CapabilitiesMiddleware(capability_headers))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/init", _StreamInitResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))
+    if upload_url_provider is not None:
+        app.add_route(f"{prefix}/__upload_url__/init", _UploadUrlResource(app_handler))
 
     _logger.info(
         "WSGI app created for %s (server_id=%s, prefix=%s, auth=%s)",
@@ -1114,6 +1254,8 @@ def make_sync_client(
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     default_headers: dict[str, str] | None = None,
+    upload_url_provider: UploadUrlProvider | None = None,
+    max_upload_bytes: int | None = None,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -1128,6 +1270,8 @@ def make_sync_client(
         max_request_bytes: See ``make_wsgi_app``.
         authenticate: See ``make_wsgi_app``.
         default_headers: Headers merged into every request (e.g. auth tokens).
+        upload_url_provider: See ``make_wsgi_app``.
+        max_upload_bytes: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -1140,6 +1284,8 @@ def make_sync_client(
         max_stream_response_bytes=max_stream_response_bytes,
         max_request_bytes=max_request_bytes,
         authenticate=authenticate,
+        upload_url_provider=upload_url_provider,
+        max_upload_bytes=max_upload_bytes,
     )
     return _SyncTestClient(app, default_headers=default_headers)
 
@@ -1649,10 +1795,16 @@ class HttpServerCapabilities:
     Attributes:
         max_request_bytes: Maximum request body size the server accepts,
             or ``None`` if the server does not advertise a limit.
+        upload_url_support: Whether the server supports the
+            ``__upload_url__`` endpoint for client-side uploads.
+        max_upload_bytes: Maximum upload size the server accepts for
+            client-vended URLs, or ``None`` if not advertised.
 
     """
 
     max_request_bytes: int | None = None
+    upload_url_support: bool = False
+    max_upload_bytes: int | None = None
 
 
 def http_capabilities(
@@ -1663,8 +1815,9 @@ def http_capabilities(
 ) -> HttpServerCapabilities:
     """Discover server capabilities via an OPTIONS request.
 
-    Sends ``OPTIONS {prefix}/__capabilities__`` and reads the
-    ``VGI-Max-Request-Bytes`` header from the response.
+    Sends ``OPTIONS {prefix}/__capabilities__`` and reads capability
+    headers (``VGI-Max-Request-Bytes``, ``VGI-Upload-URL-Support``,
+    ``VGI-Max-Upload-Bytes``) from the response.
 
     Args:
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
@@ -1700,7 +1853,97 @@ def http_capabilities(
             with contextlib.suppress(ValueError):
                 max_req = int(raw)
 
-        return HttpServerCapabilities(max_request_bytes=max_req)
+        upload_raw = headers.get(UPLOAD_URL_HEADER) or headers.get(UPLOAD_URL_HEADER.lower())
+        upload_support = upload_raw == "true" if upload_raw is not None else False
+
+        max_upload: int | None = None
+        upload_bytes_raw = headers.get(MAX_UPLOAD_BYTES_HEADER) or headers.get(MAX_UPLOAD_BYTES_HEADER.lower())
+        if upload_bytes_raw is not None:
+            with contextlib.suppress(ValueError):
+                max_upload = int(upload_bytes_raw)
+
+        return HttpServerCapabilities(
+            max_request_bytes=max_req,
+            upload_url_support=upload_support,
+            max_upload_bytes=max_upload,
+        )
+    finally:
+        if own_client:
+            client.close()
+
+
+def request_upload_urls(
+    base_url: str | None = None,
+    *,
+    count: int = 1,
+    prefix: str = "/vgi",
+    client: httpx.Client | _SyncTestClient | None = None,
+) -> list[UploadUrl]:
+    """Request pre-signed upload URLs from the server's ``__upload_url__`` endpoint.
+
+    The server must have been configured with an ``upload_url_provider``
+    in ``make_wsgi_app()``.
+
+    Args:
+        base_url: Base URL of the server (e.g. ``http://localhost:8000``).
+            Required when *client* is ``None``.
+        count: Number of upload URLs to request (default 1, max 100).
+        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+
+    Returns:
+        A list of ``UploadUrl`` objects with pre-signed PUT and GET URLs.
+
+    Raises:
+        RpcError: If the server does not support upload URLs (404) or
+            returns an error.
+        ValueError: If *base_url* is ``None`` and *client* is ``None``.
+
+    """
+    own_client = client is None
+    if client is None:
+        if base_url is None:
+            raise ValueError("base_url is required when client is not provided")
+        client = httpx.Client(base_url=base_url, follow_redirects=True)
+
+    try:
+        # Build request IPC with standard wire protocol metadata
+        req_buf = BytesIO()
+        _write_request(req_buf, _UPLOAD_URL_METHOD, _UPLOAD_URL_PARAMS_SCHEMA, {"count": count})
+
+        resp = client.post(
+            f"{prefix}/__upload_url__/init",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+
+        # Without an upload_url_provider the route doesn't exist and the
+        # request falls through to _StreamInitResource → 404.
+        if resp.status_code == HTTPStatus.NOT_FOUND:
+            raise RpcError("NotSupported", "Server does not support upload URLs", "")
+
+        reader = _open_response_stream(resp.content, resp.status_code)
+        urls: list[UploadUrl] = []
+        try:
+            while True:
+                try:
+                    batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+                except StopIteration:
+                    break
+
+                if _dispatch_log_or_error(batch, custom_metadata):
+                    continue
+
+                for i in range(batch.num_rows):
+                    upload_url = batch.column("upload_url")[i].as_py()
+                    download_url = batch.column("download_url")[i].as_py()
+                    expires_at = batch.column("expires_at")[i].as_py()
+                    urls.append(UploadUrl(upload_url=upload_url, download_url=download_url, expires_at=expires_at))
+        except RpcError:
+            _drain_stream(reader)
+            raise
+        _drain_stream(reader)
+        return urls
     finally:
         if own_client:
             client.close()

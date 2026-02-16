@@ -21,7 +21,7 @@ from aioresponses import CallbackResult
 from aioresponses import aioresponses as aioresponses_ctx
 from pyarrow import ipc
 
-from vgi_rpc.external import ExternalLocationConfig
+from vgi_rpc.external import ExternalLocationConfig, UploadUrl
 from vgi_rpc.http import (
     _ARROW_CONTENT_TYPE,
     MAX_REQUEST_BYTES_HEADER,
@@ -33,6 +33,7 @@ from vgi_rpc.http import (
     http_connect,
     make_sync_client,
     make_wsgi_app,
+    request_upload_urls,
 )
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import (
@@ -850,4 +851,140 @@ class TestHttpCapabilities:
         )
         caps = http_capabilities(client=client)
         assert caps.max_request_bytes is None
+        client.close()
+
+    def test_discovers_upload_url_support(self) -> None:
+        """http_capabilities() detects upload URL support."""
+        storage = MockStorage()
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+            upload_url_provider=storage,
+        )
+        caps = http_capabilities(client=client)
+        assert caps.upload_url_support is True
+        client.close()
+
+    def test_discovers_max_upload_bytes(self) -> None:
+        """http_capabilities() reads VGI-Max-Upload-Bytes."""
+        storage = MockStorage()
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+            upload_url_provider=storage,
+            max_upload_bytes=50_000_000,
+        )
+        caps = http_capabilities(client=client)
+        assert caps.max_upload_bytes == 50_000_000
+        client.close()
+
+    def test_upload_url_support_false_by_default(self) -> None:
+        """http_capabilities() returns upload_url_support=False when not configured."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+        )
+        caps = http_capabilities(client=client)
+        assert caps.upload_url_support is False
+        assert caps.max_upload_bytes is None
+        client.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Upload URL endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestUploadUrlEndpoint:
+    """Tests for the __upload_url__ endpoint."""
+
+    def _make_client(
+        self,
+        storage: MockStorage | None = None,
+        max_upload_bytes: int | None = None,
+        authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+        default_headers: dict[str, str] | None = None,
+    ) -> _SyncTestClient:
+        """Create a test client with upload URL support."""
+        return make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+            upload_url_provider=storage,
+            max_upload_bytes=max_upload_bytes,
+            authenticate=authenticate,
+            default_headers=default_headers,
+        )
+
+    def test_returns_urls(self) -> None:
+        """Endpoint returns N URL rows."""
+        storage = MockStorage()
+        client = self._make_client(storage)
+
+        urls = request_upload_urls(count=3, client=client)
+        assert len(urls) == 3
+        for url in urls:
+            assert isinstance(url, UploadUrl)
+            assert url.upload_url.startswith("https://mock.storage/upload/")
+            assert url.download_url.startswith("https://mock.storage/download/")
+        client.close()
+
+    def test_default_count_is_one(self) -> None:
+        """Omitting count returns 1 row."""
+        storage = MockStorage()
+        client = self._make_client(storage)
+
+        urls = request_upload_urls(client=client)
+        assert len(urls) == 1
+        client.close()
+
+    def test_count_capped_at_100(self) -> None:
+        """Requesting >100 is capped at 100."""
+        storage = MockStorage()
+        client = self._make_client(storage)
+
+        urls = request_upload_urls(count=200, client=client)
+        assert len(urls) == 100
+        client.close()
+
+    def test_404_when_not_configured(self) -> None:
+        """No provider returns 404."""
+        client = self._make_client(storage=None)
+
+        with pytest.raises(RpcError, match="does not support upload URLs"):
+            request_upload_urls(client=client)
+        client.close()
+
+    def test_auth_applies(self) -> None:
+        """Auth middleware applies to upload URL endpoint."""
+        storage = MockStorage()
+        client = self._make_client(
+            storage,
+            authenticate=_test_authenticate,
+            default_headers={"Authorization": "Bearer alice"},
+        )
+        # Should succeed with auth
+        urls = request_upload_urls(client=client)
+        assert len(urls) == 1
+        client.close()
+
+    def test_auth_401_without_credentials(self) -> None:
+        """Upload URL endpoint returns 401 without auth credentials."""
+        storage = MockStorage()
+        client = self._make_client(storage, authenticate=_test_authenticate)
+
+        with pytest.raises(RpcError) as exc_info:
+            request_upload_urls(client=client)
+        assert exc_info.value.error_type == "AuthenticationError"
+        client.close()
+
+    def test_expires_at_in_future(self) -> None:
+        """Returned expires_at is in the future."""
+        from datetime import UTC, datetime
+
+        storage = MockStorage()
+        client = self._make_client(storage)
+
+        urls = request_upload_urls(client=client)
+        assert len(urls) == 1
+        assert urls[0].expires_at > datetime.now(UTC)
         client.close()

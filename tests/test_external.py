@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from typing import Any, Protocol
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,7 @@ from vgi_rpc.external import (
     Compression,
     ExternalLocationConfig,
     ExternalStorage,
+    UploadUrl,
     is_external_location_batch,
     make_external_location_batch,
     maybe_externalize_batch,
@@ -74,6 +76,16 @@ class MockStorage(ExternalStorage):
         url = f"https://mock.storage/{self._counter}"
         self.data[url] = data
         return url
+
+    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
+        """Generate a mock upload URL pair."""
+        self._counter += 1
+        expires_at = datetime.now(UTC) + timedelta(hours=1)
+        return UploadUrl(
+            upload_url=f"https://mock.storage/upload/{self._counter}",
+            download_url=f"https://mock.storage/download/{self._counter}",
+            expires_at=expires_at,
+        )
 
 
 @contextmanager

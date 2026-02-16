@@ -20,6 +20,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -50,6 +51,8 @@ __all__ = [
     "ExternalLocationConfig",
     "ExternalStorage",
     "FetchConfig",
+    "UploadUrl",
+    "UploadUrlProvider",
 ]
 
 
@@ -79,6 +82,52 @@ class ExternalStorage(Protocol):
         Returns:
             A URL (typically pre-signed) that can be fetched to retrieve
             the uploaded data.
+
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# UploadUrl + UploadUrlProvider
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UploadUrl:
+    """Pre-signed URL pair for client-side data upload.
+
+    S3/GCS pre-signed URLs are signed per HTTP method, so a PUT URL
+    cannot be used for GET — hence two URLs for the same storage object.
+
+    Attributes:
+        upload_url: Pre-signed PUT URL for uploading data.
+        download_url: Pre-signed GET URL for downloading the uploaded data.
+        expires_at: Expiration time for the pre-signed URLs (UTC).
+
+    """
+
+    upload_url: str
+    download_url: str
+    expires_at: datetime
+
+
+@runtime_checkable
+class UploadUrlProvider(Protocol):
+    """Generates pre-signed upload URL pairs.
+
+    Implementations must be thread-safe — ``generate_upload_url()``
+    may be called concurrently from different server threads.
+    """
+
+    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
+        """Generate a pre-signed upload/download URL pair.
+
+        Args:
+            schema: The Arrow schema of the data to be uploaded.
+                Backends may use this for content-type or metadata hints.
+
+        Returns:
+            An ``UploadUrl`` with PUT and GET URLs for the same object.
 
         """
         ...

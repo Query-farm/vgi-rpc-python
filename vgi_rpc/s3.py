@@ -13,11 +13,12 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pyarrow as pa
 
-from vgi_rpc.external import ExternalStorage
+from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider
 
 _logger = logging.getLogger(__name__)
 
@@ -123,11 +124,49 @@ class S3Storage:
         )
         return url
 
+    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
+        """Generate pre-signed PUT and GET URLs for client-side upload.
 
-# Runtime check that S3Storage satisfies ExternalStorage protocol
+        Args:
+            schema: The Arrow schema of the data to be uploaded
+                (unused but available for metadata hints).
+
+        Returns:
+            An ``UploadUrl`` with PUT and GET pre-signed URLs for the
+            same S3 object.
+
+        """
+        client = self._get_client()
+        key = f"{self.prefix}{uuid.uuid4().hex}.arrow"
+        params = {"Bucket": self.bucket, "Key": key}
+        expires_at = datetime.now(UTC) + timedelta(seconds=self.presign_expiry_seconds)
+
+        put_url: str = client.generate_presigned_url(
+            "put_object",
+            Params=params,
+            ExpiresIn=self.presign_expiry_seconds,
+        )
+        get_url: str = client.generate_presigned_url(
+            "get_object",
+            Params=params,
+            ExpiresIn=self.presign_expiry_seconds,
+        )
+
+        _logger.debug(
+            "S3 upload URL generated: bucket=%s key=%s",
+            self.bucket,
+            key,
+            extra={"bucket": self.bucket, "key": key},
+        )
+        return UploadUrl(upload_url=put_url, download_url=get_url, expires_at=expires_at)
+
+
+# Runtime check that S3Storage satisfies ExternalStorage and UploadUrlProvider protocols
 def _check_protocol() -> None:
-    """Verify S3Storage satisfies ExternalStorage at import time."""
-    _storage: ExternalStorage = S3Storage(bucket="test")
+    """Verify S3Storage satisfies ExternalStorage and UploadUrlProvider at import time."""
+    _inst = S3Storage(bucket="test")
+    _storage: ExternalStorage = _inst
+    _provider: UploadUrlProvider = _inst
 
 
 _check_protocol()
