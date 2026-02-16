@@ -1,0 +1,298 @@
+"""Client proxy and connection."""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import Callable, Iterator
+from io import IOBase
+from types import TracebackType
+from typing import Any, cast
+
+import pyarrow as pa
+from pyarrow import ipc
+
+from vgi_rpc.external import ExternalLocationConfig, maybe_externalize_batch
+from vgi_rpc.log import Message
+from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
+from vgi_rpc.rpc._transport import RpcTransport, ShmPipeTransport
+from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, rpc_methods
+from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_unary_response, _send_request
+from vgi_rpc.shm import ShmSegment, maybe_write_to_shm
+from vgi_rpc.utils import IpcValidation, ValidatedReader
+
+
+class StreamSession:
+    """Client-side handle for a stream call (both producer and exchange patterns).
+
+    For producer streams, use ``__iter__()`` or ``tick()``.
+    For exchange streams, use ``exchange()`` with context manager.
+    Log batches are delivered to the ``on_log`` callback.
+    """
+
+    __slots__ = (
+        "_closed",
+        "_external_config",
+        "_input_writer",
+        "_ipc_validation",
+        "_on_log",
+        "_output_reader",
+        "_reader_stream",
+        "_shm",
+        "_writer_stream",
+    )
+
+    def __init__(
+        self,
+        writer_stream: IOBase,
+        reader_stream: IOBase,
+        on_log: Callable[[Message], None] | None = None,
+        *,
+        external_config: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
+        shm: ShmSegment | None = None,
+    ) -> None:
+        """Initialize with writer/reader streams and optional log callback."""
+        self._writer_stream = writer_stream
+        self._reader_stream = reader_stream
+        self._on_log = on_log
+        self._input_writer: ipc.RecordBatchStreamWriter | None = None
+        self._output_reader: ValidatedReader | None = None
+        self._closed = False
+        self._external_config = external_config
+        self._ipc_validation = ipc_validation
+        self._shm = shm
+
+    def _write_batch(self, input: AnnotatedBatch) -> None:
+        """Write a batch to the input stream, opening it on first use."""
+        batch_to_write = input.batch
+        cm_to_write = input.custom_metadata
+
+        # Client-side SHM for large inputs (preferred over external)
+        if self._shm is not None:
+            batch_to_write, cm_to_write = maybe_write_to_shm(batch_to_write, cm_to_write, self._shm)
+        elif self._external_config is not None:
+            batch_to_write, cm_to_write = maybe_externalize_batch(batch_to_write, cm_to_write, self._external_config)
+
+        if self._input_writer is None:
+            self._input_writer = ipc.new_stream(self._writer_stream, batch_to_write.schema)
+        if cm_to_write is not None:
+            self._input_writer.write_batch(batch_to_write, custom_metadata=cm_to_write)
+        else:
+            self._input_writer.write_batch(batch_to_write)
+
+    def _read_response(self) -> AnnotatedBatch:
+        """Read the next data batch from the output stream, skipping log batches."""
+        if self._output_reader is None:
+            self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
+        return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config, shm=self._shm)
+
+    def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
+        """Send an input batch, receive the output batch.
+
+        Always returns an ``AnnotatedBatch``. Log batches are delivered to
+        the ``on_log`` callback before returning. On ``RpcError``, the
+        session is automatically closed so the transport is clean.
+        """
+        self._write_batch(input)
+        try:
+            return self._read_response()
+        except RpcError:
+            self.close()
+            raise
+
+    def tick(self) -> AnnotatedBatch:
+        """Send a tick batch (producer streams) and receive the output batch.
+
+        Returns:
+            The next output batch.
+
+        Raises:
+            StopIteration: When the producer stream has finished.
+            RpcError: On server-side errors.
+
+        """
+        self._write_batch(_TICK_BATCH)
+        try:
+            return self._read_response()
+        except StopIteration:
+            self.close()
+            raise
+        except RpcError:
+            self.close()
+            raise
+
+    def __iter__(self) -> Iterator[AnnotatedBatch]:
+        """Iterate over output batches from a producer stream.
+
+        Sends tick batches and yields output batches until the server
+        signals stream completion.
+        """
+        while True:
+            try:
+                yield self.tick()
+            except StopIteration:
+                break
+
+    def close(self) -> None:
+        """Close input stream (signals EOS) and drain remaining output."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._input_writer is not None:
+            self._input_writer.close()
+        else:
+            with ipc.new_stream(self._writer_stream, _EMPTY_SCHEMA):
+                pass
+        if self._output_reader is None:
+            try:
+                self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
+            except (pa.ArrowInvalid, OSError, StopIteration):
+                return
+        _MAX_DRAIN = 10_000
+        with contextlib.suppress(StopIteration, RpcError, pa.ArrowInvalid, OSError):
+            for _ in range(_MAX_DRAIN):
+                _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config, shm=self._shm)
+
+    def __enter__(self) -> StreamSession:
+        """Enter context manager."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit context manager."""
+        self.close()
+
+
+class _RpcProxy:
+    """Dynamic proxy that implements RPC method calls through a transport.
+
+    Not thread-safe: each proxy serialises calls over a single transport.
+    Do not share a proxy across threads; create one connection per thread instead.
+    """
+
+    def __init__(
+        self,
+        protocol: type,
+        transport: RpcTransport,
+        on_log: Callable[[Message], None] | None = None,
+        *,
+        external_config: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
+    ) -> None:
+        self._protocol = protocol
+        self._transport = transport
+        self._methods = rpc_methods(protocol)
+        self._on_log = on_log
+        self._external_config = external_config
+        self._ipc_validation = ipc_validation
+        self._shm: ShmSegment | None = transport.shm if isinstance(transport, ShmPipeTransport) else None
+
+    def __getattr__(self, name: str) -> Any:
+        info = self._methods.get(name)
+        if info is None:
+            raise AttributeError(f"{self._protocol.__name__} has no RPC method '{name}'")
+
+        if info.method_type == MethodType.UNARY:
+            caller = self._make_unary_caller(info)
+        elif info.method_type == MethodType.STREAM:
+            caller = self._make_stream_caller(info)
+        else:
+            raise AttributeError(f"Unknown method type for '{name}'")
+
+        self.__dict__[name] = caller
+        return caller
+
+    def _make_unary_caller(self, info: RpcMethodInfo) -> Callable[..., object]:
+        transport = self._transport
+        on_log = self._on_log
+        ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
+        shm = self._shm
+
+        def caller(**kwargs: object) -> object:
+            _send_request(transport.writer, info, kwargs)
+            reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
+            return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
+
+        return caller
+
+    def _make_stream_caller(self, info: RpcMethodInfo) -> Callable[..., StreamSession]:
+        transport = self._transport
+        on_log = self._on_log
+        ext_cfg = self._external_config
+        ipc_validation = self._ipc_validation
+        shm = self._shm
+
+        def caller(**kwargs: object) -> StreamSession:
+            _send_request(transport.writer, info, kwargs)
+            return StreamSession(
+                transport.writer,
+                transport.reader,
+                on_log,
+                external_config=ext_cfg,
+                ipc_validation=ipc_validation,
+                shm=shm,
+            )
+
+        return caller
+
+
+# ---------------------------------------------------------------------------
+# RpcConnection — typed context manager
+# ---------------------------------------------------------------------------
+
+
+class RpcConnection[P]:
+    """Context manager that provides a typed RPC proxy over a transport.
+
+    The type parameter ``P`` is the Protocol class, enabling IDE
+    autocompletion for all methods defined on the protocol::
+
+        with RpcConnection(MyProtocol, transport) as svc:
+            result = svc.add(a=1, b=2)   # IDE sees MyProtocol methods
+
+    """
+
+    __slots__ = ("_external_config", "_ipc_validation", "_on_log", "_protocol", "_transport")
+
+    def __init__(
+        self,
+        protocol: type[P],
+        transport: RpcTransport,
+        on_log: Callable[[Message], None] | None = None,
+        *,
+        external_location: ExternalLocationConfig | None = None,
+        ipc_validation: IpcValidation = IpcValidation.NONE,
+    ) -> None:
+        """Initialize with a protocol type and transport."""
+        self._protocol = protocol
+        self._transport = transport
+        self._on_log = on_log
+        self._external_config = external_location
+        self._ipc_validation = ipc_validation
+
+    def __enter__(self) -> P:
+        """Enter the context and return a typed proxy."""
+        return cast(
+            P,
+            _RpcProxy(
+                self._protocol,
+                self._transport,
+                self._on_log,
+                external_config=self._external_config,
+                ipc_validation=self._ipc_validation,
+            ),
+        )
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Close the transport."""
+        self._transport.close()
