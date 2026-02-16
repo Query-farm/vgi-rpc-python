@@ -53,7 +53,10 @@ from vgi_rpc.utils import (
 # HTTP (optional — requires `pip install vgi-rpc[http]`)
 with contextlib.suppress(ImportError):
     from vgi_rpc.http import (
+        HttpServerCapabilities,
         HttpStreamSession,
+        MAX_REQUEST_BYTES_HEADER,
+        http_capabilities,
         http_connect,
         http_introspect,
         make_sync_client,
@@ -132,7 +135,10 @@ if "GCSStorage" in dir():
     __all__.append("GCSStorage")
 if "HttpStreamSession" in dir():
     __all__ += [
+        "HttpServerCapabilities",
         "HttpStreamSession",
+        "MAX_REQUEST_BYTES_HEADER",
+        "http_capabilities",
         "http_connect",
         "http_introspect",
         "make_wsgi_app",

@@ -31,6 +31,7 @@ import struct
 import time
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO, IOBase
 from types import TracebackType
@@ -90,7 +91,10 @@ if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
 
 __all__ = [
+    "HttpServerCapabilities",
     "HttpStreamSession",
+    "MAX_REQUEST_BYTES_HEADER",
+    "http_capabilities",
     "http_connect",
     "http_introspect",
     "make_sync_client",
@@ -98,6 +102,7 @@ __all__ = [
 ]
 
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
+MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes"
 _logger = logging.getLogger(__name__)
 
 
@@ -298,13 +303,20 @@ def _resolve_state_types(
 class _HttpRpcApp:
     """Internal helper that wraps an RpcServer and manages stream state."""
 
-    __slots__ = ("_max_stream_response_bytes", "_server", "_signing_key", "_state_types")
+    __slots__ = ("_max_request_bytes", "_max_stream_response_bytes", "_server", "_signing_key", "_state_types")
 
-    def __init__(self, server: RpcServer, signing_key: bytes, max_stream_response_bytes: int | None = None) -> None:
+    def __init__(
+        self,
+        server: RpcServer,
+        signing_key: bytes,
+        max_stream_response_bytes: int | None = None,
+        max_request_bytes: int | None = None,
+    ) -> None:
         self._server = server
         self._signing_key = signing_key
         self._state_types = _resolve_state_types(server)
         self._max_stream_response_bytes = max_stream_response_bytes
+        self._max_request_bytes = max_request_bytes
 
     def _resolve_method(self, req: falcon.Request, method: str) -> RpcMethodInfo:
         """Validate content type and resolve method info.
@@ -934,12 +946,32 @@ class _AuthMiddleware:
             _current_transport.reset(token)
 
 
+class _MaxRequestBytesMiddleware:
+    """Falcon middleware that sets ``VGI-Max-Request-Bytes`` on every response."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: int) -> None:
+        self._value = str(value)
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
+    ) -> None:
+        """Set the max request bytes header on every response."""
+        resp.set_header(MAX_REQUEST_BYTES_HEADER, self._value)
+
+
 def make_wsgi_app(
     server: RpcServer,
     *,
     prefix: str = "/vgi",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
+    max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     cors_origins: str | Iterable[str] | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
@@ -958,6 +990,12 @@ def make_wsgi_app(
             exceeds this size.  The client transparently resumes via
             ``POST /{method}/exchange``.  ``None`` (default) disables
             resumable streaming.
+        max_request_bytes: When set, the value is advertised via the
+            ``VGI-Max-Request-Bytes`` response header on every response
+            (including OPTIONS).  Clients can use ``http_capabilities()``
+            to discover this limit and decide whether to use external
+            storage for large payloads.  Advertisement only — no
+            server-side enforcement.  ``None`` (default) omits the header.
         authenticate: Optional callback that extracts an :class:`AuthContext`
             from a Falcon ``Request``.  When provided, every request is
             authenticated before dispatch.  The callback should raise
@@ -983,12 +1021,20 @@ def make_wsgi_app(
             stacklevel=2,
         )
         signing_key = os.urandom(32)
-    app_handler = _HttpRpcApp(server, signing_key, max_stream_response_bytes)
+    app_handler = _HttpRpcApp(server, signing_key, max_stream_response_bytes, max_request_bytes)
     middleware: list[Any] = []
+    cors_expose: list[str] = []
+    if max_request_bytes is not None:
+        cors_expose.append(MAX_REQUEST_BYTES_HEADER)
     if cors_origins is not None:
-        middleware.append(falcon.CORSMiddleware(allow_origins=cors_origins))
+        cors_kwargs: dict[str, Any] = {"allow_origins": cors_origins}
+        if cors_expose:
+            cors_kwargs["expose_headers"] = cors_expose
+        middleware.append(falcon.CORSMiddleware(**cors_kwargs))
     if authenticate is not None:
         middleware.append(_AuthMiddleware(authenticate))
+    if max_request_bytes is not None:
+        middleware.append(_MaxRequestBytesMiddleware(max_request_bytes))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/init", _StreamInitResource(app_handler))
@@ -1019,11 +1065,12 @@ def make_wsgi_app(
 class _SyncTestResponse:
     """Minimal response object matching what _HttpProxy expects from httpx.Response."""
 
-    __slots__ = ("content", "status_code")
+    __slots__ = ("content", "headers", "status_code")
 
-    def __init__(self, status_code: int, content: bytes) -> None:
+    def __init__(self, status_code: int, content: bytes, headers: dict[str, str] | None = None) -> None:
         self.status_code = status_code
         self.content = content
+        self.headers: dict[str, str] = headers or {}
 
 
 class _SyncTestClient:
@@ -1045,7 +1092,14 @@ class _SyncTestClient:
         # Strip scheme+host if present (test_http.py passes full URLs)
         path = urlparse(url).path
         result = self._client.simulate_post(path, body=content, headers=merged)
-        return _SyncTestResponse(result.status_code, result.content)
+        return _SyncTestResponse(result.status_code, result.content, headers=dict(result.headers))
+
+    def options(self, url: str, *, headers: dict[str, str] | None = None) -> _SyncTestResponse:
+        """Send a synchronous OPTIONS using the Falcon test client."""
+        merged = {**self._default_headers, **(headers or {})}
+        path = urlparse(url).path
+        result = self._client.simulate_options(path, headers=merged)
+        return _SyncTestResponse(result.status_code, result.content, headers=dict(result.headers))
 
     def close(self) -> None:
         """Close the client (no-op for test client)."""
@@ -1057,6 +1111,7 @@ def make_sync_client(
     prefix: str = "/vgi",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
+    max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     default_headers: dict[str, str] | None = None,
 ) -> _SyncTestClient:
@@ -1070,6 +1125,7 @@ def make_sync_client(
         signing_key: HMAC key for signing state tokens (see
             ``make_wsgi_app`` for details).
         max_stream_response_bytes: See ``make_wsgi_app``.
+        max_request_bytes: See ``make_wsgi_app``.
         authenticate: See ``make_wsgi_app``.
         default_headers: Headers merged into every request (e.g. auth tokens).
 
@@ -1082,6 +1138,7 @@ def make_sync_client(
         prefix=prefix,
         signing_key=signing_key,
         max_stream_response_bytes=max_stream_response_bytes,
+        max_request_bytes=max_request_bytes,
         authenticate=authenticate,
     )
     return _SyncTestClient(app, default_headers=default_headers)
@@ -1578,3 +1635,72 @@ class _HttpProxy:
             )
 
         return caller
+
+
+# ---------------------------------------------------------------------------
+# Server capabilities discovery
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HttpServerCapabilities:
+    """Capabilities advertised by an HTTP RPC server.
+
+    Attributes:
+        max_request_bytes: Maximum request body size the server accepts,
+            or ``None`` if the server does not advertise a limit.
+
+    """
+
+    max_request_bytes: int | None = None
+
+
+def http_capabilities(
+    base_url: str | None = None,
+    *,
+    prefix: str = "/vgi",
+    client: httpx.Client | _SyncTestClient | None = None,
+) -> HttpServerCapabilities:
+    """Discover server capabilities via an OPTIONS request.
+
+    Sends ``OPTIONS {prefix}/__capabilities__`` and reads the
+    ``VGI-Max-Request-Bytes`` header from the response.
+
+    Args:
+        base_url: Base URL of the server (e.g. ``http://localhost:8000``).
+            Required when *client* is ``None``.
+        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+
+    Returns:
+        An ``HttpServerCapabilities`` with discovered values.
+
+    Raises:
+        ValueError: If *base_url* is ``None`` and *client* is ``None``.
+
+    """
+    own_client = client is None
+    if client is None:
+        if base_url is None:
+            raise ValueError("base_url is required when client is not provided")
+        client = httpx.Client(base_url=base_url, follow_redirects=True)
+
+    try:
+        url = f"{prefix}/__capabilities__"
+        if isinstance(client, _SyncTestClient):
+            resp = client.options(url)
+            headers = resp.headers
+        else:
+            httpx_resp = client.options(url)
+            headers = dict(httpx_resp.headers)
+
+        max_req: int | None = None
+        raw = headers.get(MAX_REQUEST_BYTES_HEADER) or headers.get(MAX_REQUEST_BYTES_HEADER.lower())
+        if raw is not None:
+            with contextlib.suppress(ValueError):
+                max_req = int(raw)
+
+        return HttpServerCapabilities(max_request_bytes=max_req)
+    finally:
+        if own_client:
+            client.close()

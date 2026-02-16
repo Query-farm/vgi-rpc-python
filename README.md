@@ -326,6 +326,7 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `signing_key` | random 32 bytes | HMAC key for signing state tokens |
 | `max_stream_response_bytes` | `None` | Split producer stream responses across multiple HTTP exchanges |
 | `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |
+| `max_request_bytes` | `None` | Advertise max request body size via `VGI-Max-Request-Bytes` header (no enforcement) |
 | `cors_origins` | `None` | Allowed CORS origins — `"*"` for all, a string, or list of strings |
 
 ### CORS (browser clients)
@@ -341,6 +342,18 @@ app = make_wsgi_app(server, cors_origins=["https://app.example.com", "https://st
 ```
 
 This uses Falcon's built-in `CORSMiddleware`, which handles preflight `OPTIONS` requests automatically.
+
+### Server capabilities
+
+When `max_request_bytes` is set, the server advertises the limit via the `VGI-Max-Request-Bytes` response header on every response (including OPTIONS). Clients can discover this with `http_capabilities()`:
+
+```python
+from vgi_rpc import http_capabilities
+
+caps = http_capabilities("http://localhost:8080")
+if caps.max_request_bytes is not None:
+    print(f"Server accepts up to {caps.max_request_bytes} bytes")
+```
 
 ## Streaming
 

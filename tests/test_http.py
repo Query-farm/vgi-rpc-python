@@ -24,9 +24,12 @@ from pyarrow import ipc
 from vgi_rpc.external import ExternalLocationConfig
 from vgi_rpc.http import (
     _ARROW_CONTENT_TYPE,
+    MAX_REQUEST_BYTES_HEADER,
+    HttpServerCapabilities,
     HttpStreamSession,
     _SyncTestClient,
     _SyncTestResponse,
+    http_capabilities,
     http_connect,
     make_sync_client,
     make_wsgi_app,
@@ -757,3 +760,94 @@ class TestCors:
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
         assert "access-control-allow-origin" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# Tests: Max request bytes header
+# ---------------------------------------------------------------------------
+
+
+class TestMaxRequestBytes:
+    """Tests for VGI-Max-Request-Bytes header advertisement."""
+
+    def test_header_present_on_post_when_configured(self) -> None:
+        """POST response includes VGI-Max-Request-Bytes when configured."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+            max_request_bytes=10_000_000,
+        )
+        resp = client.post(
+            f"{_BASE_URL}/vgi/add",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        # Falcon test client lowercases header names
+        assert resp.headers.get(MAX_REQUEST_BYTES_HEADER.lower()) == "10000000"
+        client.close()
+
+    def test_header_absent_when_not_configured(self) -> None:
+        """POST response does not include VGI-Max-Request-Bytes by default."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+        )
+        resp = client.post(
+            f"{_BASE_URL}/vgi/add",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert MAX_REQUEST_BYTES_HEADER not in resp.headers
+        assert MAX_REQUEST_BYTES_HEADER.lower() not in resp.headers
+        client.close()
+
+    def test_options_returns_header(self) -> None:
+        """OPTIONS response includes VGI-Max-Request-Bytes when configured."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+            max_request_bytes=5_000_000,
+        )
+        resp = client.options(f"{_BASE_URL}/vgi/__capabilities__")
+        assert resp.headers.get(MAX_REQUEST_BYTES_HEADER.lower()) == "5000000"
+        client.close()
+
+    def test_cors_exposes_header(self) -> None:
+        """With cors_origins, VGI-Max-Request-Bytes is in Access-Control-Expose-Headers."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*", max_request_bytes=1_000_000)
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        expose = resp.headers.get("access-control-expose-headers", "")
+        assert MAX_REQUEST_BYTES_HEADER in expose
+
+
+# ---------------------------------------------------------------------------
+# Tests: HTTP capabilities discovery
+# ---------------------------------------------------------------------------
+
+
+class TestHttpCapabilities:
+    """Tests for http_capabilities() discovery function."""
+
+    def test_discovers_max_request_bytes(self) -> None:
+        """http_capabilities() reads VGI-Max-Request-Bytes from OPTIONS response."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+            max_request_bytes=8_000_000,
+        )
+        caps = http_capabilities(client=client)
+        assert isinstance(caps, HttpServerCapabilities)
+        assert caps.max_request_bytes == 8_000_000
+        client.close()
+
+    def test_none_when_not_configured(self) -> None:
+        """http_capabilities() returns None max_request_bytes when not set."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test",
+        )
+        caps = http_capabilities(client=client)
+        assert caps.max_request_bytes is None
+        client.close()
