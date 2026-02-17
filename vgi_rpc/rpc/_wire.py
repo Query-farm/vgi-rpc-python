@@ -23,13 +23,16 @@ from vgi_rpc.metadata import (
     LOG_EXTRA_KEY,
     LOG_LEVEL_KEY,
     LOG_MESSAGE_KEY,
+    REQUEST_ID_KEY,
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
     RPC_METHOD_KEY,
     SERVER_ID_KEY,
+    TRACEPARENT_KEY,
+    TRACESTATE_KEY,
     encode_metadata,
 )
-from vgi_rpc.rpc._common import _EMPTY_SCHEMA, RpcError, VersionError
+from vgi_rpc.rpc._common import _EMPTY_SCHEMA, RpcError, VersionError, _current_request_id, _current_trace_headers
 from vgi_rpc.rpc._types import (
     AnnotatedBatch,
     RpcMethodInfo,
@@ -40,6 +43,12 @@ from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedRe
 
 if TYPE_CHECKING:
     from vgi_rpc.rpc._types import OutputCollector
+
+# Best-effort trace context injection (no-op if OTel not installed)
+try:
+    from vgi_rpc.otel import _inject_trace_context
+except ImportError:
+    _inject_trace_context = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +89,12 @@ def _write_request(writer_stream: IOBase, method_name: str, params_schema: pa.Sc
         val = _convert_for_arrow(kwargs.get(f.name))
         arrays.append(pa.array([val], type=f.type))
     batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
-    custom_metadata = pa.KeyValueMetadata({RPC_METHOD_KEY: method_name.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION})
+    md: dict[bytes, bytes] = {RPC_METHOD_KEY: method_name.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION}
+    if _inject_trace_context is not None:
+        trace_meta = _inject_trace_context()
+        if trace_meta is not None:
+            md.update(trace_meta)
+    custom_metadata = pa.KeyValueMetadata(md)
     with ipc.new_stream(writer_stream, params_schema) as writer:
         writer.write_batch(batch, custom_metadata=custom_metadata)
 
@@ -95,6 +109,9 @@ def _write_message_batch(
     md = msg.add_to_metadata()
     if server_id is not None:
         md[SERVER_ID_KEY.decode()] = server_id
+    request_id = _current_request_id.get()
+    if request_id:
+        md[REQUEST_ID_KEY.decode()] = request_id
     custom_metadata = encode_metadata(md)
     writer.write_batch(empty_batch(schema), custom_metadata=custom_metadata)
 
@@ -198,6 +215,14 @@ def _read_request(
     if version_bytes != REQUEST_VERSION:
         raise VersionError(f"Unsupported request version {version_bytes!r}, expected {REQUEST_VERSION!r}")
     method_name = method_name_bytes.decode()
+    # Store trace context in contextvar for hook consumption (pipe/subprocess transport)
+    tp = custom_metadata.get(TRACEPARENT_KEY) if custom_metadata else None
+    if tp is not None:
+        headers: dict[str, str] = {"traceparent": tp if isinstance(tp, str) else tp.decode()}
+        ts = custom_metadata.get(TRACESTATE_KEY) if custom_metadata else None
+        if ts is not None:
+            headers["tracestate"] = ts if isinstance(ts, str) else ts.decode()
+        _current_trace_headers.set(headers)
     _drain_stream(reader)
     if len(batch.schema) > 0 and batch.num_rows != 1:
         raise RpcError("ProtocolError", f"Expected 1 row in request batch, got {batch.num_rows}", "")
@@ -268,11 +293,17 @@ def _dispatch_log_or_error(
         with contextlib.suppress(json.JSONDecodeError):
             raw_extra_data = json.loads(raw_extra.decode())
 
+    # Extract request_id from batch metadata
+    request_id_bytes = custom_metadata.get(REQUEST_ID_KEY)
+    request_id = ""
+    if request_id_bytes is not None:
+        request_id = request_id_bytes.decode() if isinstance(request_id_bytes, bytes) else request_id_bytes
+
     # EXCEPTION level → raise RpcError (existing behaviour)
     if level_str == Level.EXCEPTION.value:
         error_type = str(raw_extra_data.get("exception_type", level_str))
         traceback_str = str(raw_extra_data.get("traceback", ""))
-        raise RpcError(error_type, message_str, traceback_str)
+        raise RpcError(error_type, message_str, traceback_str, request_id=request_id)
 
     # Non-exception log message → invoke callback
     # Coerce all extra values to str for Message(**extra)
@@ -281,6 +312,8 @@ def _dispatch_log_or_error(
     server_id_bytes = custom_metadata.get(SERVER_ID_KEY)
     if server_id_bytes is not None:
         extra["server_id"] = server_id_bytes.decode() if isinstance(server_id_bytes, bytes) else server_id_bytes
+    if request_id:
+        extra["request_id"] = request_id
     msg = Message(Level(level_str), message_str, **extra)
     if on_log is not None:
         on_log(msg)

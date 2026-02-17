@@ -18,6 +18,7 @@ __all__ = [
     "LOG_EXTRA_KEY",
     "LOG_LEVEL_KEY",
     "LOG_MESSAGE_KEY",
+    "REQUEST_ID_KEY",
     "REQUEST_VERSION",
     "REQUEST_VERSION_KEY",
     "RPC_METHOD_KEY",
@@ -26,6 +27,8 @@ __all__ = [
     "SHM_OFFSET_KEY",
     "SHM_SOURCE_KEY",
     "STATE_KEY",
+    "TRACEPARENT_KEY",
+    "TRACESTATE_KEY",
     "encode_metadata",
     "merge_metadata",
     "strip_keys",
@@ -44,6 +47,7 @@ REQUEST_VERSION_KEY = b"vgi_rpc.request_version"
 REQUEST_VERSION = b"1"
 
 SERVER_ID_KEY = b"vgi_rpc.server_id"
+REQUEST_ID_KEY = b"vgi_rpc.request_id"
 
 LOCATION_KEY = b"vgi_rpc.location"
 LOCATION_FETCH_MS_KEY = b"vgi_rpc.location.fetch_ms"
@@ -55,6 +59,10 @@ SHM_LENGTH_KEY = b"vgi_rpc.shm_length"
 
 # Shared memory provenance (on resolved batch metadata — mirrors LOCATION_SOURCE_KEY)
 SHM_SOURCE_KEY = b"vgi_rpc.shm_source"
+
+# W3C trace context propagation (on request batch custom metadata)
+TRACEPARENT_KEY = b"traceparent"
+TRACESTATE_KEY = b"tracestate"
 
 # ---------------------------------------------------------------------------
 # Encode / decode

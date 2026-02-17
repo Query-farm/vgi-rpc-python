@@ -72,6 +72,7 @@ def make_sync_client(
     default_headers: dict[str, str] | None = None,
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
+    otel_config: object | None = None,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -88,6 +89,7 @@ def make_sync_client(
         default_headers: Headers merged into every request (e.g. auth tokens).
         upload_url_provider: See ``make_wsgi_app``.
         max_upload_bytes: See ``make_wsgi_app``.
+        otel_config: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -102,5 +104,6 @@ def make_sync_client(
         authenticate=authenticate,
         upload_url_provider=upload_url_provider,
         max_upload_bytes=max_upload_bytes,
+        otel_config=otel_config,
     )
     return _SyncTestClient(app, default_headers=default_headers)

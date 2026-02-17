@@ -18,10 +18,14 @@ from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
     AuthContext,
     CallContext,
+    HookToken,
     MethodType,
     RpcError,
     VersionError,
     _access_logger,
+    _current_request_id,
+    _DispatchHook,
+    _generate_request_id,
     _get_auth_and_metadata,
     _logger,
 )
@@ -63,13 +67,17 @@ def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc:
 
     """
     error_type = type(exc).__name__
+    extra: dict[str, object] = {"server_id": server_id, "method": method_name, "error_type": error_type}
+    request_id = _current_request_id.get()
+    if request_id:
+        extra["request_id"] = request_id
     _logger.error(
         "Error in %s.%s: %s",
         protocol_name,
         method_name,
         exc,
         exc_info=True,
-        extra={"server_id": server_id, "method": method_name, "error_type": error_type},
+        extra=extra,
     )
     return error_type
 
@@ -102,6 +110,9 @@ def _emit_access_log(
             "status": status,
             "error_type": error_type,
         }
+        request_id = _current_request_id.get()
+        if request_id:
+            extra["request_id"] = request_id
         if http_status is not None:
             extra["http_status"] = http_status
         _access_logger.info(
@@ -126,6 +137,7 @@ class RpcServer:
     __slots__ = (
         "_ctx_methods",
         "_describe_batch",
+        "_dispatch_hook",
         "_external_config",
         "_impl",
         "_ipc_validation",
@@ -163,6 +175,7 @@ class RpcServer:
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
         self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]
+        self._dispatch_hook: _DispatchHook | None = None
         _validate_implementation(protocol, implementation, self._methods)
 
         if enable_describe:
@@ -271,41 +284,45 @@ class RpcServer:
                 the client can read a structured ``RpcError``.
 
         """
+        token = _current_request_id.set(_generate_request_id())
         try:
-            method_name, kwargs = _read_request(transport.reader, self._ipc_validation)
-        except pa.ArrowInvalid as exc:
-            with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
-            raise
-        except (VersionError, RpcError) as exc:
-            with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
-            return
+            try:
+                method_name, kwargs = _read_request(transport.reader, self._ipc_validation)
+            except pa.ArrowInvalid as exc:
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+                raise
+            except (VersionError, RpcError) as exc:
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+                return
 
-        info = self._methods.get(method_name)
-        if info is None:
-            _write_error_stream(
-                transport.writer,
-                _EMPTY_SCHEMA,
-                AttributeError(f"Unknown method: {method_name}"),
-                server_id=self._server_id,
-            )
-            return
+            info = self._methods.get(method_name)
+            if info is None:
+                _write_error_stream(
+                    transport.writer,
+                    _EMPTY_SCHEMA,
+                    AttributeError(f"Unknown method: {method_name}"),
+                    server_id=self._server_id,
+                )
+                return
 
-        _deserialize_params(kwargs, info.param_types, self._ipc_validation)
+            _deserialize_params(kwargs, info.param_types, self._ipc_validation)
 
-        try:
-            _validate_params(info.name, kwargs, info.param_types)
-        except TypeError as exc:
-            err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
-            _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
-            return
+            try:
+                _validate_params(info.name, kwargs, info.param_types)
+            except TypeError as exc:
+                err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
+                _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
+                return
 
-        shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
-        if info.method_type == MethodType.UNARY:
-            self._serve_unary(transport, info, kwargs, shm=shm)
-        elif info.method_type == MethodType.STREAM:
-            self._serve_stream(transport, info, kwargs, shm=shm)
+            shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
+            if info.method_type == MethodType.UNARY:
+                self._serve_unary(transport, info, kwargs, shm=shm)
+            elif info.method_type == MethodType.STREAM:
+                self._serve_stream(transport, info, kwargs, shm=shm)
+        finally:
+            _current_request_id.reset(token)
 
     def _prepare_method_call(
         self, info: RpcMethodInfo, kwargs: dict[str, Any]
@@ -344,6 +361,15 @@ class RpcServer:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        hook = self._dispatch_hook
+        hook_token: HookToken = None
+        if hook is not None:
+            try:
+                hook_token = hook.on_dispatch_start(info, auth, transport_md)
+            except Exception:
+                _logger.debug("Dispatch hook start failed", exc_info=True)
+                hook = None
+        _hook_exc: BaseException | None = None
         try:
             with ipc.new_stream(transport.writer, schema) as writer:
                 sink.flush_contents(writer, schema)
@@ -351,6 +377,7 @@ class RpcServer:
                     result = getattr(self._impl, info.name)(**kwargs)
                     _validate_result(info.name, result, info.result_type)
                 except Exception as exc:
+                    _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
                     _write_error_batch(writer, schema, exc, server_id=self._server_id)
@@ -369,6 +396,11 @@ class RpcServer:
                 status,
                 error_type,
             )
+            if hook is not None:
+                try:
+                    hook.on_dispatch_end(hook_token, info, _hook_exc)
+                except Exception:
+                    _logger.debug("Dispatch hook end failed", exc_info=True)
 
     def _serve_stream(
         self,
@@ -383,12 +415,22 @@ class RpcServer:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        hook = self._dispatch_hook
+        hook_token: HookToken = None
+        if hook is not None:
+            try:
+                hook_token = hook.on_dispatch_start(info, auth, transport_md)
+            except Exception:
+                _logger.debug("Dispatch hook start failed", exc_info=True)
+                hook = None
+        _hook_exc: BaseException | None = None
 
         # NOTE: Two finally blocks — the inner one handles init errors (with early return),
         # the outer one handles streaming errors.  Only one access log fires per call.
         try:
             result: Stream[StreamState] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
+            _hook_exc = exc
             status = "error"
             error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
             with contextlib.suppress(BrokenPipeError, OSError):
@@ -408,6 +450,11 @@ class RpcServer:
                     status,
                     error_type,
                 )
+                if hook is not None:
+                    try:
+                        hook.on_dispatch_end(hook_token, info, _hook_exc)
+                    except Exception:
+                        _logger.debug("Dispatch hook end failed", exc_info=True)
 
         output_schema = result.output_schema
         input_schema = result.input_schema
@@ -468,6 +515,7 @@ class RpcServer:
                             break
                         cumulative_bytes = out.total_data_bytes
                 except Exception as exc:
+                    _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
                     with contextlib.suppress(BrokenPipeError, OSError):
@@ -485,6 +533,11 @@ class RpcServer:
                 status,
                 error_type,
             )
+            if hook is not None:
+                try:
+                    hook.on_dispatch_end(hook_token, info, _hook_exc)
+                except Exception:
+                    _logger.debug("Dispatch hook end failed", exc_info=True)
 
         # Drain remaining input so transport is clean for next request
         with contextlib.suppress(pa.ArrowInvalid, OSError):

@@ -43,11 +43,13 @@ from vgi_rpc.rpc import (
     StreamState,
     VersionError,
     _ClientLogSink,
+    _current_request_id,
     _current_transport,
     _deserialize_params,
     _drain_stream,
     _emit_access_log,
     _flush_collector,
+    _generate_request_id,
     _get_auth_and_metadata,
     _log_method_error,
     _read_request,
@@ -57,6 +59,7 @@ from vgi_rpc.rpc import (
     _write_error_batch,
     _write_result_batch,
 )
+from vgi_rpc.rpc._common import HookToken, _DispatchHook
 from vgi_rpc.utils import ValidatedReader, empty_batch
 
 from ._common import (
@@ -363,6 +366,15 @@ class _HttpRpcApp:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        hook: _DispatchHook | None = self._server._dispatch_hook
+        hook_token: HookToken = None
+        if hook is not None:
+            try:
+                hook_token = hook.on_dispatch_start(info, auth, transport_metadata)
+            except Exception:
+                _logger.debug("Dispatch hook start failed", exc_info=True)
+                hook = None
+        _hook_exc: BaseException | None = None
         try:
             with ipc.new_stream(resp_buf, schema) as writer:
                 sink.flush_contents(writer, schema)
@@ -371,11 +383,13 @@ class _HttpRpcApp:
                     _validate_result(info.name, result, info.result_type)
                     _write_result_batch(writer, schema, result, self._server.external_config)
                 except (TypeError, pa.ArrowInvalid) as exc:
+                    _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                     _write_error_batch(writer, schema, exc, server_id=server_id)
                     http_status = HTTPStatus.BAD_REQUEST
                 except Exception as exc:
+                    _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                     _write_error_batch(writer, schema, exc, server_id=server_id)
@@ -394,6 +408,11 @@ class _HttpRpcApp:
                 error_type,
                 http_status=http_status.value,
             )
+            if hook is not None:
+                try:
+                    hook.on_dispatch_end(hook_token, info, _hook_exc)
+                except Exception:
+                    _logger.debug("Dispatch hook end failed", exc_info=True)
 
         resp_buf.seek(0)
         return resp_buf, http_status
@@ -433,15 +452,26 @@ class _HttpRpcApp:
         http_status = HTTPStatus.OK
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        hook: _DispatchHook | None = self._server._dispatch_hook
+        hook_token_init: HookToken = None
+        if hook is not None:
+            try:
+                hook_token_init = hook.on_dispatch_start(info, auth, transport_metadata)
+            except Exception:
+                _logger.debug("Dispatch hook start failed", exc_info=True)
+                hook = None
+        _hook_exc: BaseException | None = None
         try:
             try:
                 result: Stream[StreamState] = getattr(self._server.implementation, method_name)(**kwargs)
             except (TypeError, pa.ArrowInvalid) as exc:
+                _hook_exc = exc
                 status = "error"
                 error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                 http_status = HTTPStatus.BAD_REQUEST
                 raise _RpcHttpError(exc, status_code=http_status) from exc
             except Exception as exc:
+                _hook_exc = exc
                 status = "error"
                 error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
@@ -485,6 +515,7 @@ class _HttpRpcApp:
                         zero_batch = empty_batch(output_schema)
                         writer.write_batch(zero_batch, custom_metadata=state_metadata)
                 except Exception as exc:
+                    _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
@@ -506,6 +537,11 @@ class _HttpRpcApp:
                 error_type,
                 http_status=http_status.value,
             )
+            if hook is not None:
+                try:
+                    hook.on_dispatch_end(hook_token_init, info, _hook_exc)
+                except Exception:
+                    _logger.debug("Dispatch hook end failed", exc_info=True)
 
     def _stream_exchange_sync(self, method_name: str, stream: IOBase) -> BytesIO:
         """Run stream exchange synchronously.
@@ -543,6 +579,10 @@ class _HttpRpcApp:
 
         is_producer = input_schema == _EMPTY_SCHEMA
 
+        # Resolve method info for hook (may be None for unknown methods, but
+        # _stream_exchange_sync is only reached for known stream methods)
+        info = self._server.methods.get(method_name)
+
         if is_producer:
             # Producer continuation
             server_id = self._server.server_id
@@ -552,6 +592,15 @@ class _HttpRpcApp:
             http_status = HTTPStatus.OK
             status: Literal["ok", "error"] = "ok"
             error_type = ""
+            hook: _DispatchHook | None = self._server._dispatch_hook if info is not None else None
+            hook_token_exch: HookToken = None
+            if hook is not None and info is not None:
+                try:
+                    hook_token_exch = hook.on_dispatch_start(info, auth, transport_metadata)
+                except Exception:
+                    _logger.debug("Dispatch hook start failed", exc_info=True)
+                    hook = None
+            _hook_exc: BaseException | None = None
             try:
                 resp_buf, produce_error_type = self._produce_stream_response(
                     output_schema,
@@ -577,6 +626,11 @@ class _HttpRpcApp:
                     error_type,
                     http_status=http_status.value,
                 )
+                if hook is not None and info is not None:
+                    try:
+                        hook.on_dispatch_end(hook_token_exch, info, _hook_exc)
+                    except Exception:
+                        _logger.debug("Dispatch hook end failed", exc_info=True)
         else:
             # Exchange — resolve external locations on real input data
             try:
@@ -596,6 +650,15 @@ class _HttpRpcApp:
             http_status = HTTPStatus.OK
             status_str: Literal["ok", "error"] = "ok"
             error_type_str = ""
+            hook_e: _DispatchHook | None = self._server._dispatch_hook if info is not None else None
+            hook_token_e: HookToken = None
+            if hook_e is not None and info is not None:
+                try:
+                    hook_token_e = hook_e.on_dispatch_start(info, auth, transport_md)
+                except Exception:
+                    _logger.debug("Dispatch hook start failed", exc_info=True)
+                    hook_e = None
+            _hook_exc_e: BaseException | None = None
             try:
                 # Strip state token from metadata visible to process()
                 user_cm = strip_keys(resolved_cm, STATE_KEY)
@@ -629,6 +692,7 @@ class _HttpRpcApp:
                 with ipc.new_stream(resp_buf, output_schema) as writer:
                     _flush_collector(writer, out, self._server.external_config)
             except Exception as exc:
+                _hook_exc_e = exc
                 status_str = "error"
                 error_type_str = _log_method_error(protocol_name, method_name, server_id, exc)
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
@@ -647,6 +711,11 @@ class _HttpRpcApp:
                     error_type_str,
                     http_status=http_status.value,
                 )
+                if hook_e is not None and info is not None:
+                    try:
+                        hook_e.on_dispatch_end(hook_token_e, info, _hook_exc_e)
+                    except Exception:
+                        _logger.debug("Dispatch hook end failed", exc_info=True)
 
             resp_buf.seek(0)
             return resp_buf
@@ -946,6 +1015,40 @@ class _UploadUrlResource:
         resp.status = str(http_status.value)
 
 
+_REQUEST_ID_HEADER = "X-Request-ID"
+
+
+class _RequestIdMiddleware:
+    """Falcon middleware that sets a per-request correlation ID.
+
+    Reads ``X-Request-ID`` from the incoming request header or generates a
+    new 16-char hex ID.  The value is stored in ``req.context.request_id``,
+    set on the ``_current_request_id`` contextvar, and echoed back on the
+    response as the ``X-Request-ID`` header.
+    """
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Set request ID from header or generate one; populate contextvar."""
+        request_id = req.get_header(_REQUEST_ID_HEADER) or _generate_request_id()
+        req.context.request_id = request_id
+        req.context.request_id_token = _current_request_id.set(request_id)
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
+    ) -> None:
+        """Echo request ID on response header and reset contextvar."""
+        request_id = getattr(req.context, "request_id", None)
+        if request_id is not None:
+            resp.set_header(_REQUEST_ID_HEADER, request_id)
+        token = getattr(req.context, "request_id_token", None)
+        if token is not None:
+            _current_request_id.reset(token)
+
+
 class _AuthMiddleware:
     """Falcon middleware that runs an ``authenticate`` callback on each request.
 
@@ -1042,6 +1145,7 @@ def make_wsgi_app(
     cors_origins: str | Iterable[str] | None = None,
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
+    otel_config: object | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -1084,6 +1188,10 @@ def make_wsgi_app(
             advertised via the ``VGI-Max-Upload-Bytes`` header.  Informs
             clients of the maximum size they may upload to vended URLs.
             Advertisement only — no server-side enforcement.
+        otel_config: Optional ``OtelConfig`` for OpenTelemetry instrumentation.
+            When provided, ``instrument_server()`` is called and
+            ``_OtelFalconMiddleware`` is prepended for W3C trace propagation.
+            Requires ``pip install vgi-rpc[otel]``.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -1097,10 +1205,23 @@ def make_wsgi_app(
             stacklevel=2,
         )
         signing_key = os.urandom(32)
+    # OpenTelemetry instrumentation (optional)
+    if otel_config is not None:
+        from vgi_rpc.otel import OtelConfig, _OtelFalconMiddleware, instrument_server
+
+        if not isinstance(otel_config, OtelConfig):
+            raise TypeError(f"otel_config must be an OtelConfig instance, got {type(otel_config).__name__}")
+        instrument_server(server, otel_config)
+
     app_handler = _HttpRpcApp(
         server, signing_key, max_stream_response_bytes, max_request_bytes, upload_url_provider, max_upload_bytes
     )
-    middleware: list[Any] = []
+    middleware: list[Any] = [_RequestIdMiddleware()]
+
+    # OTel middleware must come before auth so spans cover the full request
+    if otel_config is not None:
+        middleware.append(_OtelFalconMiddleware())
+
     cors_expose: list[str] = []
 
     # Build capability headers

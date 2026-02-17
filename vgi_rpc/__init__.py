@@ -75,6 +75,10 @@ with contextlib.suppress(ImportError):
         request_upload_urls,
     )
 
+# OpenTelemetry instrumentation (optional — requires `pip install vgi-rpc[otel]`)
+with contextlib.suppress(ImportError):
+    from vgi_rpc.otel import OtelConfig, instrument_server
+
 # S3 storage backend (optional — requires `pip install vgi-rpc[s3]`)
 with contextlib.suppress(ImportError):
     from vgi_rpc.s3 import S3Storage  # noqa: F401
@@ -146,7 +150,9 @@ __all__ = [
     "UploadUrlProvider",
 ]
 
-# Conditionally include optional backend names only when actually imported
+# Conditionally include optional names only when actually imported
+if "OtelConfig" in dir():
+    __all__ += ["OtelConfig", "instrument_server"]
 if "S3Storage" in dir():
     __all__.append("S3Storage")
 if "GCSStorage" in dir():

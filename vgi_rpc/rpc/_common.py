@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable, Mapping, MutableMapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pyarrow as pa
 
 from vgi_rpc.log import Level, Message
+
+if TYPE_CHECKING:
+    from vgi_rpc.rpc._types import RpcMethodInfo
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -100,6 +104,7 @@ class CallContext:
         "_logger",
         "_method_name",
         "_protocol_name",
+        "_request_id",
         "_server_id",
         "auth",
         "emit_client_log",
@@ -123,7 +128,13 @@ class CallContext:
         self._server_id = server_id
         self._method_name = method_name
         self._protocol_name = protocol_name
+        self._request_id = _current_request_id.get()
         self._logger: _ContextLoggerAdapter | None = None
+
+    @property
+    def request_id(self) -> str:
+        """Per-request correlation ID (empty string if not set)."""
+        return self._request_id
 
     @property
     def logger(self) -> logging.LoggerAdapter[logging.Logger]:
@@ -133,8 +144,8 @@ class CallContext:
             A ``LoggerAdapter`` with logger name
             ``vgi_rpc.service.<ProtocolName>``.  Always includes
             ``server_id`` and ``method``; conditionally includes
-            ``principal``, ``auth_domain``, and ``remote_addr``
-            when available.
+            ``request_id``, ``principal``, ``auth_domain``, and
+            ``remote_addr`` when available.
 
         """
         if self._logger is None:
@@ -143,6 +154,8 @@ class CallContext:
                 "server_id": self._server_id,
                 "method": self._method_name,
             }
+            if self._request_id:
+                extra["request_id"] = self._request_id
             if self.auth.principal:
                 extra["principal"] = self.auth.principal
             if self.auth.domain:
@@ -178,6 +191,19 @@ def _get_auth_and_metadata() -> tuple[AuthContext, Mapping[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Per-request correlation ID
+# ---------------------------------------------------------------------------
+
+
+def _generate_request_id() -> str:
+    """Generate a 16-char hex request ID for correlation."""
+    return uuid.uuid4().hex[:16]
+
+
+_current_request_id: ContextVar[str] = ContextVar("vgi_rpc_request_id", default="")
+
+
+# ---------------------------------------------------------------------------
 # MethodType enum
 # ---------------------------------------------------------------------------
 
@@ -197,13 +223,51 @@ class MethodType(Enum):
 class RpcError(Exception):
     """Raised on the client side when the server reports an error."""
 
-    def __init__(self, error_type: str, error_message: str, remote_traceback: str) -> None:
+    def __init__(self, error_type: str, error_message: str, remote_traceback: str, *, request_id: str = "") -> None:
         """Initialize with error details from the remote side."""
         self.error_type = error_type
         self.error_message = error_message
         self.remote_traceback = remote_traceback
+        self.request_id = request_id
         super().__init__(f"{error_type}: {error_message}")
 
 
 class VersionError(Exception):
     """Raised when a request has a missing or incompatible protocol version."""
+
+
+# ---------------------------------------------------------------------------
+# Trace context propagation (pipe/subprocess transport)
+# ---------------------------------------------------------------------------
+
+_current_trace_headers: ContextVar[dict[str, str] | None] = ContextVar("_current_trace_headers", default=None)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch hook protocol
+# ---------------------------------------------------------------------------
+
+type HookToken = object
+"""Opaque token returned by ``_DispatchHook.on_dispatch_start``."""
+
+
+class _DispatchHook(Protocol):
+    """Internal protocol for observability hooks called around RPC dispatch."""
+
+    def on_dispatch_start(
+        self,
+        info: RpcMethodInfo,
+        auth: AuthContext,
+        transport_metadata: Mapping[str, Any],
+    ) -> HookToken:
+        """Start observability for a dispatch and return an opaque token."""
+        ...
+
+    def on_dispatch_end(
+        self,
+        token: HookToken,
+        info: RpcMethodInfo,
+        error: BaseException | None,
+    ) -> None:
+        """Finalize observability after method dispatch (success or failure)."""
+        ...
