@@ -23,6 +23,7 @@ Optional dependencies: ``pip install vgi-rpc[http]``
 from vgi_rpc.http._client import (
     HttpServerCapabilities,
     HttpStreamSession,
+    _init_http_stream_session,
     http_capabilities,
     http_connect,
     http_introspect,
@@ -51,6 +52,7 @@ __all__ = [
     "_ARROW_CONTENT_TYPE",
     "_RpcHttpError",
     "_SyncTestClient",
+    "_init_http_stream_session",
     "_SyncTestResponse",
     "http_capabilities",
     "http_connect",

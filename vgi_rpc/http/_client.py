@@ -409,6 +409,88 @@ def http_introspect(
             client.close()
 
 
+def _init_http_stream_session(
+    client: httpx.Client | _SyncTestClient,
+    url_prefix: str,
+    method_name: str,
+    reader: ValidatedReader,
+    on_log: Callable[[Message], None] | None = None,
+    *,
+    external_config: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation = IpcValidation.NONE,
+) -> HttpStreamSession:
+    """Parse an init response and return an ``HttpStreamSession``.
+
+    Reads the IPC stream from the init response, collecting state tokens,
+    pending data batches, and log/error batches.  This is shared between
+    ``_HttpProxy._make_stream_caller`` and the CLI.
+
+    Args:
+        client: HTTP client for subsequent exchange requests.
+        url_prefix: URL path prefix (e.g. ``/vgi``).
+        method_name: RPC method name.
+        reader: ``ValidatedReader`` opened from the init response.
+        on_log: Optional log callback.
+        external_config: Optional external location config.
+        ipc_validation: Validation level for IPC batches.
+
+    Returns:
+        A configured ``HttpStreamSession`` ready for iteration or exchange.
+
+    Raises:
+        RpcError: If the server reports an error in the init response.
+
+    """
+    output_schema = reader.schema
+    state_bytes: bytes | None = None
+    pending_batches: list[AnnotatedBatch] = []
+    finished = False
+
+    try:
+        while True:
+            try:
+                batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+            except StopIteration:
+                finished = True
+                break
+
+            # Check for state token (zero-row batch with STATE_KEY)
+            if batch.num_rows == 0 and custom_metadata is not None:
+                token = custom_metadata.get(STATE_KEY)
+                if token is not None:
+                    if isinstance(token, bytes):
+                        state_bytes = token
+                    break
+
+            # Dispatch log/error batches
+            if _dispatch_log_or_error(batch, custom_metadata, on_log):
+                continue
+
+            # Data batch from producer init
+            resolved_batch, resolved_cm = resolve_external_location(
+                batch, custom_metadata, external_config, on_log, reader.ipc_validation
+            )
+            pending_batches.append(AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm))
+    except RpcError:
+        _drain_stream(reader)
+        raise
+
+    _drain_stream(reader)
+
+    return HttpStreamSession(
+        client=client,
+        url_prefix=url_prefix,
+        method=method_name,
+        state_bytes=state_bytes,
+        output_schema=output_schema,
+        on_log=on_log,
+        external_config=external_config,
+        ipc_validation=ipc_validation,
+        pending_batches=pending_batches,
+        finished=finished,
+    )
+
+
 class _HttpProxy:
     """Dynamic proxy that implements RPC method calls over HTTP."""
 
@@ -491,55 +573,15 @@ class _HttpProxy:
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
 
-            # Read response
             reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
-            output_schema = reader.schema
-            state_bytes: bytes | None = None
-            pending_batches: list[AnnotatedBatch] = []
-            finished = False
-
-            try:
-                while True:
-                    try:
-                        batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
-                    except StopIteration:
-                        finished = True
-                        break
-
-                    # Check for state token (zero-row batch with STATE_KEY)
-                    if batch.num_rows == 0 and custom_metadata is not None:
-                        token = custom_metadata.get(STATE_KEY)
-                        if token is not None:
-                            if isinstance(token, bytes):
-                                state_bytes = token
-                            break
-
-                    # Dispatch log/error batches
-                    if _dispatch_log_or_error(batch, custom_metadata, on_log):
-                        continue
-
-                    # Data batch from producer init
-                    resolved_batch, resolved_cm = resolve_external_location(
-                        batch, custom_metadata, ext_cfg, on_log, reader.ipc_validation
-                    )
-                    pending_batches.append(AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm))
-            except RpcError:
-                _drain_stream(reader)
-                raise
-
-            _drain_stream(reader)
-
-            return HttpStreamSession(
+            return _init_http_stream_session(
                 client=client,
                 url_prefix=url_prefix,
-                method=info.name,
-                state_bytes=state_bytes,
-                output_schema=output_schema,
+                method_name=info.name,
+                reader=reader,
                 on_log=on_log,
                 external_config=ext_cfg,
                 ipc_validation=ipc_validation,
-                pending_batches=pending_batches,
-                finished=finished,
             )
 
         return caller

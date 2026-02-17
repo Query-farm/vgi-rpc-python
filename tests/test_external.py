@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from unittest.mock import MagicMock, patch
 
 import aiohttp
@@ -708,7 +708,7 @@ class _LargeBidiState(StreamState):
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process input and produce large output."""
         scaled = pc.multiply(input.batch.column("value"), self.factor)
-        out.emit_arrays([scaled])
+        out.emit_arrays([cast("pa.Array[Any]", scaled)])  # type: ignore[redundant-cast]
 
 
 class _ExternalService(Protocol):

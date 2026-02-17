@@ -28,6 +28,10 @@ Issues = "https://github.com/Query-farm/vgi-rpc-python/issues"
 http = ["falcon>=3.0", "httpx>=0.24", "waitress>=2.0"]
 s3 = ["boto3>=1.28"]
 gcs = ["google-cloud-storage>=2.10"]
+cli = ["typer>=0.9", "httpx>=0.24"]
+
+[project.scripts]
+vgi-rpc = "vgi_rpc.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -76,6 +80,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "google.cloud.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "typer.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -150,5 +158,6 @@ dev = [
     "pytest-timeout>=2.4.0",
     "ruff>=0.1",
     "ty>=0.0.8",
+    "typer>=0.9",
     "waitress>=2.0",
 ]

@@ -14,6 +14,7 @@ from io import BytesIO
 from typing import Any, Protocol, cast
 
 import falcon
+import falcon.testing
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from vgi_rpc.log import Level, Message
@@ -97,13 +99,9 @@ class TestMessageFactories:
             (Message.trace, Level.TRACE),
         ],
     )
-    def test_factory_creates_correct_level(self, factory: object, level: Level) -> None:
+    def test_factory_creates_correct_level(self, factory: Callable[..., Message], level: Level) -> None:
         """Each factory creates the correct level with the given message."""
-        from collections.abc import Callable
-
-        assert callable(factory)
-        f: Callable[..., Message] = factory
-        m = f("msg")
+        m = factory("msg")
         assert m.level == level
         assert m.message == "msg"
 

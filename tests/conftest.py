@@ -38,8 +38,7 @@ def _wait_for_http(port: int, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5.0)
-            del resp
+            _ = httpx.get(f"http://127.0.0.1:{port}/", timeout=5.0)
             return
         except (httpx.ConnectError, httpx.ConnectTimeout):
             time.sleep(0.1)
