@@ -34,7 +34,6 @@ from vgi_rpc.rpc import (
     RpcError,
     StreamSession,
     SubprocessTransport,
-    _dispatch_log_or_error,
     _drain_stream,
     _read_batch_with_log_check,
     _write_request,
@@ -382,7 +381,7 @@ def _run_stream(session: _StreamLike, config: _CliConfig) -> None:
 
 def _introspect_pipe(cmd: str) -> tuple[ServiceDescription, SubprocessTransport]:
     """Introspect a subprocess transport, returning both description and open transport."""
-    transport = SubprocessTransport(shlex.split(cmd))
+    transport = SubprocessTransport(shlex.split(cmd, posix=sys.platform != "win32"))
     try:
         desc = introspect(transport)
     except BaseException:
