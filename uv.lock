@@ -2012,17 +2012,19 @@ name = "vgi-rpc"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiohttp" },
     { name = "pyarrow" },
-    { name = "tenacity" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
-    { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
 cli = [
     { name = "httpx" },
     { name = "typer" },
+]
+external = [
+    { name = "aiohttp" },
+    { name = "tenacity" },
+    { name = "zstandard" },
 ]
 gcs = [
     { name = "google-cloud-storage" },
@@ -2062,20 +2064,20 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.9" },
+    { name = "aiohttp", marker = "extra == 'external'", specifier = ">=3.9" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.28" },
     { name = "falcon", marker = "extra == 'http'", specifier = ">=3.0" },
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.10" },
     { name = "httpx", marker = "extra == 'cli'", specifier = ">=0.24" },
     { name = "httpx", marker = "extra == 'http'", specifier = ">=0.24" },
     { name = "pyarrow", specifier = ">=14.0" },
-    { name = "tenacity", specifier = ">=8.0" },
+    { name = "tenacity", marker = "extra == 'external'", specifier = ">=8.0" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.9" },
     { name = "tzdata", marker = "sys_platform == 'win32'", specifier = ">=2024.1" },
     { name = "waitress", marker = "extra == 'http'", specifier = ">=2.0" },
-    { name = "zstandard", specifier = ">=0.20" },
+    { name = "zstandard", marker = "extra == 'external'", specifier = ">=0.20" },
 ]
-provides-extras = ["http", "s3", "gcs", "cli"]
+provides-extras = ["http", "s3", "gcs", "cli", "external"]
 
 [package.metadata.requires-dev]
 dev = [

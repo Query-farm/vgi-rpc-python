@@ -17,7 +17,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-dependencies = ["aiohttp>=3.9", "pyarrow>=14.0", "tenacity>=8.0", "tzdata>=2024.1; sys_platform == 'win32'", "zstandard>=0.20"]
+dependencies = ["pyarrow>=14.0", "tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.urls]
 Homepage = "https://github.com/Query-farm/vgi-rpc-python"
@@ -29,6 +29,7 @@ http = ["falcon>=3.0", "httpx>=0.24", "waitress>=2.0"]
 s3 = ["boto3>=1.28"]
 gcs = ["google-cloud-storage>=2.10"]
 cli = ["typer>=0.9", "httpx>=0.24"]
+external = ["aiohttp>=3.9", "tenacity>=8.0", "zstandard>=0.20"]
 
 [project.scripts]
 vgi-rpc = "vgi_rpc.cli:app"

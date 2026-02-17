@@ -235,6 +235,13 @@ class TestInferArrowType:
         with pytest.raises(TypeError, match="Cannot infer Arrow type"):
             _infer_arrow_type(object)
 
+    def test_tuple_raises_with_hint(self) -> None:
+        """Bare tuple and subscripted tuple both raise with a targeted hint."""
+        with pytest.raises(TypeError, match="no native heterogeneous-tuple type"):
+            _infer_arrow_type(tuple)
+        with pytest.raises(TypeError, match="no native heterogeneous-tuple type"):
+            _infer_arrow_type(tuple[str, int])
+
     def test_subscripted_list(self) -> None:
         """list[str] maps to pa.list_(pa.string())."""
         assert _infer_arrow_type(list[str]) == pa.list_(pa.string())

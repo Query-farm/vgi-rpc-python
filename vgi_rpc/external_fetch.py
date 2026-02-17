@@ -30,9 +30,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from types import TracebackType
+from typing import TYPE_CHECKING
 
-import aiohttp
-import zstandard
+if TYPE_CHECKING:
+    import aiohttp
 
 __all__ = [
     "FetchConfig",
@@ -153,6 +154,8 @@ def _ensure_pool(config: FetchConfig) -> _FetchPool:
             pool.session = None  # will be created below
 
         if pool.session is None:
+            import aiohttp
+
             if pool.loop is None:  # pragma: no cover — unreachable after block above
                 raise RuntimeError("FetchPool event loop not initialized")
             timeout = aiohttp.ClientTimeout(total=config.timeout_seconds)
@@ -166,7 +169,9 @@ def _ensure_pool(config: FetchConfig) -> _FetchPool:
 
 async def _create_session(timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSession:
     """Create a new ``aiohttp.ClientSession`` (must run on the pool loop)."""
-    return aiohttp.ClientSession(timeout=timeout)
+    import aiohttp as _aiohttp
+
+    return _aiohttp.ClientSession(timeout=timeout)
 
 
 def _reset_session(config: FetchConfig, *, url: str = "") -> None:
@@ -175,6 +180,8 @@ def _reset_session(config: FetchConfig, *, url: str = "") -> None:
     Used after ``ServerDisconnectedError`` to recover from stale pooled
     connections.
     """
+    import aiohttp
+
     _logger.warning(
         "Resetting aiohttp session due to stale connection",
         extra={"url": url},
@@ -219,6 +226,8 @@ def fetch_url(url: str, config: FetchConfig) -> bytes:
         aiohttp.ClientResponseError: On HTTP error responses.
 
     """
+    import aiohttp
+
     t0 = time.monotonic()
     pool = _ensure_pool(config)
     if pool.loop is None or pool.session is None:  # pragma: no cover
@@ -306,6 +315,8 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
 
     # Decompress if the server indicates zstd Content-Encoding
     if "zstd" in content_encoding.lower():
+        import zstandard
+
         try:
             data = zstandard.ZstdDecompressor().decompress(data)
         except zstandard.ZstdError as exc:
@@ -320,6 +331,8 @@ async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | No
     Returns ``(None, "", "")`` if the server does not support HEAD (405, 501)
     or returns an error, allowing the caller to fall back to a plain GET.
     """
+    import aiohttp as _aiohttp
+
     try:
         async with client.head(url) as resp:
             if resp.status in (405, 501):
@@ -337,7 +350,7 @@ async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | No
                     content_length = None
 
             return content_length, accept_ranges, content_encoding
-    except aiohttp.ClientResponseError as exc:
+    except _aiohttp.ClientResponseError as exc:
         if exc.status in (405, 501):
             return None, "", ""
         raise

@@ -24,11 +24,8 @@ from datetime import datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
-import aiohttp
 import pyarrow as pa
-import zstandard
 from pyarrow import ipc
-from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from vgi_rpc.external_fetch import FetchConfig, fetch_url
 from vgi_rpc.log import Message
@@ -367,6 +364,9 @@ def resolve_external_location(
     if config.url_validator is not None:
         config.url_validator(url)
 
+    import aiohttp
+    from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
+
     max_retries = min(config.max_retries, 2)  # cap at 3 total attempts
 
     retry_types: tuple[type[BaseException], ...] = (OSError, pa.ArrowInvalid, aiohttp.ClientError)
@@ -500,6 +500,8 @@ def maybe_externalize_collector(
 
     content_encoding: str | None = None
     if config.compression is not None:
+        import zstandard
+
         ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
         content_encoding = config.compression.algorithm
 
@@ -563,6 +565,8 @@ def maybe_externalize_batch(
 
     content_encoding: str | None = None
     if config.compression is not None:
+        import zstandard
+
         ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
         content_encoding = config.compression.algorithm
 

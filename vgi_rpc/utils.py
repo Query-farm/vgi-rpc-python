@@ -373,7 +373,12 @@ def _infer_arrow_type(python_type: Any) -> pa.DataType:
     - Enum: serializes as dictionary-encoded string
     - ArrowSerializableDataclass: serializes as struct
 
-    For complex types not supported here, use Annotated[T, ArrowType(...)].
+    Not supported:
+    - tuple: Arrow has no native heterogeneous-tuple type. Use a nested
+      dataclass (``ArrowSerializableDataclass``) for fixed, named fields, or
+      ``list[T]`` for homogeneous sequences.
+
+    For other complex types not supported here, use Annotated[T, ArrowType(...)].
 
     Args:
         python_type: Python type annotation.
@@ -450,6 +455,15 @@ def _infer_arrow_type(python_type: Any) -> pa.DataType:
 
     if python_type in type_map:
         return type_map[python_type]
+
+    # Provide a targeted hint for tuple, which is a common attempt
+    if python_type is tuple or origin is tuple:
+        raise TypeError(
+            f"Cannot infer Arrow type for: {python_type}. "
+            f"Arrow has no native heterogeneous-tuple type. Use a nested "
+            f"ArrowSerializableDataclass for fixed named fields, or list[T] "
+            f"for homogeneous sequences."
+        )
 
     raise TypeError(
         f"Cannot infer Arrow type for: {python_type}. "
@@ -531,6 +545,11 @@ class ArrowSerializableDataclass:
     - NewType: unwraps to underlying type (e.g., NewType("Id", bytes) -> binary)
     - Enum: serializes as dictionary-encoded string via .name
     - ArrowSerializableDataclass: serializes as struct
+
+    Not supported:
+    - tuple: Arrow has no native heterogeneous-tuple type. Use a nested
+      dataclass (``ArrowSerializableDataclass``) for fixed, named fields, or
+      ``list[T]`` for homogeneous sequences.
 
     Optional fields (annotated with `| None`) are marked as nullable.
     To override specific field types, use Annotated with ArrowType.
