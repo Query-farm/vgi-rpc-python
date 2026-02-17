@@ -9,10 +9,13 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
 - **Apache Arrow IPC wire format** — zero-copy serialization for structured data
 - **Two method types** — unary and streaming (producer and exchange patterns)
-- **Transport-agnostic** — in-process pipes, subprocess, or HTTP
+- **Transport-agnostic** — in-process pipes, subprocess, shared memory, or HTTP
 - **Automatic schema inference** — Python type annotations map to Arrow types
 - **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
 - **Runtime introspection** — opt-in `__describe__` RPC method for dynamic service discovery
+- **CLI tool** — `vgi-rpc describe` and `vgi-rpc call` for ad-hoc service interaction
+- **Shared memory transport** — zero-copy batch transfer between co-located processes
+- **IPC validation** — configurable batch validation levels for untrusted data
 - **Large batch support** — transparent externalization to S3/GCS for oversized data
 
 ## Installation
@@ -27,6 +30,7 @@ Optional extras:
 pip install vgi-rpc[http]   # HTTP transport (Falcon + httpx)
 pip install vgi-rpc[s3]     # S3 storage backend
 pip install vgi-rpc[gcs]    # Google Cloud Storage backend
+pip install vgi-rpc[cli]    # CLI tool (typer + httpx)
 ```
 
 Requires Python 3.12+.
@@ -74,6 +78,50 @@ with serve_pipe(Calculator, CalculatorImpl()) as proxy:
     greeting = proxy.greet(name="World")
     print(greeting)  # Hello, World!
 ```
+
+## CLI
+
+The `vgi-rpc` command-line tool lets you introspect and call methods on any service that has `enable_describe=True`. Requires `pip install vgi-rpc[cli]`.
+
+### Describe a service
+
+```bash
+# Subprocess transport
+vgi-rpc describe --cmd "python worker.py"
+
+# HTTP transport
+vgi-rpc describe --url http://localhost:8000
+
+# JSON output
+vgi-rpc describe --cmd "python worker.py" --format json
+```
+
+### Call a method
+
+```bash
+# Unary call with key=value parameters
+vgi-rpc call add --cmd "python worker.py" a=1.0 b=2.0
+
+# JSON parameter input
+vgi-rpc call add --url http://localhost:8000 --json '{"a": 1.0, "b": 2.0}'
+
+# Producer stream (table output)
+vgi-rpc call countdown --cmd "python worker.py" n=5 --format table
+
+# Exchange stream (pipe JSON lines to stdin)
+echo '{"value": 1.0}' | vgi-rpc call accumulate --url http://localhost:8000
+```
+
+### Options
+
+| Option | Short | Description |
+|---|---|---|
+| `--url` | `-u` | HTTP base URL |
+| `--cmd` | `-c` | Subprocess command |
+| `--prefix` | `-p` | URL path prefix (default `/vgi`) |
+| `--format` | `-f` | Output format: `auto`, `json`, or `table` |
+| `--verbose` | `-v` | Show server log messages on stderr |
+| `--json` | `-j` | Pass parameters as a JSON string (for `call`) |
 
 ## Defining Services
 
@@ -300,6 +348,34 @@ from vgi_rpc import connect
 with connect(MyService, [sys.executable, "worker.py"]) as proxy:
     result = proxy.echo(message="hello")  # proxy is typed as MyService
 ```
+
+### Shared memory
+
+`ShmPipeTransport` wraps a `PipeTransport` with a shared memory side-channel for zero-copy batch transfer. When a batch fits in the shared memory segment, only a small pointer is sent over the pipe; the receiver reads the data directly from shared memory. Falls back to normal pipe IPC for oversized batches.
+
+```python
+from vgi_rpc.shm import ShmSegment
+
+from vgi_rpc import ShmPipeTransport, RpcServer, make_pipe_pair
+
+# Create a shared memory segment (both sides must agree on name and size)
+shm = ShmSegment.create(size=100 * 1024 * 1024)  # 100 MB
+
+# Wrap a pipe transport with shared memory
+client_pipe, server_pipe = make_pipe_pair()
+client_transport = ShmPipeTransport(client_pipe, shm)
+server_transport = ShmPipeTransport(server_pipe, shm)
+
+# Use as normal transports
+server = RpcServer(MyService, MyServiceImpl())
+# ... serve on server_transport, connect via client_transport ...
+
+# Cleanup
+shm.close()
+shm.unlink()  # destroy the segment
+```
+
+The lockstep RPC protocol guarantees only one side is active at a time, so no locking is needed. The segment uses a bump-pointer allocator stored in a fixed 4 KB header.
 
 ### HTTP
 
@@ -842,6 +918,49 @@ storage = GCSStorage(
 | `max_fetch_bytes` | 256 MiB | Hard cap on total download size |
 | `speculative_retry_multiplier` | 2.0 | Hedge threshold (multiplier of median chunk time) |
 
+## Examples
+
+The [`examples/`](examples/) directory contains runnable scripts demonstrating key features:
+
+| Example | Description |
+|---|---|
+| [`hello_world.py`](examples/hello_world.py) | Minimal quickstart with in-process pipe transport |
+| [`streaming.py`](examples/streaming.py) | Producer and exchange stream patterns |
+| [`structured_types.py`](examples/structured_types.py) | Dataclass parameters with enums and nested types |
+| [`http_server.py`](examples/http_server.py) | HTTP server with Falcon + waitress |
+| [`http_client.py`](examples/http_client.py) | HTTP client connecting to the server |
+| [`subprocess_worker.py`](examples/subprocess_worker.py) | Subprocess worker entry point |
+| [`subprocess_client.py`](examples/subprocess_client.py) | Subprocess client with error handling |
+
+## IPC Validation
+
+Incoming Arrow IPC batches can be validated at configurable levels via `IpcValidation`:
+
+| Level | Description |
+|---|---|
+| `IpcValidation.NONE` | No validation (fastest) |
+| `IpcValidation.STANDARD` | Calls `batch.validate()` — checks structural integrity |
+| `IpcValidation.FULL` | Calls `batch.validate(full=True)` — also checks data buffers |
+
+Both server and client default to `IpcValidation.FULL`. You can lower the level for performance-sensitive paths:
+
+```python
+from vgi_rpc import IpcValidation, RpcServer, connect, serve_pipe
+
+# Server: validate incoming requests (default is FULL)
+server = RpcServer(MyService, MyServiceImpl(), ipc_validation=IpcValidation.FULL)
+
+# Client: opt into lighter validation for performance
+with connect(MyService, ["python", "worker.py"], ipc_validation=IpcValidation.STANDARD) as proxy:
+    proxy.echo(message="hello")
+
+# In-process: both sides default to FULL
+with serve_pipe(MyService, MyServiceImpl()) as proxy:
+    proxy.echo(message="hello")
+```
+
+Invalid batches raise `IPCError`.
+
 ## Wire Protocol Specification
 
 ### Framing
@@ -876,6 +995,9 @@ All framework metadata keys live in the `vgi_rpc.` namespace:
 | `vgi_rpc.location.source` | batch metadata | Fetch source (diagnostics) |
 | `vgi_rpc.protocol_name` | schema metadata | Protocol class name (`__describe__` response) |
 | `vgi_rpc.describe_version` | schema metadata | Introspection format version (`__describe__` response) |
+| `vgi_rpc.shm_offset` | batch metadata | Shared memory offset (SHM pointer batch) |
+| `vgi_rpc.shm_length` | batch metadata | Shared memory length (SHM pointer batch) |
+| `vgi_rpc.shm_source` | batch metadata | SHM source indicator (diagnostics) |
 
 ### Unary wire format
 

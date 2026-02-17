@@ -173,7 +173,7 @@ class MethodDescription:
     """Description of a single RPC method from introspection.
 
     For ``STREAM`` methods, ``result_schema`` reflects the Protocol-level
-    return type (typically empty).  The actual stream output schema is
+    return type (always empty).  The actual stream output schema is
     determined at runtime by the implementation and cannot be reported
     statically.
 
@@ -389,12 +389,12 @@ def parse_describe_batch(batch: pa.RecordBatch) -> ServiceDescription:
 
 def introspect(
     transport: RpcTransport,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> ServiceDescription:
-    """Send a ``__describe__`` request over a pipe/subprocess transport.
+    """Send a ``__describe__`` request over any ``RpcTransport``.
 
     Args:
-        transport: An open ``RpcTransport`` (pipe or subprocess).
+        transport: An open ``RpcTransport``.
         ipc_validation: Validation level for incoming IPC batches.
 
     Returns:

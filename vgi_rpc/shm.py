@@ -92,7 +92,7 @@ class _ShmSink(RawIOBase):
     (memoryview format ``'b'``, signed).  We cast to unsigned ``'B'``
     before writing to the SHM memoryview.
 
-    Inherits from ``RawIOBase`` to satisfy ``pa.output_stream()`` type
+    Inherits from ``RawIOBase`` to satisfy ``ipc.new_stream()`` type
     requirements.
     """
 

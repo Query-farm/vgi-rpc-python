@@ -79,6 +79,10 @@ class FetchConfig:
         speculative_retry_multiplier: Launch a hedge request for chunks
             taking longer than ``multiplier * median``.  Set to ``0`` to
             disable hedging.
+        max_speculative_hedges: Maximum number of hedge requests per
+            fetch.  Prevents runaway request amplification under
+            adversarial or slow-backend conditions.  ``0`` means no
+            limit (bounded only by chunk count).
 
     """
 
@@ -88,6 +92,7 @@ class FetchConfig:
     timeout_seconds: float = 60.0
     max_fetch_bytes: int = 256 * 1024 * 1024
     speculative_retry_multiplier: float = 2.0
+    max_speculative_hedges: int = 4
 
     _pool: _FetchPool = field(default_factory=_FetchPool, init=False, repr=False, compare=False, hash=False)
 
@@ -456,14 +461,20 @@ async def _fetch_chunks_with_hedging(
                 break
 
             # Time-based hedging: after >= 2 completions, hedge any pending
-            # chunk whose elapsed time exceeds median * multiplier
-            if hedging_enabled and len(completion_times) >= 2:
+            # chunk whose elapsed time exceeds median * multiplier.
+            # Capped by max_speculative_hedges (0 = unlimited).
+            hedge_budget_exhausted = (
+                config.max_speculative_hedges > 0 and len(hedged_chunks) >= config.max_speculative_hedges
+            )
+            if hedging_enabled and not hedge_budget_exhausted and len(completion_times) >= 2:
                 sorted_times = sorted(completion_times)
                 median = sorted_times[len(sorted_times) // 2]
                 threshold = median * config.speculative_retry_multiplier
                 now = time.monotonic()
 
                 for task in list(pending):
+                    if config.max_speculative_hedges > 0 and len(hedged_chunks) >= config.max_speculative_hedges:
+                        break
                     chunk_idx = task_to_chunk.get(task)
                     if chunk_idx is None or chunk_idx in hedged_chunks or chunk_idx in results:
                         continue

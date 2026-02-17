@@ -272,6 +272,47 @@ class TestResumableServerStream:
         err = _extract_rpc_error(resp)
         assert "token" in err.error_message.lower() or "Malformed" in err.error_message
 
+    def test_wrong_token_version_400(self, resumable_client: _SyncTestClient) -> None:
+        """Token with an unsupported version byte returns 400."""
+        import hashlib
+        import hmac as hmac_mod
+        import struct
+
+        import pyarrow as pa
+
+        from vgi_rpc.metadata import STATE_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        # Build a structurally valid token with a wrong version byte
+        bad_version = 99
+        state_bytes = schema_bytes = input_bytes = b""
+        payload = (
+            struct.pack("B", bad_version)
+            + struct.pack("<I", len(state_bytes))
+            + state_bytes
+            + struct.pack("<I", len(schema_bytes))
+            + schema_bytes
+            + struct.pack("<I", len(input_bytes))
+            + input_bytes
+        )
+        mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
+        token = payload + mac
+
+        req_buf = BytesIO()
+        state_md = pa.KeyValueMetadata({STATE_KEY: token})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
+
+        resp = resumable_client.post(
+            f"{_BASE_URL}/vgi/generate/exchange",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 400
+        err = _extract_rpc_error(resp)
+        assert "version" in err.error_message.lower()
+
     def test_single_batch_no_continuation(self) -> None:
         """A stream with one batch doesn't need continuation even with small limit."""
         c = make_sync_client(

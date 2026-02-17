@@ -2,8 +2,9 @@
 
 Centralises well-known metadata keys (including the wire-protocol version
 constant ``REQUEST_VERSION``), encoding/decoding, merging, and key-stripping
-so that ``rpc.py``, ``http.py``, and ``utils.py`` share a single
-implementation instead of duplicating these patterns.
+so that ``rpc/``, ``http/``, ``log.py``, ``external.py``, ``shm.py``,
+and ``introspect.py`` share a single implementation instead of
+duplicating these patterns.
 """
 
 from __future__ import annotations

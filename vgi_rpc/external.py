@@ -53,6 +53,7 @@ __all__ = [
     "FetchConfig",
     "UploadUrl",
     "UploadUrlProvider",
+    "https_only_validator",
 ]
 
 
@@ -67,10 +68,22 @@ class ExternalStorage(Protocol):
 
     Implementations must be thread-safe — ``upload()`` may be called
     concurrently from different server threads.
+
+    .. important:: **Object lifecycle** — vgi-rpc does not manage the
+       lifecycle of uploaded objects.  Data uploaded via ``upload()``
+       or ``generate_upload_url()`` persists indefinitely unless the
+       server operator configures cleanup.  Use storage-level lifecycle
+       rules (e.g. S3 Lifecycle Policies, GCS Object Lifecycle
+       Management) or bucket-level TTLs to automatically expire and
+       delete stale objects.
     """
 
     def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Upload serialized IPC data and return a URL for retrieval.
+
+        The uploaded object is not automatically deleted — server
+        operators are responsible for configuring object cleanup via
+        storage lifecycle rules or TTLs.
 
         Args:
             data: Complete Arrow IPC stream bytes.
@@ -117,10 +130,22 @@ class UploadUrlProvider(Protocol):
 
     Implementations must be thread-safe — ``generate_upload_url()``
     may be called concurrently from different server threads.
+
+    .. important:: **Object lifecycle** — vgi-rpc does not manage the
+       lifecycle of uploaded objects.  Data uploaded via these URLs
+       persists indefinitely unless the server operator configures
+       cleanup.  Use storage-level lifecycle rules (e.g. S3 Lifecycle
+       Policies, GCS Object Lifecycle Management) or bucket-level TTLs
+       to automatically expire and delete stale objects.
     """
 
     def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
         """Generate a pre-signed upload/download URL pair.
+
+        The caller receives time-limited PUT and GET URLs for a new
+        storage object.  **The uploaded object is not automatically
+        deleted** — server operators are responsible for configuring
+        object cleanup via storage lifecycle rules or TTLs.
 
         Args:
             schema: The Arrow schema of the data to be uploaded.
@@ -131,6 +156,33 @@ class UploadUrlProvider(Protocol):
 
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# URL validation
+# ---------------------------------------------------------------------------
+
+
+def https_only_validator(url: str) -> None:
+    """Reject URLs that do not use the ``https`` scheme.
+
+    This is the default ``url_validator`` for ``ExternalLocationConfig``.
+    It prevents the client from issuing requests over plain HTTP or other
+    schemes (``ftp``, ``file``, etc.) when resolving external-location
+    pointers.
+
+    Args:
+        url: The URL to validate.
+
+    Raises:
+        ValueError: If the URL scheme is not ``https``.
+
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"URL scheme '{parsed.scheme}' not allowed (only 'https' is permitted)")
 
 
 # ---------------------------------------------------------------------------
@@ -158,10 +210,10 @@ class ExternalLocationConfig:
     """Configuration for ExternalLocation batch support.
 
     .. note:: **Trust boundary** — When resolution is enabled, the
-       client will fetch URLs embedded in server responses.  Only
-       connect to trusted RPC servers; an untrusted server could embed
-       arbitrary URLs, causing the client to issue requests to
-       attacker-controlled hosts.
+       client will fetch URLs embedded in server responses.  The
+       default ``url_validator`` (``https_only_validator``) rejects
+       non-HTTPS URLs, but callers should still only connect to
+       **trusted** RPC servers.
 
     Attributes:
         storage: Storage backend for uploading externalized data.
@@ -177,6 +229,10 @@ class ExternalLocationConfig:
             timeouts, and size limits.  Defaults to sensible values.
         compression: Compression settings for externalized data.
             ``None`` disables compression (default).
+        url_validator: Callback invoked before fetching external
+            URLs.  Should raise ``ValueError`` to reject.  Defaults
+            to ``https_only_validator`` (HTTPS-only).  Set to
+            ``None`` to disable validation.
 
     """
 
@@ -186,6 +242,7 @@ class ExternalLocationConfig:
     retry_delay_seconds: float = 0.5
     fetch_config: FetchConfig = field(default_factory=FetchConfig)
     compression: Compression | None = None
+    url_validator: Callable[[str], None] | None = field(default=https_only_validator)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +316,7 @@ def resolve_external_location(
     custom_metadata: pa.KeyValueMetadata | None,
     config: ExternalLocationConfig | None,
     on_log: _OnLog = None,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Resolve an ExternalLocation pointer batch, or return it unchanged.
 
@@ -269,10 +326,10 @@ def resolve_external_location(
 
     .. note:: **Trust boundary** — The URLs fetched by this function
        originate from the server / storage layer (pre-signed S3/GCS
-       URLs generated by ``ExternalStorage.upload()``).  Callers should
-       only connect to **trusted** RPC servers; an untrusted server
-       could return arbitrary URLs, turning the client into an open
-       HTTP proxy.
+       URLs generated by ``ExternalStorage.upload()``).  The
+       ``url_validator`` on ``ExternalLocationConfig`` (default:
+       ``https_only_validator``) is called before each fetch to
+       reject disallowed schemes or hosts.
 
     Args:
         batch: A record batch (pointer or regular data).
@@ -292,7 +349,9 @@ def resolve_external_location(
             detected, the fetched stream contains no data batch or
             multiple data batches, or the fetch exceeds
             ``config.fetch_config.max_fetch_bytes``.
-        ValueError: If the fetched data has a schema mismatch.
+        ValueError: If the URL fails validation (e.g. non-HTTPS when using
+            ``https_only_validator``) or the fetched data has a schema
+            mismatch.
 
     """
     if config is None or not is_external_location_batch(batch, custom_metadata):
@@ -304,6 +363,9 @@ def resolve_external_location(
     url_bytes = custom_metadata.get(LOCATION_KEY)
     assert url_bytes is not None
     url = url_bytes.decode() if isinstance(url_bytes, bytes) else str(url_bytes)
+
+    if config.url_validator is not None:
+        config.url_validator(url)
 
     max_retries = min(config.max_retries, 2)  # cap at 3 total attempts
 
@@ -332,7 +394,7 @@ def _fetch_and_resolve(
     url: str,
     config: ExternalLocationConfig,
     on_log: _OnLog,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Fetch URL and extract the data batch from the IPC stream."""
     from vgi_rpc.rpc import _dispatch_log_or_error

@@ -401,6 +401,76 @@ class TestFetchHedging:
 
             assert result == data
 
+    def test_hedge_cap_limits_extra_requests(self) -> None:
+        """max_speculative_hedges caps the number of hedge requests launched."""
+        chunk_size = 500
+        data = b"h" * 4000  # 8 chunks — enough that many could be hedged
+        url = "https://example.com/hedge-cap"
+        hedge_count = 0
+
+        with FetchConfig(
+            parallel_threshold_bytes=100,
+            chunk_size_bytes=chunk_size,
+            max_parallel_requests=16,
+            speculative_retry_multiplier=1.0,  # aggressive — hedge above median
+            max_speculative_hedges=2,
+        ) as config:
+            first_attempt_for_chunk: dict[int, bool] = {}
+
+            async def _slow_callback(url_: Any, **kwargs: Any) -> CallbackResult:
+                nonlocal hedge_count
+                headers = kwargs.get("headers", {})
+                range_header = headers.get("Range", "")
+                if range_header:
+                    match = re.match(r"bytes=(\d+)-(\d+)", range_header)
+                    if match:
+                        start, end = int(match.group(1)), int(match.group(2))
+                        chunk_idx = start // chunk_size
+                        is_first = first_attempt_for_chunk.get(chunk_idx) is None
+                        if is_first:
+                            first_attempt_for_chunk[chunk_idx] = True
+                        else:
+                            hedge_count += 1
+                        # Slow down chunks 2-5 so they all exceed the threshold
+                        if chunk_idx in (2, 3, 4, 5) and is_first:
+                            await asyncio.sleep(0.5)
+                        chunk = data[start : end + 1]
+                        return CallbackResult(
+                            status=206,
+                            body=chunk,
+                            headers={
+                                "Content-Range": f"bytes {start}-{end}/{len(data)}",
+                                "Content-Length": str(len(chunk)),
+                            },
+                        )
+                return CallbackResult(status=200, body=data)
+
+            with aioresponses() as mock:
+                _register_head(mock, url, data)
+                mock.get(url, callback=_slow_callback, repeat=True)
+                result = fetch_url(url, config)
+
+            assert result == data
+            # 4 chunks are slow enough to trigger hedging, but only 2 allowed
+            assert hedge_count <= 2
+
+    def test_hedge_cap_zero_means_unlimited(self) -> None:
+        """max_speculative_hedges=0 disables the cap (backward-compatible)."""
+        data = b"u" * 2000  # 4 chunks
+        url = "https://example.com/hedge-unlimited"
+        with FetchConfig(
+            parallel_threshold_bytes=100,
+            chunk_size_bytes=500,
+            max_parallel_requests=8,
+            speculative_retry_multiplier=1.0,
+            max_speculative_hedges=0,
+        ) as config:
+            with aioresponses() as mock:
+                _register_range_url(mock, url, data)
+                result = fetch_url(url, config)
+
+            assert result == data
+
 
 class TestFetchErrors:
     """Tests for error propagation."""

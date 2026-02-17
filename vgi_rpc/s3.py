@@ -127,6 +127,10 @@ class S3Storage:
     def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
         """Generate pre-signed PUT and GET URLs for client-side upload.
 
+        The created S3 object is not automatically deleted.  Configure
+        S3 Lifecycle Policies on the bucket to expire objects after
+        a suitable retention period.
+
         Args:
             schema: The Arrow schema of the data to be uploaded
                 (unused but available for metadata hints).

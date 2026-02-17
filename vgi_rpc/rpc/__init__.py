@@ -268,7 +268,7 @@ def connect[P](
     external_location: ExternalLocationConfig | None = None,
     stderr: StderrMode = StderrMode.INHERIT,
     stderr_logger: logging.Logger | None = None,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> Iterator[P]:
     """Connect to a subprocess RPC server.
 
@@ -322,9 +322,8 @@ def serve_pipe[P](
         external_location: Optional ExternalLocation configuration for
             resolving and producing externalized batches.
         ipc_validation: Validation level for incoming IPC batches.
-            When ``None`` (the default), each component uses its own
-            default — ``RpcServer`` gets ``FULL``, ``RpcConnection``
-            gets ``NONE``.
+            When ``None`` (the default), both components use
+            ``IpcValidation.FULL``.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -345,7 +344,7 @@ def serve_pipe[P](
             client_transport,
             on_log=on_log,
             external_location=external_location,
-            ipc_validation=ipc_validation if ipc_validation is not None else IpcValidation.NONE,
+            ipc_validation=ipc_validation if ipc_validation is not None else IpcValidation.FULL,
         ) as proxy:
             yield proxy
     finally:

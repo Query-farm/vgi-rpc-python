@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 def _open_response_stream(
     content: bytes,
     status_code: int,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> ValidatedReader:
     """Open an Arrow IPC stream from HTTP response bytes.
 
@@ -131,7 +131,7 @@ class HttpStreamSession:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
-        ipc_validation: IpcValidation = IpcValidation.NONE,
+        ipc_validation: IpcValidation = IpcValidation.FULL,
         pending_batches: list[AnnotatedBatch] | None = None,
         finished: bool = False,
     ) -> None:
@@ -291,7 +291,7 @@ def http_connect[P](
     on_log: Callable[[Message], None] | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
     external_location: ExternalLocationConfig | None = None,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> Iterator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -300,12 +300,12 @@ def http_connect[P](
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
             Required when *client* is ``None``; ignored when a pre-built
             *client* is provided.  The internally-created client follows
-            redirects (307/308) transparently.
+            redirects transparently.
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         on_log: Optional callback for log messages from the server.
         client: Optional HTTP client — ``httpx.Client`` for production,
             or a ``_SyncTestClient`` from ``make_sync_client()`` for testing.
-        external_location: Optional ExternalLocation configuration for
+        external_location: Optional ExternalLocationConfig for
             resolving and producing externalized batches.
         ipc_validation: Validation level for incoming IPC batches.
 
@@ -340,7 +340,7 @@ def http_introspect(
     *,
     prefix: str = "/vgi",
     client: httpx.Client | _SyncTestClient | None = None,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> ServiceDescription:
     """Send a ``__describe__`` request over HTTP and return a ``ServiceDescription``.
 
@@ -417,7 +417,7 @@ def _init_http_stream_session(
     on_log: Callable[[Message], None] | None = None,
     *,
     external_config: ExternalLocationConfig | None = None,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> HttpStreamSession:
     """Parse an init response and return an ``HttpStreamSession``.
 
@@ -502,7 +502,7 @@ class _HttpProxy:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
-        ipc_validation: IpcValidation = IpcValidation.NONE,
+        ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> None:
         self._protocol = protocol
         self._client = client
@@ -597,12 +597,14 @@ class HttpServerCapabilities:
     """Capabilities advertised by an HTTP RPC server.
 
     Attributes:
-        max_request_bytes: Maximum request body size the server accepts,
+        max_request_bytes: Maximum request body size the server advertises,
             or ``None`` if the server does not advertise a limit.
+            Advertisement only -- no server-side enforcement.
         upload_url_support: Whether the server supports the
             ``__upload_url__`` endpoint for client-side uploads.
-        max_upload_bytes: Maximum upload size the server accepts for
+        max_upload_bytes: Maximum upload size the server advertises for
             client-vended URLs, or ``None`` if not advertised.
+            Advertisement only -- no server-side enforcement.
 
     """
 

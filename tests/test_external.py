@@ -25,6 +25,7 @@ from vgi_rpc.external import (
     ExternalLocationConfig,
     ExternalStorage,
     UploadUrl,
+    https_only_validator,
     is_external_location_batch,
     make_external_location_batch,
     maybe_externalize_batch,
@@ -453,6 +454,117 @@ class TestResolveExternalLocation:
             resolved, _ = resolve_external_location(pointer, cm, config)
 
         assert resolved.num_rows == 1000
+
+
+# ===========================================================================
+# Unit tests — URL validation
+# ===========================================================================
+
+
+class TestUrlValidation:
+    """Tests for url_validator on ExternalLocationConfig."""
+
+    def test_default_rejects_http(self) -> None:
+        """Default config rejects http:// URLs with ValueError."""
+        config = ExternalLocationConfig(max_retries=0)
+        url = "http://insecure.example.com/data"
+        pointer, cm = make_external_location_batch(_SCHEMA, url)
+
+        with pytest.raises(ValueError, match="URL scheme 'http' not allowed"):
+            resolve_external_location(pointer, cm, config)
+
+    def test_default_accepts_https(self) -> None:
+        """Default config accepts https:// URLs — resolution proceeds."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, max_retries=0)
+
+        data_batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_SCHEMA)
+        ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
+        url = "https://mock.storage/valid"
+        storage.data[url] = ipc_bytes
+
+        pointer, cm = make_external_location_batch(_SCHEMA, url)
+
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(pointer, cm, config)
+
+        assert resolved.num_rows == 1
+        assert resolved.column("value")[0].as_py() == 42
+
+    def test_validator_none_disables_validation(self) -> None:
+        """url_validator=None disables validation — any scheme accepted."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, max_retries=0, url_validator=None)
+
+        data_batch = pa.RecordBatch.from_pydict({"value": [7]}, schema=_SCHEMA)
+        ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
+        url = "http://mock.storage/novalidation"
+        storage.data[url] = ipc_bytes
+
+        pointer, cm = make_external_location_batch(_SCHEMA, url)
+
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(pointer, cm, config)
+
+        assert resolved.num_rows == 1
+
+    def test_custom_validator_rejects_domain(self) -> None:
+        """Custom url_validator can reject specific domains."""
+
+        def reject_evil(url: str) -> None:
+            from urllib.parse import urlparse
+
+            if urlparse(url).hostname == "evil.example.com":
+                raise ValueError("Domain not allowed")
+
+        config = ExternalLocationConfig(max_retries=0, url_validator=reject_evil)
+        pointer, cm = make_external_location_batch(_SCHEMA, "https://evil.example.com/data")
+
+        with pytest.raises(ValueError, match="Domain not allowed"):
+            resolve_external_location(pointer, cm, config)
+
+    def test_custom_validator_allows_good_domain(self) -> None:
+        """Custom url_validator passes for allowed domains."""
+
+        def reject_evil(url: str) -> None:
+            from urllib.parse import urlparse
+
+            if urlparse(url).hostname == "evil.example.com":
+                raise ValueError("Domain not allowed")
+
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, max_retries=0, url_validator=reject_evil)
+
+        data_batch = pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA)
+        ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
+        url = "https://mock.storage/good"
+        storage.data[url] = ipc_bytes
+
+        pointer, cm = make_external_location_batch(_SCHEMA, url)
+
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(pointer, cm, config)
+
+        assert resolved.num_rows == 1
+
+    def test_https_only_validator_accepts_https(self) -> None:
+        """https_only_validator accepts https URLs."""
+        https_only_validator("https://example.com/data")
+
+    def test_https_only_validator_rejects_http(self) -> None:
+        """https_only_validator rejects http URLs."""
+        with pytest.raises(ValueError, match="only 'https' is permitted"):
+            https_only_validator("http://example.com/data")
+
+    def test_https_only_validator_rejects_ftp(self) -> None:
+        """https_only_validator rejects ftp URLs."""
+        with pytest.raises(ValueError, match="only 'https' is permitted"):
+            https_only_validator("ftp://example.com/data")
+
+    def test_https_only_validator_rejects_empty_scheme(self) -> None:
+        """https_only_validator rejects URLs with no scheme."""
+        with pytest.raises(ValueError, match="only 'https' is permitted"):
+            https_only_validator("example.com/data")
 
 
 # ===========================================================================

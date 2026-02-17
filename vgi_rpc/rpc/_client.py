@@ -48,7 +48,7 @@ class StreamSession:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
-        ipc_validation: IpcValidation = IpcValidation.NONE,
+        ipc_validation: IpcValidation = IpcValidation.FULL,
         shm: ShmSegment | None = None,
     ) -> None:
         """Initialize with writer/reader streams and optional log callback."""
@@ -89,9 +89,14 @@ class StreamSession:
     def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch, receive the output batch.
 
-        Always returns an ``AnnotatedBatch``. Log batches are delivered to
+        Returns an ``AnnotatedBatch``. Log batches are delivered to
         the ``on_log`` callback before returning. On ``RpcError``, the
         session is automatically closed so the transport is clean.
+
+        Raises:
+            StopIteration: When the stream has finished.
+            RpcError: On server-side errors.
+
         """
         self._write_batch(input)
         try:
@@ -181,7 +186,7 @@ class _RpcProxy:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_config: ExternalLocationConfig | None = None,
-        ipc_validation: IpcValidation = IpcValidation.NONE,
+        ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> None:
         self._protocol = protocol
         self._transport = transport
@@ -266,7 +271,7 @@ class RpcConnection[P]:
         on_log: Callable[[Message], None] | None = None,
         *,
         external_location: ExternalLocationConfig | None = None,
-        ipc_validation: IpcValidation = IpcValidation.NONE,
+        ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> None:
         """Initialize with a protocol type and transport."""
         self._protocol = protocol

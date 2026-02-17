@@ -119,6 +119,10 @@ class GCSStorage:
     def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
         """Generate signed PUT and GET URLs for client-side upload.
 
+        The created GCS object is not automatically deleted.  Configure
+        GCS Object Lifecycle Management on the bucket to expire objects
+        after a suitable retention period.
+
         Args:
             schema: The Arrow schema of the data to be uploaded
                 (unused but available for metadata hints).

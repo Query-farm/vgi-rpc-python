@@ -218,7 +218,7 @@ class StreamState(ArrowSerializableDataclass, abc.ABC):
     For producer streams, ``input`` is a zero-row empty-schema tick
     batch that can be ignored; call ``out.finish()`` to signal stream end.
 
-    For exchange streams (old bidi pattern), ``input`` is real data.
+    For exchange streams, ``input`` is real data.
     State is mutated in-place across calls.
 
     Extends ``ArrowSerializableDataclass`` so that state can be serialized

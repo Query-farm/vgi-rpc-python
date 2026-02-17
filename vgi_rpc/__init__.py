@@ -3,7 +3,14 @@
 import contextlib
 import logging
 
-from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider
+from vgi_rpc.external import (
+    Compression,
+    ExternalLocationConfig,
+    ExternalStorage,
+    UploadUrl,
+    UploadUrlProvider,
+    https_only_validator,
+)
 from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.introspect import (
     DESCRIBE_METHOD_NAME,
@@ -129,6 +136,7 @@ __all__ = [
     "ExternalLocationConfig",
     "ExternalStorage",
     "FetchConfig",
+    "https_only_validator",
     # Upload URLs
     "UploadUrl",
     "UploadUrlProvider",

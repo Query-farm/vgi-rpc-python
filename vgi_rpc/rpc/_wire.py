@@ -53,10 +53,10 @@ def _convert_for_arrow(val: object) -> object:
     Inverse of ``_deserialize_value``.  Handles types that Arrow cannot
     serialize directly:
 
+    - ArrowSerializableDataclass → bytes
     - Enum → .name (string)
     - frozenset → list
     - dict → list of tuples (for map types)
-    - ArrowSerializableDataclass → bytes
     """
     if isinstance(val, ArrowSerializableDataclass):
         return val.serialize_to_bytes()
@@ -173,7 +173,7 @@ def _write_result_batch(
 
 
 def _read_request(
-    reader_stream: IOBase, ipc_validation: IpcValidation = IpcValidation.NONE
+    reader_stream: IOBase, ipc_validation: IpcValidation = IpcValidation.FULL
 ) -> tuple[str, dict[str, Any]]:
     """Read a request IPC stream, return (method_name, kwargs).
 
@@ -181,7 +181,8 @@ def _read_request(
     from the batch's custom_metadata.
 
     Raises:
-        RpcError: If ``vgi_rpc.method`` is missing.
+        RpcError: If ``vgi_rpc.method`` is missing or if the request
+            batch has a non-empty schema but ``num_rows != 1``.
         VersionError: If ``vgi_rpc.request_version`` is missing or
             does not match ``REQUEST_VERSION``.
 
@@ -286,7 +287,7 @@ def _dispatch_log_or_error(
     return True
 
 
-def _deserialize_value(value: object, type_hint: Any, ipc_validation: IpcValidation = IpcValidation.NONE) -> object:
+def _deserialize_value(value: object, type_hint: Any, ipc_validation: IpcValidation = IpcValidation.FULL) -> object:
     """Deserialize a single value based on its type hint.
 
     Inverse of ``_convert_for_arrow``.  Handles ArrowSerializableDataclass,
@@ -314,7 +315,7 @@ def _deserialize_value(value: object, type_hint: Any, ipc_validation: IpcValidat
 
 
 def _deserialize_params(
-    kwargs: dict[str, Any], param_types: dict[str, Any], ipc_validation: IpcValidation = IpcValidation.NONE
+    kwargs: dict[str, Any], param_types: dict[str, Any], ipc_validation: IpcValidation = IpcValidation.FULL
 ) -> None:
     """Deserialize params that lose type fidelity through as_py() in-place.
 
@@ -391,6 +392,9 @@ def _read_batch_with_log_check(
     ``_dispatch_log_or_error``).  Returns the first data batch as an
     ``AnnotatedBatch``.  ``StopIteration`` and ``RpcError`` propagate
     to the caller.
+
+    If *external_config* is provided and the batch is an external
+    location pointer, resolves it by fetching the data from the URL.
 
     If *shm* is provided and the batch is a shared memory
     pointer, resolves it via zero-copy read from shared memory.

@@ -1,19 +1,23 @@
 """IPC utility functions for Arrow message reading and writing.
 
 This module provides helper functions for common IPC patterns used in the
-VGI protocol, reducing code duplication between client and worker.
+VGI protocol, reducing code duplication between client and server.
 
 KEY FUNCTIONS
 -------------
 serialize_record_batch(destination, batch, custom_metadata) : Serialize to stream
-serialize_record_batch_bytes(batch, custom_metadata) : Serialize to bytes
-deserialize_record_batch(data) : Deserialize from bytes
-read_single_record_batch(stream, context) : Read and validate single batch
+deserialize_record_batch(data, ipc_validation) : Deserialize from bytes
+read_single_record_batch(stream, context, ipc_validation) : Read and validate single batch
+empty_batch(schema) : Create a zero-row batch from a schema
+validate_batch(batch, schema) : Validate a batch against a schema
 
 KEY CLASSES
 -----------
 ArrowSerializableDataclass : Mixin for dataclasses with automatic Arrow IPC serialization.
+ArrowType : Protocol for custom Arrow type annotations.
 IPCError : Exception raised on IPC communication errors
+IpcValidation : Enum controlling batch validation level (NONE, FULL).
+ValidatedReader : Wrapper around RecordBatchStreamReader with configurable validation.
 
 """
 
@@ -208,7 +212,7 @@ def serialize_record_batch_bytes(
 
 def deserialize_record_batch(
     data: bytes,
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Deserialize bytes back to a RecordBatch with custom metadata.
 
@@ -236,7 +240,7 @@ def deserialize_record_batch(
 def read_single_record_batch(
     stream: IOBase,
     context: str = "batch",
-    ipc_validation: IpcValidation = IpcValidation.NONE,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Read a single record batch from a stream.
 
@@ -481,7 +485,6 @@ class _ArrowSchemaDescriptor:
 
     def _generate_schema(self, cls: type["ArrowSerializableDataclass"]) -> pa.Schema:
         """Generate ARROW_SCHEMA from dataclass field annotations."""
-        # Build schema from dataclass fields
         arrow_fields: list[pa.Field[Any]] = []
         overrides = getattr(cls, "_ARROW_FIELD_OVERRIDES", {})
 
@@ -497,34 +500,17 @@ class _ArrowSchemaDescriptor:
             field_name = field.name
             field_type = type_hints.get(field_name, field.type)
 
-            # Check for Annotated[T, ArrowType(...)]
-            arrow_type_from_annotation: pa.DataType | None = None
-            actual_type = field_type
-            if get_origin(field_type) is Annotated:
-                args = get_args(field_type)
-                actual_type = args[0] if args else field_type
-                for arg in args[1:]:
-                    if isinstance(arg, ArrowType):
-                        arrow_type_from_annotation = arg.arrow_type
-                        break
-
             # Check for explicit ClassVar override (legacy support)
             if field_name in overrides:
                 arrow_type = overrides[field_name]
-                _, nullable = _is_optional_type(actual_type)
+                _, nullable = _is_optional_type(field_type)
                 arrow_fields.append(pa.field(field_name, arrow_type, nullable=nullable))
                 continue
 
-            # Use ArrowType from annotation if provided
-            if arrow_type_from_annotation is not None:
-                _, nullable = _is_optional_type(actual_type)
-                arrow_fields.append(pa.field(field_name, arrow_type_from_annotation, nullable=nullable))
-                continue
-
-            # Infer Arrow type from Python type
-            _, nullable = _is_optional_type(actual_type)
+            # Infer Arrow type from Python type (handles Annotated[T, ArrowType(...)] internally)
+            _, nullable = _is_optional_type(field_type)
             try:
-                arrow_type = _infer_arrow_type(actual_type)
+                arrow_type = _infer_arrow_type(field_type)
                 arrow_fields.append(pa.field(field_name, arrow_type, nullable=nullable))
             except TypeError as e:
                 raise TypeError(f"Cannot generate Arrow schema for {cls.__name__}.{field_name}: {e}") from e
@@ -572,6 +558,7 @@ class ArrowSerializableDataclass:
         - pa.Schema -> bytes (via serialize())
         - pa.RecordBatch -> bytes (via IPC stream)
         - ArrowSerializableDataclass -> dict (serialize nested dataclass)
+        - _BytesSerializable -> bytes (objects with serialize_to_bytes())
         - Enum -> .name (serialize as the enum member's name)
         - frozenset -> list (Arrow doesn't support sets)
         - dict -> list of tuples (for map types)
@@ -607,11 +594,11 @@ class ArrowSerializableDataclass:
         if isinstance(value, ArrowSerializableDataclass):
             return value._to_row_dict()
 
-        # Handle objects with serialize_to_bytes() method (e.g., Arguments)
+        # Handle objects with serialize_to_bytes() method
         if isinstance(value, _BytesSerializable):
             return value.serialize_to_bytes()
 
-        # Handle Enum -> .name (always uppercase, consistent across all enum types)
+        # Handle Enum -> .name (string representation of the enum member)
         if isinstance(value, Enum):
             return value.name
 
@@ -669,13 +656,14 @@ class ArrowSerializableDataclass:
         batch: pa.RecordBatch,
         custom_metadata: pa.KeyValueMetadata | None = None,
         *,
-        ipc_validation: IpcValidation = IpcValidation.NONE,
+        ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> Self:
         """Deserialize an instance from an Arrow RecordBatch.
 
         Args:
             batch: Single-row RecordBatch containing the serialized data.
-            custom_metadata: Optional metadata from the batch (for batch type).
+            custom_metadata: Optional metadata from the batch (unused,
+                reserved for subclass overrides).
             ipc_validation: Validation level for nested IPC batches.
 
         Returns:
@@ -683,6 +671,8 @@ class ArrowSerializableDataclass:
 
         Raises:
             ValueError: If the batch is invalid (wrong row count or missing fields).
+            TypeError: If a field value has an unexpected type during conversion.
+            KeyError: If an Enum name cannot be resolved.
 
         """
         # Get required fields (those without defaults) from dataclass definition.
@@ -735,7 +725,7 @@ class ArrowSerializableDataclass:
 
     @classmethod
     def _convert_value_for_deserialization(
-        cls, value: Any, field_type: Any, ipc_validation: IpcValidation = IpcValidation.NONE
+        cls, value: Any, field_type: Any, ipc_validation: IpcValidation = IpcValidation.FULL
     ) -> Any:
         """Convert a deserialized value back to the expected Python type."""
         if value is None:
@@ -757,7 +747,7 @@ class ArrowSerializableDataclass:
             reader = ValidatedReader(pa.ipc.open_stream(value), ipc_validation)
             return reader.read_next_batch()
 
-        # Handle types with deserialize_from_bytes class method (e.g., Arguments)
+        # Handle types with deserialize_from_bytes class method
         if isinstance(inner_type, type) and hasattr(inner_type, "deserialize_from_bytes") and isinstance(value, bytes):
             deserialize_method = inner_type.deserialize_from_bytes
             if callable(deserialize_method):
@@ -820,7 +810,7 @@ class ArrowSerializableDataclass:
         return value
 
     @classmethod
-    def deserialize_from_bytes(cls, data: bytes, ipc_validation: IpcValidation = IpcValidation.NONE) -> Self:
+    def deserialize_from_bytes(cls, data: bytes, ipc_validation: IpcValidation = IpcValidation.FULL) -> Self:
         """Deserialize an instance from Arrow IPC bytes.
 
         Args:
@@ -832,6 +822,9 @@ class ArrowSerializableDataclass:
 
         Raises:
             ValueError: If the batch is invalid (wrong row count or missing fields).
+            IPCError: If the IPC stream is malformed or truncated.
+            TypeError: If a field value has an unexpected type during conversion.
+            KeyError: If an Enum name cannot be resolved.
 
         """
         batch, cm = deserialize_record_batch(data, ipc_validation)

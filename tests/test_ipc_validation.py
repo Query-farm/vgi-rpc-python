@@ -138,12 +138,12 @@ class TestDefaults:
         server = RpcServer(self._Svc, self._Impl())
         assert server.ipc_validation is IpcValidation.FULL
 
-    def test_rpc_connection_default_none(self) -> None:
-        """RpcConnection defaults to IpcValidation.NONE."""
+    def test_rpc_connection_default_full(self) -> None:
+        """RpcConnection defaults to IpcValidation.FULL."""
         c, s = make_pipe_pair()
         try:
             conn = RpcConnection(self._Svc, c)
-            assert conn._ipc_validation is IpcValidation.NONE
+            assert conn._ipc_validation is IpcValidation.FULL
         finally:
             c.close()
             s.close()
@@ -164,8 +164,8 @@ class TestServePipeDefaults:
         def add(self, a: float, b: float) -> float:
             return a + b
 
-    def test_default_none_uses_component_defaults(self) -> None:
-        """serve_pipe(ipc_validation=None) creates server=FULL, client=NONE."""
+    def test_default_none_uses_full_for_both(self) -> None:
+        """serve_pipe(ipc_validation=None) creates server=FULL, client=FULL."""
         with serve_pipe(self._Svc, self._Impl()) as proxy:
             # The proxy works correctly with valid data
             result = proxy.add(a=1.0, b=2.0)

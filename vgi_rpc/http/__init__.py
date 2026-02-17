@@ -15,7 +15,7 @@ Streaming is implemented statelessly: each exchange is a separate HTTP POST
 carrying serialized state in Arrow custom metadata (``vgi_rpc.stream_state``).
 When ``max_stream_response_bytes`` is set, producer-stream responses are
 split across multiple exchanges; the client transparently resumes via
-``POST /{method}/exchange``.
+``POST /vgi/{method}/exchange``.
 
 Optional dependencies: ``pip install vgi-rpc[http]``
 """

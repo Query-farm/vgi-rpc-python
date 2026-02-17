@@ -124,19 +124,22 @@ def _set_error_response(
 
 _HMAC_LEN = 32  # SHA-256 digest size
 _HEADER_LEN = 4  # uint32 LE prefix for each segment
-_MIN_TOKEN_LEN = _HEADER_LEN * 3 + _HMAC_LEN  # three length prefixes + HMAC
+_TOKEN_VERSION = 1  # bump when the token wire format changes
+_TOKEN_VERSION_LEN = 1  # single byte
+_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _HEADER_LEN * 3 + _HMAC_LEN
 
 
 def _pack_state_token(state_bytes: bytes, schema_bytes: bytes, input_schema_bytes: bytes, signing_key: bytes) -> bytes:
     """Pack state, output schema, and input schema bytes into a signed token.
 
-    Wire format::
+    Wire format (v1)::
 
-        [4 bytes: state_len  (uint32 LE)]
+        [1 byte:  version            (uint8, currently 1)]
+        [4 bytes: state_len          (uint32 LE)]
         [state_len bytes: state_bytes]
-        [4 bytes: schema_len (uint32 LE)]
+        [4 bytes: schema_len         (uint32 LE)]
         [schema_len bytes: schema_bytes]
-        [4 bytes: input_schema_len (uint32 LE)]
+        [4 bytes: input_schema_len   (uint32 LE)]
         [input_schema_len bytes: input_schema_bytes]
         [32 bytes: HMAC-SHA256(key, all above)]
 
@@ -151,7 +154,8 @@ def _pack_state_token(state_bytes: bytes, schema_bytes: bytes, input_schema_byte
 
     """
     payload = (
-        struct.pack("<I", len(state_bytes))
+        struct.pack("B", _TOKEN_VERSION)
+        + struct.pack("<I", len(state_bytes))
         + state_bytes
         + struct.pack("<I", len(schema_bytes))
         + schema_bytes
@@ -191,7 +195,7 @@ def _unpack_state_token(token: bytes, signing_key: bytes) -> tuple[bytes, bytes,
             raise _RpcHttpError(RuntimeError("Malformed state token"), status_code=HTTPStatus.BAD_REQUEST)
         return data[pos + _HEADER_LEN : seg_end], seg_end
 
-    state_bytes, pos = _read_segment(token, 0)
+    state_bytes, pos = _read_segment(token, _TOKEN_VERSION_LEN)
     schema_bytes, pos = _read_segment(token, pos)
     input_schema_bytes, payload_end = _read_segment(token, pos)
 
@@ -201,12 +205,21 @@ def _unpack_state_token(token: bytes, signing_key: bytes) -> tuple[bytes, bytes,
             status_code=HTTPStatus.BAD_REQUEST,
         )
 
+    # Verify HMAC before inspecting any payload fields (including version)
+    # to avoid leaking information about the token format to unauthenticated callers.
     payload = token[:payload_end]
     received_mac = token[payload_end:]
     expected_mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
     if not hmac.compare_digest(received_mac, expected_mac):
         raise _RpcHttpError(
             RuntimeError("State token signature verification failed"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    version = token[0]
+    if version != _TOKEN_VERSION:
+        raise _RpcHttpError(
+            RuntimeError(f"Unsupported state token version {version} (expected {_TOKEN_VERSION})"),
             status_code=HTTPStatus.BAD_REQUEST,
         )
 

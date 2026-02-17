@@ -504,7 +504,7 @@ def _call_unary_pipe(
 ) -> None:
     """Call a unary method over pipe transport."""
     _write_request(transport.writer, method.name, method.params_schema, kwargs)
-    reader = ValidatedReader(ipc.open_stream(transport.reader), IpcValidation.NONE)
+    reader = ValidatedReader(ipc.open_stream(transport.reader), IpcValidation.FULL)
     try:
         ab = _read_batch_with_log_check(reader, on_log)
     except RpcError:
@@ -556,7 +556,7 @@ def _call_unary_http(
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
-        reader = _open_response_stream(resp.content, resp.status_code, IpcValidation.NONE)
+        reader = _open_response_stream(resp.content, resp.status_code, IpcValidation.FULL)
         try:
             ab = _read_batch_with_log_check(reader, on_log)
         except RpcError:
@@ -592,7 +592,7 @@ def _call_stream_http(
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
-        reader = _open_response_stream(resp.content, resp.status_code, IpcValidation.NONE)
+        reader = _open_response_stream(resp.content, resp.status_code, IpcValidation.FULL)
         session = _init_http_stream_session(
             client=client,
             url_prefix=prefix,
