@@ -22,10 +22,10 @@ import pyarrow as pa
 import waitress
 
 from vgi_rpc import (
-    AnnotatedBatch,
     CallContext,
     Level,
     OutputCollector,
+    ProducerState,
     RpcServer,
     Stream,
     StreamState,
@@ -41,14 +41,14 @@ PORT = 8234
 
 
 @dataclass
-class FibState(StreamState):
+class FibState(ProducerState):
     """Produce Fibonacci numbers up to *limit*."""
 
     limit: int
     a: int = 0
     b: int = 1
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Emit the next Fibonacci number."""
         if self.a > self.limit:
             out.finish()

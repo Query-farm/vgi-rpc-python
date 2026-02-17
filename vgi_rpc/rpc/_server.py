@@ -445,8 +445,12 @@ class RpcServer:
                         if prev_input is not None:
                             prev_input.release()
                         prev_input = ab_in
+                        is_producer = input_schema == _EMPTY_SCHEMA
                         out = OutputCollector(
-                            output_schema, prior_data_bytes=cumulative_bytes, server_id=self._server_id
+                            output_schema,
+                            prior_data_bytes=cumulative_bytes,
+                            server_id=self._server_id,
+                            producer_mode=is_producer,
                         )
                         process_ctx = CallContext(
                             auth=auth,

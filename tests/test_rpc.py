@@ -20,9 +20,11 @@ from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
     CallContext,
+    ExchangeState,
     MethodType,
     OutputCollector,
     PipeTransport,
+    ProducerState,
     RpcConnection,
     RpcError,
     RpcServer,
@@ -2105,3 +2107,104 @@ class TestCallContext:
             pytest.raises(RpcError, match="Authentication required"),
         ):
             proxy.guarded()
+
+
+# ---------------------------------------------------------------------------
+# Tests: ProducerState / ExchangeState / finish() guard
+# ---------------------------------------------------------------------------
+
+
+class TestStreamSafety:
+    """Tests for stream safety: finish() guard, ProducerState, ExchangeState."""
+
+    def test_exchange_mode_finish_raises(self) -> None:
+        """finish() raises RuntimeError when producer_mode=False."""
+        schema = pa.schema([pa.field("x", pa.int64())])
+        out = OutputCollector(schema, producer_mode=False)
+        with pytest.raises(RuntimeError, match=r"finish.*not allowed on exchange streams"):
+            out.finish()
+
+    def test_producer_mode_finish_allowed(self) -> None:
+        """finish() works normally when producer_mode=True (default)."""
+        schema = pa.schema([pa.field("x", pa.int64())])
+        out = OutputCollector(schema)
+        out.finish()
+        assert out.finished
+
+    def test_producer_state_produce_called(self) -> None:
+        """ProducerState.produce() is called by process()."""
+        calls: list[bool] = []
+
+        @dataclass
+        class TestProducer(ProducerState):
+            count: int = 0
+
+            def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+                calls.append(True)
+                if self.count >= 2:
+                    out.finish()
+                    return
+                out.emit_pydict({"v": [self.count]})
+                self.count += 1
+
+        class ProducerProto(Protocol):
+            def gen(self) -> Stream[StreamState]: ...
+
+        class ProducerImpl:
+            def gen(self) -> Stream[TestProducer]:
+                schema = pa.schema([pa.field("v", pa.int64())])
+                return Stream(output_schema=schema, state=TestProducer())
+
+        with serve_pipe(ProducerProto, ProducerImpl()) as proxy:
+            batches = list(proxy.gen())
+        assert len(batches) == 2
+        assert len(calls) == 3  # 2 data + 1 finish
+
+    def test_exchange_state_exchange_called(self) -> None:
+        """ExchangeState.exchange() is called by process()."""
+        calls: list[bool] = []
+
+        @dataclass
+        class TestExchange(ExchangeState):
+            factor: float
+
+            def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+                calls.append(True)
+                scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("v"), self.factor))  # type: ignore[redundant-cast]
+                out.emit_arrays([scaled])
+
+        class ExchangeProto(Protocol):
+            def xform(self) -> Stream[StreamState]: ...
+
+        class ExchangeImpl:
+            def xform(self) -> Stream[TestExchange]:
+                schema = pa.schema([pa.field("v", pa.float64())])
+                return Stream(output_schema=schema, state=TestExchange(factor=2.0), input_schema=schema)
+
+        with serve_pipe(ExchangeProto, ExchangeImpl()) as proxy, proxy.xform() as session:
+            result = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"v": [3.0, 4.0]})))
+            assert result.batch.column("v").to_pylist() == [6.0, 8.0]
+        assert len(calls) == 1
+
+    def test_exchange_stream_finish_blocked_by_server(self) -> None:
+        """Server blocks finish() on exchange streams via producer_mode=False."""
+
+        @dataclass
+        class BadExchangeState(StreamState):
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+                out.finish()  # Should raise RuntimeError on exchange streams
+
+        class BadProto(Protocol):
+            def bad(self) -> Stream[StreamState]: ...
+
+        class BadImpl:
+            def bad(self) -> Stream[BadExchangeState]:
+                schema = pa.schema([pa.field("v", pa.int64())])
+                return Stream(output_schema=schema, state=BadExchangeState(), input_schema=schema)
+
+        with (
+            serve_pipe(BadProto, BadImpl()) as proxy,
+            proxy.bad() as session,
+            pytest.raises(RpcError, match=r"finish.*not allowed on exchange streams"),
+        ):
+            session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"v": [1]})))

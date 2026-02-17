@@ -38,6 +38,15 @@ Pay attention to mypy strict type checking make sure strict typing is preserved.
 
 Verify "ty" type checking too.
 
+The full process before committing code is
+
+1. Run mypy and resolve all errors
+2. Run ty and resolve all errors
+3. Run pytest for all tests
+4. Run ruff format on all files
+
+Then you can commit.
+
 ## Architecture
 
 ### Core modules (`vgi_rpc/`)

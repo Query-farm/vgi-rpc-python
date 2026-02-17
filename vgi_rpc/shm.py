@@ -6,6 +6,10 @@ fixed-size header at the start of the shared memory segment.  The lockstep
 RPC protocol guarantees only one side is active at a time, so no locking
 is needed.
 
+Adjacent free regions coalesce implicitly: the allocator only tracks
+occupied regions, so when neighbours are freed the gap between remaining
+allocations grows naturally without an explicit coalescing step.
+
 Header Format (language-agnostic, struct-based)
 ------------------------------------------------
 ::
@@ -25,6 +29,7 @@ All integers are little-endian for C++ interop.  Offsets are absolute
 
 from __future__ import annotations
 
+import logging
 import struct
 from collections.abc import Callable
 from io import RawIOBase
@@ -51,7 +56,7 @@ __all__ = [
     "resolve_shm_batch",
 ]
 
-HEADER_SIZE = 4096
+HEADER_SIZE = 65536
 _MAGIC = b"VGIS"
 _VERSION = 1
 
@@ -65,7 +70,10 @@ _ALLOC_FMT = "<QQ"
 _ALLOC_STRUCT = struct.Struct(_ALLOC_FMT)
 assert _ALLOC_STRUCT.size == 16
 
-MAX_ALLOCS = (HEADER_SIZE - _HEADER_STRUCT.size) // _ALLOC_STRUCT.size  # 254
+MAX_ALLOCS = (HEADER_SIZE - _HEADER_STRUCT.size) // _ALLOC_STRUCT.size  # 4094
+
+_shm_logger = logging.getLogger("vgi_rpc.shm")
+_WARN_THRESHOLD = int(MAX_ALLOCS * 0.8)
 
 # IPC stream EOS marker: continuation token (0xFFFFFFFF) + 0-length metadata
 _IPC_EOS = b"\xff\xff\xff\xff\x00\x00\x00\x00"
@@ -192,10 +200,12 @@ def _deserialize_from_shm(buf: pa.Buffer, schema: pa.Schema) -> pa.RecordBatch:
 
 
 class ShmAllocator:
-    """First-fit bump-pointer allocator stored in shared memory header.
+    """First-fit allocator stored in shared memory header.
 
     The allocation list is kept sorted by offset.  Allocation scans for
     the first gap that fits; freeing removes the entry by offset.
+    Adjacent free regions coalesce implicitly: the allocator only tracks
+    occupied regions, so when neighbours are freed the gap grows naturally.
     """
 
     __slots__ = ("_buf", "_total_size")
@@ -218,6 +228,17 @@ class ShmAllocator:
         """Write initial header: zero allocations."""
         data_size = total_size - HEADER_SIZE
         _HEADER_STRUCT.pack_into(buf, 0, _MAGIC, _VERSION, data_size, 0, 0)
+
+    @property
+    def num_allocs(self) -> int:
+        """Current number of active allocations."""
+        count: int = struct.unpack_from("<I", self._buf, 16)[0]
+        return count
+
+    @property
+    def max_allocs(self) -> int:
+        """Maximum number of concurrent allocations the header can hold."""
+        return MAX_ALLOCS
 
     def _read_allocs(self) -> list[tuple[int, int]]:
         """Read the sorted allocation list from the header."""
@@ -253,6 +274,7 @@ class ShmAllocator:
             if gap >= size:
                 allocs.insert(i, (prev_end, size))
                 self._write_allocs(allocs)
+                self._warn_if_near_limit(len(allocs))
                 return prev_end
             prev_end = off + length
 
@@ -261,6 +283,7 @@ class ShmAllocator:
         if gap >= size:
             allocs.append((prev_end, size))
             self._write_allocs(allocs)
+            self._warn_if_near_limit(len(allocs))
             return prev_end
 
         return None
@@ -279,6 +302,16 @@ class ShmAllocator:
                 self._write_allocs(allocs)
                 return
         raise ValueError(f"No allocation at offset {offset}")
+
+    def _warn_if_near_limit(self, count: int) -> None:
+        """Log a warning when allocation count reaches 80% of capacity."""
+        if count >= _WARN_THRESHOLD:
+            _shm_logger.warning(
+                "SHM allocator near capacity: %d/%d allocations (%.0f%%)",
+                count,
+                MAX_ALLOCS,
+                count * 100 / MAX_ALLOCS,
+            )
 
     def reset(self) -> None:
         """Clear all allocations (``num_allocs = 0``)."""
@@ -430,6 +463,11 @@ class ShmSegment:
     def unlink(self) -> None:
         """Unlink (destroy) the shared memory segment."""
         self._shm.unlink()
+
+    @property
+    def allocator(self) -> ShmAllocator:
+        """The allocator managing this segment's header."""
+        return self._allocator
 
     @property
     def name(self) -> str:

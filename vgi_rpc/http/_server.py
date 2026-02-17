@@ -601,7 +601,7 @@ class _HttpRpcApp:
                 user_cm = strip_keys(resolved_cm, STATE_KEY)
 
                 ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
-                out = OutputCollector(output_schema, server_id=server_id)
+                out = OutputCollector(output_schema, server_id=server_id, producer_mode=False)
 
                 process_ctx = CallContext(
                     auth=auth,
@@ -694,7 +694,9 @@ class _HttpRpcApp:
             cumulative_bytes = 0
             try:
                 while True:
-                    out = OutputCollector(schema, prior_data_bytes=cumulative_bytes, server_id=server_id)
+                    out = OutputCollector(
+                        schema, prior_data_bytes=cumulative_bytes, server_id=server_id, producer_mode=True
+                    )
                     produce_ctx = CallContext(
                         auth=auth,
                         emit_client_log=out.emit_client_log_message,

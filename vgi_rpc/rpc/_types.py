@@ -74,15 +74,33 @@ class OutputCollector:
     data batch they annotate).
     """
 
-    __slots__ = ("_batches", "_data_batch_idx", "_finished", "_output_schema", "_prior_data_bytes", "_server_id")
+    __slots__ = (
+        "_batches",
+        "_data_batch_idx",
+        "_finished",
+        "_output_schema",
+        "_prior_data_bytes",
+        "_producer_mode",
+        "_server_id",
+    )
 
-    def __init__(self, output_schema: pa.Schema, *, prior_data_bytes: int = 0, server_id: str | None = None) -> None:
+    def __init__(
+        self,
+        output_schema: pa.Schema,
+        *,
+        prior_data_bytes: int = 0,
+        server_id: str | None = None,
+        producer_mode: bool = True,
+    ) -> None:
         """Initialize with the output schema for this stream.
 
         Args:
             output_schema: The Arrow schema for data batches.
             prior_data_bytes: Cumulative data bytes from earlier produce/process calls in this stream.
             server_id: Optional server identifier injected into log batch metadata.
+            producer_mode: When ``True`` (default), ``finish()`` is allowed.
+                Set to ``False`` for exchange streams where ``finish()`` is
+                not permitted.
 
         """
         self._output_schema = output_schema
@@ -90,6 +108,7 @@ class OutputCollector:
         self._finished: bool = False
         self._data_batch_idx: int | None = None
         self._prior_data_bytes = prior_data_bytes
+        self._producer_mode = producer_mode
         self._server_id = server_id
 
     @property
@@ -205,7 +224,16 @@ class OutputCollector:
 
         Producer streams (``input_schema == _EMPTY_SCHEMA``) call this
         to signal that no more data will be produced.
+
+        Raises:
+            RuntimeError: If called on an exchange stream (``producer_mode=False``).
+
         """
+        if not self._producer_mode:
+            raise RuntimeError(
+                "finish() is not allowed on exchange streams; "
+                "exchange streams must emit exactly one data batch per call"
+            )
         self._finished = True
 
 
@@ -229,6 +257,57 @@ class StreamState(ArrowSerializableDataclass, abc.ABC):
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process an input batch and emit output into the collector."""
         ...
+
+
+class ProducerState(StreamState, abc.ABC):
+    """Base class for producer stream state objects.
+
+    Subclasses implement ``produce(out, ctx)`` instead of ``process()``,
+    eliminating the phantom ``input`` parameter that producer streams
+    must otherwise ignore.
+
+    Call ``out.finish()`` from ``produce()`` to signal end of stream.
+    """
+
+    @abc.abstractmethod
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Produce output batches into the collector.
+
+        Args:
+            out: The output collector to emit batches into.
+            ctx: The call context for this request.
+
+        """
+        ...
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Delegate to ``produce()``, ignoring the tick input."""
+        self.produce(out, ctx)
+
+
+class ExchangeState(StreamState, abc.ABC):
+    """Base class for exchange stream state objects.
+
+    Subclasses implement ``exchange(input, out, ctx)`` instead of
+    ``process()``.  Exchange streams must emit exactly one data batch
+    per call and must not call ``out.finish()``.
+    """
+
+    @abc.abstractmethod
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Process an input batch and emit exactly one output batch.
+
+        Args:
+            input: The input batch from the client.
+            out: The output collector to emit the response batch into.
+            ctx: The call context for this request.
+
+        """
+        ...
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Delegate to ``exchange()``."""
+        self.exchange(input, out, ctx)
 
 
 _TICK_BATCH = AnnotatedBatch(batch=empty_batch(_EMPTY_SCHEMA))

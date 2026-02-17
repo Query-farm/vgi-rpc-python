@@ -17,7 +17,16 @@ from typing import Any, Protocol, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from vgi_rpc import AnnotatedBatch, CallContext, OutputCollector, Stream, StreamState, serve_pipe
+from vgi_rpc import (
+    AnnotatedBatch,
+    CallContext,
+    ExchangeState,
+    OutputCollector,
+    ProducerState,
+    Stream,
+    StreamState,
+    serve_pipe,
+)
 
 # ---------------------------------------------------------------------------
 # Producer stream: server generates batches, client iterates
@@ -25,17 +34,18 @@ from vgi_rpc import AnnotatedBatch, CallContext, OutputCollector, Stream, Stream
 
 
 @dataclass
-class CounterState(StreamState):
+class CounterState(ProducerState):
     """State for the counter producer stream.
 
-    The ``process`` method is called once per iteration. Call ``out.finish()``
-    to signal the end of the stream.
+    Extends ``ProducerState`` so only ``produce(out, ctx)`` needs to be
+    implemented — no phantom ``input`` parameter to ignore.
+    Call ``out.finish()`` to signal the end of the stream.
     """
 
     limit: int
     current: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Emit one batch per call, finish when done."""
         if self.current >= self.limit:
             out.finish()
@@ -50,16 +60,17 @@ class CounterState(StreamState):
 
 
 @dataclass
-class ScaleState(StreamState):
+class ScaleState(ExchangeState):
     """State for the scale exchange stream.
 
-    Exchange streams receive an input batch from the client and must emit
-    exactly one output batch per call.
+    Extends ``ExchangeState`` so only ``exchange(input, out, ctx)`` needs
+    to be implemented.  Exchange streams must emit exactly one output batch
+    per call and must not call ``out.finish()``.
     """
 
     factor: float
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Multiply each value by the configured factor."""
         scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))
         out.emit_arrays([scaled])

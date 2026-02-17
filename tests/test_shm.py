@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import logging
 import struct
 import threading
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.shm import (
     HEADER_SIZE,
+    MAX_ALLOCS,
     ShmAllocator,
     ShmSegment,
     _deserialize_from_shm,
@@ -166,7 +168,7 @@ def _make_shm_conn(
 class TestShmAllocator:
     """Tests for the bump-pointer allocator."""
 
-    def _make_allocator(self, size: int = 8192) -> tuple[memoryview, ShmAllocator]:
+    def _make_allocator(self, size: int = HEADER_SIZE + 8192) -> tuple[memoryview, ShmAllocator]:
         """Create a fresh allocator for testing."""
         buf = bytearray(size)
         mv = memoryview(buf)
@@ -253,19 +255,74 @@ class TestShmAllocator:
 
     def test_bad_magic(self) -> None:
         """Bad magic in header raises ValueError."""
-        buf = bytearray(8192)
+        size = HEADER_SIZE + 1024
+        buf = bytearray(size)
         mv = memoryview(buf)
         with pytest.raises(ValueError, match="Bad SHM magic"):
-            ShmAllocator(mv, 8192)
+            ShmAllocator(mv, size)
 
     def test_version_mismatch(self) -> None:
         """Wrong version in header raises ValueError."""
-        buf = bytearray(8192)
+        size = HEADER_SIZE + 1024
+        buf = bytearray(size)
         mv = memoryview(buf)
-        ShmAllocator.initialize(mv, 8192)
+        ShmAllocator.initialize(mv, size)
         struct.pack_into("<I", mv, 4, 99)
         with pytest.raises(ValueError, match="Unsupported SHM version"):
-            ShmAllocator(mv, 8192)
+            ShmAllocator(mv, size)
+
+    def test_num_allocs_property(self) -> None:
+        """num_allocs reflects current allocation count."""
+        _, alloc = self._make_allocator()
+        assert alloc.num_allocs == 0
+        alloc.allocate(100)
+        assert alloc.num_allocs == 1
+        alloc.allocate(200)
+        assert alloc.num_allocs == 2
+        alloc.free(HEADER_SIZE)
+        assert alloc.num_allocs == 1
+
+    def test_max_allocs_property(self) -> None:
+        """max_allocs returns the module-level MAX_ALLOCS constant."""
+        _, alloc = self._make_allocator()
+        assert alloc.max_allocs == MAX_ALLOCS
+        assert alloc.max_allocs == (HEADER_SIZE - 24) // 16
+
+    def test_max_allocs_is_4094(self) -> None:
+        """With HEADER_SIZE=65536, max_allocs is 4094."""
+        assert MAX_ALLOCS == 4094
+
+    def test_allocate_over_254(self) -> None:
+        """Can allocate more than the old 254-entry limit."""
+        # Need enough data space: 300 allocations of 16 bytes each = 4800 bytes
+        size = HEADER_SIZE + 300 * 16
+        _, alloc = self._make_allocator(size=size)
+        offsets: list[int] = []
+        for _ in range(300):
+            off = alloc.allocate(16)
+            assert off is not None
+            offsets.append(off)
+        assert alloc.num_allocs == 300
+
+    def test_warn_at_80_percent(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Warning is logged when allocations reach 80% of max_allocs."""
+        # We need a buffer large enough for _WARN_THRESHOLD allocations.
+        # Each alloc is 1 byte of data, but we need header space for entries.
+        threshold = int(MAX_ALLOCS * 0.8)
+        data_needed = threshold * 8  # 8 bytes per data allocation
+        size = HEADER_SIZE + data_needed
+        _, alloc = self._make_allocator(size=size)
+
+        with caplog.at_level(logging.WARNING, logger="vgi_rpc.shm"):
+            for _ in range(threshold - 1):
+                alloc.allocate(8)
+            assert len(caplog.records) == 0
+
+            # This allocation crosses the 80% threshold
+            alloc.allocate(8)
+            assert len(caplog.records) == 1
+            assert "near capacity" in caplog.records[0].message
+            assert f"{threshold}/{MAX_ALLOCS}" in caplog.records[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +335,24 @@ class TestShmSegment:
 
     def test_create_and_properties(self) -> None:
         """Create segment and check properties."""
-        shm = ShmSegment.create(64 * 1024)
+        shm = ShmSegment.create(128 * 1024)
         try:
-            assert shm.size >= 64 * 1024
+            assert shm.size >= 128 * 1024
             assert shm.name
-            assert len(shm.buf) >= 64 * 1024
+            assert len(shm.buf) >= 128 * 1024
+        finally:
+            _cleanup_shm(shm)
+
+    def test_allocator_property(self) -> None:
+        """ShmSegment.allocator exposes the underlying ShmAllocator."""
+        shm = ShmSegment.create(128 * 1024)
+        try:
+            alloc = shm.allocator
+            assert isinstance(alloc, ShmAllocator)
+            assert alloc.num_allocs == 0
+            result = shm.allocate_and_write(_make_batch(1))
+            assert result is not None
+            assert alloc.num_allocs == 1
         finally:
             _cleanup_shm(shm)
 
@@ -293,7 +363,7 @@ class TestShmSegment:
 
     def test_attach(self) -> None:
         """Attach to existing segment validates header."""
-        shm1 = ShmSegment.create(64 * 1024)
+        shm1 = ShmSegment.create(128 * 1024)
         try:
             shm2 = ShmSegment.attach(shm1.name, shm1.size)
             try:
@@ -482,7 +552,7 @@ class TestPointerBatchHelpers:
 
     def test_resolve_passthrough_non_pointer(self) -> None:
         """Non-pointer batch passes through even with shm."""
-        shm = ShmSegment.create(64 * 1024)
+        shm = ShmSegment.create(128 * 1024)
         try:
             batch = _make_batch(5)
             resolved, _resolved_cm, release_fn = resolve_shm_batch(batch, None, shm)
@@ -533,7 +603,7 @@ class TestMaybeWriteToShm:
 
     def test_zero_row_skip(self) -> None:
         """Zero-row batches are never written to SHM."""
-        shm = ShmSegment.create(64 * 1024)
+        shm = ShmSegment.create(128 * 1024)
         try:
             batch = pa.RecordBatch.from_arrays(
                 [pa.array([], type=pa.int64()), pa.array([], type=pa.float64())],
@@ -715,8 +785,7 @@ class TestShmIntegration:
 
         Each batch has a unique dictionary value (``item_0`` .. ``item_999``)
         so every batch produces a new dictionary message in the IPC stream.
-        Releases each batch after verification so SHM regions are reused
-        (the allocator header only holds 254 concurrent allocations).
+        Releases each batch after verification so SHM regions are reused.
         """
         # 16 MB segment — plenty of room for 1000 tiny batches
         client, server, shm, rpc_server = _make_shm_conn(shm_size=16 * 1024 * 1024)
