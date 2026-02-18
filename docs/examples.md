@@ -8,7 +8,9 @@ hide:
 
 Runnable scripts demonstrating key vgi-rpc features. Each example is self-contained — copy, run, and modify. All examples are tested via `test_examples.py` to stay in sync with the API.
 
-## Hello World
+## Getting Started
+
+### Hello World
 
 The minimal starting point: define a Protocol, implement it, and call through a typed proxy using in-process pipe transport.
 
@@ -16,7 +18,7 @@ The minimal starting point: define a Protocol, implement it, and call through a 
 --8<-- "examples/hello_world.py"
 ```
 
-## Streaming
+### Streaming
 
 Producer streams (server pushes data, client iterates) and exchange streams (lockstep bidirectional communication). Shows `ProducerState`, `ExchangeState`, `OutputCollector`, and `out.finish()`.
 
@@ -24,7 +26,7 @@ Producer streams (server pushes data, client iterates) and exchange streams (loc
 --8<-- "examples/streaming.py"
 ```
 
-## Structured Types
+### Structured Types
 
 Using `ArrowSerializableDataclass` for complex parameters: dataclasses with enums, nested types, and optional fields. Demonstrates automatic Arrow schema inference.
 
@@ -32,7 +34,9 @@ Using `ArrowSerializableDataclass` for complex parameters: dataclasses with enum
 --8<-- "examples/structured_types.py"
 ```
 
-## HTTP Server
+## Transports
+
+### HTTP Server
 
 Serve an RPC service over HTTP using Falcon + waitress. Shows `make_wsgi_app` with a WSGI server.
 
@@ -40,7 +44,7 @@ Serve an RPC service over HTTP using Falcon + waitress. Shows `make_wsgi_app` wi
 --8<-- "examples/http_server.py"
 ```
 
-## HTTP Client
+### HTTP Client
 
 Connect to an HTTP RPC service using `http_connect`. The proxy is typed as the Protocol class.
 
@@ -48,7 +52,7 @@ Connect to an HTTP RPC service using `http_connect`. The proxy is typed as the P
 --8<-- "examples/http_client.py"
 ```
 
-## Subprocess Worker
+### Subprocess Worker
 
 Entry point for a subprocess RPC worker. Uses `run_server` to serve over stdin/stdout.
 
@@ -56,7 +60,7 @@ Entry point for a subprocess RPC worker. Uses `run_server` to serve over stdin/s
 --8<-- "examples/subprocess_worker.py"
 ```
 
-## Subprocess Client
+### Subprocess Client
 
 Connect to a subprocess worker with `connect`. Shows error handling with `RpcError`.
 
@@ -64,7 +68,9 @@ Connect to a subprocess worker with `connect`. Shows error handling with `RpcErr
 --8<-- "examples/subprocess_client.py"
 ```
 
-## Testing with Pipe Transport
+## Testing
+
+### Testing with Pipe Transport
 
 Unit-testing pattern using `serve_pipe()` — no network or subprocess needed. Tests both unary and streaming methods.
 
@@ -72,7 +78,7 @@ Unit-testing pattern using `serve_pipe()` — no network or subprocess needed. T
 --8<-- "examples/testing_pipe.py"
 ```
 
-## Testing with HTTP Transport
+### Testing with HTTP Transport
 
 Unit-testing the full HTTP stack (including auth middleware) using `make_sync_client()` — no real HTTP server needed.
 
@@ -80,7 +86,9 @@ Unit-testing the full HTTP stack (including auth middleware) using `make_sync_cl
 --8<-- "examples/testing_http.py"
 ```
 
-## Authentication
+## Advanced Features
+
+### Authentication
 
 HTTP authentication with Bearer tokens. Shows `authenticate` callback, `AuthContext`, `CallContext.auth.require_authenticated()`, and guarded methods.
 
@@ -88,7 +96,7 @@ HTTP authentication with Bearer tokens. Shows `authenticate` callback, `AuthCont
 --8<-- "examples/auth.py"
 ```
 
-## Introspection
+### Introspection
 
 Runtime service discovery with `enable_describe=True`. Shows `introspect()` for pipe transport and `http_introspect()` for HTTP.
 
@@ -96,7 +104,7 @@ Runtime service discovery with `enable_describe=True`. Shows `introspect()` for 
 --8<-- "examples/introspection.py"
 ```
 
-## Shared Memory
+### Shared Memory
 
 Zero-copy shared memory transport with `ShmPipeTransport` and `ShmSegment`. Demonstrates the side-channel optimization for large batches between co-located processes.
 

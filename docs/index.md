@@ -104,8 +104,6 @@ Requires Python 3.12+.
 
 ## Quick Start
 
-### Unary RPC
-
 Define a service as a `Protocol`, implement it, and call methods through a typed proxy:
 
 ```python
@@ -134,60 +132,18 @@ with serve_pipe(Calculator, CalculatorImpl()) as proxy:
     print(proxy.add(a=2.0, b=3.0))  # 5.0
 ```
 
-### Streaming
+See the [Examples](examples.md) page for streaming, HTTP transport, authentication, and more.
 
-Return `Stream[S]` where `S` is a state class that produces batches. Producer streams push data to the client; exchange streams accept input each iteration:
+## Limitations
 
-```python
-from dataclasses import dataclass
-from typing import Protocol
+vgi-rpc is designed for Python-to-Python RPC with structured, tabular data. Some things it deliberately does not do:
 
-import pyarrow as pa
-
-from vgi_rpc import CallContext, OutputCollector, ProducerState, Stream, StreamState, serve_pipe
-
-
-@dataclass
-class CountdownState(ProducerState):
-    """Counts down from n to 0."""
-
-    n: int
-
-    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
-        """Emit one value per tick, then finish."""
-        if self.n <= 0:
-            out.finish()
-            return
-        out.emit_pydict({"value": [self.n]})
-        self.n -= 1
-
-
-class CountdownService(Protocol):
-    """Service with a producer stream."""
-
-    def countdown(self, n: int) -> Stream[StreamState]:
-        """Count down from n."""
-        ...
-
-
-class CountdownImpl:
-    """Countdown implementation."""
-
-    def countdown(self, n: int) -> Stream[CountdownState]:
-        """Count down from n."""
-        schema = pa.schema([pa.field("value", pa.int64())])
-        return Stream(output_schema=schema, state=CountdownState(n=n))
-
-
-with serve_pipe(CountdownService, CountdownImpl()) as proxy:
-    for batch in proxy.countdown(n=3):
-        print(batch.batch.to_pydict())
-    # {'value': [3]}
-    # {'value': [2]}
-    # {'value': [1]}
-```
-
-See the [Examples](examples.md) page for exchange streams, HTTP transport, authentication, and more.
+- **Python only** — no cross-language code generation. The wire format (Arrow IPC) is language-neutral, but there are no client/server libraries for other languages.
+- **No full-duplex streaming** — the exchange pattern is lockstep (one request, one response, repeat), not concurrent bidirectional like gRPC.
+- **No client streaming** — the client cannot push a stream of batches to the server independently. Use exchange for bidirectional workflows.
+- **Columnar data model** — all data crosses the wire as Arrow RecordBatches. Scalar values are wrapped in single-row batches. If your payloads are small heterogeneous messages, a row-oriented format (protobuf, JSON) may be more natural.
+- **No service mesh integration** — no built-in load balancing, circuit breaking, or service discovery. The HTTP transport is a standard WSGI app, so you can put it behind any reverse proxy.
+- **No async server** — the server is synchronous. Streaming methods run in a blocking loop. This keeps the implementation simple but limits concurrency to one request at a time per connection (HTTP transport handles concurrency at the WSGI layer).
 
 ## Next Steps
 

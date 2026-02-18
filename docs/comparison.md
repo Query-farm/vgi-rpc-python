@@ -12,6 +12,7 @@ An honest comparison of Python RPC frameworks. Every framework makes trade-offs 
 | Framework | Serialization | IDL Required | Streaming | Typed Proxies | Transports | Maintained |
 |-----------|--------------|--------------|-----------|---------------|------------|------------|
 | **vgi-rpc** | Arrow IPC | No (Protocol classes) | Producer + Exchange | Yes (mypy strict) | Pipe, subprocess, shm, HTTP | Yes |
+| **Arrow Flight** | Arrow IPC + gRPC | No (fixed API) | get/put/exchange | No (generic client) | gRPC (HTTP/2) | Yes (Apache) |
 | **gRPC** | Protobuf | Yes (`.proto`) | All 4 patterns | Partial (needs mypy-protobuf) | HTTP/2 | Yes (Google) |
 | **Apache Thrift** | Thrift binary/compact | Yes (`.thrift`) | No | No | TCP, HTTP | Moderate |
 | **ConnectRPC** | Protobuf | Yes (`.proto`) | All 4 patterns | Yes | HTTP/1.1 + HTTP/2 | Yes (beta) |
@@ -46,6 +47,28 @@ The industry standard. If you need cross-language interop with Java, Go, C++, or
 - Heavy C++ dependency chain
 
 **Best for:** Polyglot microservices, production APIs needing ecosystem tooling, teams already using protobuf.
+
+### Arrow Flight
+
+Apache Arrow's own RPC layer. Transfers Arrow RecordBatches over gRPC with zero serialization overhead — the closest thing to a direct competitor to vgi-rpc.
+
+**Strengths:**
+
+- Eliminates serialization cost for Arrow-native consumers — batches go on the wire in Arrow IPC format
+- Multi-language ecosystem (C++, Java, Go, Rust, Python) sharing the same wire protocol
+- Parallel data fetching — `GetFlightInfo` returns multiple endpoints that clients can fetch concurrently
+- Flight SQL provides a standardized alternative to JDBC/ODBC for SQL databases (adopted by Dremio, InfluxDB, DuckDB)
+- Part of `pyarrow` (~16.5k GitHub stars), actively maintained by the Apache Software Foundation
+
+**Trade-offs:**
+
+- Not a general-purpose RPC framework — the API surface is fixed (`do_get`, `do_put`, `do_exchange`, `do_action`). You cannot define arbitrary named methods with typed signatures; all dispatch goes through opaque `FlightDescriptor` bytes.
+- No typed Python proxies — the client uses a generic `FlightClient` with untyped methods. No IDE autocompletion for service methods. Schema validation is runtime only.
+- All data must be Arrow-shaped — scalar and struct return values require wrapping in single-row tables.
+- Mandatory gRPC dependency — no pipe, shared memory, or HTTP/1.1 transport option.
+- Two-step fetch pattern (`GetFlightInfo` → `DoGet`) adds unnecessary overhead for simple point queries.
+
+**Best for:** High-throughput bulk data transfer between systems that already work with Arrow (query engines, DataFrame libraries, columnar stores). Flight SQL for replacing JDBC/ODBC. Not well-suited as a general-purpose typed RPC layer.
 
 ### Apache Thrift
 
@@ -200,7 +223,8 @@ The simplest option. xmlrpc is in the Python standard library; JSON-RPC librarie
 |----------|-------------|
 | Polyglot microservices (Java, Go, Python) | gRPC |
 | Python-only, typed interfaces, no code generation | vgi-rpc |
-| Columnar / tabular data transfer | vgi-rpc |
+| Columnar / tabular data transfer | vgi-rpc or Arrow Flight |
+| Bulk analytical data between Arrow-native systems | Arrow Flight |
 | Co-located processes, zero-copy shared memory | vgi-rpc |
 | Quick prototype, zero boilerplate | RPyC or ZeroRPC |
 | Simplest possible, stdlib only | xmlrpc |
