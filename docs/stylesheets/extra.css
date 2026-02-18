@@ -1,0 +1,138 @@
+/* Query.Farm palette — earthy greens and warm accents */
+
+/* Light mode */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #2e7d32;
+  --md-primary-fg-color--light: #4caf50;
+  --md-primary-fg-color--dark: #1b5e20;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+  --md-accent-fg-color: #f9a825;
+  --md-accent-fg-color--transparent: #f9a82533;
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: #ffffffb3;
+}
+
+/* Dark mode */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #4caf50;
+  --md-primary-fg-color--light: #66bb6a;
+  --md-primary-fg-color--dark: #2e7d32;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+  --md-accent-fg-color: #ffca28;
+  --md-accent-fg-color--transparent: #ffca2833;
+  --md-accent-bg-color: #000000;
+  --md-accent-bg-color--light: #0000004d;
+  --md-default-bg-color: #1a2e1a;
+  --md-default-bg-color--light: #22382280;
+  --md-default-bg-color--lighter: #22382233;
+  --md-default-bg-color--lightest: #2238220d;
+}
+
+/* Admonition styling — farm tones */
+.md-typeset .admonition.farm,
+.md-typeset details.farm {
+  border-color: #4caf50;
+}
+.md-typeset .farm > .admonition-title,
+.md-typeset .farm > summary {
+  background-color: #4caf501a;
+  border-color: #4caf50;
+}
+
+/* Code block styling */
+[data-md-color-scheme="default"] .highlight code {
+  border-left: 3px solid #4caf50;
+}
+
+/* Inline code */
+[data-md-color-scheme="default"] .md-typeset code {
+  background-color: #e8f5e9;
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+  background-color: #1b3a1b;
+}
+
+/* Nav tabs — earthy underline */
+.md-tabs__link--active,
+.md-tabs__link:hover {
+  border-bottom: 2px solid #f9a825;
+}
+
+/* Footer Query.Farm branding */
+.md-footer-meta {
+  background-color: #1b5e20;
+}
+
+[data-md-color-scheme="slate"] .md-footer-meta {
+  background-color: #0d2e0d;
+}
+
+/* Hero section on landing page */
+.hero {
+  padding: 2rem 0;
+  margin-bottom: 2rem;
+  text-align: center;
+}
+
+.hero h1 {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.hero .tagline {
+  font-size: 1.2rem;
+  opacity: 0.8;
+  margin-bottom: 1rem;
+}
+
+.hero .built-by {
+  font-size: 0.95rem;
+  opacity: 0.7;
+}
+
+.hero .built-by a {
+  color: var(--md-accent-fg-color);
+  font-weight: 600;
+}
+
+/* Hero logo */
+.hero-logo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.hero-logo-img {
+  border-radius: 50%;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
+  transition: transform 0.3s ease;
+  width: 200px;
+  height: 200px;
+}
+
+.hero-logo-img:hover {
+  transform: scale(1.05);
+}
+
+/* Header logo — bigger than default, clipped to circle */
+.md-header__button.md-logo img,
+.md-nav__button.md-logo img {
+  height: 3rem;
+  width: 3rem;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+/* D2 diagrams — constrain size and center */
+.md-typeset .d2 {
+  max-width: 360px !important;
+  margin: 1rem auto !important;
+}
+
+.md-typeset .d2 svg {
+  width: 100% !important;
+  height: auto !important;
+}

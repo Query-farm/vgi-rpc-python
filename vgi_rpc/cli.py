@@ -13,6 +13,7 @@ Usage::
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import shlex
 import sys
@@ -83,6 +84,14 @@ app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
+def _version_callback(value: bool) -> None:
+    """Print version and exit."""
+    if value:
+        version = importlib.metadata.version("vgi-rpc")
+        typer.echo(f"vgi-rpc {version}")
+        raise typer.Exit()
+
+
 @app.callback()
 def _main(
     ctx: typer.Context,
@@ -91,6 +100,9 @@ def _main(
     prefix: Annotated[str, typer.Option("--prefix", "-p", help="URL path prefix")] = "/vgi",
     fmt: Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format")] = OutputFormat.auto,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show server log messages on stderr")] = False,
+    version: Annotated[
+        bool, typer.Option("--version", "-V", help="Show version and exit", callback=_version_callback, is_eager=True)
+    ] = False,
 ) -> None:
     """Configure transport and output options."""
     if url and cmd:

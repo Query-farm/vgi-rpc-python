@@ -1030,3 +1030,75 @@ class TestUploadUrlEndpoint:
         assert len(urls) == 1
         assert urls[0].expires_at > datetime.now(UTC)
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Per-request correlation ID over HTTP
+# ---------------------------------------------------------------------------
+
+
+class TestRequestId:
+    """Tests for the X-Request-ID header and request_id propagation over HTTP."""
+
+    def test_request_id_response_header(self, client: _SyncTestClient) -> None:
+        """X-Request-ID is present on successful response."""
+        from vgi_rpc.rpc import _write_request
+
+        buf = BytesIO()
+        schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
+        _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
+        resp = client.post(
+            f"{_BASE_URL}/vgi/add",
+            content=buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 200
+        assert "x-request-id" in resp.headers
+        assert len(resp.headers["x-request-id"]) == 16
+
+    def test_request_id_client_supplied(self, client: _SyncTestClient) -> None:
+        """Client-supplied X-Request-ID is echoed back."""
+        from vgi_rpc.rpc import _write_request
+
+        buf = BytesIO()
+        schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
+        _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
+        resp = client.post(
+            f"{_BASE_URL}/vgi/add",
+            content=buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, "X-Request-ID": "my-custom-req-id"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["x-request-id"] == "my-custom-req-id"
+
+    def test_request_id_on_error_response(self, client: _SyncTestClient) -> None:
+        """X-Request-ID is present on error responses."""
+        resp = client.post(
+            f"{_BASE_URL}/vgi/nonexistent",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 404
+        assert "x-request-id" in resp.headers
+        assert len(resp.headers["x-request-id"]) == 16
+
+    def test_request_id_in_rpc_error(self, client: _SyncTestClient) -> None:
+        """RpcError.request_id matches the X-Request-ID response header."""
+        with (
+            pytest.raises(RpcError) as exc_info,
+            http_connect(RpcFixtureService, client=client) as proxy,
+        ):
+            proxy.fail_unary()
+        assert exc_info.value.request_id != ""
+        assert len(exc_info.value.request_id) == 16
+
+    def test_request_id_in_client_log_extra(self, client: _SyncTestClient) -> None:
+        """on_log message extra contains request_id over HTTP."""
+        logs: list[Message] = []
+        with http_connect(RpcFixtureService, client=client, on_log=logs.append) as proxy:
+            proxy.greet_with_logs(name="Alice")
+        assert len(logs) >= 1
+        for msg in logs:
+            assert msg.extra is not None
+            assert "request_id" in msg.extra
+            assert len(str(msg.extra["request_id"])) == 16

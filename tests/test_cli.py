@@ -88,6 +88,22 @@ def _invoke(args: list[str], input: str | None = None) -> Any:
 # ---------------------------------------------------------------------------
 
 
+class TestVersion:
+    """Tests for the --version flag."""
+
+    def test_version_flag(self) -> None:
+        """``--version`` prints version and exits."""
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert result.output.startswith("vgi-rpc ")
+
+    def test_version_short_flag(self) -> None:
+        """``-V`` prints version and exits."""
+        result = runner.invoke(app, ["-V"])
+        assert result.exit_code == 0
+        assert result.output.startswith("vgi-rpc ")
+
+
 class TestErrorCases:
     """Tests for CLI error handling."""
 

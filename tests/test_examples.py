@@ -45,6 +45,56 @@ class TestSelfContainedExamples:
         assert "Total tasks:    2" in out
         assert "High priority:  1" in out
 
+    def test_testing_pipe(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """testing_pipe.py: unit-testing a service with serve_pipe."""
+        from examples.testing_pipe import main
+
+        main()
+        out = capsys.readouterr().out
+        assert "add(2, 3) = 5.0" in out
+        assert "countdown(3) = [3, 2, 1]" in out
+        assert "All assertions passed!" in out
+
+    def test_testing_http(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """testing_http.py: unit-testing the HTTP transport with make_sync_client."""
+        from examples.testing_http import main
+
+        main()
+        out = capsys.readouterr().out
+        assert "greet('World') = Hello, World!" in out
+        assert "whoami() = anonymous" in out
+        assert "whoami() [authenticated] = alice" in out
+        assert "All assertions passed!" in out
+
+    def test_auth(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """auth.py: HTTP authentication with Bearer tokens and guarded methods."""
+        from examples.auth import main
+
+        main()
+        out = capsys.readouterr().out
+        assert "status (public):" in out
+        assert "alice" in out
+        assert "secret" in out
+
+    def test_introspection(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """introspection.py: runtime service introspection with enable_describe."""
+        from examples.introspection import main
+
+        main()
+        out = capsys.readouterr().out
+        assert "Service: DemoService" in out
+        assert "greet (unary)" in out
+        assert "count (stream)" in out
+
+    def test_shared_memory(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """shared_memory.py: zero-copy shared memory transport."""
+        from examples.shared_memory import main
+
+        main()
+        out = capsys.readouterr().out
+        assert "6.0" in out
+        assert "20.0" in out
+
 
 # ---------------------------------------------------------------------------
 # Subprocess example: client spawns worker

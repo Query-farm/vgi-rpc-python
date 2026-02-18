@@ -23,6 +23,7 @@ dependencies = ["pyarrow>=14.0", "tzdata>=2024.1; sys_platform == 'win32'"]
 Homepage = "https://github.com/Query-farm/vgi-rpc-python"
 Repository = "https://github.com/Query-farm/vgi-rpc-python"
 Issues = "https://github.com/Query-farm/vgi-rpc-python/issues"
+Documentation = "https://query-farm.github.io/vgi-rpc-python/"
 
 [project.optional-dependencies]
 http = ["falcon>=3.0", "httpx>=0.24", "waitress>=2.0"]
@@ -93,6 +94,10 @@ module = "opentelemetry.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "pytest_benchmark.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "tests.*"
 # Protocol classes are passed as type markers (not instantiated) to serve_pipe/connect/http_connect;
 # type[P] correctly triggers type-abstract for abstract Protocol classes.
@@ -105,7 +110,7 @@ unused-type-ignore-comment = "ignore"  # these comments are required by mypy
 python-version = "3.13"
 
 [tool.pytest.ini_options]
-addopts = "--mypy --ruff --timeout=50"
+addopts = "--mypy --ruff --timeout=50 --benchmark-disable"
 testpaths = ["tests"]
 
 [tool.coverage.run]
@@ -145,6 +150,13 @@ also_copy = ["vgi_rpc/"]
 pytest_add_cli_args = ["--timeout=50", "--no-header", "-o", "addopts=", "-o", "pythonpath=.", "--ignore=tests/test_external_fetch.py"]
 
 [dependency-groups]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
+    "mkdocs-section-index>=0.3",
+    "mkdocs-d2-plugin>=1.4",
+]
 dev = [
     "aioresponses>=0.7",
     "boto3>=1.28",
@@ -168,4 +180,5 @@ dev = [
     "waitress>=2.0",
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
+    "pytest-benchmark>=4.0",
 ]

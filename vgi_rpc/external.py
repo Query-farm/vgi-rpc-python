@@ -1,4 +1,4 @@
-"""ExternalLocation batch support for large data batches.
+r"""ExternalLocation batch support for large data batches.
 
 When record batches exceed a configurable size threshold, they can be
 externalized to remote storage (e.g. S3) and replaced with zero-row
@@ -12,6 +12,52 @@ cycle (log batches + the single data batch). The pointer batch replaces
 the entire cycle in the response stream.  On resolution, the client reads
 back all batches from the external stream, dispatches log batches via
 ``on_log``, and returns just the data batch.
+
+Object Lifecycle
+----------------
+
+**vgi-rpc does not delete uploaded objects.**  Every call to
+``ExternalStorage.upload()`` or ``UploadUrlProvider.generate_upload_url()``
+creates a new storage object that persists until the operator removes it.
+Pre-signed URLs expire (default one hour), but the underlying object
+remains in the bucket.
+
+Server operators **must** configure storage-level cleanup to avoid
+unbounded growth:
+
+* **Amazon S3** — Add an `S3 Lifecycle Policy`_ that expires objects
+  under the configured ``prefix`` (default ``vgi-rpc/``) after a
+  suitable retention period (e.g. 24 hours)::
+
+      aws s3api put-bucket-lifecycle-configuration \\
+        --bucket MY_BUCKET \\
+        --lifecycle-configuration '{
+          "Rules": [{
+            "ID": "expire-vgi-rpc",
+            "Filter": {"Prefix": "vgi-rpc/"},
+            "Status": "Enabled",
+            "Expiration": {"Days": 1}
+          }]
+        }'
+
+* **Google Cloud Storage** — Add an `Object Lifecycle Management`_ rule
+  that deletes objects older than the desired retention::
+
+      gsutil lifecycle set <(cat <<EOF
+      {"rule": [{"action": {"type": "Delete"},
+                 "condition": {"age": 1,
+                               "matchesPrefix": ["vgi-rpc/"]}}]}
+      EOF
+      ) gs://MY_BUCKET
+
+Choose a retention period that exceeds the maximum expected RPC
+round-trip time (including retries).  A 24-hour window is a safe
+starting point for most workloads.
+
+.. _S3 Lifecycle Policy:
+   https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html
+.. _Object Lifecycle Management:
+   https://cloud.google.com/storage/docs/lifecycle
 """
 
 from __future__ import annotations

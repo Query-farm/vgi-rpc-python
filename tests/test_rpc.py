@@ -31,6 +31,8 @@ from vgi_rpc.rpc import (
     Stream,
     StreamSession,
     StreamState,
+    _current_request_id,
+    _generate_request_id,
     connect,
     describe_rpc,
     make_pipe_pair,
@@ -2208,3 +2210,75 @@ class TestStreamSafety:
             pytest.raises(RpcError, match=r"finish.*not allowed on exchange streams"),
         ):
             session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"v": [1]})))
+
+
+# ---------------------------------------------------------------------------
+# Tests: Per-request correlation ID
+# ---------------------------------------------------------------------------
+
+
+class TestRequestId:
+    """Tests for the per-request correlation ID feature."""
+
+    def test_generate_request_id_format(self) -> None:
+        """_generate_request_id returns 16 hex chars, unique across calls."""
+        rid1 = _generate_request_id()
+        rid2 = _generate_request_id()
+        assert len(rid1) == 16
+        assert rid1 != rid2
+        # Must be valid hex
+        int(rid1, 16)
+        int(rid2, 16)
+
+    def test_rpc_error_request_id(self) -> None:
+        """RpcError stores request_id, defaults to empty string."""
+        err_default = RpcError("T", "m", "tb")
+        assert err_default.request_id == ""
+
+        err_with = RpcError("T", "m", "tb", request_id="abc123")
+        assert err_with.request_id == "abc123"
+
+    def test_call_context_reads_request_id_contextvar(self) -> None:
+        """CallContext reads from _current_request_id contextvar and exposes via property."""
+        # Without contextvar set → empty
+        ctx_empty = CallContext(auth=AuthContext.anonymous(), emit_client_log=lambda _: None)
+        assert ctx_empty.request_id == ""
+
+        # With contextvar set
+        token = _current_request_id.set("test-req-42")
+        try:
+            ctx = CallContext(
+                auth=AuthContext.anonymous(),
+                emit_client_log=lambda _: None,
+                server_id="srv1",
+                method_name="greet",
+                protocol_name="Test",
+            )
+            assert ctx.request_id == "test-req-42"
+            # logger extra should include request_id
+            extra = ctx.logger.extra
+            assert isinstance(extra, dict)
+            assert extra["request_id"] == "test-req-42"
+        finally:
+            _current_request_id.reset(token)
+
+    def test_pipe_error_has_request_id(self) -> None:
+        """RpcError.request_id is non-empty on pipe transport error."""
+        with (
+            pytest.raises(RpcError) as exc_info,
+            serve_pipe(RpcFixtureService, RpcFixtureServiceImpl()) as proxy,
+        ):
+            proxy.fail_unary()
+        assert exc_info.value.request_id != ""
+        assert len(exc_info.value.request_id) == 16
+
+    def test_pipe_client_log_has_request_id(self) -> None:
+        """on_log callback message extra contains request_id on pipe transport."""
+        logs: list[Message] = []
+        with serve_pipe(RpcFixtureService, RpcFixtureServiceImpl(), on_log=logs.append) as proxy:
+            proxy.greet_with_logs(name="Alice")
+        assert len(logs) >= 1
+        for msg in logs:
+            assert msg.extra is not None
+            assert "request_id" in msg.extra
+            assert len(str(msg.extra["request_id"])) == 16

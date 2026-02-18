@@ -931,6 +931,46 @@ The [`examples/`](examples/) directory contains runnable scripts demonstrating k
 | [`http_client.py`](examples/http_client.py) | HTTP client connecting to the server |
 | [`subprocess_worker.py`](examples/subprocess_worker.py) | Subprocess worker entry point |
 | [`subprocess_client.py`](examples/subprocess_client.py) | Subprocess client with error handling |
+| [`testing_pipe.py`](examples/testing_pipe.py) | Unit-testing with `serve_pipe()` (no network) |
+| [`testing_http.py`](examples/testing_http.py) | Unit-testing the HTTP transport with `make_sync_client()` |
+| [`auth.py`](examples/auth.py) | HTTP authentication with Bearer tokens and guarded methods |
+| [`introspection.py`](examples/introspection.py) | Runtime service introspection with `enable_describe` |
+| [`shared_memory.py`](examples/shared_memory.py) | Zero-copy shared memory transport with `ShmPipeTransport` |
+
+## Testing
+
+### Pipe transport (fastest)
+
+`serve_pipe` runs the server on a background thread — no subprocess or network needed:
+
+```python
+from vgi_rpc import serve_pipe
+
+with serve_pipe(MyService, MyServiceImpl()) as svc:
+    assert svc.add(a=2.0, b=3.0) == 5.0
+
+    values = [row["value"] for b in svc.countdown(n=3) for row in b.batch.to_pylist()]
+    assert values == [3, 2, 1]
+```
+
+See [`examples/testing_pipe.py`](examples/testing_pipe.py) for a complete runnable example.
+
+### HTTP transport (no real server)
+
+`make_sync_client` wraps a Falcon `TestClient` so you can exercise the full HTTP stack — including authentication — without starting a server:
+
+```python
+from vgi_rpc import RpcServer
+from vgi_rpc.http import http_connect, make_sync_client
+
+server = RpcServer(MyService, MyServiceImpl())
+client = make_sync_client(server, authenticate=my_auth, default_headers={"Authorization": "Bearer tok"})
+
+with http_connect(MyService, client=client) as svc:
+    assert svc.greet(name="World") == "Hello, World!"
+```
+
+See [`examples/testing_http.py`](examples/testing_http.py) for a complete runnable example with authentication testing.
 
 ## IPC Validation
 
@@ -1041,14 +1081,15 @@ Over HTTP, streaming is **stateless**: each exchange carries serialized `StreamS
 
 ### State tokens (HTTP)
 
-State tokens use HMAC-SHA256 signing to prevent tampering:
+State tokens use HMAC-SHA256 signing to prevent tampering. The token is versioned for forward compatibility, and the HMAC is verified before inspecting any payload fields (including the version byte) to avoid leaking format information to unauthenticated callers.
 
 ```
-[4 bytes: state_len        (uint32 LE)]
+[1 byte:  version            (uint8, currently 1)]
+[4 bytes: state_len          (uint32 LE)]
 [state_len bytes: state_bytes]
-[4 bytes: output_schema_len (uint32 LE)]
-[output_schema_len bytes: output_schema_bytes]
-[4 bytes: input_schema_len  (uint32 LE)]
+[4 bytes: schema_len         (uint32 LE)]
+[schema_len bytes: schema_bytes]
+[4 bytes: input_schema_len   (uint32 LE)]
 [input_schema_len bytes: input_schema_bytes]
 [32 bytes: HMAC-SHA256(key, all preceding bytes)]
 ```

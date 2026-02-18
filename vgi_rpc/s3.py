@@ -37,6 +37,12 @@ class _S3Pool:
 class S3Storage:
     """S3-backed ``ExternalStorage`` using boto3.
 
+    .. important:: **Object lifecycle** — uploaded objects persist
+       indefinitely.  Configure an `S3 Lifecycle Policy`_ on the
+       bucket to expire objects under ``prefix`` (default
+       ``vgi-rpc/``) after a suitable retention period.
+       See :mod:`vgi_rpc.external` for full details and examples.
+
     Attributes:
         bucket: S3 bucket name.
         prefix: Key prefix for uploaded objects.
@@ -44,6 +50,9 @@ class S3Storage:
         region_name: AWS region (``None`` uses boto3 default).
         endpoint_url: Custom endpoint for S3-compatible services
             (e.g. MinIO, LocalStack).
+
+    .. _S3 Lifecycle Policy:
+       https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html
 
     """
 

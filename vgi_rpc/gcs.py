@@ -37,12 +37,21 @@ class _GCSPool:
 class GCSStorage:
     """GCS-backed ``ExternalStorage`` using google-cloud-storage.
 
+    .. important:: **Object lifecycle** — uploaded objects persist
+       indefinitely.  Configure `Object Lifecycle Management`_ on the
+       bucket to delete objects under ``prefix`` (default
+       ``vgi-rpc/``) after a suitable retention period.
+       See :mod:`vgi_rpc.external` for full details and examples.
+
     Attributes:
         bucket: GCS bucket name.
         prefix: Key prefix for uploaded objects.
         presign_expiry_seconds: Lifetime of signed GET URLs.
         project: GCS project ID (``None`` uses Application Default
             Credentials default project).
+
+    .. _Object Lifecycle Management:
+       https://cloud.google.com/storage/docs/lifecycle
 
     """
 
