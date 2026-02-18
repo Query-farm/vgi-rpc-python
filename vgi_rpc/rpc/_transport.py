@@ -13,6 +13,7 @@ from io import IOBase
 from typing import TYPE_CHECKING, BinaryIO, Protocol, cast, runtime_checkable
 
 from vgi_rpc.rpc._common import _logger
+from vgi_rpc.rpc._debug import wire_transport_logger
 from vgi_rpc.shm import ShmSegment
 
 if TYPE_CHECKING:
@@ -81,6 +82,14 @@ def make_pipe_pair() -> tuple[PipeTransport, PipeTransport]:
     """
     c2s_r, c2s_w = os.pipe()
     s2c_r, s2c_w = os.pipe()
+    if wire_transport_logger.isEnabledFor(logging.DEBUG):
+        wire_transport_logger.debug(
+            "make_pipe_pair: c2s=(%d,%d), s2c=(%d,%d)",
+            c2s_r,
+            c2s_w,
+            s2c_r,
+            s2c_w,
+        )
     client = PipeTransport(
         os.fdopen(s2c_r, "rb"),
         os.fdopen(c2s_w, "wb", buffering=0),
@@ -187,6 +196,13 @@ class SubprocessTransport:
                 Defaults to ``logging.getLogger("vgi_rpc.subprocess.stderr")``.
 
         """
+        if wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug(
+                "SubprocessTransport init: cmd=%s, stderr=%s",
+                cmd,
+                stderr.value,
+            )
+
         if stderr == StderrMode.DEVNULL:
             stderr_arg: int | None = subprocess.DEVNULL
         elif stderr == StderrMode.PIPE:
@@ -207,6 +223,13 @@ class SubprocessTransport:
         self._writer: IOBase = cast(IOBase, self._proc.stdin)
         self._closed = False
         self._stderr_thread: threading.Thread | None = None
+        if wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug(
+                "SubprocessTransport spawned: pid=%d, stdin_fd=%d, stdout_fd=%d",
+                self._proc.pid,
+                self._proc.stdin.fileno(),
+                self._proc.stdout.fileno(),
+            )
 
         if stderr == StderrMode.PIPE:
             assert self._proc.stderr is not None
@@ -238,6 +261,8 @@ class SubprocessTransport:
         """Close stdin (sends EOF), wait for exit, close stdout."""
         if self._closed:
             return
+        if wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug("SubprocessTransport closing: pid=%d", self._proc.pid)
         self._closed = True
         if self._proc.stdin:
             self._proc.stdin.close()
@@ -249,6 +274,12 @@ class SubprocessTransport:
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
         self._reader.close()
+        if wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug(
+                "SubprocessTransport closed: pid=%d, exit_code=%s",
+                self._proc.pid,
+                self._proc.returncode,
+            )
 
 
 def serve_stdio(server: RpcServer) -> None:
@@ -273,5 +304,11 @@ def serve_stdio(server: RpcServer) -> None:
         )
     reader = os.fdopen(sys.stdin.fileno(), "rb", closefd=False)
     writer = os.fdopen(sys.stdout.fileno(), "wb", buffering=0, closefd=False)
+    if wire_transport_logger.isEnabledFor(logging.DEBUG):
+        wire_transport_logger.debug(
+            "serve_stdio: server_id=%s, protocol=%s",
+            server.server_id,
+            server.protocol_name,
+        )
     transport = PipeTransport(reader, writer)
     server.serve(transport)

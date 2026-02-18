@@ -33,6 +33,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **CLI tool** — `vgi-rpc describe` and `vgi-rpc call` for ad-hoc service interaction
 - **Shared memory transport** — zero-copy batch transfer between co-located processes
 - **Large batch support** — transparent externalization to S3/GCS for oversized data
+- **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full wire-level visibility
 
 ## Two Method Types
 

@@ -1080,7 +1080,7 @@ class TestServeOneServerErrors:
                 return "ok"
 
         server = RpcServer(P, Impl())
-        with pytest.raises(RpcError, match="Unknown method: bogus"):
+        with pytest.raises(RpcError, match="Unknown method: 'bogus'"):
             _serve_one_roundtrip(server, "bogus", pa.schema([]), {})
 
     def test_validate_params_none_for_required(self) -> None:

@@ -1925,7 +1925,7 @@ class TestRequestVersion:
 
         resp_buf.seek(0)
         reader = ValidatedReader(pa.ipc.open_stream(resp_buf), IpcValidation.NONE)
-        with pytest.raises(RpcError, match=r"Missing vgi_rpc\.request_version") as exc_info:
+        with pytest.raises(RpcError, match=r"Missing 'vgi_rpc\.request_version'") as exc_info:
             while True:
                 batch, cm = reader.read_next_batch_with_custom_metadata()
                 _dispatch_log_or_error(batch, cm)

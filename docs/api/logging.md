@@ -56,6 +56,25 @@ class MyServiceImpl:
 | `vgi_rpc.http` | HTTP transport lifecycle |
 | `vgi_rpc.external` | External storage operations |
 | `vgi_rpc.subprocess.stderr` | Child process stderr (`StderrMode.PIPE`) |
+| `vgi_rpc.wire.request` | Request serialization / deserialization |
+| `vgi_rpc.wire.response` | Response serialization / deserialization |
+| `vgi_rpc.wire.batch` | Batch classification (log / error / data dispatch) |
+| `vgi_rpc.wire.stream` | Stream session lifecycle |
+| `vgi_rpc.wire.transport` | Transport lifecycle (pipe, subprocess) |
+| `vgi_rpc.wire.http` | HTTP client requests / responses |
+
+### Wire protocol debugging
+
+Enable the `vgi_rpc.wire` hierarchy at DEBUG to see exactly what flows over the wire — request/response batches, metadata, batch classification, stream lifecycle, and transport events:
+
+```python
+import logging
+
+logging.getLogger("vgi_rpc.wire").setLevel(logging.DEBUG)
+logging.getLogger("vgi_rpc.wire").addHandler(logging.StreamHandler())
+```
+
+All formatting is gated behind `isEnabledFor` guards — zero overhead when disabled. Enable individual sub-loggers (e.g. `vgi_rpc.wire.request` only) for targeted debugging.
 
 ### Production JSON logging
 

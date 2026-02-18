@@ -7,6 +7,7 @@ Provides ``http_connect`` context manager, ``HttpStreamSession``,
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -40,6 +41,7 @@ from vgi_rpc.rpc import (
     _write_request,
     rpc_methods,
 )
+from vgi_rpc.rpc._debug import fmt_batch, wire_http_logger
 from vgi_rpc.utils import IpcValidation, ValidatedReader, empty_batch
 
 from ._common import (
@@ -77,6 +79,12 @@ def _open_response_stream(
             the response is not a valid Arrow IPC stream.
 
     """
+    if wire_http_logger.isEnabledFor(logging.DEBUG):
+        wire_http_logger.debug(
+            "Open response stream: status=%d, body_size=%d",
+            status_code,
+            len(content),
+        )
     # 401 responses are plain text (not Arrow IPC) because they are produced
     # by _AuthMiddleware before any method is resolved, so no output schema
     # is available.  We surface them as RpcError("AuthenticationError").
@@ -85,9 +93,10 @@ def _open_response_stream(
     try:
         return ValidatedReader(ipc.open_stream(BytesIO(content)), ipc_validation)
     except pa.ArrowInvalid:
+        body_preview = content[:200].decode(errors="replace") if content else ""
         raise RpcError(
             "HttpError",
-            f"HTTP {status_code}: response is not a valid Arrow IPC stream",
+            f"HTTP {status_code}: response is not a valid Arrow IPC stream (first 200 bytes: {body_preview!r})",
             "",
         ) from None
 
@@ -177,11 +186,24 @@ class HttpStreamSession:
         with ipc.new_stream(req_buf, batch_to_write.schema) as writer:
             writer.write_batch(batch_to_write, custom_metadata=merged)
 
+        if wire_http_logger.isEnabledFor(logging.DEBUG):
+            wire_http_logger.debug(
+                "HTTP stream exchange: method=%s, input=%s",
+                self._method,
+                fmt_batch(batch_to_write),
+            )
         resp = self._client.post(
             f"{self._url_prefix}/{self._method}/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
+        if wire_http_logger.isEnabledFor(logging.DEBUG):
+            wire_http_logger.debug(
+                "HTTP stream exchange response: method=%s, status=%d, size=%d",
+                self._method,
+                resp.status_code,
+                len(resp.content),
+            )
 
         # Read response — log batches + data batch with state
         reader = _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
@@ -541,6 +563,8 @@ class _HttpProxy:
         ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> object:
+            if wire_http_logger.isEnabledFor(logging.DEBUG):
+                wire_http_logger.debug("HTTP unary call: %s/%s", url_prefix, info.name)
             req_buf = BytesIO()
             _send_request(req_buf, info, kwargs)
 
@@ -549,6 +573,13 @@ class _HttpProxy:
                 content=req_buf.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
+            if wire_http_logger.isEnabledFor(logging.DEBUG):
+                wire_http_logger.debug(
+                    "HTTP unary response: method=%s, status=%d, size=%d",
+                    info.name,
+                    resp.status_code,
+                    len(resp.content),
+                )
 
             reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
             return _read_unary_response(reader, info, on_log, ext_cfg)
@@ -563,6 +594,8 @@ class _HttpProxy:
         ipc_validation = self._ipc_validation
 
         def caller(**kwargs: object) -> HttpStreamSession:
+            if wire_http_logger.isEnabledFor(logging.DEBUG):
+                wire_http_logger.debug("HTTP stream init: %s/%s/init", url_prefix, info.name)
             # Send init request
             req_buf = BytesIO()
             _send_request(req_buf, info, kwargs)
@@ -572,6 +605,13 @@ class _HttpProxy:
                 content=req_buf.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
+            if wire_http_logger.isEnabledFor(logging.DEBUG):
+                wire_http_logger.debug(
+                    "HTTP stream init response: method=%s, status=%d, size=%d",
+                    info.name,
+                    resp.status_code,
+                    len(resp.content),
+                )
 
             reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
             return _init_http_stream_session(

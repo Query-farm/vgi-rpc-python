@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from collections.abc import Callable
 from enum import Enum
 from io import IOBase
@@ -33,6 +34,15 @@ from vgi_rpc.metadata import (
     encode_metadata,
 )
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, RpcError, VersionError, _current_request_id, _current_trace_headers
+from vgi_rpc.rpc._debug import (
+    fmt_batch,
+    fmt_kwargs,
+    fmt_metadata,
+    fmt_schema,
+    wire_batch_logger,
+    wire_request_logger,
+    wire_response_logger,
+)
 from vgi_rpc.rpc._types import (
     AnnotatedBatch,
     RpcMethodInfo,
@@ -95,6 +105,14 @@ def _write_request(writer_stream: IOBase, method_name: str, params_schema: pa.Sc
         if trace_meta is not None:
             md.update(trace_meta)
     custom_metadata = pa.KeyValueMetadata(md)
+    if wire_request_logger.isEnabledFor(logging.DEBUG):
+        wire_request_logger.debug(
+            "Write request: method=%s, schema=%s, kwargs={%s}, metadata=%s",
+            method_name,
+            fmt_schema(params_schema),
+            fmt_kwargs(kwargs),
+            fmt_metadata(custom_metadata),
+        )
     with ipc.new_stream(writer_stream, params_schema) as writer:
         writer.write_batch(batch, custom_metadata=custom_metadata)
 
@@ -123,6 +141,12 @@ def _write_error_batch(
     server_id: str | None = None,
 ) -> None:
     """Write error as zero-row batch (convenience wrapper)."""
+    if wire_response_logger.isEnabledFor(logging.DEBUG):
+        wire_response_logger.debug(
+            "Write error batch: %s: %s",
+            type(exc).__name__,
+            str(exc)[:200],
+        )
     _write_message_batch(writer, schema, Message.from_exception(exc), server_id=server_id)
 
 
@@ -179,13 +203,19 @@ def _write_result_batch(
     if shm is not None:
         batch, cm = maybe_write_to_shm(batch, None, shm)
         if cm is not None:
+            if wire_response_logger.isEnabledFor(logging.DEBUG):
+                wire_response_logger.debug("Write result batch: %s, route=shm", fmt_batch(batch))
             writer.write_batch(batch, custom_metadata=cm)
             return
     elif external_config is not None:
         batch, cm = maybe_externalize_batch(batch, None, external_config)
         if cm is not None:
+            if wire_response_logger.isEnabledFor(logging.DEBUG):
+                wire_response_logger.debug("Write result batch: %s, route=external", fmt_batch(batch))
             writer.write_batch(batch, custom_metadata=cm)
             return
+    if wire_response_logger.isEnabledFor(logging.DEBUG):
+        wire_response_logger.debug("Write result batch: %s, route=inline", fmt_batch(batch))
     writer.write_batch(batch)
 
 
@@ -206,14 +236,32 @@ def _read_request(
     """
     reader = ValidatedReader(ipc.open_stream(reader_stream), ipc_validation)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+    if wire_request_logger.isEnabledFor(logging.DEBUG):
+        wire_request_logger.debug(
+            "Read request batch: %s, metadata=%s",
+            fmt_batch(batch),
+            fmt_metadata(custom_metadata),
+        )
     method_name_bytes = custom_metadata.get(RPC_METHOD_KEY) if custom_metadata else None
     if method_name_bytes is None:
-        raise RpcError("ProtocolError", "Missing vgi_rpc.method in request batch custom_metadata", "")
+        raise RpcError(
+            "ProtocolError",
+            "Missing 'vgi_rpc.method' in request batch custom_metadata. "
+            "Each request batch must carry a 'vgi_rpc.method' key in its Arrow IPC custom_metadata "
+            "with the method name as a UTF-8 string.",
+            "",
+        )
     version_bytes = custom_metadata.get(REQUEST_VERSION_KEY) if custom_metadata else None
     if version_bytes is None:
-        raise VersionError("Missing vgi_rpc.request_version in request metadata")
+        raise VersionError(
+            "Missing 'vgi_rpc.request_version' in request batch custom_metadata. "
+            f"Set the 'vgi_rpc.request_version' custom_metadata value to {REQUEST_VERSION!r}."
+        )
     if version_bytes != REQUEST_VERSION:
-        raise VersionError(f"Unsupported request version {version_bytes!r}, expected {REQUEST_VERSION!r}")
+        raise VersionError(
+            f"Unsupported request version {version_bytes!r}, expected {REQUEST_VERSION!r}. "
+            f"Set the 'vgi_rpc.request_version' custom_metadata value to {REQUEST_VERSION!r}."
+        )
     method_name = method_name_bytes.decode()
     # Store trace context in contextvar for hook consumption (pipe/subprocess transport)
     tp = custom_metadata.get(TRACEPARENT_KEY) if custom_metadata else None
@@ -225,8 +273,20 @@ def _read_request(
         _current_trace_headers.set(headers)
     _drain_stream(reader)
     if len(batch.schema) > 0 and batch.num_rows != 1:
-        raise RpcError("ProtocolError", f"Expected 1 row in request batch, got {batch.num_rows}", "")
+        raise RpcError(
+            "ProtocolError",
+            f"Expected 1 row in request batch, got {batch.num_rows}. "
+            f"Each parameter is a column (not a row). The batch should have exactly 1 row with schema "
+            f"{fmt_schema(batch.schema)}.",
+            "",
+        )
     kwargs = {f.name: batch.column(i)[0].as_py() for i, f in enumerate(batch.schema)}
+    if wire_request_logger.isEnabledFor(logging.DEBUG):
+        wire_request_logger.debug(
+            "Parsed request: method=%s, kwargs={%s}",
+            method_name,
+            fmt_kwargs(kwargs),
+        )
     return method_name, kwargs
 
 
@@ -238,6 +298,13 @@ def _flush_collector(
     shm: ShmSegment | None = None,
 ) -> None:
     """Write all accumulated batches from an OutputCollector to an IPC stream writer."""
+    if wire_response_logger.isEnabledFor(logging.DEBUG):
+        route_config = "shm" if shm is not None else ("external" if external_config is not None else "inline")
+        wire_response_logger.debug(
+            "Flush collector: batches=%d, route_config=%s",
+            len(out.batches),
+            route_config,
+        )
     if shm is not None:
         # Log batches go to pipe; data batch goes to SHM if possible
         for ab in out.batches:
@@ -275,12 +342,22 @@ def _dispatch_log_or_error(
     Callers should loop, skipping consumed batches until a data batch is found.
     """
     if custom_metadata is None:
+        if wire_batch_logger.isEnabledFor(logging.DEBUG):
+            wire_batch_logger.debug("Classify batch: rows=%d, no metadata -> data", batch.num_rows)
         return False
     if batch.num_rows != 0:
+        if wire_batch_logger.isEnabledFor(logging.DEBUG):
+            wire_batch_logger.debug(
+                "Classify batch: rows=%d, metadata=%s -> data",
+                batch.num_rows,
+                fmt_metadata(custom_metadata),
+            )
         return False
     level_bytes = custom_metadata.get(LOG_LEVEL_KEY)
     message_bytes = custom_metadata.get(LOG_MESSAGE_KEY)
     if level_bytes is None or message_bytes is None:
+        if wire_batch_logger.isEnabledFor(logging.DEBUG):
+            wire_batch_logger.debug("Classify batch: zero-row, no log keys -> data")
         return False
 
     level_str = level_bytes.decode()
@@ -298,6 +375,13 @@ def _dispatch_log_or_error(
     request_id = ""
     if request_id_bytes is not None:
         request_id = request_id_bytes.decode() if isinstance(request_id_bytes, bytes) else request_id_bytes
+
+    if wire_batch_logger.isEnabledFor(logging.DEBUG):
+        wire_batch_logger.debug(
+            "Classify batch: zero-row -> %s: %s",
+            level_str,
+            message_str[:200],
+        )
 
     # EXCEPTION level → raise RpcError (existing behaviour)
     if level_str == Level.EXCEPTION.value:
@@ -408,6 +492,13 @@ def _drain_stream(reader: ValidatedReader) -> None:
 def _send_request(writer: IOBase, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
     """Merge defaults, validate, and write a request IPC stream."""
     merged = {**info.param_defaults, **kwargs}
+    if wire_request_logger.isEnabledFor(logging.DEBUG):
+        wire_request_logger.debug(
+            "Send request: method=%s, type=%s, defaults_applied=%s",
+            info.name,
+            info.method_type.value,
+            sorted(set(info.param_defaults) - set(kwargs)),
+        )
     _validate_params(info.name, merged, info.param_types)
     _write_request(writer, info.name, info.params_schema, merged)
 
@@ -434,6 +525,12 @@ def _read_batch_with_log_check(
     """
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+        if wire_response_logger.isEnabledFor(logging.DEBUG):
+            wire_response_logger.debug(
+                "Read batch: %s, metadata=%s",
+                fmt_batch(batch),
+                fmt_metadata(custom_metadata),
+            )
         if not _dispatch_log_or_error(batch, custom_metadata, on_log):
             resolved_batch, resolved_cm = resolve_external_location(
                 batch, custom_metadata, external_config, on_log, reader.ipc_validation
@@ -458,9 +555,17 @@ def _read_unary_response(
         raise
     _drain_stream(reader)
     if not info.has_return:
+        if wire_response_logger.isEnabledFor(logging.DEBUG):
+            wire_response_logger.debug("Read unary response: method=%s, void return", info.name)
         return None
     value = batch.batch.column("result")[0].as_py()
     _validate_result(info.name, value, info.result_type)
+    if wire_response_logger.isEnabledFor(logging.DEBUG):
+        wire_response_logger.debug(
+            "Read unary response: method=%s, result_type=%s",
+            info.name,
+            type(value).__name__,
+        )
     if value is None:
         return None
     return _deserialize_value(value, info.result_type, reader.ipc_validation)

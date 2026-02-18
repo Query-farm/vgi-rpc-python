@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Callable, Iterator
 from io import IOBase
 from types import TracebackType
@@ -14,6 +15,7 @@ from pyarrow import ipc
 from vgi_rpc.external import ExternalLocationConfig, maybe_externalize_batch
 from vgi_rpc.log import Message
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
+from vgi_rpc.rpc._debug import fmt_batch, wire_request_logger, wire_stream_logger, wire_transport_logger
 from vgi_rpc.rpc._transport import RpcTransport, ShmPipeTransport
 from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, rpc_methods
 from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_unary_response, _send_request
@@ -73,8 +75,15 @@ class StreamSession:
         elif self._external_config is not None:
             batch_to_write, cm_to_write = maybe_externalize_batch(batch_to_write, cm_to_write, self._external_config)
 
+        first_write = self._input_writer is None
         if self._input_writer is None:
             self._input_writer = ipc.new_stream(self._writer_stream, batch_to_write.schema)
+        if wire_stream_logger.isEnabledFor(logging.DEBUG):
+            wire_stream_logger.debug(
+                "Stream write input: %s, first_write=%s",
+                fmt_batch(batch_to_write),
+                first_write,
+            )
         if cm_to_write is not None:
             self._input_writer.write_batch(batch_to_write, custom_metadata=cm_to_write)
         else:
@@ -84,7 +93,10 @@ class StreamSession:
         """Read the next data batch from the output stream, skipping log batches."""
         if self._output_reader is None:
             self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
-        return _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config, shm=self._shm)
+        ab = _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config, shm=self._shm)
+        if wire_stream_logger.isEnabledFor(logging.DEBUG):
+            wire_stream_logger.debug("Stream read output: %s", fmt_batch(ab.batch))
+        return ab
 
     def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch, receive the output batch.
@@ -98,6 +110,8 @@ class StreamSession:
             RpcError: On server-side errors.
 
         """
+        if wire_stream_logger.isEnabledFor(logging.DEBUG):
+            wire_stream_logger.debug("Stream exchange: sending input")
         self._write_batch(input)
         try:
             return self._read_response()
@@ -116,6 +130,8 @@ class StreamSession:
             RpcError: On server-side errors.
 
         """
+        if wire_stream_logger.isEnabledFor(logging.DEBUG):
+            wire_stream_logger.debug("Stream tick")
         self._write_batch(_TICK_BATCH)
         try:
             return self._read_response()
@@ -142,6 +158,8 @@ class StreamSession:
         """Close input stream (signals EOS) and drain remaining output."""
         if self._closed:
             return
+        if wire_stream_logger.isEnabledFor(logging.DEBUG):
+            wire_stream_logger.debug("Stream close")
         self._closed = True
         if self._input_writer is not None:
             self._input_writer.close()
@@ -219,6 +237,8 @@ class _RpcProxy:
         shm = self._shm
 
         def caller(**kwargs: object) -> object:
+            if wire_request_logger.isEnabledFor(logging.DEBUG):
+                wire_request_logger.debug("Unary call: method=%s", info.name)
             _send_request(transport.writer, info, kwargs)
             reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
             return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
@@ -233,6 +253,8 @@ class _RpcProxy:
         shm = self._shm
 
         def caller(**kwargs: object) -> StreamSession:
+            if wire_stream_logger.isEnabledFor(logging.DEBUG):
+                wire_stream_logger.debug("Stream init: method=%s", info.name)
             _send_request(transport.writer, info, kwargs)
             return StreamSession(
                 transport.writer,
@@ -282,6 +304,8 @@ class RpcConnection[P]:
 
     def __enter__(self) -> P:
         """Enter the context and return a typed proxy."""
+        if wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug("RpcConnection open: protocol=%s", self._protocol.__name__)
         return cast(
             P,
             _RpcProxy(
@@ -300,4 +324,6 @@ class RpcConnection[P]:
         exc_tb: TracebackType | None,
     ) -> None:
         """Close the transport."""
+        if wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug("RpcConnection close: protocol=%s", self._protocol.__name__)
         self._transport.close()

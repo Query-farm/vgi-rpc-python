@@ -81,7 +81,10 @@ def _check_content_type(req: falcon.Request) -> None:
     content_type = req.content_type or ""
     if content_type != _ARROW_CONTENT_TYPE:
         raise _RpcHttpError(
-            TypeError(f"Expected Content-Type: {_ARROW_CONTENT_TYPE}, got {content_type!r}"),
+            TypeError(
+                f"Expected Content-Type: '{_ARROW_CONTENT_TYPE}', got {content_type!r}. "
+                f"All vgi-rpc HTTP requests must use Content-Type: {_ARROW_CONTENT_TYPE}"
+            ),
             status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
         )
 
@@ -312,7 +315,11 @@ class _HttpRpcApp:
         _check_content_type(req)
         info = self._server.methods.get(method)
         if info is None:
-            raise _RpcHttpError(AttributeError(f"Unknown method: {method}"), status_code=HTTPStatus.NOT_FOUND)
+            available = sorted(self._server.methods.keys())
+            raise _RpcHttpError(
+                AttributeError(f"Unknown method: '{method}'. Available methods: {available}"),
+                status_code=HTTPStatus.NOT_FOUND,
+            )
         return info
 
     def _unary_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> tuple[BytesIO, HTTPStatus]:
@@ -330,7 +337,10 @@ class _HttpRpcApp:
         try:
             ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
             if ipc_method != method_name:
-                raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
+                raise TypeError(
+                    f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
+                    f"custom_metadata 'vgi_rpc.method' has '{ipc_method}'. These must match."
+                )
             _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
@@ -427,7 +437,10 @@ class _HttpRpcApp:
         try:
             ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
             if ipc_method != method_name:
-                raise TypeError(f"Method mismatch: URL '{method_name}' vs IPC metadata '{ipc_method}'")
+                raise TypeError(
+                    f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
+                    f"custom_metadata 'vgi_rpc.method' has '{ipc_method}'. These must match."
+                )
             _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:

@@ -17,6 +17,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Shared memory transport** — zero-copy batch transfer between co-located processes
 - **IPC validation** — configurable batch validation levels for untrusted data
 - **Large batch support** — transparent externalization to S3/GCS for oversized data
+- **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full visibility into what flows over the wire
 
 ## Installation
 
@@ -758,6 +759,36 @@ logging.getLogger("vgi_rpc").addHandler(handler)
 | `vgi_rpc.external_fetch` | URL fetch operations |
 | `vgi_rpc.s3` / `vgi_rpc.gcs` | Storage backend operations |
 | `vgi_rpc.subprocess.stderr` | Child process stderr (`StderrMode.PIPE`) |
+| `vgi_rpc.wire.request` | Request serialization / deserialization |
+| `vgi_rpc.wire.response` | Response serialization / deserialization |
+| `vgi_rpc.wire.batch` | Batch classification (log / error / data dispatch) |
+| `vgi_rpc.wire.stream` | Stream session lifecycle |
+| `vgi_rpc.wire.transport` | Transport lifecycle (pipe, subprocess) |
+| `vgi_rpc.wire.http` | HTTP client requests / responses |
+
+#### Wire protocol debugging
+
+Enable the `vgi_rpc.wire` hierarchy at DEBUG to see exactly what flows over the wire — request/response batches, metadata, batch classification, stream lifecycle, and transport events. This is invaluable for diagnosing interoperability issues:
+
+```python
+import logging
+
+logging.getLogger("vgi_rpc.wire").setLevel(logging.DEBUG)
+logging.getLogger("vgi_rpc.wire").addHandler(logging.StreamHandler())
+```
+
+Sample output:
+
+```
+DEBUG vgi_rpc.wire.request  Send request: method=add, type=unary, defaults_applied=[]
+DEBUG vgi_rpc.wire.request  Write request: method=add, schema=(a: double, b: double), kwargs={a=1.0, b=2.0}, metadata={...}
+DEBUG vgi_rpc.wire.request  Read request batch: RecordBatch(rows=1, cols=2, schema=(a: double, b: double), bytes=16), metadata={...}
+DEBUG vgi_rpc.wire.response Write result batch: RecordBatch(rows=1, cols=1, schema=(result: double), bytes=8), route=inline
+DEBUG vgi_rpc.wire.batch    Classify batch: rows=1, no metadata -> data
+DEBUG vgi_rpc.wire.response Read unary response: method=add, result_type=float
+```
+
+All formatting is gated behind `isEnabledFor` guards — zero overhead when debug logging is disabled. You can selectively enable individual loggers (e.g. `vgi_rpc.wire.request` only) for targeted debugging.
 
 ## Error Handling
 

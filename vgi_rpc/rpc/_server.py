@@ -299,10 +299,11 @@ class RpcServer:
 
             info = self._methods.get(method_name)
             if info is None:
+                available = sorted(self._methods.keys())
                 _write_error_stream(
                     transport.writer,
                     _EMPTY_SCHEMA,
-                    AttributeError(f"Unknown method: {method_name}"),
+                    AttributeError(f"Unknown method: '{method_name}'. Available methods: {available}"),
                     server_id=self._server_id,
                 )
                 return
