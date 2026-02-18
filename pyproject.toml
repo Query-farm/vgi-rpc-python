@@ -3,7 +3,7 @@ name = "vgi-rpc"
 version = "0.1.0"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
-requires-python = ">=3.12.4"
+requires-python = ">=3.13"
 license = {file = "LICENSE.md"}
 authors = [{ name = "Query.farm" }]
 keywords = ["rpc", "arrow", "ipc", "serialization", "streaming"]
@@ -12,7 +12,6 @@ classifiers = [
   "Intended Audience :: Developers",
   "License :: Other/Proprietary License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
@@ -42,7 +41,7 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "D", "RUF", "PERF"]
@@ -56,7 +55,7 @@ ignore = [
 quote-style = "double"
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
