@@ -109,7 +109,7 @@ def _write_request(
     writer_stream: IOBase,
     method_name: str,
     params_schema: pa.Schema,
-    kwargs: dict[str, Any],
+    kwargs: dict[str, object],
     *,
     shm: ShmSegment | None = None,
 ) -> None:
@@ -264,7 +264,7 @@ def _write_result_batch(
 
 def _read_request(
     reader_stream: IOBase, ipc_validation: IpcValidation = IpcValidation.FULL
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, object]]:
     """Read a request IPC stream, return (method_name, kwargs).
 
     Extracts ``vgi_rpc.method`` and validates ``vgi_rpc.request_version``
@@ -452,7 +452,7 @@ def _dispatch_log_or_error(
     return True
 
 
-def _deserialize_value(value: object, type_hint: Any, ipc_validation: IpcValidation = IpcValidation.FULL) -> object:
+def _deserialize_value(value: object, type_hint: object, ipc_validation: IpcValidation = IpcValidation.FULL) -> object:
     """Deserialize a single value based on its type hint.
 
     Inverse of ``_convert_for_arrow``.  Handles ArrowSerializableDataclass,
@@ -473,14 +473,14 @@ def _deserialize_value(value: object, type_hint: Any, ipc_validation: IpcValidat
         return base[value]
     origin = get_origin(base)
     if origin is dict and isinstance(value, list):
-        return dict(cast(list[tuple[Any, Any]], value))
+        return dict(cast(list[tuple[object, object]], value))
     if origin is frozenset and isinstance(value, list):
         return frozenset(value)
     return value
 
 
 def _deserialize_params(
-    kwargs: dict[str, Any], param_types: dict[str, Any], ipc_validation: IpcValidation = IpcValidation.FULL
+    kwargs: dict[str, object], param_types: dict[str, object], ipc_validation: IpcValidation = IpcValidation.FULL
 ) -> None:
     """Deserialize params that lose type fidelity through as_py() in-place.
 
@@ -496,7 +496,7 @@ def _deserialize_params(
         kwargs[name] = _deserialize_value(value, ptype, ipc_validation)
 
 
-def _validate_params(method_name: str, kwargs: dict[str, Any], param_types: dict[str, Any]) -> None:
+def _validate_params(method_name: str, kwargs: dict[str, object], param_types: dict[str, object]) -> None:
     """Validate that non-optional parameters are not None.
 
     Raises TypeError if a None value is passed for a parameter whose type
@@ -513,7 +513,7 @@ def _validate_params(method_name: str, kwargs: dict[str, Any], param_types: dict
             raise TypeError(f"{method_name}() parameter '{name}' is not optional but got None")
 
 
-def _validate_result(method_name: str, value: object, result_type: Any) -> None:
+def _validate_result(method_name: str, value: object, result_type: object) -> None:
     """Validate that a non-optional return value is not None.
 
     Raises TypeError if the implementation returns None for a method whose
@@ -692,7 +692,7 @@ def _read_raw_stream_header(
 def _send_request(
     writer: IOBase,
     info: RpcMethodInfo,
-    kwargs: dict[str, Any],
+    kwargs: dict[str, object],
     *,
     shm: ShmSegment | None = None,
 ) -> None:

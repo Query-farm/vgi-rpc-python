@@ -27,7 +27,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Annotated, Any, get_args, get_origin
+from typing import Annotated, get_args, get_origin
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -90,7 +90,7 @@ _DESCRIBE_SCHEMA = pa.schema(_DESCRIBE_FIELDS)
 # ---------------------------------------------------------------------------
 
 
-def _type_name(python_type: Any) -> str:
+def _type_name(python_type: object) -> str:
     """Convert a Python type annotation to a human-readable string.
 
     Handles basic types, Optional, generics, Enum subclasses,
@@ -136,7 +136,7 @@ def _type_name(python_type: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _safe_defaults_json(defaults: dict[str, Any]) -> str | None:
+def _safe_defaults_json(defaults: dict[str, object]) -> str | None:
     """JSON-serialize parameter defaults, skipping non-serializable values.
 
     Args:
@@ -364,19 +364,19 @@ def parse_describe_batch(
         ValueError: If required metadata is missing.
 
     """
-    md: pa.KeyValueMetadata | dict[bytes, bytes] = custom_metadata if custom_metadata is not None else {}
+    md: dict[bytes, bytes] = dict(custom_metadata) if custom_metadata is not None else {}
 
-    protocol_name = md.get(PROTOCOL_NAME_KEY, b"").decode()
-    request_version = md.get(REQUEST_VERSION_KEY, b"").decode()
-    describe_version = md.get(DESCRIBE_VERSION_KEY, b"").decode()
-    server_id = md.get(SERVER_ID_KEY, b"").decode()
+    protocol_name: str = md.get(PROTOCOL_NAME_KEY, b"").decode()
+    request_version: str = md.get(REQUEST_VERSION_KEY, b"").decode()
+    describe_version: str = md.get(DESCRIBE_VERSION_KEY, b"").decode()
+    server_id: str = md.get(SERVER_ID_KEY, b"").decode()
 
     method_map: dict[str, MethodDescription] = {}
     for i in range(batch.num_rows):
-        name = batch.column("name")[i].as_py()
+        name: str = batch.column("name")[i].as_py()
         method_type = MethodType(batch.column("method_type")[i].as_py())
-        doc = batch.column("doc")[i].as_py()
-        has_return = batch.column("has_return")[i].as_py()
+        doc: str | None = batch.column("doc")[i].as_py()
+        has_return: bool = batch.column("has_return")[i].as_py()
 
         params_schema_bytes: bytes = batch.column("params_schema_ipc")[i].as_py()
         result_schema_bytes: bytes = batch.column("result_schema_ipc")[i].as_py()
@@ -390,7 +390,7 @@ def parse_describe_batch(
         param_defaults: dict[str, object] = json.loads(pd_json) if pd_json else {}
 
         # Header fields (v2+)
-        has_header = False
+        has_header: bool = False
         header_schema: pa.Schema | None = None
         if "has_header" in batch.schema.names:
             has_header = batch.column("has_header")[i].as_py()

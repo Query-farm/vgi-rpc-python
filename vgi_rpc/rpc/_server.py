@@ -390,7 +390,7 @@ class RpcServer:
             _current_request_id.reset(token)
 
     def _prepare_method_call(
-        self, info: RpcMethodInfo, kwargs: dict[str, Any]
+        self, info: RpcMethodInfo, kwargs: dict[str, object]
     ) -> tuple[_ClientLogSink, AuthContext, Mapping[str, Any]]:
         """Create a log sink + read auth; wire a :class:`CallContext` into *kwargs* if the method accepts ``ctx``."""
         sink = _ClientLogSink(server_id=self._server_id)
@@ -410,7 +410,7 @@ class RpcServer:
         self,
         transport: RpcTransport,
         info: RpcMethodInfo,
-        kwargs: dict[str, Any],
+        kwargs: dict[str, object],
         *,
         stats: CallStatistics | None = None,
         shm: ShmSegment | None = None,
@@ -486,7 +486,7 @@ class RpcServer:
         self,
         transport: RpcTransport,
         info: RpcMethodInfo,
-        kwargs: dict[str, Any],
+        kwargs: dict[str, object],
         *,
         stats: CallStatistics | None = None,
         shm: ShmSegment | None = None,

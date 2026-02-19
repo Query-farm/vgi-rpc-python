@@ -833,7 +833,7 @@ class _HttpRpcApp:
         *,
         method_name: str,
         auth: AuthContext | None = None,
-        transport_metadata: Mapping[str, Any] | None = None,
+        transport_metadata: Mapping[str, str] | None = None,
     ) -> tuple[BytesIO, str | None]:
         """Run the produce loop for a producer stream, with optional size-based continuation.
 

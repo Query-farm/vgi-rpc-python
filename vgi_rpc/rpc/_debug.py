@@ -14,7 +14,6 @@ there is zero overhead when debug logging is disabled.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import pyarrow as pa
 
@@ -93,7 +92,7 @@ def fmt_batch(batch: pa.RecordBatch) -> str:
     return f"RecordBatch(rows={batch.num_rows}, cols={batch.num_columns}, schema={schema_str}, bytes={nbytes})"
 
 
-def fmt_kwargs(kwargs: dict[str, Any]) -> str:
+def fmt_kwargs(kwargs: dict[str, object]) -> str:
     """Format keyword arguments compactly.
 
     Returns:

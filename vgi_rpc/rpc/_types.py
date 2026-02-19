@@ -445,12 +445,12 @@ class RpcMethodInfo:
     name: str
     params_schema: pa.Schema
     result_schema: pa.Schema
-    result_type: Any
+    result_type: object
     method_type: MethodType
     has_return: bool
     doc: str | None
-    param_defaults: dict[str, Any] = field(default_factory=dict)
-    param_types: dict[str, Any] = field(default_factory=dict)
+    param_defaults: dict[str, object] = field(default_factory=dict)
+    param_types: dict[str, object] = field(default_factory=dict)
     header_type: type[ArrowSerializableDataclass] | None = None
 
 
@@ -459,14 +459,14 @@ class RpcMethodInfo:
 # ---------------------------------------------------------------------------
 
 
-def _unwrap_annotated(hint: Any) -> Any:
+def _unwrap_annotated(hint: object) -> object:
     """Unwrap Annotated[T, ...] to T, or return hint unchanged."""
     if get_origin(hint) is Annotated:
         return get_args(hint)[0]
     return hint
 
 
-def _classify_return_type(hint: Any) -> tuple[MethodType, Any, bool]:
+def _classify_return_type(hint: object) -> tuple[MethodType, object, bool]:
     """Classify a return type hint into a MethodType.
 
     Returns (method_type, result_type, has_return).
@@ -486,7 +486,7 @@ def _classify_return_type(hint: Any) -> tuple[MethodType, Any, bool]:
     return MethodType.UNARY, hint, has_return
 
 
-def _build_params_schema(hints: dict[str, Any]) -> pa.Schema:
+def _build_params_schema(hints: dict[str, object]) -> pa.Schema:
     """Build an Arrow schema from method parameter type hints (excluding 'self' and 'return')."""
     fields: list[pa.Field[pa.DataType]] = []
     for name, hint in hints.items():
@@ -502,7 +502,7 @@ def _build_params_schema(hints: dict[str, Any]) -> pa.Schema:
     return pa.schema(fields)
 
 
-def _build_result_schema(result_type: Any) -> pa.Schema:
+def _build_result_schema(result_type: object) -> pa.Schema:
     """Build a single-field Arrow schema for a unary result type."""
     if result_type is type(None) or result_type is None:
         return _EMPTY_SCHEMA
@@ -550,13 +550,13 @@ def _validate_protocol_params(protocol: type, method_name: str, sig: inspect.Sig
         )
 
 
-def _get_param_defaults(protocol: type, method_name: str) -> dict[str, Any]:
+def _get_param_defaults(protocol: type, method_name: str) -> dict[str, object]:
     """Extract default values for method parameters."""
     method = getattr(protocol, method_name, None)
     if method is None:
         return {}
     sig = inspect.signature(method)
-    defaults: dict[str, Any] = {}
+    defaults: dict[str, object] = {}
     for name, param in sig.parameters.items():
         if name == "self":
             continue

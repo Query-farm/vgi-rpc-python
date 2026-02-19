@@ -226,8 +226,6 @@ def conformance_conn(
 
             return _conn()
         else:
-            return http_connect(
-                ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log
-            )
+            return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
 
     return factory

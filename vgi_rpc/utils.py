@@ -34,6 +34,7 @@ from typing import (
     Protocol,
     Self,
     Union,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -282,7 +283,7 @@ def _validate_single_row_batch(
     data: pa.RecordBatch,
     class_name: str,
     required_fields: list[str] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Validate a RecordBatch has exactly one row and return it as a dict.
 
     Args:
@@ -303,7 +304,7 @@ def _validate_single_row_batch(
     if data.num_rows > 1:
         raise ValueError(f"Expected single-row RecordBatch for {class_name} deserialization, got {data.num_rows} rows")
 
-    first_row: dict[str, Any] = data.to_pylist()[0]
+    first_row: dict[str, object] = data.to_pylist()[0]
 
     if required_fields:
         found_fields = set(first_row.keys())
@@ -340,7 +341,7 @@ class ArrowType:
     arrow_type: pa.DataType
 
 
-def _is_optional_type(python_type: Any) -> tuple[Any, bool]:
+def _is_optional_type(python_type: object) -> tuple[object, bool]:
     """Check if a type is Optional (X | None) and extract the inner type.
 
     Args:
@@ -363,7 +364,7 @@ def _is_optional_type(python_type: Any) -> tuple[Any, bool]:
     return python_type, False
 
 
-def _infer_arrow_type(python_type: Any) -> pa.DataType:
+def _infer_arrow_type(python_type: object) -> pa.DataType:
     """Infer Arrow type from Python type annotation.
 
     Supports:
@@ -407,7 +408,7 @@ def _infer_arrow_type(python_type: Any) -> pa.DataType:
     # Handle NewType - unwrap to underlying type
     # NewType creates a callable with __supertype__ attribute
     if hasattr(python_type, "__supertype__"):
-        return _infer_arrow_type(python_type.__supertype__)
+        return _infer_arrow_type(getattr(python_type, "__supertype__"))  # noqa: B009
 
     # Handle Enum - serialize as dictionary-encoded string
     if isinstance(python_type, type) and issubclass(python_type, Enum):
@@ -416,7 +417,8 @@ def _infer_arrow_type(python_type: Any) -> pa.DataType:
     # Handle ArrowSerializableDataclass - serialize as struct
     if hasattr(python_type, "ARROW_SCHEMA") and isinstance(getattr(python_type, "ARROW_SCHEMA", None), pa.Schema):
         # Convert schema fields to struct type using pa.field tuples
-        struct_fields = [pa.field(f.name, f.type, nullable=f.nullable) for f in python_type.ARROW_SCHEMA]
+        arrow_schema: pa.Schema = getattr(python_type, "ARROW_SCHEMA")  # noqa: B009
+        struct_fields = [pa.field(f.name, f.type, nullable=f.nullable) for f in arrow_schema]
         return pa.struct(struct_fields)
 
     origin = get_origin(python_type)
@@ -453,7 +455,7 @@ def _infer_arrow_type(python_type: Any) -> pa.DataType:
         bool: pa.bool_(),
     }
 
-    if python_type in type_map:
+    if isinstance(python_type, type) and python_type in type_map:
         return type_map[python_type]
 
     # Provide a targeted hint for tuple, which is a common attempt
@@ -499,7 +501,7 @@ class _ArrowSchemaDescriptor:
 
     def _generate_schema(self, cls: type["ArrowSerializableDataclass"]) -> pa.Schema:
         """Generate ARROW_SCHEMA from dataclass field annotations."""
-        arrow_fields: list[pa.Field[Any]] = []
+        arrow_fields: list[pa.Field[pa.DataType]] = []
         overrides = getattr(cls, "_ARROW_FIELD_OVERRIDES", {})
 
         # Use get_type_hints to resolve string annotations
@@ -570,7 +572,7 @@ class ArrowSerializableDataclass:
     # Optional: explicit Arrow type overrides for complex fields
     _ARROW_FIELD_OVERRIDES: ClassVar[dict[str, pa.DataType]] = {}
 
-    def _to_row_dict(self) -> dict[str, Any]:
+    def _to_row_dict(self) -> dict[str, object]:
         """Convert instance to a dictionary for Arrow batch construction.
 
         Handles special type conversions:
@@ -584,7 +586,7 @@ class ArrowSerializableDataclass:
         - list elements -> recursively converted
 
         """
-        row: dict[str, Any] = {}
+        row: dict[str, object] = {}
         for field in dataclass_fields(self):
             value = getattr(self, field.name)
             value = self._convert_value_for_serialization(value)
@@ -744,8 +746,8 @@ class ArrowSerializableDataclass:
 
     @classmethod
     def _convert_value_for_deserialization(
-        cls, value: Any, field_type: Any, ipc_validation: IpcValidation = IpcValidation.FULL
-    ) -> Any:
+        cls, value: object, field_type: object, ipc_validation: IpcValidation = IpcValidation.FULL
+    ) -> object:
         """Convert a deserialized value back to the expected Python type."""
         if value is None:
             return None
@@ -768,7 +770,7 @@ class ArrowSerializableDataclass:
 
         # Handle types with deserialize_from_bytes class method
         if isinstance(inner_type, type) and hasattr(inner_type, "deserialize_from_bytes") and isinstance(value, bytes):
-            deserialize_method = inner_type.deserialize_from_bytes
+            deserialize_method: object = getattr(inner_type, "deserialize_from_bytes")  # noqa: B009
             if callable(deserialize_method):
                 return deserialize_method(value, ipc_validation)
 
@@ -796,6 +798,7 @@ class ArrowSerializableDataclass:
             and isinstance(value, dict)
         ):
             # Recursively deserialize nested dataclass
+            value_dict = cast("dict[str, object]", value)
             nested_kwargs = {}
             try:
                 nested_hints = get_type_hints(inner_type)
@@ -806,7 +809,7 @@ class ArrowSerializableDataclass:
                 if get_origin(f_type) is Annotated:
                     f_type = get_args(f_type)[0]
                 nested_kwargs[f.name] = cls._convert_value_for_deserialization(
-                    value.get(f.name), f_type, ipc_validation
+                    value_dict.get(f.name), f_type, ipc_validation
                 )
             return inner_type(**nested_kwargs)
 
@@ -816,7 +819,7 @@ class ArrowSerializableDataclass:
 
         # Handle dict reconstruction from list of tuples
         if get_origin(inner_type) is dict and isinstance(value, list):
-            return dict(value)
+            return dict(cast("list[tuple[object, object]]", value))
 
         # Handle list with element type conversion
         origin = get_origin(inner_type)
