@@ -306,6 +306,13 @@ class RpcServer:
                 self.serve_one(transport)
             except (EOFError, StopIteration):
                 break
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                _logger.debug(
+                    "serve loop ending due to broken pipe",
+                    exc_info=True,
+                    extra={"server_id": self._server_id},
+                )
+                break
             except pa.ArrowInvalid:
                 _logger.warning(
                     "serve loop ending due to ArrowInvalid",

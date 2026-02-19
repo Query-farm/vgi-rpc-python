@@ -351,7 +351,7 @@ class TestStreamSessionLifecycle:
             session.close()
             assert isinstance(session, StreamSession)
             # After close, the input writer is closed. Trying to exchange should fail.
-            with pytest.raises((pa.ArrowInvalid, OSError)):
+            with pytest.raises(RpcError, match="TransportError"):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
 
 

@@ -67,8 +67,10 @@ with contextlib.suppress(ImportError):
         MAX_REQUEST_BYTES_HEADER,
         MAX_UPLOAD_BYTES_HEADER,
         UPLOAD_URL_HEADER,
+        HttpRetryConfig,
         HttpServerCapabilities,
         HttpStreamSession,
+        HttpTransientError,
         http_capabilities,
         http_connect,
         http_introspect,
@@ -165,8 +167,10 @@ if "GCSStorage" in dir():
     __all__.append("GCSStorage")
 if "HttpStreamSession" in dir():
     __all__ += [
+        "HttpRetryConfig",
         "HttpServerCapabilities",
         "HttpStreamSession",
+        "HttpTransientError",
         "MAX_REQUEST_BYTES_HEADER",
         "MAX_UPLOAD_BYTES_HEADER",
         "UPLOAD_URL_HEADER",

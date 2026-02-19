@@ -571,6 +571,17 @@ class TestRpcMethods:
         with pytest.raises(TypeError):
             methods["add"] = methods["add"]  # type: ignore[index]
 
+    def test_broken_type_hints_raises(self) -> None:
+        """Methods with unresolvable type hints raise TypeError instead of being silently skipped."""
+
+        class BrokenProtocol:
+            def ok(self, x: int) -> int: ...  # type: ignore[empty-body]
+            def bad(self, x: NoSuchType) -> int: ...  # type: ignore[empty-body,name-defined]  # noqa: F821
+
+        rpc_methods.cache_clear()
+        with pytest.raises(TypeError, match=r"Failed to resolve type hints for BrokenProtocol\.bad"):
+            rpc_methods(BrokenProtocol)
+
 
 # ---------------------------------------------------------------------------
 # Tests: Unary calls over pipe transport

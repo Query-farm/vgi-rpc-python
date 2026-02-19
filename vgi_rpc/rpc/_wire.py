@@ -463,13 +463,13 @@ def _deserialize_value(value: object, type_hint: Any, ipc_validation: IpcValidat
     base = _unwrap_annotated(inner)
     if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
         if not isinstance(value, bytes):
-            return value
+            raise TypeError(f"Expected bytes for {base.__name__} deserialization, got {type(value).__name__}")
         reader = ValidatedReader(ipc.open_stream(value), ipc_validation)
         batch, metadata = reader.read_next_batch_with_custom_metadata()
         return base.deserialize_from_batch(batch, metadata, ipc_validation=ipc_validation)
     if isinstance(base, type) and issubclass(base, Enum):
         if not isinstance(value, str):
-            return value
+            raise TypeError(f"Expected str for {base.__name__} deserialization, got {type(value).__name__}")
         return base[value]
     origin = get_origin(base)
     if origin is dict and isinstance(value, list):

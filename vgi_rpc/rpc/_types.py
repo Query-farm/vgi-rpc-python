@@ -583,8 +583,8 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
 
         try:
             method_hints = get_type_hints(attr, include_extras=True)
-        except (NameError, AttributeError):
-            continue
+        except (NameError, AttributeError) as exc:
+            raise TypeError(f"Failed to resolve type hints for {protocol.__name__}.{name}(): {exc}") from exc
 
         _validate_protocol_params(protocol, name, inspect.signature(attr))
 

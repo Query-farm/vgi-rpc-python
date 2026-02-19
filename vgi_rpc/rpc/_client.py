@@ -22,6 +22,13 @@ from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_stream_header, _
 from vgi_rpc.shm import ShmSegment, maybe_write_to_shm
 from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader
 
+# Exceptions that indicate the transport peer has disconnected or the IPC
+# data is truncated/corrupt.  Caught on the client side and wrapped into
+# ``RpcError("TransportError", ...)``.  We intentionally list specific
+# ``ConnectionError`` subclasses rather than the broad ``OSError`` to avoid
+# swallowing unrelated OS-level errors (e.g. ``PermissionError``).
+_TRANSPORT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, EOFError, pa.ArrowInvalid)
+
 
 class StreamSession:
     """Client-side handle for a stream call (both producer and exchange patterns).
@@ -29,6 +36,8 @@ class StreamSession:
     For producer streams, use ``__iter__()`` or ``tick()``.
     For exchange streams, use ``exchange()`` with context manager.
     Log batches are delivered to the ``on_log`` callback.
+
+    Not thread-safe: do not share a session across threads.
     """
 
     __slots__ = (
@@ -135,17 +144,25 @@ class StreamSession:
 
         Raises:
             StopIteration: When the stream has finished.
-            RpcError: On server-side errors.
+            RpcError: On server-side errors or transport failures.
 
         """
         if wire_stream_logger.isEnabledFor(logging.DEBUG):
             wire_stream_logger.debug("Stream exchange: sending input")
-        self._write_batch(input)
+        try:
+            self._write_batch(input)
+        except _TRANSPORT_ERRORS as exc:
+            # Set _closed directly — calling close() would attempt I/O on the broken transport.
+            self._closed = True
+            raise RpcError("TransportError", f"Transport failed during stream exchange (write): {exc}", "") from exc
         try:
             return self._read_response()
         except RpcError:
             self.close()
             raise
+        except _TRANSPORT_ERRORS as exc:
+            self._closed = True  # Bypass close() — transport is broken.
+            raise RpcError("TransportError", f"Transport failed during stream exchange (read): {exc}", "") from exc
 
     def tick(self) -> AnnotatedBatch:
         """Send a tick batch (producer streams) and receive the output batch.
@@ -155,12 +172,17 @@ class StreamSession:
 
         Raises:
             StopIteration: When the producer stream has finished.
-            RpcError: On server-side errors.
+            RpcError: On server-side errors or transport failures.
 
         """
         if wire_stream_logger.isEnabledFor(logging.DEBUG):
             wire_stream_logger.debug("Stream tick")
-        self._write_batch(_TICK_BATCH)
+        try:
+            self._write_batch(_TICK_BATCH)
+        except _TRANSPORT_ERRORS as exc:
+            # Set _closed directly — calling close() would attempt I/O on the broken transport.
+            self._closed = True
+            raise RpcError("TransportError", f"Transport failed during stream tick (write): {exc}", "") from exc
         try:
             return self._read_response()
         except StopIteration:
@@ -169,6 +191,9 @@ class StreamSession:
         except RpcError:
             self.close()
             raise
+        except _TRANSPORT_ERRORS as exc:
+            self._closed = True  # Bypass close() — transport is broken.
+            raise RpcError("TransportError", f"Transport failed during stream tick (read): {exc}", "") from exc
 
     def __iter__(self) -> Iterator[AnnotatedBatch]:
         """Iterate over output batches from a producer stream.
@@ -269,9 +294,16 @@ class _RpcProxy:
         def caller(**kwargs: object) -> object:
             if wire_request_logger.isEnabledFor(logging.DEBUG):
                 wire_request_logger.debug("Unary call: method=%s", info.name)
-            _send_request(transport.writer, info, kwargs, shm=shm)
-            reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
-            return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
+            try:
+                _send_request(transport.writer, info, kwargs, shm=shm)
+                reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
+                return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
+            except RpcError:
+                raise
+            except _TRANSPORT_ERRORS as exc:
+                raise RpcError(
+                    "TransportError", f"Transport failed during unary call to '{info.name}': {exc}", ""
+                ) from exc
 
         return caller
 
@@ -285,27 +317,38 @@ class _RpcProxy:
         def caller(**kwargs: object) -> StreamSession:
             if wire_stream_logger.isEnabledFor(logging.DEBUG):
                 wire_stream_logger.debug("Stream init: method=%s", info.name)
-            _send_request(transport.writer, info, kwargs, shm=shm)
-            # _PooledTransport (pool.py) uses __slots__ and tracks stream
-            # lifecycle to detect abandoned streams.  object.__setattr__ is
-            # needed because __slots__ classes don't have __dict__.
-            if hasattr(transport, "_stream_opened"):
-                object.__setattr__(transport, "_stream_opened", True)
-            header = None
-            if info.header_type is not None:
-                header = _read_stream_header(transport.reader, info.header_type, ipc_validation, on_log, ext_cfg)
-            session = StreamSession(
-                transport.writer,
-                transport.reader,
-                on_log,
-                external_config=ext_cfg,
-                ipc_validation=ipc_validation,
-                shm=shm,
-                header=header,
-            )
-            if hasattr(transport, "_last_stream_session"):
-                object.__setattr__(transport, "_last_stream_session", session)  # __slots__
-            return session
+            try:
+                _send_request(transport.writer, info, kwargs, shm=shm)
+                # _PooledTransport (pool.py) uses __slots__ and tracks stream
+                # lifecycle to detect abandoned streams.  object.__setattr__ is
+                # needed because __slots__ classes don't have __dict__.
+                # Note: _stream_opened is set here (before session construction)
+                # because the request has been sent — even if session creation
+                # fails, the transport state is tainted and the pool must
+                # discard the worker rather than reuse it.
+                if hasattr(transport, "_stream_opened"):
+                    object.__setattr__(transport, "_stream_opened", True)
+                header = None
+                if info.header_type is not None:
+                    header = _read_stream_header(transport.reader, info.header_type, ipc_validation, on_log, ext_cfg)
+                session = StreamSession(
+                    transport.writer,
+                    transport.reader,
+                    on_log,
+                    external_config=ext_cfg,
+                    ipc_validation=ipc_validation,
+                    shm=shm,
+                    header=header,
+                )
+                if hasattr(transport, "_last_stream_session"):
+                    object.__setattr__(transport, "_last_stream_session", session)  # __slots__
+                return session
+            except RpcError:
+                raise
+            except _TRANSPORT_ERRORS as exc:
+                raise RpcError(
+                    "TransportError", f"Transport failed during stream init for '{info.name}': {exc}", ""
+                ) from exc
 
         return caller
 

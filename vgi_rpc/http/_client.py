@@ -53,6 +53,7 @@ from ._common import (
     MAX_UPLOAD_BYTES_HEADER,
     UPLOAD_URL_HEADER,
 )
+from ._retry import HttpRetryConfig, _options_with_retry, _post_with_retry
 
 if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
@@ -128,6 +129,7 @@ class HttpStreamSession:
         "_on_log",
         "_output_schema",
         "_pending_batches",
+        "_retry_config",
         "_state_bytes",
         "_url_prefix",
     )
@@ -146,6 +148,7 @@ class HttpStreamSession:
         pending_batches: list[AnnotatedBatch] | None = None,
         finished: bool = False,
         header: object | None = None,
+        retry_config: HttpRetryConfig | None = None,
     ) -> None:
         """Initialize with HTTP client, method details, and initial state."""
         self._client = client
@@ -159,6 +162,7 @@ class HttpStreamSession:
         self._pending_batches: list[AnnotatedBatch] = pending_batches or []
         self._finished = finished
         self._header = header
+        self._retry_config = retry_config
 
     @property
     def header(self) -> object | None:
@@ -221,6 +225,9 @@ class HttpStreamSession:
                 self._method,
                 fmt_batch(batch_to_write),
             )
+        # Exchange calls are NOT retried: the server's process() method may
+        # have side effects, and a proxy 502 after server processing would
+        # cause duplicate execution.  Only init/unary/continuation are retried.
         resp = self._client.post(
             f"{self._url_prefix}/{self._method}/exchange",
             content=req_buf.getvalue(),
@@ -261,10 +268,12 @@ class HttpStreamSession:
         with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
-        resp = self._client.post(
+        resp = _post_with_retry(
+            self._client,
             f"{self._url_prefix}/{self._method}/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            config=self._retry_config,
         )
         return _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
 
@@ -343,6 +352,7 @@ def http_connect[P](
     client: httpx.Client | _SyncTestClient | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
+    retry: HttpRetryConfig | None = None,
 ) -> Iterator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -359,6 +369,8 @@ def http_connect[P](
         external_location: Optional ExternalLocationConfig for
             resolving and producing externalized batches.
         ipc_validation: Validation level for incoming IPC batches.
+        retry: Optional retry configuration for transient HTTP failures.
+            When ``None`` (the default), no retries are attempted.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -378,7 +390,13 @@ def http_connect[P](
         yield cast(
             P,
             _HttpProxy(
-                protocol, client, url_prefix, on_log, external_config=external_location, ipc_validation=ipc_validation
+                protocol,
+                client,
+                url_prefix,
+                on_log,
+                external_config=external_location,
+                ipc_validation=ipc_validation,
+                retry_config=retry,
             ),
         )
     finally:
@@ -392,6 +410,7 @@ def http_introspect(
     prefix: str = "/vgi",
     client: httpx.Client | _SyncTestClient | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
+    retry: HttpRetryConfig | None = None,
 ) -> ServiceDescription:
     """Send a ``__describe__`` request over HTTP and return a ``ServiceDescription``.
 
@@ -401,6 +420,7 @@ def http_introspect(
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
         ipc_validation: Validation level for incoming IPC batches.
+        retry: Optional retry configuration for transient HTTP failures.
 
     Returns:
         A ``ServiceDescription`` with all method metadata.
@@ -434,10 +454,12 @@ def http_introspect(
                 custom_metadata=request_metadata,
             )
 
-        resp = client.post(
+        resp = _post_with_retry(
+            client,
             f"{prefix}/{DESCRIBE_METHOD_NAME}",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            config=retry,
         )
 
         reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
@@ -464,6 +486,7 @@ def _init_http_stream_session(
     external_config: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     header: object | None = None,
+    retry_config: HttpRetryConfig | None = None,
 ) -> HttpStreamSession:
     """Parse an init response and return an ``HttpStreamSession``.
 
@@ -480,6 +503,7 @@ def _init_http_stream_session(
         external_config: Optional external location config.
         ipc_validation: Validation level for IPC batches.
         header: Optional pre-read stream header.
+        retry_config: Optional retry configuration for transient failures.
 
     Returns:
         A configured ``HttpStreamSession`` ready for iteration or exchange.
@@ -536,6 +560,7 @@ def _init_http_stream_session(
         pending_batches=pending_batches,
         finished=finished,
         header=header,
+        retry_config=retry_config,
     )
 
 
@@ -551,6 +576,7 @@ class _HttpProxy:
         *,
         external_config: ExternalLocationConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
+        retry_config: HttpRetryConfig | None = None,
     ) -> None:
         self._protocol = protocol
         self._client = client
@@ -559,6 +585,7 @@ class _HttpProxy:
         self._on_log = on_log
         self._external_config = external_config
         self._ipc_validation = ipc_validation
+        self._retry_config = retry_config
 
     def __getattr__(self, name: str) -> Any:
         """Resolve RPC method names to callable proxies, caching on first access.
@@ -587,6 +614,7 @@ class _HttpProxy:
         on_log = self._on_log
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
+        retry_cfg = self._retry_config
 
         def caller(**kwargs: object) -> object:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
@@ -594,10 +622,12 @@ class _HttpProxy:
             req_buf = BytesIO()
             _send_request(req_buf, info, kwargs)
 
-            resp = client.post(
+            resp = _post_with_retry(
+                client,
                 f"{url_prefix}/{info.name}",
                 content=req_buf.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
+                config=retry_cfg,
             )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(
@@ -618,6 +648,7 @@ class _HttpProxy:
         on_log = self._on_log
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
+        retry_cfg = self._retry_config
 
         def caller(**kwargs: object) -> HttpStreamSession:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
@@ -626,10 +657,12 @@ class _HttpProxy:
             req_buf = BytesIO()
             _send_request(req_buf, info, kwargs)
 
-            resp = client.post(
+            resp = _post_with_retry(
+                client,
                 f"{url_prefix}/{info.name}/init",
                 content=req_buf.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
+                config=retry_cfg,
             )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(
@@ -661,6 +694,7 @@ class _HttpProxy:
                 external_config=ext_cfg,
                 ipc_validation=ipc_validation,
                 header=header,
+                retry_config=retry_cfg,
             )
 
         return caller
@@ -697,6 +731,7 @@ def http_capabilities(
     *,
     prefix: str = "/vgi",
     client: httpx.Client | _SyncTestClient | None = None,
+    retry: HttpRetryConfig | None = None,
 ) -> HttpServerCapabilities:
     """Discover server capabilities via an OPTIONS request.
 
@@ -709,6 +744,7 @@ def http_capabilities(
             Required when *client* is ``None``.
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        retry: Optional retry configuration for transient HTTP failures.
 
     Returns:
         An ``HttpServerCapabilities`` with discovered values.
@@ -725,15 +761,8 @@ def http_capabilities(
 
     try:
         url = f"{prefix}/__capabilities__"
-        # Lazy runtime import to avoid circular dependency
-        from ._testing import _SyncTestClient as _SyncTestClientCls
-
-        if isinstance(client, _SyncTestClientCls):
-            resp = client.options(url)
-            headers = resp.headers
-        else:
-            httpx_resp = client.options(url)
-            headers = dict(httpx_resp.headers)
+        resp = _options_with_retry(client, url, config=retry)
+        headers = resp.headers
 
         max_req: int | None = None
         raw = headers.get(MAX_REQUEST_BYTES_HEADER) or headers.get(MAX_REQUEST_BYTES_HEADER.lower())
@@ -766,6 +795,7 @@ def request_upload_urls(
     count: int = 1,
     prefix: str = "/vgi",
     client: httpx.Client | _SyncTestClient | None = None,
+    retry: HttpRetryConfig | None = None,
 ) -> list[UploadUrl]:
     """Request pre-signed upload URLs from the server's ``__upload_url__`` endpoint.
 
@@ -778,6 +808,7 @@ def request_upload_urls(
         count: Number of upload URLs to request (default 1, max 100).
         prefix: URL prefix matching the server's prefix (default ``/vgi``).
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        retry: Optional retry configuration for transient HTTP failures.
 
     Returns:
         A list of ``UploadUrl`` objects with pre-signed PUT and GET URLs.
@@ -799,10 +830,12 @@ def request_upload_urls(
         req_buf = BytesIO()
         _write_request(req_buf, _UPLOAD_URL_METHOD, _UPLOAD_URL_PARAMS_SCHEMA, {"count": count})
 
-        resp = client.post(
+        resp = _post_with_retry(
+            client,
             f"{prefix}/__upload_url__/init",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            config=retry,
         )
 
         # Without an upload_url_provider the route doesn't exist and the

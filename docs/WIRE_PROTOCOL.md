@@ -63,7 +63,7 @@ where they appear, and their semantics:
 |-------------|-------|-------------|
 | `vgi_rpc.method` | UTF-8 method name | Target RPC method to invoke. **Required.** |
 | `vgi_rpc.request_version` | `"1"` (ASCII `0x31`) | Wire protocol version. **Required.** |
-| `vgi_rpc.request_id` | UTF-8 string (16-char hex) | Per-request correlation ID. Optional. |
+| `vgi_rpc.request_id` | UTF-8 string (16-char hex) | Per-request correlation ID. Optional; if absent, the server generates a new 16-char hex ID. |
 | `traceparent` | W3C Trace Context string | OpenTelemetry trace propagation. Optional. |
 | `tracestate` | W3C Trace Context string | OpenTelemetry trace state. Optional. |
 | `vgi_rpc.shm_segment_name` | UTF-8 OS name | Shared memory segment name (session-level). Optional. |
@@ -131,7 +131,15 @@ for interoperability.
 | `frozenset[T]` / `set[T]` | `list(T)` | Serialized as list (order undefined). Deserialized back to set. |
 | `enum` | `dictionary(int16, utf8)` | Serialized as the enum **member name** (string). Deserialized by name lookup. |
 | `optional[T]` / `T?` | Same as `T`, but with `nullable = true` on the Arrow field. | `null` represents the absent value. |
-| `dataclass` (nested) | `binary` | Serialized as a complete Arrow IPC stream (schema + 1-row batch + EOS) in a `binary` column. Recursively applies the same type mapping. |
+| `dataclass` (nested) | `binary` | Serialized as a complete Arrow IPC stream (schema + 1-row batch + EOS) in a `binary` column. See note below. |
+
+> **Nested dataclass type context**: This `binary` mapping applies at the
+> **RPC method parameter/return level** — each dataclass parameter or return
+> value is a binary blob containing a serialized IPC stream. Within that
+> IPC stream, the dataclass's own Arrow schema uses the same type mapping
+> for primitive fields (string→utf8, int→int64, etc.), but sub-dataclass
+> fields use Arrow `struct` type (not `binary`), since they are embedded
+> inline rather than serialized as separate IPC streams.
 
 ### Serialization transforms
 
@@ -144,7 +152,7 @@ When writing a value to an Arrow column:
 
 When reading:
 
-- **Enum** → look up the string by member **name** first; fall back to member **value** for legacy compatibility.
+- **Enum** → look up the string by member **name** (`Enum["NAME"]`). Name-based lookup is the normative wire format. (The Python reference implementation also supports a value-based fallback internally for nested dataclass fields, but cross-language implementations need only implement name-based lookup.)
 - **map** → convert list of tuples back to dict.
 - **list (when target is set)** → convert to frozenset/set.
 - **binary (when target is dataclass)** → deserialize from Arrow IPC bytes.
@@ -176,6 +184,11 @@ IPC Stream:
 
 For methods with no parameters, the schema has zero fields and the batch
 has one row with zero columns.
+
+> **Row count validation**: The server only enforces `num_rows == 1` when
+> the schema has one or more fields. For zero-field (parameterless) methods,
+> the server accepts batches with any row count (including 0). Conforming
+> clients SHOULD send 1 row for consistency.
 
 ### Worked example
 
@@ -258,11 +271,11 @@ receive(batch, custom_metadata):
     ELSE:
       → LOG batch → deliver to on_log callback
 
-  IF custom_metadata contains "vgi_rpc.shm_offset":
-    → SHM POINTER batch → resolve via shared memory (see Section 11)
-
   IF custom_metadata contains "vgi_rpc.location":
     → EXTERNAL POINTER batch → resolve via URL fetch (see Section 12)
+
+  IF custom_metadata contains "vgi_rpc.shm_offset":
+    → SHM POINTER batch → resolve via shared memory (see Section 11)
 
   IF custom_metadata contains "vgi_rpc.stream_state":
     → STATE TOKEN batch → stream continuation (see Section 10)
@@ -272,9 +285,11 @@ receive(batch, custom_metadata):
 ```
 
 > **Note**: Log-level keys take priority. A zero-row batch that has both
-> `vgi_rpc.log_level` and `vgi_rpc.shm_offset` is classified as a log batch,
-> not an SHM pointer. This is by design — SHM pointer detection explicitly
-> excludes batches with log-level keys.
+> `vgi_rpc.log_level` and `vgi_rpc.shm_offset` (or `vgi_rpc.location`) is
+> classified as a log batch, not a pointer. This is by design — pointer
+> detection explicitly excludes batches with log-level keys. A batch cannot
+> be both an external pointer and an SHM pointer simultaneously, so the
+> check order between those two does not matter functionally.
 
 ---
 
@@ -372,7 +387,11 @@ The header is a single-row batch containing serialized header data. If the
 method does not declare a header type, this phase is skipped entirely.
 
 If the server encounters an error during method initialization, it writes an
-error stream (with EXCEPTION-level metadata) in place of the header stream.
+error stream (with EXCEPTION-level metadata) **on the empty schema** in place
+of the header stream. The empty schema is used because the header schema may
+not be available when the error occurs (e.g., the method raised before
+returning a `Stream` object). Clients MUST be prepared to receive an
+empty-schema error stream where a header stream was expected.
 
 ### Phase 2: Lockstep data exchange
 
@@ -466,6 +485,40 @@ Given a configurable URL prefix (default `/vgi`):
 | `{prefix}/__describe__` | POST | Introspection (unary) |
 | `{prefix}/__upload_url__/init` | POST | Upload URL generation (when enabled) |
 | `{prefix}/__capabilities__` | OPTIONS | Server capability discovery |
+
+### Capability discovery
+
+The `OPTIONS {prefix}/__capabilities__` endpoint returns server capabilities
+as HTTP response headers only — there is no Arrow IPC body. Clients parse
+the following headers:
+
+| Header | Type | Description |
+|--------|------|-------------|
+| `VGI-Max-Request-Bytes` | Integer | Maximum request body size the server will accept. |
+| `VGI-Upload-URL-Support` | `"true"` | Present when the upload URL endpoint is available. |
+| `VGI-Max-Upload-Bytes` | Integer | Maximum upload size for externalized batches. |
+
+### Upload URL generation
+
+When the server has an `upload_url_provider` configured, the
+`POST {prefix}/__upload_url__/init` endpoint generates pre-signed
+upload/download URL pairs for client-side externalization.
+
+**Request**: Standard unary request with `vgi_rpc.method` = `"__upload_url__"`.
+
+| Parameter | Arrow type | Default | Description |
+|-----------|-----------|---------|-------------|
+| `count` | `int64` | 1 | Number of URL pairs to generate (1–100). |
+
+**Response schema**:
+
+| Column | Arrow type | Nullable | Description |
+|--------|-----------|----------|-------------|
+| `upload_url` | `utf8` | No | Pre-signed URL for uploading batch data. |
+| `download_url` | `utf8` | No | Pre-signed URL the server uses to fetch the uploaded data. |
+| `expires_at` | `timestamp("us", tz="UTC")` | No | Expiration time of the pre-signed URLs. |
+
+The response has one row per requested URL pair.
 
 ### Request headers
 
@@ -563,27 +616,31 @@ exposing it to application code.
 
 ### State token binary format
 
-The state token is an opaque signed blob with the following wire format:
+The state token is an opaque signed blob with the following wire format (v2):
 
 ```
-Offset  Size     Field
-0       1        version: uint8 (currently 1)
-1       4        state_len: uint32 LE
-5       N        state_bytes: Arrow IPC stream of the StreamState dataclass
-5+N     4        schema_len: uint32 LE
-9+N     M        schema_bytes: serialized output pa.Schema
-9+N+M   4        input_schema_len: uint32 LE
-13+N+M  P        input_schema_bytes: serialized input pa.Schema
-13+N+M+P 32      HMAC-SHA256(signing_key, all preceding bytes)
+Offset      Size     Field
+0           1        version: uint8 (currently 2)
+1           8        created_at: uint64 LE (seconds since Unix epoch)
+9           4        state_len: uint32 LE
+13          N        state_bytes: Arrow IPC stream of the StreamState dataclass
+13+N        4        schema_len: uint32 LE
+17+N        M        schema_bytes: serialized output pa.Schema
+17+N+M      4        input_schema_len: uint32 LE
+21+N+M      P        input_schema_bytes: serialized input pa.Schema
+21+N+M+P    32       HMAC-SHA256(signing_key, all preceding bytes)
 ```
 
+- **`created_at`**: Token creation time as seconds since the Unix epoch. Used by the server to enforce a configurable TTL (`token_ttl`). When `token_ttl > 0`, tokens older than `token_ttl` seconds are rejected with HTTP 400 ("State token expired"). Set `token_ttl` to `0` to disable expiry checking. The default TTL is 3600 seconds (1 hour).
 - **`state_bytes`**: The stream state dataclass serialized as a complete Arrow IPC stream (schema + 1-row batch + EOS).
 - **`schema_bytes`**: The output Arrow schema serialized via `pa.Schema.serialize()`.
 - **`input_schema_bytes`**: The input Arrow schema serialized via `pa.Schema.serialize()`. For producer streams, this is the serialized empty schema.
 - **HMAC**: SHA-256 HMAC over the entire payload (version byte through input_schema_bytes), using the server's signing key.
 
 **Verification order**: The HMAC MUST be verified **before** inspecting any
-payload fields (including the version byte) to prevent information leakage.
+payload fields (including the version byte and timestamp) to prevent
+information leakage. TTL enforcement happens **after** HMAC verification
+and version check.
 
 ### Authentication (HTTP)
 
@@ -636,7 +693,22 @@ The allocator uses a first-fit strategy with implicit coalescing:
 
 For **non-dictionary-encoded batches**: A complete Arrow IPC stream (schema + record batch + EOS) is written directly into the allocated SHM region.
 
-For **dictionary-encoded batches**: The IPC stream is written to a temporary buffer, then the schema message and EOS marker are stripped — only the dictionary messages and record batch message are stored in SHM. On deserialization, the schema is reconstructed from the pointer batch's schema and prepended to recreate a valid IPC stream.
+For **dictionary-encoded batches**: The IPC stream is written to a temporary buffer, then the schema message and EOS marker are stripped — only the dictionary messages and record batch message are stored in SHM.
+
+**Dictionary batch reconstruction** (reader side):
+
+To deserialize a dictionary-encoded batch from SHM:
+
+1. Serialize the pointer batch's schema into a schema message by creating a
+   temporary IPC stream writer (which emits a schema message + EOS), then
+   strip the trailing 8-byte EOS marker. This yields the schema message bytes.
+2. Concatenate: `schema_message_bytes` + `shm_stored_bytes` + `EOS_marker`
+   (8 bytes: `0xFF 0xFF 0xFF 0xFF 0x00 0x00 0x00 0x00`).
+3. Open the concatenated buffer as a standard Arrow IPC stream and read the
+   batch.
+
+Non-dictionary batches do not need this reconstruction — they are stored as
+complete IPC streams and can be read directly.
 
 ### SHM pointer batch
 
@@ -732,7 +804,10 @@ resolve_external_location(batch, custom_metadata, config):
   // Validate URL (default: HTTPS only)
   config.url_validator(url)
 
-  // Fetch with retries (max 3 attempts)
+  // Fetch with retries
+  // Default: max 3 total attempts (max_retries=2, capped at 2)
+  // Retry delay: 0.5s fixed between attempts
+  // Retryable errors: network/OS errors, Arrow parse errors, HTTP client errors
   data = fetch_url(url, config.fetch_config)
 
   // Decompress if needed (zstd)
@@ -800,6 +875,7 @@ IPC Stream (error):
 | Error condition | HTTP status |
 |----------------|-------------|
 | Bad IPC, missing metadata, version mismatch, param validation | 400 Bad Request |
+| Expired or tampered state token | 400 Bad Request |
 | Authentication failure | 401 Unauthorized |
 | Unknown method | 404 Not Found |
 | Wrong Content-Type | 415 Unsupported Media Type |
@@ -872,7 +948,25 @@ The "empty schema" referenced throughout this specification is an Arrow
 schema with zero fields: `pa.schema([])`. When serialized, it produces a
 small fixed-size blob. Batches on the empty schema have zero columns.
 
-## Appendix C: Request Metadata Location
+## Appendix C: Empty Schema Serialized Form
+
+The empty schema (`pa.schema([])`) serializes to a fixed 56-byte blob via
+`pa.Schema.serialize()`. This is useful for cross-language implementations
+that need to produce or compare serialized empty schemas (e.g., for the
+`input_schema_bytes` field in state tokens for producer streams):
+
+```
+ff ff ff ff 30 00 00 00  10 00 00 00 00 00 0a 00
+0c 00 06 00 05 00 08 00  0a 00 00 00 00 01 04 00
+0c 00 00 00 08 00 08 00  00 00 04 00 08 00 00 00
+04 00 00 00 00 00 00 00
+```
+
+This is a Flatbuffers-encoded Arrow Schema message with zero fields.
+Implementations MAY hard-code this constant rather than generating it at
+runtime. The serialized form is stable across Arrow versions.
+
+## Appendix D: Request Metadata Location
 
 A common implementation question: the `vgi_rpc.method` key appears in the
 request batch's **custom metadata** (per-batch metadata), **not** in the

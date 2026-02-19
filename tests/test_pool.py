@@ -55,6 +55,18 @@ class GenerateState(StreamState):
         self.current += 1
 
 
+@dataclass
+class EchoState(StreamState):
+    """State for the echo exchange stream."""
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Echo input values back as output."""
+        out.emit_pydict({"value": input.batch.column("value").to_pylist()})
+
+
+_ECHO_SCHEMA = pa.schema([pa.field("value", pa.float64())])
+
+
 class PoolTestService(Protocol):
     """Test protocol for pool tests."""
 
@@ -68,6 +80,10 @@ class PoolTestService(Protocol):
 
     def generate(self, count: int) -> Stream[GenerateState, None]:
         """Yield count batches as a producer stream."""
+        ...
+
+    def echo(self, dummy: int) -> Stream[EchoState, None]:
+        """Echo input batches back (exchange stream)."""
         ...
 
 
@@ -86,6 +102,10 @@ class PoolTestServiceImpl:
         """Yield count batches as a producer stream."""
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
         return Stream(output_schema=schema, state=GenerateState(count=count))
+
+    def echo(self, dummy: int) -> Stream[EchoState, None]:
+        """Echo input batches back (exchange stream)."""
+        return Stream(output_schema=_ECHO_SCHEMA, state=EchoState(), input_schema=_ECHO_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

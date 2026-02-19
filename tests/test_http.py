@@ -277,6 +277,7 @@ class TestResumableServerStream:
         import hashlib
         import hmac as hmac_mod
         import struct
+        import time
 
         import pyarrow as pa
 
@@ -284,11 +285,12 @@ class TestResumableServerStream:
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
-        # Build a structurally valid token with a wrong version byte
+        # Build a structurally valid v2 token with a wrong version byte
         bad_version = 99
         state_bytes = schema_bytes = input_bytes = b""
         payload = (
             struct.pack("B", bad_version)
+            + struct.pack("<Q", int(time.time()))
             + struct.pack("<I", len(state_bytes))
             + state_bytes
             + struct.pack("<I", len(schema_bytes))
@@ -324,6 +326,113 @@ class TestResumableServerStream:
             batches = list(proxy.generate(count=1))
             assert len(batches) == 1
             assert batches[0].batch.column("i")[0].as_py() == 0
+        c.close()
+
+    def test_expired_token_400(self) -> None:
+        """Token with a timestamp 2 hours in the past is rejected as expired."""
+        import hashlib
+        import hmac as hmac_mod
+        import struct
+        import time
+
+        import pyarrow as pa
+
+        from vgi_rpc.http._server import _TOKEN_VERSION
+        from vgi_rpc.metadata import STATE_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        # Build a valid v2 token with a timestamp 2 hours in the past
+        old_time = int(time.time()) - 7200
+        state_bytes = schema_bytes = input_bytes = b""
+        payload = (
+            struct.pack("B", _TOKEN_VERSION)
+            + struct.pack("<Q", old_time)
+            + struct.pack("<I", len(state_bytes))
+            + state_bytes
+            + struct.pack("<I", len(schema_bytes))
+            + schema_bytes
+            + struct.pack("<I", len(input_bytes))
+            + input_bytes
+        )
+        mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
+        token = payload + mac
+
+        req_buf = BytesIO()
+        state_md = pa.KeyValueMetadata({STATE_KEY: token})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
+
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            max_stream_response_bytes=200,
+            token_ttl=3600,
+        )
+        resp = c.post(
+            f"{_BASE_URL}/vgi/generate/exchange",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 400
+        err = _extract_rpc_error(resp)
+        assert "expired" in err.error_message.lower()
+        c.close()
+
+    def test_token_ttl_zero_disables_expiry(self) -> None:
+        """Token with old timestamp is accepted when token_ttl=0."""
+        import hashlib
+        import hmac as hmac_mod
+        import struct
+        import time
+
+        import pyarrow as pa
+
+        from vgi_rpc.http._server import _TOKEN_VERSION
+        from vgi_rpc.metadata import STATE_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        # Build a valid v2 token with a very old timestamp
+        old_time = int(time.time()) - 86400  # 24 hours ago
+        state_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
+        schema_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
+        input_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
+        payload = (
+            struct.pack("B", _TOKEN_VERSION)
+            + struct.pack("<Q", old_time)
+            + struct.pack("<I", len(state_bytes))
+            + state_bytes
+            + struct.pack("<I", len(schema_bytes))
+            + schema_bytes
+            + struct.pack("<I", len(input_bytes))
+            + input_bytes
+        )
+        mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
+        token = payload + mac
+
+        req_buf = BytesIO()
+        state_md = pa.KeyValueMetadata({STATE_KEY: token})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
+
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            max_stream_response_bytes=200,
+            token_ttl=0,
+        )
+        resp = c.post(
+            f"{_BASE_URL}/vgi/generate/exchange",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        # Token should be accepted (not expired) — response may be an error
+        # for other reasons (e.g. empty state deserialization), but NOT
+        # "State token expired".
+        if resp.status_code == 400:
+            err = _extract_rpc_error(resp)
+            assert "expired" not in err.error_message.lower()
         c.close()
 
 

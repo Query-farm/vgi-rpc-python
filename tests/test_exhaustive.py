@@ -493,6 +493,29 @@ class TestDeserializeValue:
         result = _deserialize_value([("k", 1)], dict[str, int] | None)
         assert result == {"k": 1}
 
+    def test_dataclass_type_mismatch_raises(self) -> None:
+        """Non-bytes value for ArrowSerializableDataclass raises TypeError."""
+        from vgi_rpc.utils import ArrowSerializableDataclass
+
+        class Dummy(ArrowSerializableDataclass):
+            """Test dataclass."""
+
+            x: int = 0
+
+        with pytest.raises(TypeError, match="Expected bytes for Dummy deserialization, got int"):
+            _deserialize_value(42, Dummy)
+
+    def test_enum_type_mismatch_raises(self) -> None:
+        """Non-str value for Enum raises TypeError."""
+
+        class Color(Enum):
+            """Test enum."""
+
+            RED = "red"
+
+        with pytest.raises(TypeError, match="Expected str for Color deserialization, got int"):
+            _deserialize_value(42, Color)
+
 
 # ===================================================================
 # 7. _deserialize_params / _validate_params / _validate_result

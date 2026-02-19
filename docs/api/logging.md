@@ -91,7 +91,20 @@ Every completed RPC call emits one structured INFO record on the `vgi_rpc.access
 
 ### Wire protocol debugging
 
-Enable the `vgi_rpc.wire` hierarchy at DEBUG to see exactly what flows over the wire — request/response batches, metadata, batch classification, stream lifecycle, and transport events:
+From the CLI, use `--debug` for quick diagnostics or `--log-logger` for targeted debugging:
+
+```bash
+# All vgi_rpc loggers at DEBUG
+vgi-rpc --debug describe --cmd "python worker.py"
+
+# Target specific wire loggers
+vgi-rpc --log-level DEBUG --log-logger vgi_rpc.wire.request call add --cmd "python worker.py" a=1 b=2
+
+# List all available loggers
+vgi-rpc loggers
+```
+
+In Python, enable the `vgi_rpc.wire` hierarchy at DEBUG to see exactly what flows over the wire — request/response batches, metadata, batch classification, stream lifecycle, and transport events:
 
 ```python
 import logging

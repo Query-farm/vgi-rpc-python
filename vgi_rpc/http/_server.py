@@ -138,17 +138,25 @@ def _set_error_response(
 
 _HMAC_LEN = 32  # SHA-256 digest size
 _HEADER_LEN = 4  # uint32 LE prefix for each segment
-_TOKEN_VERSION = 1  # bump when the token wire format changes
+_TOKEN_VERSION = 2  # bump when the token wire format changes
 _TOKEN_VERSION_LEN = 1  # single byte
-_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _HEADER_LEN * 3 + _HMAC_LEN
+_TIMESTAMP_LEN = 8  # uint64 LE, seconds since epoch
+_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _TIMESTAMP_LEN + _HEADER_LEN * 3 + _HMAC_LEN
 
 
-def _pack_state_token(state_bytes: bytes, schema_bytes: bytes, input_schema_bytes: bytes, signing_key: bytes) -> bytes:
+def _pack_state_token(
+    state_bytes: bytes,
+    schema_bytes: bytes,
+    input_schema_bytes: bytes,
+    signing_key: bytes,
+    created_at: int,
+) -> bytes:
     """Pack state, output schema, and input schema bytes into a signed token.
 
-    Wire format (v1)::
+    Wire format (v2)::
 
-        [1 byte:  version            (uint8, currently 1)]
+        [1 byte:  version=2          (uint8)]
+        [8 bytes: created_at         (uint64 LE, seconds since epoch)]
         [4 bytes: state_len          (uint32 LE)]
         [state_len bytes: state_bytes]
         [4 bytes: schema_len         (uint32 LE)]
@@ -162,6 +170,7 @@ def _pack_state_token(state_bytes: bytes, schema_bytes: bytes, input_schema_byte
         schema_bytes: Serialized output ``pa.Schema``.
         input_schema_bytes: Serialized input ``pa.Schema``.
         signing_key: HMAC signing key.
+        created_at: Token creation time as seconds since epoch.
 
     Returns:
         The opaque signed token.
@@ -169,6 +178,7 @@ def _pack_state_token(state_bytes: bytes, schema_bytes: bytes, input_schema_byte
     """
     payload = (
         struct.pack("B", _TOKEN_VERSION)
+        + struct.pack("<Q", created_at)
         + struct.pack("<I", len(state_bytes))
         + state_bytes
         + struct.pack("<I", len(schema_bytes))
@@ -180,18 +190,20 @@ def _pack_state_token(state_bytes: bytes, schema_bytes: bytes, input_schema_byte
     return payload + mac
 
 
-def _unpack_state_token(token: bytes, signing_key: bytes) -> tuple[bytes, bytes, bytes]:
+def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) -> tuple[bytes, bytes, bytes]:
     """Unpack and verify a signed state token.
 
     Args:
         token: The opaque token produced by ``_pack_state_token``.
         signing_key: HMAC signing key (must match the one used to pack).
+        token_ttl: Maximum token age in seconds.  ``0`` disables expiry
+            checking.
 
     Returns:
         ``(state_bytes, schema_bytes, input_schema_bytes)``
 
     Raises:
-        _RpcHttpError: On malformed or tampered tokens (HTTP 400).
+        _RpcHttpError: On malformed, tampered, or expired tokens (HTTP 400).
 
     """
     if len(token) < _MIN_TOKEN_LEN:
@@ -209,7 +221,8 @@ def _unpack_state_token(token: bytes, signing_key: bytes) -> tuple[bytes, bytes,
             raise _RpcHttpError(RuntimeError("Malformed state token"), status_code=HTTPStatus.BAD_REQUEST)
         return data[pos + _HEADER_LEN : seg_end], seg_end
 
-    state_bytes, pos = _read_segment(token, _TOKEN_VERSION_LEN)
+    segments_start = _TOKEN_VERSION_LEN + _TIMESTAMP_LEN
+    state_bytes, pos = _read_segment(token, segments_start)
     schema_bytes, pos = _read_segment(token, pos)
     input_schema_bytes, payload_end = _read_segment(token, pos)
 
@@ -236,6 +249,15 @@ def _unpack_state_token(token: bytes, signing_key: bytes) -> tuple[bytes, bytes,
             RuntimeError(f"Unsupported state token version {version} (expected {_TOKEN_VERSION})"),
             status_code=HTTPStatus.BAD_REQUEST,
         )
+
+    # Enforce token TTL when configured
+    if token_ttl > 0:
+        created_at = struct.unpack_from("<Q", token, _TOKEN_VERSION_LEN)[0]
+        if int(time.time()) - created_at > token_ttl:
+            raise _RpcHttpError(
+                RuntimeError("State token expired"),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
 
     return state_bytes, schema_bytes, input_schema_bytes
 
@@ -265,8 +287,9 @@ def _resolve_state_types(
             continue
         try:
             hints = get_type_hints(impl_method)
-        except (NameError, AttributeError):
-            continue
+        except (NameError, AttributeError) as exc:
+            msg = f"Cannot resolve type hints for stream method {name!r}: {exc}"
+            raise TypeError(msg) from exc
         return_hint = hints.get("return")
         if return_hint is None:
             continue
@@ -293,6 +316,7 @@ class _HttpRpcApp:
         "_server",
         "_signing_key",
         "_state_types",
+        "_token_ttl",
         "_upload_url_provider",
     )
 
@@ -304,6 +328,7 @@ class _HttpRpcApp:
         max_request_bytes: int | None = None,
         upload_url_provider: UploadUrlProvider | None = None,
         max_upload_bytes: int | None = None,
+        token_ttl: int = 3600,
     ) -> None:
         self._server = server
         self._signing_key = signing_key
@@ -312,6 +337,7 @@ class _HttpRpcApp:
         self._max_request_bytes = max_request_bytes
         self._upload_url_provider = upload_url_provider
         self._max_upload_bytes = max_upload_bytes
+        self._token_ttl = token_ttl
 
     def _resolve_method(self, req: falcon.Request, method: str) -> RpcMethodInfo:
         """Validate content type and resolve method info.
@@ -555,7 +581,9 @@ class _HttpRpcApp:
                         state_bytes = state.serialize_to_bytes()
                         schema_bytes = output_schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
-                        token = _pack_state_token(state_bytes, schema_bytes, input_schema_bytes, self._signing_key)
+                        token = _pack_state_token(
+                            state_bytes, schema_bytes, input_schema_bytes, self._signing_key, int(time.time())
+                        )
 
                         # Write response: header (if declared) + log batches + zero-row batch with token in metadata
                         resp_buf = BytesIO()
@@ -756,7 +784,7 @@ class _HttpRpcApp:
                     schema_bytes = output_schema.serialize().to_pybytes()
                     input_schema_bytes_upd = input_schema.serialize().to_pybytes()
                     updated_token = _pack_state_token(
-                        updated_state_bytes, schema_bytes, input_schema_bytes_upd, self._signing_key
+                        updated_state_bytes, schema_bytes, input_schema_bytes_upd, self._signing_key, int(time.time())
                     )
                     out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
 
@@ -863,7 +891,9 @@ class _HttpRpcApp:
                         state_bytes = state.serialize_to_bytes()
                         schema_bytes = schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
-                        token = _pack_state_token(state_bytes, schema_bytes, input_schema_bytes, self._signing_key)
+                        token = _pack_state_token(
+                            state_bytes, schema_bytes, input_schema_bytes, self._signing_key, int(time.time())
+                        )
                         state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
                         continuation_batch = empty_batch(schema)
                         _record_output(continuation_batch)
@@ -890,11 +920,11 @@ class _HttpRpcApp:
             Tuple of (state_object, output_schema, input_schema).
 
         Raises:
-            _RpcHttpError: On malformed tokens, failed deserialization, or
-                signature verification failure.
+            _RpcHttpError: On malformed tokens, expired tokens, failed
+                deserialization, or signature verification failure.
 
         """
-        state_bytes, schema_bytes, input_schema_bytes = _unpack_state_token(token, self._signing_key)
+        state_bytes, schema_bytes, input_schema_bytes = _unpack_state_token(token, self._signing_key, self._token_ttl)
 
         try:
             output_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
@@ -1224,6 +1254,7 @@ def make_wsgi_app(
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
+    token_ttl: int = 3600,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -1270,6 +1301,9 @@ def make_wsgi_app(
             When provided, ``instrument_server()`` is called and
             ``_OtelFalconMiddleware`` is prepended for W3C trace propagation.
             Requires ``pip install vgi-rpc[otel]``.
+        token_ttl: Maximum age of stream state tokens in seconds.  Tokens
+            older than this are rejected with HTTP 400.  Default is 3600
+            (1 hour).  Set to ``0`` to disable expiry checking.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -1292,7 +1326,13 @@ def make_wsgi_app(
         instrument_server(server, otel_config)
 
     app_handler = _HttpRpcApp(
-        server, signing_key, max_stream_response_bytes, max_request_bytes, upload_url_provider, max_upload_bytes
+        server,
+        signing_key,
+        max_stream_response_bytes,
+        max_request_bytes,
+        upload_url_provider,
+        max_upload_bytes,
+        token_ttl,
     )
     middleware: list[Any] = [_RequestIdMiddleware()]
 

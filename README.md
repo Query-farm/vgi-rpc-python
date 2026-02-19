@@ -117,6 +117,10 @@ vgi-rpc call countdown --cmd "python worker.py" n=5 --format table
 echo '{"value": 1.0}' | vgi-rpc call accumulate --url http://localhost:8000
 ```
 
+### Output format
+
+Results are printed as **one JSON object per row** (NDJSON). When a batch contains multiple rows, each row is emitted as its own line. With `--format table`, all rows are collected into a single aligned table. With `--format auto` (the default), the CLI uses pretty-printed JSON for TTYs and compact NDJSON when piped.
+
 ### Options
 
 | Option | Short | Description |
@@ -126,6 +130,10 @@ echo '{"value": 1.0}' | vgi-rpc call accumulate --url http://localhost:8000
 | `--prefix` | `-p` | URL path prefix (default `/vgi`) |
 | `--format` | `-f` | Output format: `auto`, `json`, or `table` |
 | `--verbose` | `-v` | Show server log messages on stderr |
+| `--debug` | | Enable DEBUG on all `vgi_rpc` loggers to stderr |
+| `--log-level` | | Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `--log-logger` | | Target specific logger(s), repeatable |
+| `--log-format` | | Stderr log format: `text` (default) or `json` |
 | `--json` | `-j` | Pass parameters as a JSON string (for `call`) |
 
 ## Defining Services

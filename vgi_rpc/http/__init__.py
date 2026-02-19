@@ -36,6 +36,7 @@ from vgi_rpc.http._common import (
     UPLOAD_URL_HEADER,
     _RpcHttpError,
 )
+from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
 from vgi_rpc.http._server import make_wsgi_app
 from vgi_rpc.http._testing import (
     _SyncTestClient,
@@ -44,8 +45,10 @@ from vgi_rpc.http._testing import (
 )
 
 __all__ = [
+    "HttpRetryConfig",
     "HttpServerCapabilities",
     "HttpStreamSession",
+    "HttpTransientError",
     "MAX_REQUEST_BYTES_HEADER",
     "MAX_UPLOAD_BYTES_HEADER",
     "UPLOAD_URL_HEADER",
