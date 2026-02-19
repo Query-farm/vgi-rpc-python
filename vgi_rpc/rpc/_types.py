@@ -315,7 +315,7 @@ _TICK_BATCH = AnnotatedBatch(batch=empty_batch(_EMPTY_SCHEMA))
 
 
 @dataclass(frozen=True)
-class Stream[S: StreamState]:
+class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
     """Return type for stream RPC methods.
 
     Bundles the output schema with a state object whose ``process(input, out, ctx)``
@@ -326,12 +326,18 @@ class Stream[S: StreamState]:
     streams, ``input_schema`` is set to the real input schema and the client
     uses ``exchange()`` / context manager.
 
+    The optional second type parameter ``H`` specifies a header type — an
+    ``ArrowSerializableDataclass`` that is sent once before the main data
+    stream begins.  Use ``Stream[MyState, MyHeader]`` to declare a header;
+    omit it (``Stream[MyState]``) for streams without headers.
+
     Client-side stub methods provide accurate types for IDE autocompletion.
     """
 
     output_schema: pa.Schema
     state: S
     input_schema: pa.Schema = _EMPTY_SCHEMA
+    header: H | None = None
 
     def __iter__(self) -> Iterator[AnnotatedBatch]:
         """Iterate over output batches (client-side stub for producer streams).
@@ -430,6 +436,9 @@ class RpcMethodInfo:
             parameters that have defaults in the Protocol signature.
         param_types: Mapping of parameter name to its Python type annotation
             (excludes ``self`` and ``return``).
+        header_type: For stream methods with a header, the concrete
+            ``ArrowSerializableDataclass`` subclass for the header.
+            ``None`` when the method has no header.
 
     """
 
@@ -442,6 +451,7 @@ class RpcMethodInfo:
     doc: str | None
     param_defaults: dict[str, Any] = field(default_factory=dict)
     param_types: dict[str, Any] = field(default_factory=dict)
+    header_type: type[ArrowSerializableDataclass] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +594,15 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
         # For unary methods, build result schema from the result type
         result_schema = _build_result_schema(result_type) if method_type == MethodType.UNARY else _EMPTY_SCHEMA
 
+        # Extract header type from Stream[S, H] annotations
+        header_type: type[ArrowSerializableDataclass] | None = None
+        if method_type == MethodType.STREAM:
+            stream_args = get_args(return_hint)
+            if len(stream_args) >= 2:
+                h_arg = stream_args[1]
+                if isinstance(h_arg, type) and issubclass(h_arg, ArrowSerializableDataclass):
+                    header_type = h_arg
+
         param_defaults = _get_param_defaults(protocol, name)
         params_schema = _build_params_schema(method_hints)
         param_types = {k: v for k, v in method_hints.items() if k not in ("self", "return")}
@@ -600,6 +619,7 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
             doc=doc,
             param_defaults=param_defaults,
             param_types=param_types,
+            header_type=header_type,
         )
 
     return MappingProxyType(result)

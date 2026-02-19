@@ -147,6 +147,7 @@ from vgi_rpc.rpc._wire import (
     _flush_collector,
     _read_batch_with_log_check,
     _read_request,
+    _read_stream_header,
     _read_unary_response,
     _send_request,
     _validate_params,
@@ -156,6 +157,7 @@ from vgi_rpc.rpc._wire import (
     _write_message_batch,
     _write_request,
     _write_result_batch,
+    _write_stream_header,
 )
 from vgi_rpc.utils import IpcValidation
 
@@ -223,6 +225,7 @@ __all__ = [
     "_logger",
     "_read_batch_with_log_check",
     "_read_request",
+    "_read_stream_header",
     "_read_unary_response",
     "_send_request",
     "_unwrap_annotated",
@@ -235,6 +238,7 @@ __all__ = [
     "_write_message_batch",
     "_write_request",
     "_write_result_batch",
+    "_write_stream_header",
 ]
 
 

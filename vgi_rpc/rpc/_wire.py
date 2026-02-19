@@ -49,7 +49,13 @@ from vgi_rpc.rpc._types import (
     _unwrap_annotated,
 )
 from vgi_rpc.shm import ShmSegment, maybe_write_to_shm, resolve_shm_batch
-from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, _is_optional_type, empty_batch
+from vgi_rpc.utils import (
+    ArrowSerializableDataclass,
+    IpcValidation,
+    ValidatedReader,
+    _is_optional_type,
+    empty_batch,
+)
 
 if TYPE_CHECKING:
     from vgi_rpc.rpc._types import OutputCollector
@@ -182,6 +188,16 @@ class _ClientLogSink:
         for msg in self._buffer:
             _write_message_batch(writer, schema, msg, server_id=self._server_id)
         self._buffer.clear()
+
+    def reset(self) -> None:
+        """Clear writer/schema references, reverting to buffer mode.
+
+        Call this after the IPC writer the sink was flushed to has been
+        closed (e.g. after a header stream ends) so that any subsequent
+        log messages are buffered instead of written to a stale writer.
+        """
+        self._writer = None
+        self._schema = None
 
 
 def _write_result_batch(
@@ -487,6 +503,98 @@ def _drain_stream(reader: ValidatedReader) -> None:
             reader.read_next_batch()
         except StopIteration:
             return
+
+
+def _write_stream_header(
+    dest: IOBase,
+    header: ArrowSerializableDataclass | None,
+    external_config: ExternalLocationConfig | None = None,
+    sink: _ClientLogSink | None = None,
+    *,
+    method_name: str = "",
+) -> None:
+    """Write a stream header as a complete IPC stream (schema + 1-row batch + EOS).
+
+    If *sink* is provided, any buffered log messages are flushed into the
+    header IPC stream before the header data batch.
+
+    If *external_config* is provided and the serialized header exceeds the
+    externalization threshold, the header batch is uploaded to external
+    storage and replaced with a zero-row pointer batch.
+
+    Args:
+        dest: The destination to write to.
+        header: The header dataclass to serialize.  Must not be ``None``.
+        external_config: Optional external storage configuration.
+        sink: Optional client log sink to flush before writing the header batch.
+        method_name: RPC method name, used in error messages.
+
+    Raises:
+        TypeError: If *header* is ``None``.
+
+    """
+    if header is None:
+        raise TypeError(f"Method '{method_name}' declares header type but returned header=None")
+    batch = header._serialize()
+    batch, cm = maybe_externalize_batch(batch, None, external_config) if external_config else (batch, None)
+    with ipc.new_stream(dest, batch.schema) as writer:
+        if sink is not None:
+            sink.flush_contents(writer, batch.schema)
+        if cm is not None:
+            writer.write_batch(batch, custom_metadata=cm)
+        else:
+            writer.write_batch(batch)
+    if sink is not None:
+        sink.reset()
+
+
+def _read_stream_header(
+    source: IOBase,
+    header_type: type[ArrowSerializableDataclass],
+    ipc_validation: IpcValidation,
+    on_log: Callable[[Message], None] | None = None,
+    external_config: ExternalLocationConfig | None = None,
+) -> ArrowSerializableDataclass:
+    """Read a stream header IPC stream and deserialize it.
+
+    Also handles the case where the server wrote an error stream instead
+    of a header (e.g. if the method raised during init).  If the header
+    was externalized, resolves the pointer batch transparently.
+
+    Args:
+        source: The IO source to read from.
+        header_type: The concrete header dataclass type.
+        ipc_validation: Validation level for IPC batches.
+        on_log: Optional log callback.
+        external_config: Optional external storage configuration for
+            resolving externalized headers.
+
+    Returns:
+        The deserialized header instance.
+
+    Raises:
+        RpcError: If the server wrote an error instead of a header.
+
+    """
+    reader = ValidatedReader(ipc.open_stream(source), ipc_validation)
+    try:
+        while True:
+            batch, cm = reader.read_next_batch_with_custom_metadata()
+            if not _dispatch_log_or_error(batch, cm, on_log):
+                break
+    except StopIteration:
+        raise RpcError(
+            "ProtocolError",
+            "Stream header IPC stream ended without a data batch. "
+            "The server must write at least one non-log batch in the header stream.",
+            "",
+        ) from None
+    except RpcError:
+        _drain_stream(reader)
+        raise
+    _drain_stream(reader)
+    batch, cm = resolve_external_location(batch, cm, external_config, on_log, ipc_validation)
+    return header_type.deserialize_from_batch(batch, cm, ipc_validation=ipc_validation)
 
 
 def _send_request(writer: IOBase, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:

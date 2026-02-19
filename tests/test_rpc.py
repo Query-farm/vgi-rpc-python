@@ -155,6 +155,34 @@ class TransformWithLogsState(StreamState):
 
 
 @dataclass
+class GenerateWithHeaderState(ProducerState):
+    """State for the generate-with-header producer stream."""
+
+    count: int
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Produce the next batch."""
+        if self.current >= self.count:
+            out.finish()
+            return
+        out.emit_pydict({"i": [self.current], "value": [self.current * 10]})
+        self.current += 1
+
+
+@dataclass
+class TransformWithHeaderState(ExchangeState):
+    """State for the transform-with-header exchange stream."""
+
+    factor: float
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Process an input batch."""
+        scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
+        out.emit_arrays([scaled])
+
+
+@dataclass
 class PassthroughState(StreamState):
     """State for a passthrough exchange stream."""
 
@@ -183,6 +211,14 @@ class DescribeResult(ArrowSerializableDataclass):
 
     output_schema: Annotated[pa.Schema, ArrowType(pa.binary())]
     sample_batch: Annotated[pa.RecordBatch, ArrowType(pa.binary())]
+
+
+@dataclass(frozen=True)
+class StreamHeader(ArrowSerializableDataclass):
+    """Stream header for testing — carries one-time metadata."""
+
+    total_count: int
+    label: str
 
 
 class RpcFixtureService(Protocol):
@@ -254,6 +290,22 @@ class RpcFixtureService(Protocol):
 
     def transform_with_logs(self, factor: float) -> Stream[StreamState]:
         """Bidi transform with log messages per exchange."""
+        ...
+
+    def generate_with_header(self, count: int) -> Stream[StreamState, StreamHeader]:
+        """Generate batches with a stream header."""
+        ...
+
+    def transform_with_header(self, factor: float) -> Stream[StreamState, StreamHeader]:
+        """Exchange stream with a stream header."""
+        ...
+
+    def fail_stream_init_with_header(self) -> Stream[StreamState, StreamHeader]:
+        """Stream that raises during init (with header declared)."""
+        ...
+
+    def generate_with_header_and_log(self, count: int) -> Stream[StreamState, StreamHeader]:
+        """Generate batches with a stream header and init log."""
         ...
 
 
@@ -341,6 +393,34 @@ class RpcFixtureServiceImpl:
         """Bidi transform with log messages per exchange."""
         schema = pa.schema([pa.field("value", pa.float64())])
         return Stream(output_schema=schema, state=TransformWithLogsState(factor=factor), input_schema=schema)
+
+    def generate_with_header(self, count: int) -> Stream[GenerateWithHeaderState, StreamHeader]:
+        """Generate batches with a stream header."""
+        schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
+        header = StreamHeader(total_count=count, label="generate")
+        return Stream(output_schema=schema, state=GenerateWithHeaderState(count=count), header=header)
+
+    def transform_with_header(self, factor: float) -> Stream[TransformWithHeaderState, StreamHeader]:
+        """Exchange stream with a stream header."""
+        schema = pa.schema([pa.field("value", pa.float64())])
+        header = StreamHeader(total_count=0, label=f"transform-{factor}")
+        return Stream(
+            output_schema=schema, state=TransformWithHeaderState(factor=factor), input_schema=schema, header=header
+        )
+
+    def fail_stream_init_with_header(self) -> Stream[GenerateWithHeaderState, StreamHeader]:
+        """Stream that raises during init (with header declared)."""
+        raise ValueError("init boom with header")
+
+    def generate_with_header_and_log(
+        self, count: int, ctx: CallContext | None = None
+    ) -> Stream[GenerateWithHeaderState, StreamHeader]:
+        """Generate batches with a stream header and init log."""
+        if ctx:
+            ctx.client_log(Level.INFO, "stream init log")
+        header = StreamHeader(total_count=count, label="logged")
+        schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
+        return Stream(output_schema=schema, state=GenerateWithHeaderState(count=count), header=header)
 
 
 # ---------------------------------------------------------------------------
@@ -2282,3 +2362,120 @@ class TestRequestId:
             assert msg.extra is not None
             assert "request_id" in msg.extra
             assert len(str(msg.extra["request_id"])) == 16
+
+
+# ---------------------------------------------------------------------------
+# Tests: stream headers
+# ---------------------------------------------------------------------------
+
+
+class TestStreamHeader:
+    """Tests for Stream header feature."""
+
+    def test_producer_with_header(self, make_conn: ConnFactory) -> None:
+        """Producer stream with header: header available before iteration."""
+        with make_conn() as proxy:
+            session = proxy.generate_with_header(count=3)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, StreamHeader)
+            assert header.total_count == 3
+            assert header.label == "generate"
+            batches = list(session)
+            assert len(batches) == 3
+            for i, ab in enumerate(batches):
+                assert ab.batch.column("i")[0].as_py() == i
+
+    def test_exchange_with_header(self, make_conn: ConnFactory) -> None:
+        """Exchange stream with header: header available before first exchange."""
+        with make_conn() as proxy:
+            session = proxy.transform_with_header(factor=2.0)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, StreamHeader)
+            assert header.total_count == 0
+            assert header.label == "transform-2.0"
+            schema = pa.schema([pa.field("value", pa.float64())])
+            with session:
+                input_batch = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5.0]}, schema=schema))
+                output = session.exchange(input_batch)
+                assert output.batch.column("value")[0].as_py() == 10.0
+
+    def test_no_header_returns_none(self, make_conn: ConnFactory) -> None:
+        """Stream without header: session.header is None."""
+        with make_conn() as proxy:
+            session = proxy.generate(count=2)
+            assert session.header is None
+            batches = list(session)
+            assert len(batches) == 2
+
+    def test_header_type_in_rpc_methods(self) -> None:
+        """rpc_methods extracts header_type from Stream[S, H] annotations."""
+        methods = rpc_methods(RpcFixtureService)
+        assert methods["generate_with_header"].header_type is StreamHeader
+        assert methods["transform_with_header"].header_type is StreamHeader
+        assert methods["generate"].header_type is None
+        assert methods["transform"].header_type is None
+
+    def test_init_error_with_header(self, make_conn: ConnFactory) -> None:
+        """Server error during init propagates as RpcError, not deserialization error."""
+        with make_conn() as proxy, pytest.raises(RpcError, match="init boom with header"):
+            proxy.fail_stream_init_with_header()
+
+    def test_header_with_init_log(self, make_conn: ConnFactory) -> None:
+        """Init-time client log is received and header is correctly deserialized."""
+        logs: list[Message] = []
+        with make_conn(on_log=logs.append) as proxy:
+            session = proxy.generate_with_header_and_log(count=2)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, StreamHeader)
+            assert header.total_count == 2
+            assert header.label == "logged"
+            # Log emitted during init should have been received
+            assert any(m.level == Level.INFO and "stream init log" in m.message for m in logs)
+            batches = list(session)
+            assert len(batches) == 2
+
+    def test_typed_header_producer(self, make_conn: ConnFactory) -> None:
+        """typed_header returns narrowed type on producer stream."""
+        with make_conn() as proxy:
+            session = proxy.generate_with_header(count=2)
+            header = session.typed_header(StreamHeader)
+            # Static type is StreamHeader — fields are accessible without cast
+            assert header.total_count == 2
+            assert header.label == "generate"
+            batches = list(session)
+            assert len(batches) == 2
+
+    def test_typed_header_exchange(self, make_conn: ConnFactory) -> None:
+        """typed_header returns narrowed type on exchange stream."""
+        with make_conn() as proxy:
+            session = proxy.transform_with_header(factor=2.0)
+            header = session.typed_header(StreamHeader)
+            assert header.total_count == 0
+            assert header.label == "transform-2.0"
+            session.close()
+
+    def test_typed_header_none_raises(self, make_conn: ConnFactory) -> None:
+        """typed_header raises TypeError when stream has no header."""
+        with make_conn() as proxy:
+            session = proxy.generate(count=1)
+            with pytest.raises(TypeError, match="expected StreamHeader"):
+                session.typed_header(StreamHeader)
+            list(session)
+
+    def test_typed_header_wrong_type_raises(self, make_conn: ConnFactory) -> None:
+        """typed_header raises TypeError when header type doesn't match."""
+
+        @dataclass(frozen=True)
+        class WrongHeader(ArrowSerializableDataclass):
+            """Wrong header type for testing."""
+
+            x: int
+
+        with make_conn() as proxy:
+            session = proxy.generate_with_header(count=1)
+            with pytest.raises(TypeError, match=r"expected WrongHeader.*got StreamHeader"):
+                session.typed_header(WrongHeader)
+            list(session)

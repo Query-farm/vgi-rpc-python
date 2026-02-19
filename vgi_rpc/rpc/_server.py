@@ -50,6 +50,7 @@ from vgi_rpc.rpc._wire import (
     _write_error_batch,
     _write_error_stream,
     _write_result_batch,
+    _write_stream_header,
 )
 from vgi_rpc.shm import ShmSegment, resolve_shm_batch
 from vgi_rpc.utils import IpcValidation, ValidatedReader
@@ -429,7 +430,7 @@ class RpcServer:
         # NOTE: Two finally blocks — the inner one handles init errors (with early return),
         # the outer one handles streaming errors.  Only one access log fires per call.
         try:
-            result: Stream[StreamState] = getattr(self._impl, info.name)(**kwargs)
+            result: Stream[StreamState, Any] = getattr(self._impl, info.name)(**kwargs)
         except Exception as exc:
             _hook_exc = exc
             status = "error"
@@ -460,6 +461,12 @@ class RpcServer:
         output_schema = result.output_schema
         input_schema = result.input_schema
         state = result.state
+
+        # Write header IPC stream before the main output stream
+        if info.header_type is not None:
+            _write_stream_header(
+                transport.writer, result.header, self._external_config, sink=sink, method_name=info.name
+            )
 
         input_reader = ValidatedReader(ipc.open_stream(transport.reader), self._ipc_validation)
 

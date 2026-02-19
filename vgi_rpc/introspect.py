@@ -60,7 +60,7 @@ __all__ = [
 DESCRIBE_METHOD_NAME = "__describe__"
 """Well-known method name for introspection requests."""
 
-DESCRIBE_VERSION = "1"
+DESCRIBE_VERSION = "2"
 """Introspection format version for forward compatibility."""
 
 PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"
@@ -78,6 +78,8 @@ _DESCRIBE_FIELDS: list[pa.Field[pa.DataType]] = [
     pa.field("result_schema_ipc", pa.binary()),
     pa.field("param_types_json", pa.utf8(), nullable=True),
     pa.field("param_defaults_json", pa.utf8(), nullable=True),
+    pa.field("has_header", pa.bool_()),
+    pa.field("header_schema_ipc", pa.binary(), nullable=True),
 ]
 _DESCRIBE_SCHEMA = pa.schema(_DESCRIBE_FIELDS)
 
@@ -186,6 +188,8 @@ class MethodDescription:
         result_schema: Arrow schema for the response (unary) or empty (streams).
         param_types: Human-readable type names keyed by parameter name.
         param_defaults: Parsed default values keyed by parameter name.
+        has_header: ``True`` for stream methods that declare a header type.
+        header_schema: Arrow schema for the header, or ``None`` if no header.
 
     """
 
@@ -197,6 +201,8 @@ class MethodDescription:
     result_schema: pa.Schema
     param_types: dict[str, str] = field(default_factory=dict)
     param_defaults: dict[str, object] = field(default_factory=dict)
+    has_header: bool = False
+    header_schema: pa.Schema | None = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +278,8 @@ def build_describe_batch(
     result_schemas: list[bytes] = []
     param_types_jsons: list[str | None] = []
     param_defaults_jsons: list[str | None] = []
+    has_headers: list[bool] = []
+    header_schemas: list[bytes | None] = []
 
     for name, info in sorted(methods.items()):
         names.append(name)
@@ -290,6 +298,13 @@ def build_describe_batch(
 
         # Build param_defaults_json
         param_defaults_jsons.append(_safe_defaults_json(info.param_defaults))
+
+        # Header info
+        has_headers.append(info.header_type is not None)
+        if info.header_type is not None:
+            header_schemas.append(info.header_type.ARROW_SCHEMA.serialize().to_pybytes())
+        else:
+            header_schemas.append(None)
 
     # Schema-level metadata
     schema_metadata = {
@@ -310,6 +325,8 @@ def build_describe_batch(
             "result_schema_ipc": result_schemas,
             "param_types_json": param_types_jsons,
             "param_defaults_json": param_defaults_jsons,
+            "has_header": has_headers,
+            "header_schema_ipc": header_schemas,
         },
         schema=schema_with_metadata,
     )
@@ -362,6 +379,16 @@ def parse_describe_batch(batch: pa.RecordBatch) -> ServiceDescription:
         pd_json: str | None = batch.column("param_defaults_json")[i].as_py()
         param_defaults: dict[str, object] = json.loads(pd_json) if pd_json else {}
 
+        # Header fields (v2+)
+        has_header = False
+        header_schema: pa.Schema | None = None
+        if "has_header" in batch.schema.names:
+            has_header = batch.column("has_header")[i].as_py()
+        if "header_schema_ipc" in batch.schema.names:
+            header_schema_bytes: bytes | None = batch.column("header_schema_ipc")[i].as_py()
+            if header_schema_bytes is not None:
+                header_schema = pa.ipc.read_schema(pa.py_buffer(header_schema_bytes))
+
         method_map[name] = MethodDescription(
             name=name,
             method_type=method_type,
@@ -371,6 +398,8 @@ def parse_describe_batch(batch: pa.RecordBatch) -> ServiceDescription:
             result_schema=result_schema,
             param_types=param_types,
             param_defaults=param_defaults,
+            has_header=has_header,
+            header_schema=header_schema,
         )
 
     return ServiceDescription(

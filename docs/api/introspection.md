@@ -41,6 +41,8 @@ desc = http_introspect("http://localhost:8080")
 
 The `ServiceDescription` contains method metadata, parameter schemas, default values, and docstrings — everything a dynamic client needs without the Python Protocol class.
 
+For stream methods that declare a header type (`Stream[S, H]`), `MethodDescription` includes `has_header` (`bool`) and `header_schema` (`pa.Schema | None`) fields describing the header's Arrow schema. These are `False` / `None` for methods without headers.
+
 ## API Reference
 
 ### Functions

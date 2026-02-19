@@ -42,7 +42,8 @@ from vgi_rpc.rpc import (
     rpc_methods,
 )
 from vgi_rpc.rpc._debug import fmt_batch, wire_http_logger
-from vgi_rpc.utils import IpcValidation, ValidatedReader, empty_batch
+from vgi_rpc.rpc._wire import _read_stream_header
+from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch
 
 from ._common import (
     _ARROW_CONTENT_TYPE,
@@ -121,6 +122,7 @@ class HttpStreamSession:
         "_client",
         "_external_config",
         "_finished",
+        "_header",
         "_ipc_validation",
         "_method",
         "_on_log",
@@ -143,6 +145,7 @@ class HttpStreamSession:
         ipc_validation: IpcValidation = IpcValidation.FULL,
         pending_batches: list[AnnotatedBatch] | None = None,
         finished: bool = False,
+        header: object | None = None,
     ) -> None:
         """Initialize with HTTP client, method details, and initial state."""
         self._client = client
@@ -155,6 +158,32 @@ class HttpStreamSession:
         self._ipc_validation = ipc_validation
         self._pending_batches: list[AnnotatedBatch] = pending_batches or []
         self._finished = finished
+        self._header = header
+
+    @property
+    def header(self) -> object | None:
+        """The stream header, or ``None`` if the stream has no header."""
+        return self._header
+
+    def typed_header[H: ArrowSerializableDataclass](self, header_type: type[H]) -> H:
+        """Return the stream header narrowed to the expected type.
+
+        Args:
+            header_type: The expected header dataclass type.
+
+        Returns:
+            The header, typed as *header_type*.
+
+        Raises:
+            TypeError: If the header is ``None`` or not an instance of
+                *header_type*.
+
+        """
+        if self._header is None:
+            raise TypeError(f"Stream has no header (expected {header_type.__name__})")
+        if not isinstance(self._header, header_type):
+            raise TypeError(f"Header type mismatch: expected {header_type.__name__}, got {type(self._header).__name__}")
+        return self._header
 
     def exchange(self, input_batch: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch and receive the output batch.
@@ -440,6 +469,7 @@ def _init_http_stream_session(
     *,
     external_config: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
+    header: object | None = None,
 ) -> HttpStreamSession:
     """Parse an init response and return an ``HttpStreamSession``.
 
@@ -455,6 +485,7 @@ def _init_http_stream_session(
         on_log: Optional log callback.
         external_config: Optional external location config.
         ipc_validation: Validation level for IPC batches.
+        header: Optional pre-read stream header.
 
     Returns:
         A configured ``HttpStreamSession`` ready for iteration or exchange.
@@ -510,6 +541,7 @@ def _init_http_stream_session(
         ipc_validation=ipc_validation,
         pending_batches=pending_batches,
         finished=finished,
+        header=header,
     )
 
 
@@ -613,7 +645,19 @@ class _HttpProxy:
                     len(resp.content),
                 )
 
-            reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
+            # Read header from response before main IPC stream (if method declares one).
+            # For non-401 errors (e.g. 500), _read_stream_header still works correctly
+            # because _set_error_response writes a proper IPC error stream with error
+            # metadata, which _read_stream_header detects via _dispatch_log_or_error.
+            header = None
+            resp_stream = BytesIO(resp.content)
+            if info.header_type is not None:
+                # Check for auth errors first (plain text, not Arrow IPC)
+                if resp.status_code == 401:
+                    _open_response_stream(resp.content, resp.status_code, ipc_validation)
+                header = _read_stream_header(resp_stream, info.header_type, ipc_validation, on_log, ext_cfg)
+
+            reader = _open_response_stream(resp_stream.read(), resp.status_code, ipc_validation)
             return _init_http_stream_session(
                 client=client,
                 url_prefix=url_prefix,
@@ -622,6 +666,7 @@ class _HttpProxy:
                 on_log=on_log,
                 external_config=ext_cfg,
                 ipc_validation=ipc_validation,
+                header=header,
             )
 
         return caller

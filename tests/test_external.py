@@ -45,11 +45,12 @@ from vgi_rpc.rpc import (
     AnnotatedBatch,
     CallContext,
     OutputCollector,
+    ProducerState,
     Stream,
     StreamState,
     serve_pipe,
 )
-from vgi_rpc.utils import empty_batch
+from vgi_rpc.utils import ArrowSerializableDataclass, empty_batch
 
 # ---------------------------------------------------------------------------
 # MockStorage — in-memory ExternalStorage
@@ -1740,3 +1741,124 @@ class TestPipeIntegrationCompressed:
         assert result.batch.num_rows == 50
         assert result.batch.column("value")[0].as_py() == 0.0
         assert result.batch.column("value")[1].as_py() == 2.0
+
+
+# ===========================================================================
+# Stream header externalization
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _LargeStreamHeader(ArrowSerializableDataclass):
+    """Stream header large enough to be externalized."""
+
+    label: str
+    payload: str
+
+
+@dataclass
+class _HeaderProducerState(ProducerState):
+    """Simple producer that emits a fixed number of batches."""
+
+    count: int
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Produce the next batch."""
+        if self.current >= self.count:
+            out.finish()
+            return
+        out.emit_pydict({"value": [self.current]})
+        self.current += 1
+
+
+class _HeaderExternalService(Protocol):
+    """Protocol with a header-bearing stream for external storage tests."""
+
+    def stream_with_header(self, count: int) -> Stream[StreamState, _LargeStreamHeader]:
+        """Stream batches with a large header."""
+        ...
+
+
+class _HeaderExternalServiceImpl:
+    """Implementation for header externalization tests."""
+
+    def stream_with_header(self, count: int) -> Stream[_HeaderProducerState, _LargeStreamHeader]:
+        """Return a stream with a large header that will be externalized."""
+        schema = pa.schema([pa.field("value", pa.int64())])
+        header = _LargeStreamHeader(label="test", payload="x" * 500)
+        return Stream(output_schema=schema, state=_HeaderProducerState(count=count), header=header)
+
+
+class TestStreamHeaderExternalization:
+    """Tests for stream header externalization via external storage."""
+
+    def _make_config(self, storage: MockStorage, threshold: int = 10) -> ExternalLocationConfig:
+        """Create config with a low threshold so headers are externalized."""
+        return ExternalLocationConfig(
+            storage=storage,
+            externalize_threshold_bytes=threshold,
+            max_retries=0,
+            retry_delay_seconds=0.0,
+        )
+
+    def test_large_header_externalized(self) -> None:
+        """Large stream header is externalized and resolved transparently."""
+        storage = MockStorage()
+        config = self._make_config(storage, threshold=10)
+
+        with aioresponses_ctx() as mock:
+            _mock_aio_dynamic(storage, mock)
+            with serve_pipe(
+                _HeaderExternalService,
+                _HeaderExternalServiceImpl(),
+                external_location=config,
+            ) as svc:
+                session = svc.stream_with_header(count=2)
+                header = session.header
+                assert header is not None
+                assert isinstance(header, _LargeStreamHeader)
+                assert header.label == "test"
+                assert header.payload == "x" * 500
+                batches = list(session)
+
+        assert len(batches) == 2
+        # At least one upload should have occurred (the header)
+        assert len(storage.data) >= 1
+
+    def test_small_header_inline(self) -> None:
+        """Small stream header stays inline (not externalized)."""
+        storage = MockStorage()
+        config = self._make_config(storage, threshold=10_000_000)
+
+        with serve_pipe(
+            _HeaderExternalService,
+            _HeaderExternalServiceImpl(),
+            external_location=config,
+        ) as svc:
+            session = svc.stream_with_header(count=1)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, _LargeStreamHeader)
+            assert header.label == "test"
+            batches = list(session)
+
+        assert len(batches) == 1
+        # No uploads — header was inline
+        assert len(storage.data) == 0
+
+    def test_header_no_external_config(self) -> None:
+        """Stream header works normally without external storage configured."""
+        with serve_pipe(
+            _HeaderExternalService,
+            _HeaderExternalServiceImpl(),
+        ) as svc:
+            session = svc.stream_with_header(count=1)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, _LargeStreamHeader)
+            assert header.label == "test"
+            assert header.payload == "x" * 500
+            batches = list(session)
+
+        assert len(batches) == 1

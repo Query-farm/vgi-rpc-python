@@ -202,6 +202,102 @@ with proxy.pipeline(threshold=100.0) as session:
     # phase=processing, buffer_size=3, total=110.0
 ```
 
+## Stream Headers
+
+Stream methods can send a one-time `ArrowSerializableDataclass` header before the data stream begins. Declare it as the second type parameter: `Stream[S, H]`. Headers carry metadata that applies to the entire stream — total row counts, column descriptions, job identifiers, or any fixed information the client needs before processing batches.
+
+### Producer with header
+
+Define a header dataclass, use it in the Protocol signature, and return it via `Stream(..., header=...)`:
+
+```python
+from dataclasses import dataclass
+
+import pyarrow as pa
+
+from vgi_rpc import (
+    ArrowSerializableDataclass,
+    CallContext,
+    OutputCollector,
+    ProducerState,
+    Stream,
+    StreamState,
+)
+
+
+@dataclass(frozen=True)
+class JobHeader(ArrowSerializableDataclass):
+    """One-time metadata sent before the stream begins."""
+
+    total_rows: int
+    description: str
+
+
+# Protocol declares the header type
+class DataService(Protocol):
+    """Service with a header-bearing producer stream."""
+
+    def fetch_rows(self, query: str) -> Stream[StreamState, JobHeader]: ...
+
+
+# Implementation returns the header alongside the stream
+@dataclass
+class FetchState(ProducerState):
+    """Produces query results."""
+
+    remaining: int
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit one batch per call."""
+        if self.remaining <= 0:
+            out.finish()
+            return
+        out.emit_pydict({"value": [self.remaining]})
+        self.remaining -= 1
+
+
+class DataServiceImpl:
+    """Implementation with stream headers."""
+
+    def fetch_rows(self, query: str) -> Stream[FetchState, JobHeader]:
+        """Return a stream with a header."""
+        schema = pa.schema([pa.field("value", pa.int64())])
+        header = JobHeader(total_rows=100, description=f"Results for: {query}")
+        return Stream(output_schema=schema, state=FetchState(remaining=100), header=header)
+```
+
+Client side — access the header via `session.header`:
+
+```python
+from vgi_rpc import serve_pipe
+
+with serve_pipe(DataService, DataServiceImpl()) as proxy:
+    session = proxy.fetch_rows(query="SELECT *")
+    print(session.header)  # JobHeader(total_rows=100, description='Results for: SELECT *')
+    for batch in session:
+        print(batch.batch.to_pydict())
+```
+
+### Exchange with header
+
+Exchange streams work the same way — the header is available when entering the context manager:
+
+```python
+from vgi_rpc import AnnotatedBatch
+
+with serve_pipe(DataService, DataServiceImpl()) as proxy:
+    with proxy.transform_rows(factor=2.0) as session:
+        print(session.header)  # JobHeader(...)
+        result = session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
+```
+
+### Notes
+
+- For streams without a header (`Stream[S]`), `session.header` returns `None`.
+- Use `session.typed_header(JobHeader)` for a typed narrowing that raises `TypeError` if the header is missing or the wrong type.
+- Headers work across all transports (pipe, subprocess, HTTP). For HTTP, the header is included in the `/init` response only — subsequent `/exchange` requests do not re-send it.
+- Headers are visible in runtime introspection: `MethodDescription.has_header` and `MethodDescription.header_schema`.
+
 ## API Reference
 
 ### Stream

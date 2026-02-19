@@ -18,9 +18,9 @@ from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
 from vgi_rpc.rpc._debug import fmt_batch, wire_request_logger, wire_stream_logger, wire_transport_logger
 from vgi_rpc.rpc._transport import RpcTransport, ShmPipeTransport
 from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, rpc_methods
-from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_unary_response, _send_request
+from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_stream_header, _read_unary_response, _send_request
 from vgi_rpc.shm import ShmSegment, maybe_write_to_shm
-from vgi_rpc.utils import IpcValidation, ValidatedReader
+from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader
 
 
 class StreamSession:
@@ -34,6 +34,7 @@ class StreamSession:
     __slots__ = (
         "_closed",
         "_external_config",
+        "_header",
         "_input_writer",
         "_ipc_validation",
         "_on_log",
@@ -52,6 +53,7 @@ class StreamSession:
         external_config: ExternalLocationConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
         shm: ShmSegment | None = None,
+        header: object | None = None,
     ) -> None:
         """Initialize with writer/reader streams and optional log callback."""
         self._writer_stream = writer_stream
@@ -63,6 +65,32 @@ class StreamSession:
         self._external_config = external_config
         self._ipc_validation = ipc_validation
         self._shm = shm
+        self._header = header
+
+    @property
+    def header(self) -> object | None:
+        """The stream header, or ``None`` if the stream has no header."""
+        return self._header
+
+    def typed_header[H: ArrowSerializableDataclass](self, header_type: type[H]) -> H:
+        """Return the stream header narrowed to the expected type.
+
+        Args:
+            header_type: The expected header dataclass type.
+
+        Returns:
+            The header, typed as *header_type*.
+
+        Raises:
+            TypeError: If the header is ``None`` or not an instance of
+                *header_type*.
+
+        """
+        if self._header is None:
+            raise TypeError(f"Stream has no header (expected {header_type.__name__})")
+        if not isinstance(self._header, header_type):
+            raise TypeError(f"Header type mismatch: expected {header_type.__name__}, got {type(self._header).__name__}")
+        return self._header
 
     def _write_batch(self, input: AnnotatedBatch) -> None:
         """Write a batch to the input stream, opening it on first use."""
@@ -256,6 +284,9 @@ class _RpcProxy:
             if wire_stream_logger.isEnabledFor(logging.DEBUG):
                 wire_stream_logger.debug("Stream init: method=%s", info.name)
             _send_request(transport.writer, info, kwargs)
+            header = None
+            if info.header_type is not None:
+                header = _read_stream_header(transport.reader, info.header_type, ipc_validation, on_log, ext_cfg)
             return StreamSession(
                 transport.writer,
                 transport.reader,
@@ -263,6 +294,7 @@ class _RpcProxy:
                 external_config=ext_cfg,
                 ipc_validation=ipc_validation,
                 shm=shm,
+                header=header,
             )
 
         return caller

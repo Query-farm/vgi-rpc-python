@@ -132,11 +132,19 @@ Services are defined as `Protocol` classes. The return type annotation determine
 |---|---|---|
 | `-> T` | **Unary** | Single request, single response |
 | `-> Stream[S]` | **Stream** | Stateful streaming (producer or exchange) |
+| `-> Stream[S, H]` | **Stream** | Streaming with a one-time header |
 
 ```python
 from typing import Protocol
 
-from vgi_rpc import Stream, StreamState
+from vgi_rpc import ArrowSerializableDataclass, Stream, StreamState
+
+
+class JobHeader(ArrowSerializableDataclass):
+    """One-time metadata sent before the stream begins."""
+
+    total_rows: int
+    description: str
 
 
 class MyService(Protocol):
@@ -152,6 +160,10 @@ class MyService(Protocol):
 
     def transform(self, factor: float) -> Stream[StreamState]:
         """Exchange stream: lockstep input/output exchange."""
+        ...
+
+    def generate_with_meta(self, count: int) -> Stream[StreamState, JobHeader]:
+        """Producer stream with metadata header."""
         ...
 ```
 
@@ -260,6 +272,8 @@ Each `MethodDescription` contains:
 | `result_schema` | `pa.Schema` | Arrow schema for the response |
 | `param_types` | `dict[str, str]` | Human-readable type names by parameter |
 | `param_defaults` | `dict[str, object]` | Default values by parameter |
+| `has_header` | `bool` | Whether the stream method declares a header |
+| `header_schema` | `pa.Schema \| None` | Arrow schema for the header type |
 
 The response is a standard Arrow IPC batch — any Arrow-capable language can parse it directly.
 
@@ -569,6 +583,101 @@ with serve_pipe(SumService, SumServiceImpl()) as proxy:
         )
         print(result.batch.to_pydict())  # {'total': [13.0]}
 ```
+
+### Stream Headers
+
+Stream methods can send a one-time header before the data stream begins by declaring `Stream[S, H]` where `H` is an `ArrowSerializableDataclass`. Headers carry metadata that applies to the entire stream — total row counts, column descriptions, job identifiers, or any fixed information the client needs before processing batches.
+
+Define a header as a frozen dataclass with the `ArrowSerializableDataclass` mixin:
+
+```python
+from dataclasses import dataclass
+
+from vgi_rpc import ArrowSerializableDataclass
+
+
+@dataclass(frozen=True)
+class JobHeader(ArrowSerializableDataclass):
+    """One-time metadata sent before the stream begins."""
+
+    total_rows: int
+    description: str
+```
+
+Declare the header in the Protocol with `Stream[S, H]`:
+
+```python
+from typing import Protocol
+
+from vgi_rpc import Stream, StreamState
+
+
+class DataService(Protocol):
+    """Service with header-bearing streams."""
+
+    def fetch_rows(self, query: str) -> Stream[StreamState, JobHeader]:
+        """Producer stream with metadata header."""
+        ...
+
+    def transform_rows(self, factor: float) -> Stream[StreamState, JobHeader]:
+        """Exchange stream with metadata header."""
+        ...
+```
+
+Return the header from the server implementation via `Stream(..., header=...)`:
+
+```python
+from vgi_rpc import OutputCollector, CallContext, ProducerState, Stream
+
+import pyarrow as pa
+
+
+@dataclass
+class FetchState(ProducerState):
+    """Produces rows from a query."""
+
+    remaining: int
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit one batch per call."""
+        if self.remaining <= 0:
+            out.finish()
+            return
+        out.emit_pydict({"value": [self.remaining]})
+        self.remaining -= 1
+
+
+class DataServiceImpl:
+    """Implementation with stream headers."""
+
+    def fetch_rows(self, query: str) -> Stream[FetchState, JobHeader]:
+        """Return a stream with a header."""
+        schema = pa.schema([pa.field("value", pa.int64())])
+        header = JobHeader(total_rows=100, description=f"Results for: {query}")
+        return Stream(output_schema=schema, state=FetchState(remaining=100), header=header)
+```
+
+On the client side, access the header via `session.header`:
+
+```python
+from vgi_rpc import serve_pipe
+
+with serve_pipe(DataService, DataServiceImpl()) as proxy:
+    # Producer stream with header
+    session = proxy.fetch_rows(query="SELECT *")
+    print(session.header)  # JobHeader(total_rows=100, description='Results for: SELECT *')
+    for batch in session:
+        print(batch.batch.to_pydict())
+
+    # Exchange stream with header
+    with proxy.transform_rows(factor=2.0) as session:
+        print(session.header)  # JobHeader(...)
+        result = session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
+```
+
+For streams without a header (`Stream[S]`), `session.header` returns `None`. Use `session.typed_header(JobHeader)` for a typed narrowing that raises `TypeError` if the header is missing or the wrong type.
+
+Stream headers work across all transports (pipe, subprocess, HTTP). For HTTP, the header is included in the `/init` response — subsequent `/exchange` requests do not re-send it.
 
 ## Logging
 
@@ -1087,6 +1196,14 @@ All streams use the same lockstep exchange protocol:
 Client → Server:  [IPC stream: params_schema + 1 request batch + EOS]
 ```
 
+**Phase 1.5 — optional header** (only if the Protocol declares `Stream[S, H]`):
+
+```
+Server → Client:  [IPC stream: header_schema + 0..N log batches + 1 header batch + EOS]
+```
+
+The header is a complete IPC stream containing a single-row batch with the header data. It is written once, before the main output stream begins. Streams declared as `Stream[S]` (no header type) skip this phase entirely.
+
 **Phase 2 — lockstep exchange** (one IPC stream per direction):
 
 ```
@@ -1109,6 +1226,8 @@ All endpoints use `Content-Type: application/vnd.apache.arrow.stream`.
 | `{prefix}/{method}/exchange` | POST | Stream continuation (producer and exchange) |
 
 Over HTTP, streaming is **stateless**: each exchange carries serialized `StreamState` in a signed token in the `vgi_rpc.stream_state` batch metadata key. Producer stream init returns data batches directly; exchange stream init returns a state token.
+
+For streams with headers, the `/init` response body contains the header IPC stream prepended to the main output IPC stream. The `/exchange` endpoint never re-sends the header — it is only included in the initial response.
 
 ### State tokens (HTTP)
 

@@ -58,6 +58,7 @@ from vgi_rpc.rpc import (
     _validate_result,
     _write_error_batch,
     _write_result_batch,
+    _write_stream_header,
 )
 from vgi_rpc.rpc._common import HookToken, _DispatchHook
 from vgi_rpc.utils import ValidatedReader, empty_batch
@@ -476,7 +477,7 @@ class _HttpRpcApp:
         _hook_exc: BaseException | None = None
         try:
             try:
-                result: Stream[StreamState] = getattr(self._server.implementation, method_name)(**kwargs)
+                result: Stream[StreamState, Any] = getattr(self._server.implementation, method_name)(**kwargs)
             except (TypeError, pa.ArrowInvalid) as exc:
                 _hook_exc = exc
                 status = "error"
@@ -493,8 +494,13 @@ class _HttpRpcApp:
             is_producer = result.input_schema == _EMPTY_SCHEMA
 
             if is_producer:
-                # Producer stream — run produce loop directly
-                resp_buf, produce_error_type = self._produce_stream_response(
+                # Producer stream — write header (if declared) then run produce loop
+                resp_buf = BytesIO()
+                if info.header_type is not None:
+                    _write_stream_header(
+                        resp_buf, result.header, self._server.external_config, sink=sink, method_name=method_name
+                    )
+                produce_buf, produce_error_type = self._produce_stream_response(
                     result.output_schema,
                     result.state,
                     result.input_schema,
@@ -503,6 +509,8 @@ class _HttpRpcApp:
                     auth=auth,
                     transport_metadata=transport_metadata,
                 )
+                resp_buf.write(produce_buf.getvalue())
+                resp_buf.seek(0)
                 if produce_error_type is not None:
                     status = "error"
                     error_type = produce_error_type
@@ -520,8 +528,12 @@ class _HttpRpcApp:
                     input_schema_bytes = input_schema.serialize().to_pybytes()
                     token = _pack_state_token(state_bytes, schema_bytes, input_schema_bytes, self._signing_key)
 
-                    # Write response: log batches + zero-row batch with token in metadata
+                    # Write response: header (if declared) + log batches + zero-row batch with token in metadata
                     resp_buf = BytesIO()
+                    if info.header_type is not None:
+                        _write_stream_header(
+                            resp_buf, result.header, self._server.external_config, sink=sink, method_name=method_name
+                        )
                     with ipc.new_stream(resp_buf, output_schema) as writer:
                         sink.flush_contents(writer, output_schema)
                         state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
@@ -561,6 +573,10 @@ class _HttpRpcApp:
 
         Dispatches to producer continuation or exchange based on input_schema
         recovered from the state token.
+
+        Note: headers are only sent in the init response — continuations
+        and exchanges never re-send headers (state is recovered from the
+        signed token, which does not include header data).
         """
         state_cls = self._state_types.get(method_name)
         if state_cls is None:
