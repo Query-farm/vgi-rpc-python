@@ -14,6 +14,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import json
 import logging
@@ -22,7 +23,7 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from io import BytesIO
+from io import BytesIO, IOBase, TextIOWrapper
 from typing import Annotated, Protocol, cast
 
 import pyarrow as pa
@@ -39,6 +40,7 @@ from vgi_rpc.rpc import (
     SubprocessTransport,
     _drain_stream,
     _read_batch_with_log_check,
+    _read_raw_stream_header,
     _write_request,
 )
 from vgi_rpc.utils import IpcValidation, ValidatedReader
@@ -54,6 +56,7 @@ class OutputFormat(StrEnum):
     auto = "auto"
     json = "json"
     table = "table"
+    arrow = "arrow"
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +121,7 @@ class _CliConfig:
     cmd: str | None = None
     prefix: str = "/vgi"
     format: OutputFormat = OutputFormat.auto
+    output: str | None = None
     verbose: bool = False
     no_stdin: bool = False
     log_level: LogLevel | None = None
@@ -192,6 +196,7 @@ def _main(
     cmd: Annotated[str | None, typer.Option("--cmd", "-c", help="Subprocess command")] = None,
     prefix: Annotated[str, typer.Option("--prefix", "-p", help="URL path prefix")] = "/vgi",
     fmt: Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format")] = OutputFormat.auto,
+    output: Annotated[str | None, typer.Option("--output", "-o", help="Output file path (default: stdout)")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show server log messages on stderr")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Enable DEBUG on all vgi_rpc loggers to stderr")] = False,
     log_level: Annotated[LogLevel | None, typer.Option("--log-level", help="Python logging level for vgi_rpc")] = None,
@@ -217,6 +222,7 @@ def _main(
         cmd=cmd,
         prefix=prefix,
         format=fmt,
+        output=output,
         verbose=verbose,
         log_level=effective_level,
         log_loggers=log_logger or [],
@@ -427,6 +433,82 @@ def _emit_rpc_error(e: RpcError) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Arrow / file output helpers
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _open_arrow_dest(config: _CliConfig) -> Iterator[IOBase]:
+    """Open the arrow output destination as a context manager.
+
+    Yields a binary writable stream: a file when ``--output`` is set,
+    otherwise ``sys.stdout.buffer`` (with a TTY warning on stderr).
+    The file is closed on exit; stdout.buffer is left open.
+    """
+    if config.output:
+        f = open(config.output, "wb")  # noqa: SIM115
+        try:
+            yield cast("IOBase", f)
+        finally:
+            f.close()
+    else:
+        if sys.stdout.isatty():
+            sys.stderr.write("Warning: writing binary Arrow IPC to terminal; consider --output/-o\n")
+            sys.stderr.flush()
+        yield cast("IOBase", sys.stdout.buffer)
+
+
+def _write_arrow_output(config: _CliConfig, batch: pa.RecordBatch) -> None:
+    """Write a single batch as a complete IPC stream to the configured destination."""
+    with _open_arrow_dest(config) as dest, ipc.new_stream(dest, batch.schema) as writer:
+        writer.write_batch(batch)
+
+
+@contextlib.contextmanager
+def _open_text_dest(config: _CliConfig) -> Iterator[TextIOWrapper | None]:
+    """Open a text output destination when ``--output`` is set.
+
+    Yields the file handle, or ``None`` when writing to stdout.
+    Callers use the returned handle to write explicitly, falling back
+    to ``typer.echo`` / ``_print_json`` for stdout (which go through
+    Click's own output machinery and work correctly under CliRunner).
+    """
+    if not config.output:
+        yield None
+        return
+    f = open(config.output, "w")  # noqa: SIM115
+    try:
+        yield f
+    finally:
+        f.close()
+
+
+def _echo(text: str, dest: TextIOWrapper | None) -> None:
+    """Write text to *dest* if given, otherwise to stdout via typer.echo."""
+    if dest is not None:
+        dest.write(text + "\n")
+    else:
+        typer.echo(text)
+
+
+def _print_json_to(data: object, dest: TextIOWrapper | None, *, pretty: bool = False) -> None:
+    """Serialize *data* as JSON and write to *dest* or stdout."""
+    text = json.dumps(data, indent=2 if pretty else None, default=str)
+    _echo(text, dest)
+
+
+def _header_batch_to_dict(batch: pa.RecordBatch) -> dict[str, object]:
+    """Convert a single-row header batch to a dict.
+
+    Returns an empty dict for zero-row batches (defensive).
+    """
+    if batch.num_rows == 0:
+        return {}
+    d = batch.to_pydict()
+    return {col: _coerce_map_value(vals[0]) for col, vals in d.items()}
+
+
+# ---------------------------------------------------------------------------
 # Shared stream protocol + deduplication
 # ---------------------------------------------------------------------------
 
@@ -443,62 +525,150 @@ class _StreamLike(Protocol):
 
 def _print_unary_result(ab: AnnotatedBatch, method: MethodDescription, config: _CliConfig) -> None:
     """Format and print a unary call result."""
-    if not method.has_return:
-        _print_json(None)
+    fmt = config.format
+    if fmt == OutputFormat.arrow:
+        if not method.has_return:
+            _write_arrow_output(config, pa.record_batch({}))
+        else:
+            _write_arrow_output(config, ab.batch)
         return
-    rows = _batch_to_rows(ab.batch)
-    is_tty = sys.stdout.isatty()
-    fmt = config.format
+    with _open_text_dest(config) as dest:
+        if not method.has_return:
+            _print_json_to(None, dest)
+            return
+        rows = _batch_to_rows(ab.batch)
+        is_tty = sys.stdout.isatty() and dest is None
+        if fmt == OutputFormat.table:
+            _echo(_format_table(rows), dest)
+        else:
+            for row in rows:
+                _print_json_to(row, dest, pretty=(fmt == OutputFormat.auto and is_tty))
+
+
+def _emit_header_text(
+    header_batch: pa.RecordBatch | None,
+    fmt: OutputFormat,
+    is_tty: bool,
+    dest: TextIOWrapper | None,
+) -> None:
+    """Emit stream header in text formats (JSON or table) before data rows."""
+    if header_batch is None:
+        return
+    hdr = _header_batch_to_dict(header_batch)
     if fmt == OutputFormat.table:
-        typer.echo(_format_table(rows))
+        _echo("Header:", dest)
+        for k, v in hdr.items():
+            _echo(f"  {k}: {v}", dest)
+        _echo("", dest)
     else:
-        for row in rows:
-            _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
+        _print_json_to({"__header__": hdr}, dest, pretty=(fmt == OutputFormat.auto and is_tty))
 
 
-def _run_stream(session: _StreamLike, config: _CliConfig) -> None:
-    """Run a stream session (producer or exchange) with config-driven output."""
+def _run_stream_arrow(
+    session: _StreamLike,
+    config: _CliConfig,
+    header_batch: pa.RecordBatch | None,
+) -> None:
+    """Run a stream session and write Arrow IPC output."""
     has_stdin = _stdin_has_data(config)
-    is_tty = sys.stdout.isatty()
-    fmt = config.format
+    with _open_arrow_dest(config) as dest:
+        # Write header as its own IPC stream if present
+        if header_batch is not None:
+            with ipc.new_stream(dest, header_batch.schema) as hw:
+                hw.write_batch(header_batch)
 
-    if not has_stdin:
-        # Producer mode
-        table_rows: list[dict[str, object]] = []
+        writer: ipc.RecordBatchStreamWriter | None = None
         try:
-            for ab in session:
-                batch_rows = _batch_to_rows(ab.batch)
-                if fmt == OutputFormat.table:
-                    table_rows.extend(batch_rows)
-                else:
-                    for row in batch_rows:
-                        _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
-                    sys.stdout.flush()
-        except RpcError as e:
-            _emit_rpc_error(e)
-            raise typer.Exit(1) from None
-        if fmt == OutputFormat.table and table_rows:
-            typer.echo(_format_table(table_rows))
-    else:
-        # Exchange mode
-        try:
-            for line in sys.stdin:
-                line = line.strip()
-                if not line:
-                    continue
-                input_data = json.loads(line)
-                input_dict: dict[str, list[object]] = {k: [v] for k, v in input_data.items()}
-                input_batch = pa.RecordBatch.from_pydict(input_dict)
-                ab_input = AnnotatedBatch(batch=input_batch)
-                ab_output = session.exchange(ab_input)
-                for row in _batch_to_rows(ab_output.batch):
-                    _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
-                sys.stdout.flush()
+            if not has_stdin:
+                for ab in session:
+                    if writer is None:
+                        writer = ipc.new_stream(dest, ab.batch.schema)
+                    writer.write_batch(ab.batch)
+            else:
+                for line in sys.stdin:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    input_data = json.loads(line)
+                    input_dict: dict[str, list[object]] = {k: [v] for k, v in input_data.items()}
+                    input_batch = pa.RecordBatch.from_pydict(input_dict)
+                    ab_input = AnnotatedBatch(batch=input_batch)
+                    ab_output = session.exchange(ab_input)
+                    if writer is None:
+                        writer = ipc.new_stream(dest, ab_output.batch.schema)
+                    writer.write_batch(ab_output.batch)
         except RpcError as e:
             _emit_rpc_error(e)
             raise typer.Exit(1) from None
         finally:
-            session.close()
+            if has_stdin:
+                with contextlib.suppress(Exception):
+                    session.close()
+            if writer is not None:
+                writer.close()
+
+
+def _run_stream(
+    session: _StreamLike,
+    config: _CliConfig,
+    header_batch: pa.RecordBatch | None = None,
+) -> None:
+    """Run a stream session (producer or exchange) with config-driven output."""
+    fmt = config.format
+
+    if fmt == OutputFormat.arrow:
+        _run_stream_arrow(session, config, header_batch)
+        return
+
+    has_stdin = _stdin_has_data(config)
+
+    with _open_text_dest(config) as dest:
+        is_tty = sys.stdout.isatty() and dest is None
+        _emit_header_text(header_batch, fmt, is_tty, dest)
+
+        if not has_stdin:
+            # Producer mode
+            table_rows: list[dict[str, object]] = []
+            try:
+                for ab in session:
+                    batch_rows = _batch_to_rows(ab.batch)
+                    if fmt == OutputFormat.table:
+                        table_rows.extend(batch_rows)
+                    else:
+                        for row in batch_rows:
+                            _print_json_to(row, dest, pretty=(fmt == OutputFormat.auto and is_tty))
+                        if dest is None:
+                            sys.stdout.flush()
+                        else:
+                            dest.flush()
+            except RpcError as e:
+                _emit_rpc_error(e)
+                raise typer.Exit(1) from None
+            if fmt == OutputFormat.table and table_rows:
+                _echo(_format_table(table_rows), dest)
+        else:
+            # Exchange mode
+            try:
+                for line in sys.stdin:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    input_data = json.loads(line)
+                    input_dict: dict[str, list[object]] = {k: [v] for k, v in input_data.items()}
+                    input_batch = pa.RecordBatch.from_pydict(input_dict)
+                    ab_input = AnnotatedBatch(batch=input_batch)
+                    ab_output = session.exchange(ab_input)
+                    for row in _batch_to_rows(ab_output.batch):
+                        _print_json_to(row, dest, pretty=(fmt == OutputFormat.auto and is_tty))
+                    if dest is None:
+                        sys.stdout.flush()
+                    else:
+                        dest.flush()
+            except RpcError as e:
+                _emit_rpc_error(e)
+                raise typer.Exit(1) from None
+            finally:
+                session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -674,8 +844,14 @@ def _call_stream_pipe(
 ) -> None:
     """Call a stream method over pipe transport."""
     _write_request(transport.writer, method.name, method.params_schema, kwargs)
+    header_batch: pa.RecordBatch | None = None
+    if method.has_header:
+        header_batch = _read_raw_stream_header(transport.reader, IpcValidation.FULL, on_log)
+    # header_batch is a raw RecordBatch (not a deserialized dataclass), so we
+    # don't pass it to StreamSession.header which expects the typed object.
+    # Instead we pass it directly to _run_stream for display.
     session = StreamSession(transport.writer, transport.reader, on_log)
-    _run_stream(session, config)
+    _run_stream(session, config, header_batch)
 
 
 # ---------------------------------------------------------------------------
@@ -743,7 +919,16 @@ def _call_stream_http(
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
-        reader = _open_response_stream(resp.content, resp.status_code, IpcValidation.FULL)
+        header_batch: pa.RecordBatch | None = None
+        resp_stream = BytesIO(resp.content)
+        if method.has_header:
+            # Check for auth errors first (plain text, not Arrow IPC)
+            if resp.status_code == 401:
+                _open_response_stream(resp.content, resp.status_code, IpcValidation.FULL)
+            header_batch = _read_raw_stream_header(resp_stream, IpcValidation.FULL, on_log)
+        remaining = resp_stream.read()
+        reader = _open_response_stream(remaining, resp.status_code, IpcValidation.FULL)
+        # header_batch is a raw RecordBatch, not passed to the session.
         session = _init_http_stream_session(
             client=client,
             url_prefix=prefix,
@@ -751,7 +936,7 @@ def _call_stream_http(
             reader=reader,
             on_log=on_log,
         )
-        _run_stream(session, config)
+        _run_stream(session, config, header_batch)
     finally:
         client.close()
 

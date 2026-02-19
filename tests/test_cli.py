@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pyarrow as pa
 import pytest
+from pyarrow import ipc
 from typer.testing import CliRunner
 
 from vgi_rpc.cli import _KNOWN_LOGGERS, app
@@ -457,3 +459,194 @@ class TestLogging:
         # CliRunner mixes stderr into output; look for wire logger output
         # The describe command triggers request/response wire logging at DEBUG
         assert "vgi_rpc." in result.output
+
+
+# ---------------------------------------------------------------------------
+# Stream header tests (parametrized over pipe/http)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamHeaders:
+    """Tests for stream header display in text formats."""
+
+    def test_header_json(self, transport_args: list[str]) -> None:
+        """Stream header appears as ``__header__`` wrapper in JSON output."""
+        result = _invoke(
+            [*transport_args, "--format", "json", "call", "--no-stdin", "generate_with_header", "count=2"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        lines = [line for line in result.output.strip().split("\n") if line.strip()]
+        # First line should be the header wrapper
+        header_line = json.loads(lines[0])
+        assert "__header__" in header_line
+        hdr = header_line["__header__"]
+        assert hdr["total_count"] == 2
+        assert hdr["label"] == "generate"
+        # Remaining lines are data rows
+        data_lines = [json.loads(line) for line in lines[1:]]
+        assert len(data_lines) == 2
+        assert data_lines[0]["i"] == 0
+
+    def test_header_table(self, transport_args: list[str]) -> None:
+        """Stream header appears as ``Header:`` section in table output."""
+        result = _invoke(
+            [*transport_args, "--format", "table", "call", "--no-stdin", "generate_with_header", "count=2"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Header:" in result.output
+        assert "total_count: 2" in result.output
+        assert "label: generate" in result.output
+        # Data table should follow
+        assert "i" in result.output
+        assert "value" in result.output
+
+    def test_no_header_json(self, transport_args: list[str]) -> None:
+        """Streams without headers produce no ``__header__`` line."""
+        result = _invoke(
+            [*transport_args, "--format", "json", "call", "--no-stdin", "generate", "count=2"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        lines = [line for line in result.output.strip().split("\n") if line.strip()]
+        for line in lines:
+            data = json.loads(line)
+            assert "__header__" not in data
+
+
+# ---------------------------------------------------------------------------
+# Arrow format tests (pipe transport is sufficient)
+# ---------------------------------------------------------------------------
+
+
+class TestArrowFormat:
+    """Tests for ``--format arrow`` output."""
+
+    def test_arrow_unary(self, tmp_path: Path) -> None:
+        """Unary result written as Arrow IPC to a file."""
+        out = tmp_path / "result.arrow"
+        result = _invoke(
+            ["--cmd", _PIPE_CMD, "--format", "arrow", "--output", str(out), "call", "add", "a=1.0", "b=2.0"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        with ipc.open_stream(pa.OSFile(str(out), "rb")) as reader:
+            batch = reader.read_next_batch()
+            assert batch.num_rows == 1
+            assert batch.column("result")[0].as_py() == 3.0
+
+    def test_arrow_stream_producer(self, tmp_path: Path) -> None:
+        """Producer stream written as Arrow IPC to a file."""
+        out = tmp_path / "stream.arrow"
+        result = _invoke(
+            [
+                "--cmd",
+                _PIPE_CMD,
+                "--format",
+                "arrow",
+                "--output",
+                str(out),
+                "call",
+                "--no-stdin",
+                "generate",
+                "count=3",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        i_values: list[object] = []
+        with ipc.open_stream(pa.OSFile(str(out), "rb")) as reader:
+            for batch in reader:
+                i_values.extend(batch.to_pydict()["i"])
+        assert i_values == [0, 1, 2]
+
+    def test_arrow_stream_with_header(self, tmp_path: Path) -> None:
+        """Stream with header writes header IPC stream followed by data IPC stream."""
+        out = tmp_path / "header_stream.arrow"
+        result = _invoke(
+            [
+                "--cmd",
+                _PIPE_CMD,
+                "--format",
+                "arrow",
+                "--output",
+                str(out),
+                "call",
+                "--no-stdin",
+                "generate_with_header",
+                "count=2",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        # Read back: first IPC stream is the header, second is data
+        with open(out, "rb") as f:
+            # Header stream
+            header_reader = ipc.open_stream(f)
+            hdr_batch = header_reader.read_next_batch()
+            assert hdr_batch.num_rows == 1
+            assert hdr_batch.column("total_count")[0].as_py() == 2
+            assert hdr_batch.column("label")[0].as_py() == "generate"
+            # Drain header stream
+            try:
+                while True:
+                    header_reader.read_next_batch()
+            except StopIteration:
+                pass
+            # Data stream
+            data_reader = ipc.open_stream(f)
+            data_rows: list[object] = []
+            try:
+                while True:
+                    batch = data_reader.read_next_batch()
+                    data_rows.extend(batch.column("i").to_pylist())
+            except StopIteration:
+                pass
+            assert data_rows == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# --output option tests (pipe transport is sufficient)
+# ---------------------------------------------------------------------------
+
+
+class TestOutputOption:
+    """Tests for ``--output`` / ``-o`` with text formats."""
+
+    def test_output_json(self, tmp_path: Path) -> None:
+        """``--output`` with JSON format writes to file."""
+        out = tmp_path / "result.json"
+        result = _invoke(
+            ["--cmd", _PIPE_CMD, "--format", "json", "--output", str(out), "call", "add", "a=1.0", "b=2.0"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        data = json.loads(out.read_text())
+        assert data["result"] == 3.0
+
+    def test_output_table(self, tmp_path: Path) -> None:
+        """``--output`` with table format writes to file."""
+        out = tmp_path / "result.txt"
+        result = _invoke(
+            ["--cmd", _PIPE_CMD, "--format", "table", "--output", str(out), "call", "add", "a=1.0", "b=2.0"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        text = out.read_text()
+        assert "result" in text
+        assert "3.0" in text
+
+    def test_output_stream_json(self, tmp_path: Path) -> None:
+        """``--output`` with stream and JSON format."""
+        out = tmp_path / "stream.json"
+        result = _invoke(
+            [
+                "--cmd",
+                _PIPE_CMD,
+                "--format",
+                "json",
+                "--output",
+                str(out),
+                "call",
+                "--no-stdin",
+                "generate",
+                "count=2",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        lines = [line for line in out.read_text().strip().split("\n") if line.strip()]
+        assert len(lines) == 2
+        assert json.loads(lines[0])["i"] == 0

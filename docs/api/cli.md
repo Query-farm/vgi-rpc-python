@@ -90,6 +90,24 @@ i   value
 
 With `--format auto` (the default), the CLI uses pretty-printed JSON when stdout is a TTY and compact NDJSON when piped.
 
+With `--format arrow`, raw Arrow IPC streams are written to the output. Use `--output`/`-o` to direct binary output to a file:
+
+```bash
+# Write Arrow IPC to a file
+vgi-rpc call add --cmd "python worker.py" a=1.0 b=2.0 --format arrow -o result.arrow
+
+# Stream with header: two concatenated IPC streams (header + data)
+vgi-rpc call generate_with_header --cmd "python worker.py" count=5 --format arrow -o stream.arrow
+```
+
+### Stream headers
+
+Stream methods that declare a header type (e.g. `Stream[MyState, MyHeader]`) emit a header before the data rows. The CLI surfaces this header in all formats:
+
+- **JSON**: a `{"__header__": {...}}` line before data rows
+- **Table**: a `Header:` section with `key: value` lines before the data table
+- **Arrow**: a separate IPC stream before the data IPC stream
+
 ### Options
 
 | Option | Short | Description |
@@ -97,7 +115,8 @@ With `--format auto` (the default), the CLI uses pretty-printed JSON when stdout
 | `--url` | `-u` | HTTP base URL |
 | `--cmd` | `-c` | Subprocess command |
 | `--prefix` | `-p` | URL path prefix (default `/vgi`) |
-| `--format` | `-f` | Output format: `auto`, `json`, or `table` |
+| `--format` | `-f` | Output format: `auto`, `json`, `table`, or `arrow` |
+| `--output` | `-o` | Output file path (default: stdout) |
 | `--verbose` | `-v` | Show server log messages on stderr |
 | `--debug` | | Enable DEBUG on all `vgi_rpc` loggers to stderr |
 | `--log-level` | | Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |

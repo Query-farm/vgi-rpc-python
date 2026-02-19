@@ -119,7 +119,9 @@ echo '{"value": 1.0}' | vgi-rpc call accumulate --url http://localhost:8000
 
 ### Output format
 
-Results are printed as **one JSON object per row** (NDJSON). When a batch contains multiple rows, each row is emitted as its own line. With `--format table`, all rows are collected into a single aligned table. With `--format auto` (the default), the CLI uses pretty-printed JSON for TTYs and compact NDJSON when piped.
+Results are printed as **one JSON object per row** (NDJSON). When a batch contains multiple rows, each row is emitted as its own line. With `--format table`, all rows are collected into a single aligned table. With `--format auto` (the default), the CLI uses pretty-printed JSON for TTYs and compact NDJSON when piped. With `--format arrow`, raw Arrow IPC data is written to the output (use `--output`/`-o` to direct to a file).
+
+Stream methods with headers display the header before data rows: as a `{"__header__": {...}}` line in JSON, a `Header:` section in table format, or a separate IPC stream in arrow format.
 
 ### Options
 
@@ -128,7 +130,8 @@ Results are printed as **one JSON object per row** (NDJSON). When a batch contai
 | `--url` | `-u` | HTTP base URL |
 | `--cmd` | `-c` | Subprocess command |
 | `--prefix` | `-p` | URL path prefix (default `/vgi`) |
-| `--format` | `-f` | Output format: `auto`, `json`, or `table` |
+| `--format` | `-f` | Output format: `auto`, `json`, `table`, or `arrow` |
+| `--output` | `-o` | Output file path (default: stdout) |
 | `--verbose` | `-v` | Show server log messages on stderr |
 | `--debug` | | Enable DEBUG on all `vgi_rpc` loggers to stderr |
 | `--log-level` | | Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |

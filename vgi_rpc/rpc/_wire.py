@@ -581,6 +581,52 @@ def _write_stream_header(
         sink.reset()
 
 
+def _read_header_batch(
+    source: IOBase,
+    ipc_validation: IpcValidation,
+    on_log: Callable[[Message], None] | None = None,
+    external_config: ExternalLocationConfig | None = None,
+) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
+    """Read a stream header IPC stream and return the raw batch and metadata.
+
+    Shared implementation for ``_read_stream_header`` and
+    ``_read_raw_stream_header``.  Handles log/error dispatch, stream
+    draining, and external location resolution.
+
+    Args:
+        source: The IO source to read from.
+        ipc_validation: Validation level for IPC batches.
+        on_log: Optional log callback.
+        external_config: Optional external storage configuration for
+            resolving externalized headers.
+
+    Returns:
+        A ``(batch, custom_metadata)`` tuple.
+
+    Raises:
+        RpcError: If the server wrote an error instead of a header.
+
+    """
+    reader = ValidatedReader(ipc.open_stream(source), ipc_validation)
+    try:
+        while True:
+            batch, cm = reader.read_next_batch_with_custom_metadata()
+            if not _dispatch_log_or_error(batch, cm, on_log):
+                break
+    except StopIteration:
+        raise RpcError(
+            "ProtocolError",
+            "Stream header IPC stream ended without a data batch. "
+            "The server must write at least one non-log batch in the header stream.",
+            "",
+        ) from None
+    except RpcError:
+        _drain_stream(reader)
+        raise
+    _drain_stream(reader)
+    return resolve_external_location(batch, cm, external_config, on_log, ipc_validation)
+
+
 def _read_stream_header(
     source: IOBase,
     header_type: type[ArrowSerializableDataclass],
@@ -609,25 +655,38 @@ def _read_stream_header(
         RpcError: If the server wrote an error instead of a header.
 
     """
-    reader = ValidatedReader(ipc.open_stream(source), ipc_validation)
-    try:
-        while True:
-            batch, cm = reader.read_next_batch_with_custom_metadata()
-            if not _dispatch_log_or_error(batch, cm, on_log):
-                break
-    except StopIteration:
-        raise RpcError(
-            "ProtocolError",
-            "Stream header IPC stream ended without a data batch. "
-            "The server must write at least one non-log batch in the header stream.",
-            "",
-        ) from None
-    except RpcError:
-        _drain_stream(reader)
-        raise
-    _drain_stream(reader)
-    batch, cm = resolve_external_location(batch, cm, external_config, on_log, ipc_validation)
+    batch, cm = _read_header_batch(source, ipc_validation, on_log, external_config)
     return header_type.deserialize_from_batch(batch, cm, ipc_validation=ipc_validation)
+
+
+def _read_raw_stream_header(
+    source: IOBase,
+    ipc_validation: IpcValidation,
+    on_log: Callable[[Message], None] | None = None,
+    external_config: ExternalLocationConfig | None = None,
+) -> pa.RecordBatch:
+    """Read a stream header IPC stream and return the raw batch.
+
+    Same as ``_read_stream_header`` but returns the ``pa.RecordBatch``
+    directly without deserializing into a typed dataclass.  Used by
+    the CLI, which does not have access to the concrete header type.
+
+    Args:
+        source: The IO source to read from.
+        ipc_validation: Validation level for IPC batches.
+        on_log: Optional log callback.
+        external_config: Optional external storage configuration for
+            resolving externalized headers.
+
+    Returns:
+        The raw header ``RecordBatch``.
+
+    Raises:
+        RpcError: If the server wrote an error instead of a header.
+
+    """
+    batch, _cm = _read_header_batch(source, ipc_validation, on_log, external_config)
+    return batch
 
 
 def _send_request(
