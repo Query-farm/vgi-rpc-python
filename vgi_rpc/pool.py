@@ -371,7 +371,12 @@ class WorkerPool:
                     return transport
 
         # Spawn new
-        transport = SubprocessTransport(list(key), stderr=self._stderr, stderr_logger=self._stderr_logger)
+        try:
+            transport = SubprocessTransport(list(key), stderr=self._stderr, stderr_logger=self._stderr_logger)
+        except OSError:
+            with self._lock:
+                self._active -= 1
+            raise
         with self._lock:
             self._spawns += 1
         _logger.info("Spawned new worker: pid=%d, cmd=%s", transport.proc.pid, key)
