@@ -16,7 +16,7 @@ from vgi_rpc.external import ExternalLocationConfig, maybe_externalize_batch
 from vgi_rpc.log import Message
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
 from vgi_rpc.rpc._debug import fmt_batch, wire_request_logger, wire_stream_logger, wire_transport_logger
-from vgi_rpc.rpc._transport import RpcTransport, ShmPipeTransport
+from vgi_rpc.rpc._transport import RpcTransport
 from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, rpc_methods
 from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_stream_header, _read_unary_response, _send_request
 from vgi_rpc.shm import ShmSegment, maybe_write_to_shm
@@ -240,7 +240,9 @@ class _RpcProxy:
         self._on_log = on_log
         self._external_config = external_config
         self._ipc_validation = ipc_validation
-        self._shm: ShmSegment | None = transport.shm if isinstance(transport, ShmPipeTransport) else None
+        # ShmPipeTransport and _PooledTransport expose a .shm property;
+        # plain RpcTransport does not.  Duck-type to avoid coupling to concrete classes.
+        self._shm: ShmSegment | None = getattr(transport, "shm", None)
 
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
@@ -267,7 +269,7 @@ class _RpcProxy:
         def caller(**kwargs: object) -> object:
             if wire_request_logger.isEnabledFor(logging.DEBUG):
                 wire_request_logger.debug("Unary call: method=%s", info.name)
-            _send_request(transport.writer, info, kwargs)
+            _send_request(transport.writer, info, kwargs, shm=shm)
             reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
             return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
 
@@ -283,11 +285,16 @@ class _RpcProxy:
         def caller(**kwargs: object) -> StreamSession:
             if wire_stream_logger.isEnabledFor(logging.DEBUG):
                 wire_stream_logger.debug("Stream init: method=%s", info.name)
-            _send_request(transport.writer, info, kwargs)
+            _send_request(transport.writer, info, kwargs, shm=shm)
+            # _PooledTransport (pool.py) uses __slots__ and tracks stream
+            # lifecycle to detect abandoned streams.  object.__setattr__ is
+            # needed because __slots__ classes don't have __dict__.
+            if hasattr(transport, "_stream_opened"):
+                object.__setattr__(transport, "_stream_opened", True)
             header = None
             if info.header_type is not None:
                 header = _read_stream_header(transport.reader, info.header_type, ipc_validation, on_log, ext_cfg)
-            return StreamSession(
+            session = StreamSession(
                 transport.writer,
                 transport.reader,
                 on_log,
@@ -296,6 +303,9 @@ class _RpcProxy:
                 shm=shm,
                 header=header,
             )
+            if hasattr(transport, "_last_stream_session"):
+                object.__setattr__(transport, "_last_stream_session", session)  # __slots__
+            return session
 
         return caller
 

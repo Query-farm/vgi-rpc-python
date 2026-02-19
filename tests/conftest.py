@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 
+from vgi_rpc.pool import WorkerPool
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
 _SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
@@ -75,21 +76,30 @@ def subprocess_worker() -> Iterator[SubprocessTransport]:
     transport.close()
 
 
+@pytest.fixture(scope="session")
+def worker_pool() -> Iterator[WorkerPool]:
+    """Session-scoped WorkerPool for pool transport tests."""
+    pool = WorkerPool(max_idle=4)
+    yield pool
+    pool.close()
+
+
 # ---------------------------------------------------------------------------
-# Fixture: make_conn — parametrized over pipe, subprocess, and http transports
+# Fixture: make_conn — parametrized over pipe, subprocess, pool, and http transports
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(params=["pipe", "shm_pipe", "subprocess", "http"])
+@pytest.fixture(params=["pipe", "shm_pipe", "subprocess", "pool", "http"])
 def make_conn(
     request: pytest.FixtureRequest,
     http_server_port: int,
     subprocess_worker: SubprocessTransport,
+    worker_pool: WorkerPool,
 ) -> ConnFactory:
     """Return a factory that creates an RPC connection context manager.
 
-    Parametrized over pipe, shm_pipe, subprocess, and http transports so
-    tests automatically run against all four.
+    Parametrized over pipe, shm_pipe, subprocess, pool, and http transports
+    so tests automatically run against all five.
     """
     from vgi_rpc.http import http_connect
     from vgi_rpc.log import Message
@@ -133,6 +143,8 @@ def make_conn(
                 yield _RpcProxy(RpcFixtureService, subprocess_worker, on_log)
 
             return _conn()
+        elif request.param == "pool":
+            return worker_pool.connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
         else:
             return http_connect(RpcFixtureService, f"http://127.0.0.1:{http_server_port}", on_log=on_log)
 

@@ -29,6 +29,8 @@ from vgi_rpc.metadata import (
     REQUEST_VERSION_KEY,
     RPC_METHOD_KEY,
     SERVER_ID_KEY,
+    SHM_SEGMENT_NAME_KEY,
+    SHM_SEGMENT_SIZE_KEY,
     TRACEPARENT_KEY,
     TRACESTATE_KEY,
     encode_metadata,
@@ -38,6 +40,7 @@ from vgi_rpc.rpc._common import (
     RpcError,
     VersionError,
     _current_request_id,
+    _current_request_metadata,
     _current_trace_headers,
     _record_input,
     _record_output,
@@ -102,11 +105,21 @@ def _convert_for_arrow(val: object) -> object:
     return val
 
 
-def _write_request(writer_stream: IOBase, method_name: str, params_schema: pa.Schema, kwargs: dict[str, Any]) -> None:
+def _write_request(
+    writer_stream: IOBase,
+    method_name: str,
+    params_schema: pa.Schema,
+    kwargs: dict[str, Any],
+    *,
+    shm: ShmSegment | None = None,
+) -> None:
     """Write a request as a complete IPC stream (schema + 1 batch + EOS).
 
     The batch's custom_metadata carries ``vgi_rpc.method`` (the method name)
     and ``vgi_rpc.request_version`` (the wire-protocol version).
+
+    When *shm* is provided, the segment name and size are included in the
+    metadata so the server can dynamically attach to the segment.
     """
     arrays: list[pa.Array[Any]] = []
     for f in params_schema:
@@ -114,6 +127,9 @@ def _write_request(writer_stream: IOBase, method_name: str, params_schema: pa.Sc
         arrays.append(pa.array([val], type=f.type))
     batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
     md: dict[bytes, bytes] = {RPC_METHOD_KEY: method_name.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION}
+    if shm is not None:
+        md[SHM_SEGMENT_NAME_KEY] = shm.name.encode()
+        md[SHM_SEGMENT_SIZE_KEY] = str(shm.size).encode()
     if _inject_trace_context is not None:
         trace_meta = _inject_trace_context()
         if trace_meta is not None:
@@ -263,6 +279,7 @@ def _read_request(
     """
     reader = ValidatedReader(ipc.open_stream(reader_stream), ipc_validation)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+    _current_request_metadata.set(custom_metadata)
     _record_input(batch)
     if wire_request_logger.isEnabledFor(logging.DEBUG):
         wire_request_logger.debug(
@@ -613,7 +630,13 @@ def _read_stream_header(
     return header_type.deserialize_from_batch(batch, cm, ipc_validation=ipc_validation)
 
 
-def _send_request(writer: IOBase, info: RpcMethodInfo, kwargs: dict[str, Any]) -> None:
+def _send_request(
+    writer: IOBase,
+    info: RpcMethodInfo,
+    kwargs: dict[str, Any],
+    *,
+    shm: ShmSegment | None = None,
+) -> None:
     """Merge defaults, validate, and write a request IPC stream."""
     merged = {**info.param_defaults, **kwargs}
     if wire_request_logger.isEnabledFor(logging.DEBUG):
@@ -624,7 +647,7 @@ def _send_request(writer: IOBase, info: RpcMethodInfo, kwargs: dict[str, Any]) -
             sorted(set(info.param_defaults) - set(kwargs)),
         )
     _validate_params(info.name, merged, info.param_types)
-    _write_request(writer, info.name, info.params_schema, merged)
+    _write_request(writer, info.name, info.params_schema, merged, shm=shm)
 
 
 def _read_batch_with_log_check(

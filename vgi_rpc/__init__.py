@@ -20,6 +20,7 @@ from vgi_rpc.introspect import (
 )
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
+from vgi_rpc.pool import PoolMetrics, WorkerPool
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
@@ -141,6 +142,9 @@ __all__ = [
     "validate_batch",
     # Protocol version
     "REQUEST_VERSION",
+    # Pool
+    "PoolMetrics",
+    "WorkerPool",
     # ExternalLocation
     "Compression",
     "ExternalLocationConfig",

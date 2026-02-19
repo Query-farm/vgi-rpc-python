@@ -147,6 +147,28 @@ server_transport = ShmPipeTransport(server_pipe, shm)
 # Use transports with RpcServer / RpcConnection
 ```
 
+### Worker pool (subprocess reuse)
+
+Keeps idle subprocess workers alive between calls, avoiding repeated spawn/teardown overhead:
+
+```python
+from vgi_rpc import WorkerPool
+
+pool = WorkerPool(max_idle=4, idle_timeout=60.0)
+
+# Workers are reused across connect() calls
+with pool.connect(MyService, ["python", "worker.py"]) as proxy:
+    result = proxy.some_method(arg="value")
+
+# With pool-managed shared memory (each borrow gets its own isolated segment)
+pool_shm = WorkerPool(max_idle=4, shm_size=4 * 1024 * 1024)
+with pool_shm.connect(MyService, ["python", "worker.py"]) as proxy:
+    batches = list(proxy.generate(count=100))
+# subprocess back in pool; SHM segment cleaned up automatically
+
+pool.close()  # terminates all idle workers
+```
+
 ## Streaming
 
 ### Producer stream (server pushes data)
@@ -359,7 +381,33 @@ Access logs are emitted automatically on `vgi_rpc.access` with per-call I/O stat
 | `vgi_rpc.access` | One INFO record per RPC call (automatic, with I/O stats) |
 | `vgi_rpc.service.<Protocol>` | `ctx.logger` for each service |
 | `vgi_rpc.rpc` | Framework lifecycle |
+| `vgi_rpc.pool` | Worker pool: spawn, evict, borrow/return, abandoned streams |
 | `vgi_rpc.http` | HTTP transport |
+| `vgi_rpc.wire.*` | Wire protocol debugging (see below) |
+
+### Wire protocol debugging
+
+Enable `vgi_rpc.wire` at DEBUG to see exact Arrow IPC batches, schemas, metadata, and stream lifecycle events flowing over the wire:
+
+```python
+import logging
+
+logging.getLogger("vgi_rpc.wire").setLevel(logging.DEBUG)
+logging.getLogger("vgi_rpc.wire").addHandler(logging.StreamHandler())
+```
+
+Six sub-loggers for targeted debugging:
+
+| Logger | What it shows |
+|---|---|
+| `vgi_rpc.wire.request` | Request schemas, kwargs, metadata (both send and receive sides) |
+| `vgi_rpc.wire.response` | Result batches, error batches, routing (inline/shm/external) |
+| `vgi_rpc.wire.batch` | How each batch is classified: data vs. log vs. error |
+| `vgi_rpc.wire.stream` | Stream lifecycle: init, tick, exchange, close |
+| `vgi_rpc.wire.transport` | Pipe/subprocess open, close, fd numbers, process IDs |
+| `vgi_rpc.wire.http` | HTTP request URLs, response status codes, body sizes |
+
+For cross-language implementations, run the Python side with full wire debugging to see the exact IPC format your implementation must produce/consume. Key requirements: schema metadata must include `vgi_rpc.method`, batch metadata must include `vgi_rpc.request_version` = `"1"`, requests are single-row batches, and log/error batches are zero-row batches with `vgi_rpc.log_level` + `vgi_rpc.log_message` in batch metadata.
 
 ## Call Statistics
 
@@ -537,6 +585,32 @@ Stream(
 ```python
 AnnotatedBatch(batch: pa.RecordBatch, custom_metadata: pa.KeyValueMetadata | None = None)
 AnnotatedBatch.from_pydict(data: dict) -> AnnotatedBatch  # convenience constructor
+```
+
+### WorkerPool
+
+```python
+WorkerPool(
+    max_idle: int = 4,           # global cap on idle workers (all commands)
+    idle_timeout: float = 60.0,  # seconds before idle worker eviction
+    stderr: StderrMode = StderrMode.INHERIT,
+    stderr_logger: logging.Logger | None = None,
+    shm_size: int | None = None, # per-borrow SHM segment size (bytes); None = no SHM
+)
+
+pool.connect(
+    protocol: type[P],
+    cmd: list[str],
+    *,
+    on_log: Callable[[Message], None] | None = None,
+    external_location: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
+) -> ContextManager[P]
+
+pool.metrics -> PoolMetrics  # borrows, spawns, reuses, returns, discards, evictions, idle, active
+pool.idle_count -> int
+pool.active_count -> int
+pool.close()  # terminates all idle workers, stops reaper thread
 ```
 
 ### OutputCollector (used in StreamState.process)

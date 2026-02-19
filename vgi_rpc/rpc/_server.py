@@ -14,6 +14,7 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.external import ExternalLocationConfig, resolve_external_location
+from vgi_rpc.metadata import SHM_SEGMENT_NAME_KEY, SHM_SEGMENT_SIZE_KEY
 from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
     AuthContext,
@@ -26,6 +27,7 @@ from vgi_rpc.rpc._common import (
     _access_logger,
     _current_call_stats,
     _current_request_id,
+    _current_request_metadata,
     _DispatchHook,
     _generate_request_id,
     _get_auth_and_metadata,
@@ -137,6 +139,30 @@ def _emit_access_log(
         )
     except Exception:
         _logger.debug("Access log emission failed", exc_info=True)
+
+
+def _maybe_attach_shm(req_md: pa.KeyValueMetadata | None) -> ShmSegment | None:
+    """Attach to a client-owned SHM segment advertised in request metadata.
+
+    Returns ``None`` if the metadata doesn't contain SHM segment keys or
+    if the values are malformed.  The caller owns unlinking; the returned
+    segment uses ``track=False`` so the resource tracker won't interfere.
+    """
+    if req_md is None:
+        return None
+    shm_name_bytes = req_md.get(SHM_SEGMENT_NAME_KEY)
+    if shm_name_bytes is None:
+        return None
+    shm_size_bytes = req_md.get(SHM_SEGMENT_SIZE_KEY)
+    if shm_size_bytes is None:
+        return None
+    try:
+        shm_name = shm_name_bytes if isinstance(shm_name_bytes, str) else shm_name_bytes.decode()
+        shm_size = int(shm_size_bytes)
+    except (ValueError, UnicodeDecodeError):
+        _logger.warning("Ignoring malformed SHM metadata: name=%r, size=%r", shm_name_bytes, shm_size_bytes)
+        return None
+    return ShmSegment.attach(shm_name, shm_size, track=False)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +326,8 @@ class RpcServer:
         token = _current_request_id.set(_generate_request_id())
         stats = CallStatistics()
         stats_token = _current_call_stats.set(stats)
+        md_token = _current_request_metadata.set(None)
+        dynamic_shm: ShmSegment | None = None
         try:
             try:
                 method_name, kwargs = _read_request(transport.reader, self._ipc_validation)
@@ -332,12 +360,21 @@ class RpcServer:
                 _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
                 return
 
+            # Determine SHM segment: prefer transport-level, fall back to request metadata
             shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
+            if shm is None:
+                dynamic_shm = _maybe_attach_shm(_current_request_metadata.get())
+                shm = dynamic_shm
+
             if info.method_type == MethodType.UNARY:
                 self._serve_unary(transport, info, kwargs, stats=stats, shm=shm)
             elif info.method_type == MethodType.STREAM:
                 self._serve_stream(transport, info, kwargs, stats=stats, shm=shm)
         finally:
+            if dynamic_shm is not None:
+                with contextlib.suppress(BufferError):
+                    dynamic_shm.close()
+            _current_request_metadata.reset(md_token)
             _current_call_stats.reset(stats_token)
             _current_request_id.reset(token)
 

@@ -25,6 +25,8 @@ __all__ = [
     "SERVER_ID_KEY",
     "SHM_LENGTH_KEY",
     "SHM_OFFSET_KEY",
+    "SHM_SEGMENT_NAME_KEY",
+    "SHM_SEGMENT_SIZE_KEY",
     "SHM_SOURCE_KEY",
     "STATE_KEY",
     "TRACEPARENT_KEY",
@@ -59,6 +61,11 @@ SHM_LENGTH_KEY = b"vgi_rpc.shm_length"
 
 # Shared memory provenance (on resolved batch metadata — mirrors LOCATION_SOURCE_KEY)
 SHM_SOURCE_KEY = b"vgi_rpc.shm_source"
+
+# Shared memory segment identity (on request batch custom metadata — identifies
+# the segment itself at session level, distinct from per-batch SHM_OFFSET/LENGTH)
+SHM_SEGMENT_NAME_KEY = b"vgi_rpc.shm_segment_name"
+SHM_SEGMENT_SIZE_KEY = b"vgi_rpc.shm_segment_size"
 
 # W3C trace context propagation (on request batch custom metadata)
 TRACEPARENT_KEY = b"traceparent"

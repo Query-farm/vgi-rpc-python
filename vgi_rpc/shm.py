@@ -355,15 +355,18 @@ class ShmSegment:
         return cls(shm, allocator)
 
     @classmethod
-    def attach(cls, name: str, size: int) -> ShmSegment:
+    def attach(cls, name: str, size: int, *, track: bool = True) -> ShmSegment:
         """Attach to an existing segment (validates header magic/version).
 
         Args:
             name: The shared memory segment name.
             size: Expected segment size.
+            track: Whether the resource tracker should track this segment.
+                Set to ``False`` when the caller does not own the segment
+                (e.g. dynamic attachment in a subprocess).
 
         """
-        shm = SharedMemory(name=name, create=False, size=size)
+        shm = SharedMemory(name=name, create=False, size=size, track=track)
         buf = shm.buf
         assert buf is not None  # always valid after attach
         allocator = ShmAllocator(buf, size)

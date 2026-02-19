@@ -2,7 +2,7 @@
 
 Transport-agnostic RPC framework built on [Apache Arrow](https://arrow.apache.org/) IPC serialization.
 
-Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow schemas from type annotations and provides typed client proxies with automatic serialization/deserialization.
+Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow schemas from type annotations and provides typed client proxies with automatic serialization/deserialization. Unlike gRPC, there are no `.proto` files or codegen steps — your Python type annotations are the schema. Unlike JSON-over-HTTP, structured data stays in Arrow columnar format for efficient transfer, especially with large or batch-oriented workloads.
 
 **Key features:**
 
@@ -33,9 +33,10 @@ pip install vgi-rpc[http]   # HTTP transport (Falcon + httpx)
 pip install vgi-rpc[s3]     # S3 storage backend
 pip install vgi-rpc[gcs]    # Google Cloud Storage backend
 pip install vgi-rpc[cli]    # CLI tool (typer + httpx)
+pip install vgi-rpc[otel]   # OpenTelemetry instrumentation
 ```
 
-Requires Python 3.12+.
+Requires Python 3.13+.
 
 ## Quick Start
 
@@ -80,6 +81,8 @@ with serve_pipe(Calculator, CalculatorImpl()) as proxy:
     greeting = proxy.greet(name="World")
     print(greeting)  # Hello, World!
 ```
+
+`serve_pipe` runs the server on a background thread — great for trying things out. For production deployments, see [Subprocess](#subprocess) or [HTTP](#http) transports.
 
 ## CLI
 
@@ -480,6 +483,38 @@ if caps.upload_url_support:
         # url.download_url goes into vgi_rpc.location pointer batches
 ```
 
+### Worker Pool
+
+`WorkerPool` keeps idle subprocess workers alive between `connect()` calls, avoiding repeated process spawn/teardown overhead for session-oriented workloads. Each `connect()` call borrows a worker (or spawns a new one), yields a typed proxy, and returns the worker to the pool on context exit.
+
+```python
+from vgi_rpc import WorkerPool
+
+pool = WorkerPool(max_idle=4, idle_timeout=60.0)
+with pool.connect(MyService, ["python", "worker.py"]) as proxy:
+    result = proxy.echo(message="hello")
+# subprocess returned to pool, not terminated
+with pool.connect(MyService, ["python", "worker.py"]) as proxy:
+    result = proxy.echo(message="world")  # reuses same subprocess
+pool.close()  # terminates all idle workers
+```
+
+Workers are keyed by their command tuple. Idle workers are cached up to `max_idle` globally. A daemon reaper thread evicts workers that exceed `idle_timeout`.
+
+The pool also supports pool-managed shared memory for zero-copy data transfer. Pass `shm_size` to the constructor and each `connect()` call gets its own isolated segment, automatically destroyed on exit:
+
+```python
+from vgi_rpc import WorkerPool
+
+pool = WorkerPool(max_idle=4, shm_size=4 * 1024 * 1024)
+with pool.connect(MyService, cmd) as svc:
+    batches = list(svc.generate(count=100))
+# subprocess back in pool; SHM segment cleaned up automatically
+pool.close()
+```
+
+Use `pool.metrics` for observability: borrows, spawns, reuses, returns, discards, evictions, idle/active counts.
+
 ## Streaming
 
 Streaming methods return `Stream[S]` where `S` is a `StreamState` subclass. The state's `process(input, out, ctx)` method is called once per iteration. There are two patterns:
@@ -822,7 +857,25 @@ logging.getLogger("vgi_rpc").setLevel(logging.INFO)
 Sample JSON output:
 
 ```json
-{"timestamp": "2026-01-15 10:30:00,123", "level": "INFO", "logger": "vgi_rpc.access", "message": "MyService.process ok", "server_id": "a1b2c3d4e5f6", "protocol": "MyService", "method": "process", "method_type": "unary", "principal": "", "auth_domain": "", "remote_addr": "", "duration_ms": 3.45, "status": "ok", "error_type": "", "input_batches": 1, "output_batches": 1, "input_rows": 1, "output_rows": 1, "input_bytes": 24, "output_bytes": 16}
+{
+  "timestamp": "2026-01-15 10:30:00,123",
+  "level": "INFO",
+  "logger": "vgi_rpc.access",
+  "message": "MyService.process ok",
+  "server_id": "a1b2c3d4e5f6",
+  "protocol": "MyService",
+  "method": "process",
+  "method_type": "unary",
+  "duration_ms": 3.45,
+  "status": "ok",
+  "error_type": "",
+  "input_batches": 1,
+  "output_batches": 1,
+  "input_rows": 1,
+  "output_rows": 1,
+  "input_bytes": 24,
+  "output_bytes": 16
+}
 ```
 
 #### Per-service log levels
@@ -918,7 +971,7 @@ logging.getLogger("vgi_rpc").addHandler(handler)
 
 #### Wire protocol debugging
 
-Enable the `vgi_rpc.wire` hierarchy at DEBUG to see exactly what flows over the wire — request/response batches, metadata, batch classification, stream lifecycle, and transport events. This is invaluable for diagnosing interoperability issues:
+Enable the `vgi_rpc.wire` hierarchy at DEBUG to see exactly what flows over the wire — request/response batches, metadata, batch classification, stream lifecycle, and transport events:
 
 ```python
 import logging
@@ -927,7 +980,7 @@ logging.getLogger("vgi_rpc.wire").setLevel(logging.DEBUG)
 logging.getLogger("vgi_rpc.wire").addHandler(logging.StreamHandler())
 ```
 
-Sample output:
+Sample output for a unary `add(a=1.0, b=2.0) -> 3.0` call:
 
 ```
 DEBUG vgi_rpc.wire.request  Send request: method=add, type=unary, defaults_applied=[]
@@ -938,7 +991,62 @@ DEBUG vgi_rpc.wire.batch    Classify batch: rows=1, no metadata -> data
 DEBUG vgi_rpc.wire.response Read unary response: method=add, result_type=float
 ```
 
-All formatting is gated behind `isEnabledFor` guards — zero overhead when debug logging is disabled. You can selectively enable individual loggers (e.g. `vgi_rpc.wire.request` only) for targeted debugging.
+All formatting is gated behind `isEnabledFor` guards — zero overhead when debug logging is disabled.
+
+#### What to enable when
+
+Rather than enabling everything, pick the loggers that match your scenario:
+
+| Scenario | Loggers to enable |
+|---|---|
+| Method calls return wrong results | `vgi_rpc.wire.request` + `vgi_rpc.wire.response` — see schemas, kwargs, and result types |
+| Client can't connect or hangs | `vgi_rpc.wire.transport` — see pipe/subprocess lifecycle and fd numbers |
+| Streaming batches lost or out of order | `vgi_rpc.wire.stream` — see each tick, exchange, and close event |
+| Log/error batches not arriving at client | `vgi_rpc.wire.batch` — see how each batch is classified (data vs. log vs. error) |
+| HTTP transport issues | `vgi_rpc.wire.http` — see HTTP request URLs, response status codes, and body sizes |
+| Need everything | `vgi_rpc.wire` — all six loggers at once |
+
+Selectively enable only what you need:
+
+```python
+# Debug only request/response serialization
+logging.getLogger("vgi_rpc.wire.request").setLevel(logging.DEBUG)
+logging.getLogger("vgi_rpc.wire.request").addHandler(logging.StreamHandler())
+```
+
+#### Debugging cross-language implementations
+
+When building a vgi-rpc client or server in another language, wire logging on the Python side lets you see the exact Arrow IPC bytes and metadata your implementation needs to produce or consume. Run the Python side with full wire debugging to use it as a reference:
+
+```python
+import logging
+
+# Full wire + access logging for interop debugging
+logging.basicConfig(level=logging.DEBUG, format="%(name)-30s %(message)s")
+logging.getLogger("vgi_rpc.wire").setLevel(logging.DEBUG)
+logging.getLogger("vgi_rpc.access").setLevel(logging.INFO)
+```
+
+**What to verify for a non-Python client** (sending requests to a Python server):
+
+1. **Schema metadata** — The request IPC stream schema must include `vgi_rpc.method` in schema-level metadata. `wire.request` logs show the expected schema and metadata for every inbound request.
+2. **Batch metadata** — Every request batch must include `vgi_rpc.request_version` set to `"1"` in batch-level custom metadata. Missing or wrong version triggers a `VersionError`.
+3. **Single-row batches** — Requests are always exactly one row. The column order must match the schema.
+4. **IPC stream framing** — Each request/response is a complete Arrow IPC stream (schema message + record batch messages + EOS continuation bytes `0xFFFFFFFF 0x00000000`). Multiple streams are written sequentially on the same byte stream.
+
+**What to verify for a non-Python server** (receiving requests from a Python client):
+
+1. **Response classification** — `wire.batch` logs show how the Python client classifies each batch it reads. A data batch has `num_rows > 0` or no `vgi_rpc.log_level` in custom metadata. A log/error batch has `num_rows == 0` with `vgi_rpc.log_level` and `vgi_rpc.log_message` set.
+2. **Error propagation** — Errors are zero-row batches with `vgi_rpc.log_level` set to `EXCEPTION`, `vgi_rpc.log_message` as the error text, and optionally `vgi_rpc.log_extra` with JSON `{"error_type": "...", "traceback": "..."}`.
+3. **Stream protocol** — `wire.stream` logs show the expected lockstep sequence: init → (tick/input → output)* → close. Your server must write exactly one output batch per input batch.
+4. **Server identity** — Include `vgi_rpc.server_id` in batch metadata on log and error batches for tracing. The Python client doesn't require it, but it helps with debugging.
+
+**Common cross-language pitfalls:**
+
+- Arrow metadata keys and values must be UTF-8 encoded bytes — some Arrow libraries default to other encodings
+- The IPC stream EOS marker is 8 bytes (`0xFFFFFFFF` continuation token + `0x00000000` body size), not just closing the connection
+- Zero-row batches are valid Arrow IPC — ensure your library can write and read them
+- For HTTP transport, the content type must be `application/vnd.apache.arrow.stream` and the entire request/response body is a single IPC stream
 
 ## Call Statistics
 
