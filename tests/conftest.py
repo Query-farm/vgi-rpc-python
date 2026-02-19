@@ -19,6 +19,8 @@ from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
 _SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
 _SERVE_FIXTURE_HTTP = str(Path(__file__).parent / "serve_fixture_http.py")
+_CONFORMANCE_PIPE = str(Path(__file__).parent / "serve_conformance_pipe.py")
+_CONFORMANCE_HTTP = str(Path(__file__).parent / "serve_conformance_http.py")
 
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 """Type alias for the ``make_conn`` fixture return type."""
@@ -147,5 +149,85 @@ def make_conn(
             return worker_pool.connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
         else:
             return http_connect(RpcFixtureService, f"http://127.0.0.1:{http_server_port}", on_log=on_log)
+
+    return factory
+
+
+# ---------------------------------------------------------------------------
+# Conformance fixtures
+# ---------------------------------------------------------------------------
+
+
+def _conformance_pipe_cmd() -> list[str]:
+    """Return the command to launch the conformance pipe worker."""
+    return [sys.executable, _CONFORMANCE_PIPE]
+
+
+def _conformance_http_cmd() -> list[str]:
+    """Return the command to launch the conformance HTTP worker."""
+    return [sys.executable, _CONFORMANCE_HTTP]
+
+
+@pytest.fixture(scope="session")
+def conformance_http_port() -> Iterator[int]:
+    """Spawn a single conformance HTTP server subprocess for the session."""
+    proc = subprocess.Popen(
+        _conformance_http_cmd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+
+        _wait_for_http(port)
+
+        yield port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_subprocess() -> Iterator[SubprocessTransport]:
+    """Spawn a single conformance subprocess worker for the session."""
+    transport = SubprocessTransport(_conformance_pipe_cmd())
+    yield transport
+    transport.close()
+
+
+@pytest.fixture(params=["pipe", "subprocess", "http"])
+def conformance_conn(
+    request: pytest.FixtureRequest,
+    conformance_http_port: int,
+    conformance_subprocess: SubprocessTransport,
+) -> ConnFactory:
+    """Return a factory for conformance service connections.
+
+    Parametrized over pipe, subprocess, and http transports.
+    """
+    from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+    from vgi_rpc.http import http_connect
+    from vgi_rpc.log import Message
+    from vgi_rpc.rpc import serve_pipe
+
+    def factory(
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if request.param == "pipe":
+            return serve_pipe(ConformanceService, ConformanceServiceImpl(), on_log=on_log)
+        elif request.param == "subprocess":
+
+            @contextlib.contextmanager
+            def _conn() -> Iterator[_RpcProxy]:
+                yield _RpcProxy(ConformanceService, conformance_subprocess, on_log)
+
+            return _conn()
+        else:
+            return http_connect(
+                ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log
+            )
 
     return factory

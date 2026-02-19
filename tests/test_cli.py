@@ -599,6 +599,93 @@ class TestArrowFormat:
                 pass
             assert data_rows == [0, 1]
 
+    def test_arrow_stream_producer_auto_detect(self, tmp_path: Path) -> None:
+        """Producer stream works without ``--no-stdin`` when stdin has no data."""
+        out = tmp_path / "auto.arrow"
+        result = _invoke(
+            ["--cmd", _PIPE_CMD, "--format", "arrow", "--output", str(out), "call", "generate", "count=3"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        i_values: list[object] = []
+        with ipc.open_stream(pa.OSFile(str(out), "rb")) as reader:
+            for batch in reader:
+                i_values.extend(batch.to_pydict()["i"])
+        assert i_values == [0, 1, 2]
+
+    def test_arrow_stream_exchange(self, tmp_path: Path) -> None:
+        """Exchange stream written as Arrow IPC when stdin is piped."""
+        out = tmp_path / "exchange.arrow"
+        stdin_data = '{"value": 5.0}\n{"value": 10.0}\n'
+        result = _invoke(
+            ["--cmd", _PIPE_CMD, "--format", "arrow", "--output", str(out), "call", "transform", "factor=2.0"],
+            input=stdin_data,
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        values: list[object] = []
+        with ipc.open_stream(pa.OSFile(str(out), "rb")) as reader:
+            for batch in reader:
+                values.extend(batch.to_pydict()["value"])
+        assert values == [10.0, 20.0]
+
+    def test_arrow_input_file_exchange(self, tmp_path: Path) -> None:
+        """``--input`` reads exchange batches from an Arrow IPC file."""
+        # Write input Arrow IPC file with two single-row batches
+        inp = tmp_path / "input.arrow"
+        schema = pa.schema([("value", pa.float64())])
+        with ipc.new_stream(pa.OSFile(str(inp), "wb"), schema) as w:
+            w.write_batch(pa.record_batch({"value": [5.0]}, schema=schema))
+            w.write_batch(pa.record_batch({"value": [10.0]}, schema=schema))
+
+        out = tmp_path / "output.arrow"
+        result = _invoke(
+            [
+                "--cmd",
+                _PIPE_CMD,
+                "--format",
+                "arrow",
+                "--output",
+                str(out),
+                "call",
+                "--input",
+                str(inp),
+                "transform",
+                "factor=2.0",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        values: list[object] = []
+        with ipc.open_stream(pa.OSFile(str(out), "rb")) as reader:
+            for batch in reader:
+                values.extend(batch.to_pydict()["value"])
+        assert values == [10.0, 20.0]
+
+    def test_arrow_input_file_json_output(self, tmp_path: Path) -> None:
+        """``--input`` with JSON output format reads from Arrow IPC file."""
+        inp = tmp_path / "input.arrow"
+        schema = pa.schema([("value", pa.float64())])
+        with ipc.new_stream(pa.OSFile(str(inp), "wb"), schema) as w:
+            w.write_batch(pa.record_batch({"value": [5.0]}, schema=schema))
+            w.write_batch(pa.record_batch({"value": [10.0]}, schema=schema))
+
+        result = _invoke(
+            [
+                "--cmd",
+                _PIPE_CMD,
+                "--format",
+                "json",
+                "call",
+                "--input",
+                str(inp),
+                "transform",
+                "factor=2.0",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        lines = [line for line in result.output.strip().split("\n") if line.strip()]
+        assert len(lines) == 2
+        assert json.loads(lines[0])["value"] == 10.0
+        assert json.loads(lines[1])["value"] == 20.0
+
 
 # ---------------------------------------------------------------------------
 # --output option tests (pipe transport is sufficient)

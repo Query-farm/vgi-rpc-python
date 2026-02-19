@@ -18,6 +18,7 @@ import contextlib
 import importlib.metadata
 import json
 import logging
+import select
 import shlex
 import sys
 from collections.abc import Callable, Iterator
@@ -124,6 +125,7 @@ class _CliConfig:
     output: str | None = None
     verbose: bool = False
     no_stdin: bool = False
+    input_file: str | None = None
     log_level: LogLevel | None = None
     log_loggers: list[str] = field(default_factory=list)
     log_format: LogFormat = LogFormat.text
@@ -397,13 +399,16 @@ def _get_on_log(config: _CliConfig) -> Callable[[Message], None] | None:
     return _log_to_stderr if config.verbose else None
 
 
-def _stdin_has_data(config: _CliConfig) -> bool:
-    """Check whether stdin has piped data for exchange mode.
+def _has_exchange_input(config: _CliConfig) -> bool:
+    """Check whether the caller supplied exchange input.
 
-    Returns ``False`` (producer mode) when ``--no-stdin`` is set, when
-    stdin is a TTY, or when stdin is empty.  Returns ``True`` (exchange
-    mode) when stdin is a non-TTY pipe with data.
+    Returns ``True`` when ``--input`` points to an Arrow IPC file **or**
+    when stdin has piped data.  Returns ``False`` (producer mode) when
+    ``--no-stdin`` is set, stdin is a TTY, or stdin is empty and no
+    ``--input`` file was given.
     """
+    if config.input_file:
+        return True
     if config.no_stdin:
         return False
     try:
@@ -419,9 +424,35 @@ def _stdin_has_data(config: _CliConfig) -> bool:
         sys.stdin.seek(pos)  # restore
         return end > pos
     except (OSError, AttributeError, ValueError):
-        # Real pipes don't support seek — assume data is available
-        # (this is the normal piped-input case on a real terminal)
-        return True
+        # Real pipes don't support seek — probe with select to check
+        # whether data is actually ready.  A short timeout avoids
+        # blocking forever on an inherited pipe that has no writer.
+        try:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+            return bool(readable)
+        except (ValueError, OSError, TypeError):
+            return False
+
+
+def _iter_exchange_inputs(config: _CliConfig) -> Iterator[AnnotatedBatch]:
+    """Yield ``AnnotatedBatch`` exchange inputs from ``--input`` file or stdin.
+
+    When ``--input`` is set, batches are read from the Arrow IPC file.
+    Otherwise, JSON lines are read from stdin (one row per line).
+    """
+    if config.input_file:
+        with ipc.open_stream(pa.OSFile(config.input_file, "rb")) as reader:
+            for batch in reader:
+                yield AnnotatedBatch(batch=batch)
+    else:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            input_data = json.loads(line)
+            input_dict: dict[str, list[object]] = {k: [v] for k, v in input_data.items()}
+            input_batch = pa.RecordBatch.from_pydict(input_dict)
+            yield AnnotatedBatch(batch=input_batch)
 
 
 def _emit_rpc_error(e: RpcError) -> None:
@@ -570,7 +601,7 @@ def _run_stream_arrow(
     header_batch: pa.RecordBatch | None,
 ) -> None:
     """Run a stream session and write Arrow IPC output."""
-    has_stdin = _stdin_has_data(config)
+    has_input = _has_exchange_input(config)
     with _open_arrow_dest(config) as dest:
         # Write header as its own IPC stream if present
         if header_batch is not None:
@@ -579,20 +610,13 @@ def _run_stream_arrow(
 
         writer: ipc.RecordBatchStreamWriter | None = None
         try:
-            if not has_stdin:
+            if not has_input:
                 for ab in session:
                     if writer is None:
                         writer = ipc.new_stream(dest, ab.batch.schema)
                     writer.write_batch(ab.batch)
             else:
-                for line in sys.stdin:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    input_data = json.loads(line)
-                    input_dict: dict[str, list[object]] = {k: [v] for k, v in input_data.items()}
-                    input_batch = pa.RecordBatch.from_pydict(input_dict)
-                    ab_input = AnnotatedBatch(batch=input_batch)
+                for ab_input in _iter_exchange_inputs(config):
                     ab_output = session.exchange(ab_input)
                     if writer is None:
                         writer = ipc.new_stream(dest, ab_output.batch.schema)
@@ -601,7 +625,7 @@ def _run_stream_arrow(
             _emit_rpc_error(e)
             raise typer.Exit(1) from None
         finally:
-            if has_stdin:
+            if has_input:
                 with contextlib.suppress(Exception):
                     session.close()
             if writer is not None:
@@ -620,13 +644,13 @@ def _run_stream(
         _run_stream_arrow(session, config, header_batch)
         return
 
-    has_stdin = _stdin_has_data(config)
+    has_input = _has_exchange_input(config)
 
     with _open_text_dest(config) as dest:
         is_tty = sys.stdout.isatty() and dest is None
         _emit_header_text(header_batch, fmt, is_tty, dest)
 
-        if not has_stdin:
+        if not has_input:
             # Producer mode
             table_rows: list[dict[str, object]] = []
             try:
@@ -649,14 +673,7 @@ def _run_stream(
         else:
             # Exchange mode
             try:
-                for line in sys.stdin:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    input_data = json.loads(line)
-                    input_dict: dict[str, list[object]] = {k: [v] for k, v in input_data.items()}
-                    input_batch = pa.RecordBatch.from_pydict(input_dict)
-                    ab_input = AnnotatedBatch(batch=input_batch)
+                for ab_input in _iter_exchange_inputs(config):
                     ab_output = session.exchange(ab_input)
                     for row in _batch_to_rows(ab_output.batch):
                         _print_json_to(row, dest, pretty=(fmt == OutputFormat.auto and is_tty))
@@ -952,12 +969,15 @@ def call(
     method: Annotated[str, typer.Argument(help="Method name to call")],
     args: Annotated[list[str] | None, typer.Argument(help="key=value parameters")] = None,
     json_input: Annotated[str | None, typer.Option("--json", "-j", help="JSON params")] = None,
+    input_file: Annotated[str | None, typer.Option("--input", "-i", help="Arrow IPC file for exchange input")] = None,
     no_stdin: Annotated[
         bool, typer.Option("--no-stdin", help="Force producer mode (ignore stdin)", hidden=True)
     ] = False,
 ) -> None:
     """Call a method on a vgi-rpc service."""
     config: _CliConfig = ctx.obj
+    if input_file:
+        config.input_file = input_file
     if no_stdin:
         config.no_stdin = True
 
