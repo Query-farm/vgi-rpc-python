@@ -33,7 +33,15 @@ from vgi_rpc.metadata import (
     TRACESTATE_KEY,
     encode_metadata,
 )
-from vgi_rpc.rpc._common import _EMPTY_SCHEMA, RpcError, VersionError, _current_request_id, _current_trace_headers
+from vgi_rpc.rpc._common import (
+    _EMPTY_SCHEMA,
+    RpcError,
+    VersionError,
+    _current_request_id,
+    _current_trace_headers,
+    _record_input,
+    _record_output,
+)
 from vgi_rpc.rpc._debug import (
     fmt_batch,
     fmt_kwargs,
@@ -137,7 +145,9 @@ def _write_message_batch(
     if request_id:
         md[REQUEST_ID_KEY.decode()] = request_id
     custom_metadata = encode_metadata(md)
-    writer.write_batch(empty_batch(schema), custom_metadata=custom_metadata)
+    batch = empty_batch(schema)
+    _record_output(batch)
+    writer.write_batch(batch, custom_metadata=custom_metadata)
 
 
 def _write_error_batch(
@@ -216,6 +226,7 @@ def _write_result_batch(
         batch = pa.RecordBatch.from_arrays(
             [pa.array([wire_value], type=result_schema.field(0).type)], schema=result_schema
         )
+    _record_output(batch)
     if shm is not None:
         batch, cm = maybe_write_to_shm(batch, None, shm)
         if cm is not None:
@@ -252,6 +263,7 @@ def _read_request(
     """
     reader = ValidatedReader(ipc.open_stream(reader_stream), ipc_validation)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+    _record_input(batch)
     if wire_request_logger.isEnabledFor(logging.DEBUG):
         wire_request_logger.debug(
             "Read request batch: %s, metadata=%s",
@@ -314,6 +326,9 @@ def _flush_collector(
     shm: ShmSegment | None = None,
 ) -> None:
     """Write all accumulated batches from an OutputCollector to an IPC stream writer."""
+    # Record all logical batches for stats before any SHM/external transforms
+    for ab in out.batches:
+        _record_output(ab.batch)
     if wire_response_logger.isEnabledFor(logging.DEBUG):
         route_config = "shm" if shm is not None else ("external" if external_config is not None else "inline")
         wire_response_logger.debug(
@@ -536,6 +551,7 @@ def _write_stream_header(
     if header is None:
         raise TypeError(f"Method '{method_name}' declares header type but returned header=None")
     batch = header._serialize()
+    _record_output(batch)
     batch, cm = maybe_externalize_batch(batch, None, external_config) if external_config else (batch, None)
     with ipc.new_stream(dest, batch.schema) as writer:
         if sink is not None:

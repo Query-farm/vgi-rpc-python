@@ -24,6 +24,7 @@ from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
     CallContext,
+    CallStatistics,
     ClientLog,
     ExchangeState,
     MethodType,
@@ -126,6 +127,7 @@ __all__ = [
     # Auth & Context
     "AuthContext",
     "CallContext",
+    "CallStatistics",
     # Logging
     "ClientLog",
     "Level",

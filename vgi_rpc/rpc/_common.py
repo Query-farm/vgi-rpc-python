@@ -244,6 +244,70 @@ _current_trace_headers: ContextVar[dict[str, str] | None] = ContextVar("_current
 
 
 # ---------------------------------------------------------------------------
+# Per-call I/O statistics
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CallStatistics:
+    """Mutable accumulator of per-call I/O counters for usage accounting.
+
+    Created at dispatch start and populated as batches flow through the
+    server.  Surfaced through the access log and OTel dispatch hook.
+
+    **Byte measurement**: uses ``pa.RecordBatch.get_total_buffer_size()``
+    which reports logical Arrow buffer sizes (O(columns), negligible cost).
+    This is an *approximation* — it does **not** include IPC framing
+    overhead (padding, schema messages, EOS markers).
+
+    Attributes:
+        input_batches: Number of input batches read by the server.
+        output_batches: Number of output batches written by the server.
+        input_rows: Total rows across all input batches.
+        output_rows: Total rows across all output batches.
+        input_bytes: Approximate logical bytes across all input batches.
+        output_bytes: Approximate logical bytes across all output batches.
+
+    """
+
+    input_batches: int = 0
+    output_batches: int = 0
+    input_rows: int = 0
+    output_rows: int = 0
+    input_bytes: int = 0
+    output_bytes: int = 0
+
+    def record_input(self, batch: pa.RecordBatch) -> None:
+        """Record an input batch's row count and buffer size."""
+        self.input_batches += 1
+        self.input_rows += batch.num_rows
+        self.input_bytes += batch.get_total_buffer_size()
+
+    def record_output(self, batch: pa.RecordBatch) -> None:
+        """Record an output batch's row count and buffer size."""
+        self.output_batches += 1
+        self.output_rows += batch.num_rows
+        self.output_bytes += batch.get_total_buffer_size()
+
+
+_current_call_stats: ContextVar[CallStatistics | None] = ContextVar("vgi_rpc_call_stats", default=None)
+
+
+def _record_input(batch: pa.RecordBatch) -> None:
+    """Record an input batch on the current call's statistics (if any)."""
+    stats = _current_call_stats.get()
+    if stats is not None:
+        stats.record_input(batch)
+
+
+def _record_output(batch: pa.RecordBatch) -> None:
+    """Record an output batch on the current call's statistics (if any)."""
+    stats = _current_call_stats.get()
+    if stats is not None:
+        stats.record_output(batch)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch hook protocol
 # ---------------------------------------------------------------------------
 
@@ -268,6 +332,8 @@ class _DispatchHook(Protocol):
         token: HookToken,
         info: RpcMethodInfo,
         error: BaseException | None,
+        *,
+        stats: CallStatistics | None = None,
     ) -> None:
         """Finalize observability after method dispatch (success or failure)."""
         ...

@@ -60,7 +60,14 @@ from vgi_rpc.rpc import (
     _write_result_batch,
     _write_stream_header,
 )
-from vgi_rpc.rpc._common import HookToken, _DispatchHook
+from vgi_rpc.rpc._common import (
+    CallStatistics,
+    HookToken,
+    _current_call_stats,
+    _DispatchHook,
+    _record_input,
+    _record_output,
+)
 from vgi_rpc.utils import ValidatedReader, empty_batch
 
 from ._common import (
@@ -335,98 +342,117 @@ class _HttpRpcApp:
                 metadata, param validation failures).
 
         """
+        stats = CallStatistics()
+        stats_token = _current_call_stats.set(stats)
         try:
-            ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
-            if ipc_method != method_name:
-                raise TypeError(
-                    f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
-                    f"custom_metadata 'vgi_rpc.method' has '{ipc_method}'. These must match."
-                )
-            _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
-            _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
-
-        # Pre-built __describe__ batch — write directly, skip implementation call.
-        # __describe__ is metadata introspection — no access log.
-        describe_batch = self._server._describe_batch
-        if describe_batch is not None and method_name == "__describe__":
-            resp_buf = BytesIO()
-            with ipc.new_stream(resp_buf, describe_batch.schema) as writer:
-                writer.write_batch(describe_batch)
-            resp_buf.seek(0)
-            return resp_buf, HTTPStatus.OK
-
-        server_id = self._server.server_id
-        protocol_name = self._server.protocol_name
-        sink = _ClientLogSink(server_id=server_id)
-        auth, transport_metadata = _get_auth_and_metadata()
-        if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(
-                auth=auth,
-                emit_client_log=sink,
-                transport_metadata=transport_metadata,
-                server_id=server_id,
-                method_name=method_name,
-                protocol_name=protocol_name,
-            )
-
-        schema = info.result_schema
-        resp_buf = BytesIO()
-        http_status = HTTPStatus.OK
-        start = time.monotonic()
-        status: Literal["ok", "error"] = "ok"
-        error_type = ""
-        hook: _DispatchHook | None = self._server._dispatch_hook
-        hook_token: HookToken = None
-        if hook is not None:
             try:
-                hook_token = hook.on_dispatch_start(info, auth, transport_metadata)
-            except Exception:
-                _logger.debug("Dispatch hook start failed", exc_info=True)
-                hook = None
-        _hook_exc: BaseException | None = None
-        try:
-            with ipc.new_stream(resp_buf, schema) as writer:
-                sink.flush_contents(writer, schema)
-                try:
-                    result = getattr(self._server.implementation, method_name)(**kwargs)
-                    _validate_result(info.name, result, info.result_type)
-                    _write_result_batch(writer, schema, result, self._server.external_config)
-                except (TypeError, pa.ArrowInvalid) as exc:
-                    _hook_exc = exc
-                    status = "error"
-                    error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                    _write_error_batch(writer, schema, exc, server_id=server_id)
-                    http_status = HTTPStatus.BAD_REQUEST
-                except Exception as exc:
-                    _hook_exc = exc
-                    status = "error"
-                    error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                    _write_error_batch(writer, schema, exc, server_id=server_id)
-                    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-        finally:
-            duration_ms = (time.monotonic() - start) * 1000
-            _emit_access_log(
-                protocol_name,
-                method_name,
-                info.method_type.value,
-                server_id,
-                auth,
-                transport_metadata,
-                duration_ms,
-                status,
-                error_type,
-                http_status=http_status.value,
-            )
+                ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
+                if ipc_method != method_name:
+                    raise TypeError(
+                        f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
+                        f"custom_metadata 'vgi_rpc.method' has '{ipc_method}'. These must match."
+                    )
+                _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
+                _validate_params(info.name, kwargs, info.param_types)
+            except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+                raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+
+            # Pre-built __describe__ batch — write directly, skip implementation call.
+            describe_batch = self._server._describe_batch
+            if describe_batch is not None and method_name == "__describe__":
+                _record_output(describe_batch)
+                resp_buf = BytesIO()
+                with ipc.new_stream(resp_buf, describe_batch.schema) as writer:
+                    writer.write_batch(describe_batch)
+                resp_buf.seek(0)
+                auth, transport_metadata = _get_auth_and_metadata()
+                _emit_access_log(
+                    self._server.protocol_name,
+                    method_name,
+                    info.method_type.value,
+                    self._server.server_id,
+                    auth,
+                    transport_metadata,
+                    0.0,
+                    "ok",
+                    http_status=HTTPStatus.OK.value,
+                    stats=stats,
+                )
+                return resp_buf, HTTPStatus.OK
+
+            server_id = self._server.server_id
+            protocol_name = self._server.protocol_name
+            sink = _ClientLogSink(server_id=server_id)
+            auth, transport_metadata = _get_auth_and_metadata()
+            if method_name in self._server.ctx_methods:
+                kwargs["ctx"] = CallContext(
+                    auth=auth,
+                    emit_client_log=sink,
+                    transport_metadata=transport_metadata,
+                    server_id=server_id,
+                    method_name=method_name,
+                    protocol_name=protocol_name,
+                )
+
+            schema = info.result_schema
+            resp_buf = BytesIO()
+            http_status = HTTPStatus.OK
+            start = time.monotonic()
+            status: Literal["ok", "error"] = "ok"
+            error_type = ""
+            hook: _DispatchHook | None = self._server._dispatch_hook
+            hook_token: HookToken = None
             if hook is not None:
                 try:
-                    hook.on_dispatch_end(hook_token, info, _hook_exc)
+                    hook_token = hook.on_dispatch_start(info, auth, transport_metadata)
                 except Exception:
-                    _logger.debug("Dispatch hook end failed", exc_info=True)
+                    _logger.debug("Dispatch hook start failed", exc_info=True)
+                    hook = None
+            _hook_exc: BaseException | None = None
+            try:
+                with ipc.new_stream(resp_buf, schema) as writer:
+                    sink.flush_contents(writer, schema)
+                    try:
+                        result = getattr(self._server.implementation, method_name)(**kwargs)
+                        _validate_result(info.name, result, info.result_type)
+                        _write_result_batch(writer, schema, result, self._server.external_config)
+                    except (TypeError, pa.ArrowInvalid) as exc:
+                        _hook_exc = exc
+                        status = "error"
+                        error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                        _write_error_batch(writer, schema, exc, server_id=server_id)
+                        http_status = HTTPStatus.BAD_REQUEST
+                    except Exception as exc:
+                        _hook_exc = exc
+                        status = "error"
+                        error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                        _write_error_batch(writer, schema, exc, server_id=server_id)
+                        http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+            finally:
+                duration_ms = (time.monotonic() - start) * 1000
+                _emit_access_log(
+                    protocol_name,
+                    method_name,
+                    info.method_type.value,
+                    server_id,
+                    auth,
+                    transport_metadata,
+                    duration_ms,
+                    status,
+                    error_type,
+                    http_status=http_status.value,
+                    stats=stats,
+                )
+                if hook is not None:
+                    try:
+                        hook.on_dispatch_end(hook_token, info, _hook_exc, stats=stats)
+                    except Exception:
+                        _logger.debug("Dispatch hook end failed", exc_info=True)
 
-        resp_buf.seek(0)
-        return resp_buf, http_status
+            resp_buf.seek(0)
+            return resp_buf, http_status
+        finally:
+            _current_call_stats.reset(stats_token)
 
     def _stream_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Run stream init synchronously.
@@ -435,110 +461,58 @@ class _HttpRpcApp:
         immediately via _produce_stream_response.
         For exchange streams, returns a state token for subsequent exchanges.
         """
-        try:
-            ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
-            if ipc_method != method_name:
-                raise TypeError(
-                    f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
-                    f"custom_metadata 'vgi_rpc.method' has '{ipc_method}'. These must match."
-                )
-            _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
-            _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
-
-        # Inject ctx if the implementation accepts it
-        server_id = self._server.server_id
-        protocol_name = self._server.protocol_name
-        sink = _ClientLogSink(server_id=server_id)
-        auth, transport_metadata = _get_auth_and_metadata()
-        if method_name in self._server.ctx_methods:
-            kwargs["ctx"] = CallContext(
-                auth=auth,
-                emit_client_log=sink,
-                transport_metadata=transport_metadata,
-                server_id=server_id,
-                method_name=method_name,
-                protocol_name=protocol_name,
-            )
-
-        start = time.monotonic()
-        http_status = HTTPStatus.OK
-        status: Literal["ok", "error"] = "ok"
-        error_type = ""
-        hook: _DispatchHook | None = self._server._dispatch_hook
-        hook_token_init: HookToken = None
-        if hook is not None:
-            try:
-                hook_token_init = hook.on_dispatch_start(info, auth, transport_metadata)
-            except Exception:
-                _logger.debug("Dispatch hook start failed", exc_info=True)
-                hook = None
-        _hook_exc: BaseException | None = None
+        stats = CallStatistics()
+        stats_token = _current_call_stats.set(stats)
         try:
             try:
-                result: Stream[StreamState, Any] = getattr(self._server.implementation, method_name)(**kwargs)
-            except (TypeError, pa.ArrowInvalid) as exc:
-                _hook_exc = exc
-                status = "error"
-                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                http_status = HTTPStatus.BAD_REQUEST
-                raise _RpcHttpError(exc, status_code=http_status) from exc
-            except Exception as exc:
-                _hook_exc = exc
-                status = "error"
-                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-                raise _RpcHttpError(exc, status_code=http_status) from exc
-
-            is_producer = result.input_schema == _EMPTY_SCHEMA
-
-            if is_producer:
-                # Producer stream — write header (if declared) then run produce loop
-                resp_buf = BytesIO()
-                if info.header_type is not None:
-                    _write_stream_header(
-                        resp_buf, result.header, self._server.external_config, sink=sink, method_name=method_name
+                ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
+                if ipc_method != method_name:
+                    raise TypeError(
+                        f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
+                        f"custom_metadata 'vgi_rpc.method' has '{ipc_method}'. These must match."
                     )
-                produce_buf, produce_error_type = self._produce_stream_response(
-                    result.output_schema,
-                    result.state,
-                    result.input_schema,
-                    sink,
-                    method_name=method_name,
+                _deserialize_params(kwargs, info.param_types, self._server.ipc_validation)
+                _validate_params(info.name, kwargs, info.param_types)
+            except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+                raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+
+            # Inject ctx if the implementation accepts it
+            server_id = self._server.server_id
+            protocol_name = self._server.protocol_name
+            sink = _ClientLogSink(server_id=server_id)
+            auth, transport_metadata = _get_auth_and_metadata()
+            if method_name in self._server.ctx_methods:
+                kwargs["ctx"] = CallContext(
                     auth=auth,
+                    emit_client_log=sink,
                     transport_metadata=transport_metadata,
+                    server_id=server_id,
+                    method_name=method_name,
+                    protocol_name=protocol_name,
                 )
-                resp_buf.write(produce_buf.getvalue())
-                resp_buf.seek(0)
-                if produce_error_type is not None:
-                    status = "error"
-                    error_type = produce_error_type
-                return resp_buf
-            else:
-                # Exchange stream — return state token
+
+            start = time.monotonic()
+            http_status = HTTPStatus.OK
+            status: Literal["ok", "error"] = "ok"
+            error_type = ""
+            hook: _DispatchHook | None = self._server._dispatch_hook
+            hook_token_init: HookToken = None
+            if hook is not None:
                 try:
-                    state = result.state
-                    output_schema = result.output_schema
-                    input_schema = result.input_schema
-
-                    # Pack state + output schema + input schema into a signed token
-                    state_bytes = state.serialize_to_bytes()
-                    schema_bytes = output_schema.serialize().to_pybytes()
-                    input_schema_bytes = input_schema.serialize().to_pybytes()
-                    token = _pack_state_token(state_bytes, schema_bytes, input_schema_bytes, self._signing_key)
-
-                    # Write response: header (if declared) + log batches + zero-row batch with token in metadata
-                    resp_buf = BytesIO()
-                    if info.header_type is not None:
-                        _write_stream_header(
-                            resp_buf, result.header, self._server.external_config, sink=sink, method_name=method_name
-                        )
-                    with ipc.new_stream(resp_buf, output_schema) as writer:
-                        sink.flush_contents(writer, output_schema)
-                        state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
-                        zero_batch = empty_batch(output_schema)
-                        writer.write_batch(zero_batch, custom_metadata=state_metadata)
+                    hook_token_init = hook.on_dispatch_start(info, auth, transport_metadata)
+                except Exception:
+                    _logger.debug("Dispatch hook start failed", exc_info=True)
+                    hook = None
+            _hook_exc: BaseException | None = None
+            try:
+                try:
+                    result: Stream[StreamState, Any] = getattr(self._server.implementation, method_name)(**kwargs)
+                except (TypeError, pa.ArrowInvalid) as exc:
+                    _hook_exc = exc
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                    http_status = HTTPStatus.BAD_REQUEST
+                    raise _RpcHttpError(exc, status_code=http_status) from exc
                 except Exception as exc:
                     _hook_exc = exc
                     status = "error"
@@ -546,27 +520,90 @@ class _HttpRpcApp:
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                     raise _RpcHttpError(exc, status_code=http_status) from exc
 
-                resp_buf.seek(0)
-                return resp_buf
+                is_producer = result.input_schema == _EMPTY_SCHEMA
+
+                if is_producer:
+                    # Producer stream — write header (if declared) then run produce loop
+                    resp_buf = BytesIO()
+                    if info.header_type is not None:
+                        _write_stream_header(
+                            resp_buf, result.header, self._server.external_config, sink=sink, method_name=method_name
+                        )
+                    produce_buf, produce_error_type = self._produce_stream_response(
+                        result.output_schema,
+                        result.state,
+                        result.input_schema,
+                        sink,
+                        method_name=method_name,
+                        auth=auth,
+                        transport_metadata=transport_metadata,
+                    )
+                    resp_buf.write(produce_buf.getvalue())
+                    resp_buf.seek(0)
+                    if produce_error_type is not None:
+                        status = "error"
+                        error_type = produce_error_type
+                    return resp_buf
+                else:
+                    # Exchange stream — return state token
+                    try:
+                        state = result.state
+                        output_schema = result.output_schema
+                        input_schema = result.input_schema
+
+                        # Pack state + output schema + input schema into a signed token
+                        state_bytes = state.serialize_to_bytes()
+                        schema_bytes = output_schema.serialize().to_pybytes()
+                        input_schema_bytes = input_schema.serialize().to_pybytes()
+                        token = _pack_state_token(state_bytes, schema_bytes, input_schema_bytes, self._signing_key)
+
+                        # Write response: header (if declared) + log batches + zero-row batch with token in metadata
+                        resp_buf = BytesIO()
+                        if info.header_type is not None:
+                            _write_stream_header(
+                                resp_buf,
+                                result.header,
+                                self._server.external_config,
+                                sink=sink,
+                                method_name=method_name,
+                            )
+                        with ipc.new_stream(resp_buf, output_schema) as writer:
+                            sink.flush_contents(writer, output_schema)
+                            state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
+                            zero_batch = empty_batch(output_schema)
+                            _record_output(zero_batch)
+                            writer.write_batch(zero_batch, custom_metadata=state_metadata)
+                    except Exception as exc:
+                        _hook_exc = exc
+                        status = "error"
+                        error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                        http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                        raise _RpcHttpError(exc, status_code=http_status) from exc
+
+                    resp_buf.seek(0)
+                    return resp_buf
+            finally:
+                duration_ms = (time.monotonic() - start) * 1000
+                _emit_access_log(
+                    protocol_name,
+                    method_name,
+                    info.method_type.value,
+                    server_id,
+                    auth,
+                    transport_metadata,
+                    duration_ms,
+                    status,
+                    error_type,
+                    http_status=http_status.value,
+                    stats=stats,
+                )
+                if hook is not None:
+                    try:
+                        hook.on_dispatch_end(hook_token_init, info, _hook_exc, stats=stats)
+                    except Exception:
+                        _logger.debug("Dispatch hook end failed", exc_info=True)
         finally:
-            duration_ms = (time.monotonic() - start) * 1000
-            _emit_access_log(
-                protocol_name,
-                method_name,
-                info.method_type.value,
-                server_id,
-                auth,
-                transport_metadata,
-                duration_ms,
-                status,
-                error_type,
-                http_status=http_status.value,
-            )
-            if hook is not None:
-                try:
-                    hook.on_dispatch_end(hook_token_init, info, _hook_exc)
-                except Exception:
-                    _logger.debug("Dispatch hook end failed", exc_info=True)
+            _current_call_stats.reset(stats_token)
 
     def _stream_exchange_sync(self, method_name: str, stream: IOBase) -> BytesIO:
         """Run stream exchange synchronously.
@@ -578,176 +615,186 @@ class _HttpRpcApp:
         and exchanges never re-send headers (state is recovered from the
         signed token, which does not include header data).
         """
-        state_cls = self._state_types.get(method_name)
-        if state_cls is None:
-            raise _RpcHttpError(
-                RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-        # Read the input batch + extract token from metadata
+        stats = CallStatistics()
+        stats_token = _current_call_stats.set(stats)
         try:
-            req_reader = ValidatedReader(ipc.open_stream(stream), self._server.ipc_validation)
-            input_batch, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
-            _drain_stream(req_reader)
-        except pa.ArrowInvalid as exc:
-            raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+            state_cls = self._state_types.get(method_name)
+            if state_cls is None:
+                raise _RpcHttpError(
+                    RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
-        # Extract state token before resolution — resolve_external_location
-        # replaces metadata with what was stored in the external IPC stream.
-        token = custom_metadata.get(STATE_KEY) if custom_metadata is not None else None
-
-        if token is None:
-            raise _RpcHttpError(
-                RuntimeError("Missing state token in exchange request"),
-                status_code=HTTPStatus.BAD_REQUEST,
-            )
-
-        # Unpack and verify the signed token, recover state + schema + input_schema
-        state_obj, output_schema, input_schema = self._unpack_and_recover_state(token, state_cls)
-
-        is_producer = input_schema == _EMPTY_SCHEMA
-
-        # Resolve method info for hook (may be None for unknown methods, but
-        # _stream_exchange_sync is only reached for known stream methods)
-        info = self._server.methods.get(method_name)
-
-        if is_producer:
-            # Producer continuation
-            server_id = self._server.server_id
-            protocol_name = self._server.protocol_name
-            auth, transport_metadata = _get_auth_and_metadata()
-            start = time.monotonic()
-            http_status = HTTPStatus.OK
-            status: Literal["ok", "error"] = "ok"
-            error_type = ""
-            hook: _DispatchHook | None = self._server._dispatch_hook if info is not None else None
-            hook_token_exch: HookToken = None
-            if hook is not None and info is not None:
-                try:
-                    hook_token_exch = hook.on_dispatch_start(info, auth, transport_metadata)
-                except Exception:
-                    _logger.debug("Dispatch hook start failed", exc_info=True)
-                    hook = None
-            _hook_exc: BaseException | None = None
+            # Read the input batch + extract token from metadata
             try:
-                resp_buf, produce_error_type = self._produce_stream_response(
-                    output_schema,
-                    state_obj,
-                    input_schema,
-                    method_name=method_name,
+                req_reader = ValidatedReader(ipc.open_stream(stream), self._server.ipc_validation)
+                input_batch, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
+                _drain_stream(req_reader)
+            except pa.ArrowInvalid as exc:
+                raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+
+            # Record input batch for stats
+            _record_input(input_batch)
+
+            # Extract state token before resolution — resolve_external_location
+            # replaces metadata with what was stored in the external IPC stream.
+            token = custom_metadata.get(STATE_KEY) if custom_metadata is not None else None
+
+            if token is None:
+                raise _RpcHttpError(
+                    RuntimeError("Missing state token in exchange request"),
+                    status_code=HTTPStatus.BAD_REQUEST,
                 )
-                if produce_error_type is not None:
-                    status = "error"
-                    error_type = produce_error_type
-                return resp_buf
-            finally:
-                duration_ms = (time.monotonic() - start) * 1000
-                _emit_access_log(
-                    protocol_name,
-                    method_name,
-                    "stream",
-                    server_id,
-                    auth,
-                    transport_metadata,
-                    duration_ms,
-                    status,
-                    error_type,
-                    http_status=http_status.value,
-                )
+
+            # Unpack and verify the signed token, recover state + schema + input_schema
+            state_obj, output_schema, input_schema = self._unpack_and_recover_state(token, state_cls)
+
+            is_producer = input_schema == _EMPTY_SCHEMA
+
+            # Resolve method info for hook (may be None for unknown methods, but
+            # _stream_exchange_sync is only reached for known stream methods)
+            info = self._server.methods.get(method_name)
+
+            if is_producer:
+                # Producer continuation
+                server_id = self._server.server_id
+                protocol_name = self._server.protocol_name
+                auth, transport_metadata = _get_auth_and_metadata()
+                start = time.monotonic()
+                http_status = HTTPStatus.OK
+                status: Literal["ok", "error"] = "ok"
+                error_type = ""
+                hook: _DispatchHook | None = self._server._dispatch_hook if info is not None else None
+                hook_token_exch: HookToken = None
                 if hook is not None and info is not None:
                     try:
-                        hook.on_dispatch_end(hook_token_exch, info, _hook_exc)
+                        hook_token_exch = hook.on_dispatch_start(info, auth, transport_metadata)
                     except Exception:
-                        _logger.debug("Dispatch hook end failed", exc_info=True)
-        else:
-            # Exchange — resolve external locations on real input data
-            try:
-                input_batch, resolved_cm = resolve_external_location(
-                    input_batch,
-                    custom_metadata,
-                    self._server.external_config,
-                    ipc_validation=self._server.ipc_validation,
-                )
-            except Exception as exc:
-                raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
-
-            server_id = self._server.server_id
-            protocol_name = self._server.protocol_name
-            auth, transport_md = _get_auth_and_metadata()
-            start = time.monotonic()
-            http_status = HTTPStatus.OK
-            status_str: Literal["ok", "error"] = "ok"
-            error_type_str = ""
-            hook_e: _DispatchHook | None = self._server._dispatch_hook if info is not None else None
-            hook_token_e: HookToken = None
-            if hook_e is not None and info is not None:
+                        _logger.debug("Dispatch hook start failed", exc_info=True)
+                        hook = None
+                _hook_exc: BaseException | None = None
                 try:
-                    hook_token_e = hook_e.on_dispatch_start(info, auth, transport_md)
-                except Exception:
-                    _logger.debug("Dispatch hook start failed", exc_info=True)
-                    hook_e = None
-            _hook_exc_e: BaseException | None = None
-            try:
-                # Strip state token from metadata visible to process()
-                user_cm = strip_keys(resolved_cm, STATE_KEY)
+                    resp_buf, produce_error_type = self._produce_stream_response(
+                        output_schema,
+                        state_obj,
+                        input_schema,
+                        method_name=method_name,
+                    )
+                    if produce_error_type is not None:
+                        status = "error"
+                        error_type = produce_error_type
+                    return resp_buf
+                finally:
+                    duration_ms = (time.monotonic() - start) * 1000
+                    _emit_access_log(
+                        protocol_name,
+                        method_name,
+                        "stream",
+                        server_id,
+                        auth,
+                        transport_metadata,
+                        duration_ms,
+                        status,
+                        error_type,
+                        http_status=http_status.value,
+                        stats=stats,
+                    )
+                    if hook is not None and info is not None:
+                        try:
+                            hook.on_dispatch_end(hook_token_exch, info, _hook_exc, stats=stats)
+                        except Exception:
+                            _logger.debug("Dispatch hook end failed", exc_info=True)
+            else:
+                # Exchange — resolve external locations on real input data
+                try:
+                    input_batch, resolved_cm = resolve_external_location(
+                        input_batch,
+                        custom_metadata,
+                        self._server.external_config,
+                        ipc_validation=self._server.ipc_validation,
+                    )
+                except Exception as exc:
+                    raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
-                ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
-                out = OutputCollector(output_schema, server_id=server_id, producer_mode=False)
-
-                process_ctx = CallContext(
-                    auth=auth,
-                    emit_client_log=out.emit_client_log_message,
-                    transport_metadata=transport_md,
-                    server_id=server_id,
-                    method_name=method_name,
-                    protocol_name=protocol_name,
-                )
-                state_obj.process(ab_in, out, process_ctx)
-                if not out.finished:
-                    out.validate()
-
-                # Repack updated state with same schemas into new signed token
-                updated_state_bytes = state_obj.serialize_to_bytes()
-                schema_bytes = output_schema.serialize().to_pybytes()
-                input_schema_bytes_upd = input_schema.serialize().to_pybytes()
-                updated_token = _pack_state_token(
-                    updated_state_bytes, schema_bytes, input_schema_bytes_upd, self._signing_key
-                )
-                out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
-
-                # Write response batches (log + data, in order)
-                resp_buf = BytesIO()
-                with ipc.new_stream(resp_buf, output_schema) as writer:
-                    _flush_collector(writer, out, self._server.external_config)
-            except Exception as exc:
-                _hook_exc_e = exc
-                status_str = "error"
-                error_type_str = _log_method_error(protocol_name, method_name, server_id, exc)
-                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-                raise _RpcHttpError(exc, status_code=http_status, schema=output_schema) from exc
-            finally:
-                duration_ms = (time.monotonic() - start) * 1000
-                _emit_access_log(
-                    protocol_name,
-                    method_name,
-                    "stream",
-                    server_id,
-                    auth,
-                    transport_md,
-                    duration_ms,
-                    status_str,
-                    error_type_str,
-                    http_status=http_status.value,
-                )
+                server_id = self._server.server_id
+                protocol_name = self._server.protocol_name
+                auth, transport_md = _get_auth_and_metadata()
+                start = time.monotonic()
+                http_status = HTTPStatus.OK
+                status_str: Literal["ok", "error"] = "ok"
+                error_type_str = ""
+                hook_e: _DispatchHook | None = self._server._dispatch_hook if info is not None else None
+                hook_token_e: HookToken = None
                 if hook_e is not None and info is not None:
                     try:
-                        hook_e.on_dispatch_end(hook_token_e, info, _hook_exc_e)
+                        hook_token_e = hook_e.on_dispatch_start(info, auth, transport_md)
                     except Exception:
-                        _logger.debug("Dispatch hook end failed", exc_info=True)
+                        _logger.debug("Dispatch hook start failed", exc_info=True)
+                        hook_e = None
+                _hook_exc_e: BaseException | None = None
+                try:
+                    # Strip state token from metadata visible to process()
+                    user_cm = strip_keys(resolved_cm, STATE_KEY)
 
-            resp_buf.seek(0)
-            return resp_buf
+                    ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
+                    out = OutputCollector(output_schema, server_id=server_id, producer_mode=False)
+
+                    process_ctx = CallContext(
+                        auth=auth,
+                        emit_client_log=out.emit_client_log_message,
+                        transport_metadata=transport_md,
+                        server_id=server_id,
+                        method_name=method_name,
+                        protocol_name=protocol_name,
+                    )
+                    state_obj.process(ab_in, out, process_ctx)
+                    if not out.finished:
+                        out.validate()
+
+                    # Repack updated state with same schemas into new signed token
+                    updated_state_bytes = state_obj.serialize_to_bytes()
+                    schema_bytes = output_schema.serialize().to_pybytes()
+                    input_schema_bytes_upd = input_schema.serialize().to_pybytes()
+                    updated_token = _pack_state_token(
+                        updated_state_bytes, schema_bytes, input_schema_bytes_upd, self._signing_key
+                    )
+                    out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
+
+                    # Write response batches (log + data, in order)
+                    resp_buf = BytesIO()
+                    with ipc.new_stream(resp_buf, output_schema) as writer:
+                        _flush_collector(writer, out, self._server.external_config)
+                except Exception as exc:
+                    _hook_exc_e = exc
+                    status_str = "error"
+                    error_type_str = _log_method_error(protocol_name, method_name, server_id, exc)
+                    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                    raise _RpcHttpError(exc, status_code=http_status, schema=output_schema) from exc
+                finally:
+                    duration_ms = (time.monotonic() - start) * 1000
+                    _emit_access_log(
+                        protocol_name,
+                        method_name,
+                        "stream",
+                        server_id,
+                        auth,
+                        transport_md,
+                        duration_ms,
+                        status_str,
+                        error_type_str,
+                        http_status=http_status.value,
+                        stats=stats,
+                    )
+                    if hook_e is not None and info is not None:
+                        try:
+                            hook_e.on_dispatch_end(hook_token_e, info, _hook_exc_e, stats=stats)
+                        except Exception:
+                            _logger.debug("Dispatch hook end failed", exc_info=True)
+
+                resp_buf.seek(0)
+                return resp_buf
+        finally:
+            _current_call_stats.reset(stats_token)
 
     def _produce_stream_response(
         self,
@@ -818,7 +865,9 @@ class _HttpRpcApp:
                         input_schema_bytes = input_schema.serialize().to_pybytes()
                         token = _pack_state_token(state_bytes, schema_bytes, input_schema_bytes, self._signing_key)
                         state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
-                        writer.write_batch(empty_batch(schema), custom_metadata=state_metadata)
+                        continuation_batch = empty_batch(schema)
+                        _record_output(continuation_batch)
+                        writer.write_batch(continuation_batch, custom_metadata=state_metadata)
                         break
             except Exception as exc:
                 produce_error_type = _log_method_error(protocol_name, method_name, server_id, exc)

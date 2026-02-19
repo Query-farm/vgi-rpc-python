@@ -30,6 +30,7 @@ from opentelemetry.trace import SpanKind, StatusCode, Tracer, TracerProvider, ge
 
 from vgi_rpc.rpc._common import (
     AuthContext,
+    CallStatistics,
     HookToken,
     _current_trace_headers,
 )
@@ -287,6 +288,8 @@ class _OtelDispatchHook:
         token: HookToken,
         info: RpcMethodInfo,
         error: BaseException | None,
+        *,
+        stats: CallStatistics | None = None,
     ) -> None:
         """End the span and record metrics."""
         if not isinstance(token, _OtelHookToken):
@@ -304,6 +307,13 @@ class _OtelDispatchHook:
                     token.span.record_exception(error)
             else:
                 token.span.set_status(StatusCode.OK)
+            if stats is not None:
+                token.span.set_attribute("rpc.vgi_rpc.input_batches", stats.input_batches)
+                token.span.set_attribute("rpc.vgi_rpc.output_batches", stats.output_batches)
+                token.span.set_attribute("rpc.vgi_rpc.input_rows", stats.input_rows)
+                token.span.set_attribute("rpc.vgi_rpc.output_rows", stats.output_rows)
+                token.span.set_attribute("rpc.vgi_rpc.input_bytes", stats.input_bytes)
+                token.span.set_attribute("rpc.vgi_rpc.output_bytes", stats.output_bytes)
             token.span.end()
 
         if token.otel_token is not None:

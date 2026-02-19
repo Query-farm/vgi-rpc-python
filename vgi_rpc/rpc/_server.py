@@ -18,16 +18,20 @@ from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
     AuthContext,
     CallContext,
+    CallStatistics,
     HookToken,
     MethodType,
     RpcError,
     VersionError,
     _access_logger,
+    _current_call_stats,
     _current_request_id,
     _DispatchHook,
     _generate_request_id,
     _get_auth_and_metadata,
     _logger,
+    _record_input,
+    _record_output,
 )
 from vgi_rpc.rpc._transport import RpcTransport, ShmPipeTransport
 from vgi_rpc.rpc._types import (
@@ -94,6 +98,7 @@ def _emit_access_log(
     status: Literal["ok", "error"],
     error_type: str = "",
     http_status: int | None = None,
+    stats: CallStatistics | None = None,
 ) -> None:
     """Emit a structured access log record for a completed RPC call."""
     if not _access_logger.isEnabledFor(logging.INFO):
@@ -116,6 +121,13 @@ def _emit_access_log(
             extra["request_id"] = request_id
         if http_status is not None:
             extra["http_status"] = http_status
+        if stats is not None:
+            extra["input_batches"] = stats.input_batches
+            extra["output_batches"] = stats.output_batches
+            extra["input_rows"] = stats.input_rows
+            extra["output_rows"] = stats.output_rows
+            extra["input_bytes"] = stats.input_bytes
+            extra["output_bytes"] = stats.output_bytes
         _access_logger.info(
             "%s.%s %s",
             protocol_name,
@@ -286,6 +298,8 @@ class RpcServer:
 
         """
         token = _current_request_id.set(_generate_request_id())
+        stats = CallStatistics()
+        stats_token = _current_call_stats.set(stats)
         try:
             try:
                 method_name, kwargs = _read_request(transport.reader, self._ipc_validation)
@@ -320,10 +334,11 @@ class RpcServer:
 
             shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
             if info.method_type == MethodType.UNARY:
-                self._serve_unary(transport, info, kwargs, shm=shm)
+                self._serve_unary(transport, info, kwargs, stats=stats, shm=shm)
             elif info.method_type == MethodType.STREAM:
-                self._serve_stream(transport, info, kwargs, shm=shm)
+                self._serve_stream(transport, info, kwargs, stats=stats, shm=shm)
         finally:
+            _current_call_stats.reset(stats_token)
             _current_request_id.reset(token)
 
     def _prepare_method_call(
@@ -349,12 +364,26 @@ class RpcServer:
         info: RpcMethodInfo,
         kwargs: dict[str, Any],
         *,
+        stats: CallStatistics | None = None,
         shm: ShmSegment | None = None,
     ) -> None:
         # Pre-built __describe__ batch — write directly, skip implementation call.
         if self._describe_batch is not None and info.name == "__describe__":
+            _record_output(self._describe_batch)
             with ipc.new_stream(transport.writer, self._describe_batch.schema) as writer:
                 writer.write_batch(self._describe_batch)
+            auth, transport_md = _get_auth_and_metadata()
+            _emit_access_log(
+                self.protocol_name,
+                info.name,
+                info.method_type.value,
+                self._server_id,
+                auth,
+                transport_md,
+                0.0,
+                "ok",
+                stats=stats,
+            )
             return
 
         schema = info.result_schema
@@ -397,10 +426,11 @@ class RpcServer:
                 duration_ms,
                 status,
                 error_type,
+                stats=stats,
             )
             if hook is not None:
                 try:
-                    hook.on_dispatch_end(hook_token, info, _hook_exc)
+                    hook.on_dispatch_end(hook_token, info, _hook_exc, stats=stats)
                 except Exception:
                     _logger.debug("Dispatch hook end failed", exc_info=True)
 
@@ -410,6 +440,7 @@ class RpcServer:
         info: RpcMethodInfo,
         kwargs: dict[str, Any],
         *,
+        stats: CallStatistics | None = None,
         shm: ShmSegment | None = None,
     ) -> None:
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
@@ -451,10 +482,11 @@ class RpcServer:
                     duration_ms,
                     status,
                     error_type,
+                    stats=stats,
                 )
                 if hook is not None:
                     try:
-                        hook.on_dispatch_end(hook_token, info, _hook_exc)
+                        hook.on_dispatch_end(hook_token, info, _hook_exc, stats=stats)
                     except Exception:
                         _logger.debug("Dispatch hook end failed", exc_info=True)
 
@@ -481,6 +513,9 @@ class RpcServer:
                             input_batch, custom_metadata = input_reader.read_next_batch_with_custom_metadata()
                         except StopIteration:
                             break
+
+                        # Record input batch for stats (including producer ticks)
+                        _record_input(input_batch)
 
                         # Resolve ExternalLocation on input batch
                         input_batch, resolved_cm = resolve_external_location(
@@ -540,10 +575,11 @@ class RpcServer:
                 duration_ms,
                 status,
                 error_type,
+                stats=stats,
             )
             if hook is not None:
                 try:
-                    hook.on_dispatch_end(hook_token, info, _hook_exc)
+                    hook.on_dispatch_end(hook_token, info, _hook_exc, stats=stats)
                 except Exception:
                     _logger.debug("Dispatch hook end failed", exc_info=True)
 
