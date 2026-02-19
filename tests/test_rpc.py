@@ -82,6 +82,25 @@ class GenerateState(StreamState):
 
 
 @dataclass
+class GenerateMultiRowState(StreamState):
+    """State for a producer that emits multi-row batches."""
+
+    count: int
+    rows_per_batch: int
+    offset: int = 0
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Produce a batch with multiple rows."""
+        if self.offset >= self.count:
+            out.finish()
+            return
+        end = min(self.offset + self.rows_per_batch, self.count)
+        indices = list(range(self.offset, end))
+        out.emit_pydict({"i": indices, "value": [v * 10 for v in indices]})
+        self.offset = end
+
+
+@dataclass
 class TransformState(StreamState):
     """State for the transform exchange stream."""
 
@@ -240,6 +259,10 @@ class RpcFixtureService(Protocol):
         """Generate count batches."""
         ...
 
+    def generate_multi(self, count: int, rows_per_batch: int) -> Stream[StreamState]:
+        """Generate batches with multiple rows each."""
+        ...
+
     def transform(self, factor: float) -> Stream[StreamState]:
         """Scale values by factor."""
         ...
@@ -328,6 +351,11 @@ class RpcFixtureServiceImpl:
         """Generate count batches."""
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
         return Stream(output_schema=schema, state=GenerateState(count=count))
+
+    def generate_multi(self, count: int, rows_per_batch: int) -> Stream[GenerateMultiRowState]:
+        """Generate batches with multiple rows each."""
+        schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
+        return Stream(output_schema=schema, state=GenerateMultiRowState(count=count, rows_per_batch=rows_per_batch))
 
     def transform(self, factor: float) -> Stream[TransformState]:
         """Scale values by factor."""

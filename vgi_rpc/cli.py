@@ -1,13 +1,14 @@
 """Command-line interface for vgi-rpc services.
 
-Provides ``describe`` and ``call`` commands for introspecting and invoking
-methods on any vgi-rpc service that has ``enable_describe=True``.
+Provides ``describe``, ``call``, and ``loggers`` commands for introspecting
+and invoking methods on any vgi-rpc service that has ``enable_describe=True``.
 
 Usage::
 
     vgi-rpc describe --cmd "my-worker"
     vgi-rpc call add --cmd "my-worker" a=1.0 b=2.0
     vgi-rpc call generate --url http://localhost:8000 count=3
+    vgi-rpc loggers
 
 """
 
@@ -15,13 +16,14 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import logging
 import shlex
 import sys
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from io import BytesIO
-from typing import Annotated, Protocol
+from typing import Annotated, Protocol, cast
 
 import pyarrow as pa
 import typer
@@ -55,6 +57,55 @@ class OutputFormat(StrEnum):
 
 
 # ---------------------------------------------------------------------------
+# Logging enums
+# ---------------------------------------------------------------------------
+
+
+class LogLevel(StrEnum):
+    """Python logging level for ``--log-level``."""
+
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class LogFormat(StrEnum):
+    """Stderr log format for ``--log-format``."""
+
+    text = "text"
+    json = "json"
+
+
+# ---------------------------------------------------------------------------
+# Known loggers registry
+# ---------------------------------------------------------------------------
+
+# (name, description, scenario) for every logger in the codebase.
+_KNOWN_LOGGERS: tuple[tuple[str, str, str], ...] = (
+    ("vgi_rpc", "Root logger for all vgi-rpc output", "Enable to see all framework logging"),
+    ("vgi_rpc.access", "One structured record per completed RPC call", "Monitor request throughput and errors"),
+    ("vgi_rpc.rpc", "RPC framework lifecycle", "Debug server dispatch and method resolution"),
+    ("vgi_rpc.http", "HTTP transport lifecycle", "Debug Falcon WSGI app and middleware"),
+    ("vgi_rpc.http.retry", "HTTP client retry logic", "Debug retry decisions and backoff"),
+    ("vgi_rpc.pool", "Worker pool operations", "Debug subprocess pool borrow/return/eviction"),
+    ("vgi_rpc.shm", "Shared memory transport", "Debug SHM segment allocation and pointer batches"),
+    ("vgi_rpc.external", "External storage operations", "Debug externalize/resolve for large batches"),
+    ("vgi_rpc.external_fetch", "Parallel URL fetching", "Debug range-request fetching and hedging"),
+    ("vgi_rpc.s3", "S3 storage backend", "Debug S3 uploads and pre-signed URL generation"),
+    ("vgi_rpc.gcs", "GCS storage backend", "Debug GCS uploads and signed URL generation"),
+    ("vgi_rpc.otel", "OpenTelemetry integration", "Debug span creation and propagation"),
+    ("vgi_rpc.subprocess.stderr", "Child process stderr capture", "See subprocess stderr output"),
+    ("vgi_rpc.wire.request", "Request serialization/deserialization", "Debug method calls returning wrong results"),
+    ("vgi_rpc.wire.response", "Response serialization/deserialization", "Debug result schema and type mismatches"),
+    ("vgi_rpc.wire.batch", "Batch classification (log/error/data)", "Debug log or error batches not arriving"),
+    ("vgi_rpc.wire.stream", "Stream session lifecycle", "Debug streaming batches lost or out of order"),
+    ("vgi_rpc.wire.transport", "Transport lifecycle (pipe, subprocess)", "Debug connection hangs or fd issues"),
+    ("vgi_rpc.wire.http", "HTTP client requests/responses", "Debug HTTP transport request/response issues"),
+)
+
+
+# ---------------------------------------------------------------------------
 # CLI config
 # ---------------------------------------------------------------------------
 
@@ -69,6 +120,9 @@ class _CliConfig:
     format: OutputFormat = OutputFormat.auto
     verbose: bool = False
     no_stdin: bool = False
+    log_level: LogLevel | None = None
+    log_loggers: list[str] = field(default_factory=list)
+    log_format: LogFormat = LogFormat.text
 
 
 app = typer.Typer(
@@ -77,6 +131,45 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# Logging configuration
+# ---------------------------------------------------------------------------
+
+_KNOWN_LOGGER_NAMES: frozenset[str] = frozenset(name for name, _, _ in _KNOWN_LOGGERS)
+
+
+def _configure_logging(config: _CliConfig) -> None:
+    """Attach a stderr handler to the target loggers at the requested level.
+
+    Called from ``_main`` when ``--debug`` or ``--log-level`` is set.
+    """
+    level = config.log_level
+    if level is None:
+        return
+
+    # Build handler with chosen format
+    handler = logging.StreamHandler(sys.stderr)
+    if config.log_format == LogFormat.json:
+        from vgi_rpc.logging_utils import VgiJsonFormatter
+
+        handler.setFormatter(VgiJsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter("%(name)-30s %(levelname)-5s %(message)s"))
+
+    numeric_level = logging.getLevelNamesMapping()[level.value]
+
+    # Determine target loggers
+    targets = config.log_loggers if config.log_loggers else ["vgi_rpc"]
+
+    for name in targets:
+        if name not in _KNOWN_LOGGER_NAMES and not name.startswith("vgi_rpc.service."):
+            sys.stderr.write(f"Warning: unknown logger '{name}'\n")
+            sys.stderr.flush()
+        logger = logging.getLogger(name)
+        logger.setLevel(numeric_level)
+        logger.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +193,12 @@ def _main(
     prefix: Annotated[str, typer.Option("--prefix", "-p", help="URL path prefix")] = "/vgi",
     fmt: Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format")] = OutputFormat.auto,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show server log messages on stderr")] = False,
+    debug: Annotated[bool, typer.Option("--debug", help="Enable DEBUG on all vgi_rpc loggers to stderr")] = False,
+    log_level: Annotated[LogLevel | None, typer.Option("--log-level", help="Python logging level for vgi_rpc")] = None,
+    log_logger: Annotated[list[str] | None, typer.Option("--log-logger", help="Target specific logger(s)")] = None,
+    log_format: Annotated[
+        LogFormat, typer.Option("--log-format", help="Stderr log format: text or json")
+    ] = LogFormat.text,
     version: Annotated[
         bool, typer.Option("--version", "-V", help="Show version and exit", callback=_version_callback, is_eager=True)
     ] = False,
@@ -107,7 +206,24 @@ def _main(
     """Configure transport and output options."""
     if url and cmd:
         raise typer.BadParameter("--url and --cmd are mutually exclusive")
-    ctx.obj = _CliConfig(url=url, cmd=cmd, prefix=prefix, format=fmt, verbose=verbose)
+
+    # Resolve effective log level: --debug overrides --log-level
+    effective_level: LogLevel | None = log_level
+    if debug:
+        effective_level = LogLevel.DEBUG
+
+    config = _CliConfig(
+        url=url,
+        cmd=cmd,
+        prefix=prefix,
+        format=fmt,
+        verbose=verbose,
+        log_level=effective_level,
+        log_loggers=log_logger or [],
+        log_format=log_format,
+    )
+    _configure_logging(config)
+    ctx.obj = config
 
 
 # ---------------------------------------------------------------------------
@@ -193,32 +309,29 @@ def _parse_key_value_args(args: list[str], params_schema: pa.Schema) -> dict[str
     return result
 
 
-def _batch_to_dict(batch: pa.RecordBatch) -> dict[str, object]:
-    """Convert a RecordBatch to a Python dict for JSON output.
+def _coerce_map_value(val: object) -> object:
+    """Convert Arrow map values (list-of-tuples) to dicts."""
+    if isinstance(val, list) and val and isinstance(val[0], tuple):
+        return dict(cast("list[tuple[object, object]]", val))
+    return val
 
-    Single-row batches are unwrapped to scalar values per column.
-    Multi-row batches produce list values per column.  Map-typed
-    columns (list-of-tuples from Arrow) are converted to dicts.
+
+def _batch_to_rows(batch: pa.RecordBatch) -> list[dict[str, object]]:
+    """Convert a RecordBatch to a list of dicts, one per row.
+
+    Each row becomes its own ``{column: scalar_value}`` dict.
+    Map-typed columns (list-of-tuples from Arrow) are converted to dicts.
     """
     d = batch.to_pydict()
-    result: dict[str, object] = {}
-    for key, values in d.items():
-        if len(values) == 1:
-            val = values[0]
-            # Map columns come back as list of tuples — convert to dict
-            if isinstance(val, list) and val and isinstance(val[0], tuple):
-                result[key] = dict(val)
-            else:
-                result[key] = val
-        else:
-            converted: list[object] = []
-            for val in values:
-                if isinstance(val, list) and val and isinstance(val[0], tuple):
-                    converted.append(dict(val))
-                else:
-                    converted.append(val)
-            result[key] = converted
-    return result
+    columns = list(d.keys())
+    num_rows = batch.num_rows
+    rows: list[dict[str, object]] = []
+    for i in range(num_rows):
+        row: dict[str, object] = {}
+        for col in columns:
+            row[col] = _coerce_map_value(d[col][i])
+        rows.append(row)
+    return rows
 
 
 def _format_table(rows: list[dict[str, object]]) -> str:
@@ -333,13 +446,14 @@ def _print_unary_result(ab: AnnotatedBatch, method: MethodDescription, config: _
     if not method.has_return:
         _print_json(None)
         return
-    result = _batch_to_dict(ab.batch)
+    rows = _batch_to_rows(ab.batch)
     is_tty = sys.stdout.isatty()
     fmt = config.format
     if fmt == OutputFormat.table:
-        typer.echo(_format_table([result]))
+        typer.echo(_format_table(rows))
     else:
-        _print_json(result, pretty=(fmt == OutputFormat.auto and is_tty))
+        for row in rows:
+            _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
 
 
 def _run_stream(session: _StreamLike, config: _CliConfig) -> None:
@@ -350,20 +464,21 @@ def _run_stream(session: _StreamLike, config: _CliConfig) -> None:
 
     if not has_stdin:
         # Producer mode
-        rows: list[dict[str, object]] = []
+        table_rows: list[dict[str, object]] = []
         try:
             for ab in session:
-                row = _batch_to_dict(ab.batch)
+                batch_rows = _batch_to_rows(ab.batch)
                 if fmt == OutputFormat.table:
-                    rows.append(row)
+                    table_rows.extend(batch_rows)
                 else:
-                    _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
+                    for row in batch_rows:
+                        _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
                     sys.stdout.flush()
         except RpcError as e:
             _emit_rpc_error(e)
             raise typer.Exit(1) from None
-        if fmt == OutputFormat.table and rows:
-            typer.echo(_format_table(rows))
+        if fmt == OutputFormat.table and table_rows:
+            typer.echo(_format_table(table_rows))
     else:
         # Exchange mode
         try:
@@ -376,14 +491,38 @@ def _run_stream(session: _StreamLike, config: _CliConfig) -> None:
                 input_batch = pa.RecordBatch.from_pydict(input_dict)
                 ab_input = AnnotatedBatch(batch=input_batch)
                 ab_output = session.exchange(ab_input)
-                row = _batch_to_dict(ab_output.batch)
-                _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
+                for row in _batch_to_rows(ab_output.batch):
+                    _print_json(row, pretty=(fmt == OutputFormat.auto and is_tty))
                 sys.stdout.flush()
         except RpcError as e:
             _emit_rpc_error(e)
             raise typer.Exit(1) from None
         finally:
             session.close()
+
+
+# ---------------------------------------------------------------------------
+# loggers subcommand
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def loggers(
+    ctx: typer.Context,
+) -> None:
+    """List all known vgi-rpc logger names with descriptions."""
+    config: _CliConfig = ctx.obj
+    is_tty = sys.stdout.isatty()
+    fmt = config.format
+
+    if fmt == OutputFormat.json or (fmt == OutputFormat.auto and not is_tty):
+        data = [{"name": name, "description": desc, "scenario": scenario} for name, desc, scenario in _KNOWN_LOGGERS]
+        _print_json(data)
+    else:
+        rows: list[dict[str, object]] = [
+            {"name": name, "description": desc, "scenario": scenario} for name, desc, scenario in _KNOWN_LOGGERS
+        ]
+        typer.echo(_format_table(rows))
 
 
 # ---------------------------------------------------------------------------
