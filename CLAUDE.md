@@ -71,7 +71,7 @@ Then you can commit.
 
 - **`external_fetch.py`** — Parallel range-request URL fetching. Issues a HEAD probe to learn `Content-Length` and `Accept-Ranges`, then either fetches in parallel chunks with speculative hedging for stragglers, or falls back to a single GET. Maintains a persistent `aiohttp.ClientSession` per `FetchConfig` on a daemon thread. Handles zstd decompression and stale-connection recovery. Provides `FetchConfig` and `fetch_url()`.
 
-- **`cli.py`** *(optional — `pip install vgi-rpc[cli]`)* — Command-line interface. A `typer`-based CLI registered as the `vgi-rpc` entry point. Provides `describe` and `call` commands for introspecting and invoking methods on any vgi-rpc service.
+- **`cli.py`** *(optional — `pip install vgi-rpc[cli]`)* — Command-line interface. A `typer`-based CLI registered as the `vgi-rpc` entry point. Provides `describe`, `call`, and `loggers` commands for introspecting and invoking methods on any vgi-rpc service. Supports output formats `auto`, `json`, `table`, and `arrow` (raw Arrow IPC via `--format arrow`), with `--output`/`-o` for file output. Stream headers are surfaced in all formats.
 
 - **`s3.py`** *(optional — `pip install vgi-rpc[s3]`)* — S3 storage backend implementing `ExternalStorage`. Uses boto3 to upload IPC data and generate pre-signed URLs. Supports custom endpoints for MinIO/LocalStack.
 

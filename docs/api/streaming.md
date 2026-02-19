@@ -297,6 +297,7 @@ with serve_pipe(DataService, DataServiceImpl()) as proxy:
 - Use `session.typed_header(JobHeader)` for a typed narrowing that raises `TypeError` if the header is missing or the wrong type.
 - Headers work across all transports (pipe, subprocess, HTTP). For HTTP, the header is included in the `/init` response only — subsequent `/exchange` requests do not re-send it.
 - Headers are visible in runtime introspection: `MethodDescription.has_header` and `MethodDescription.header_schema`.
+- The [CLI](cli.md#stream-headers) surfaces headers in all output formats: `{"__header__": {...}}` in JSON, a `Header:` section in table, and a separate IPC stream in `--format arrow`.
 
 ## API Reference
 

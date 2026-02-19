@@ -90,23 +90,87 @@ i   value
 
 With `--format auto` (the default), the CLI uses pretty-printed JSON when stdout is a TTY and compact NDJSON when piped.
 
-With `--format arrow`, raw Arrow IPC streams are written to the output. Use `--output`/`-o` to direct binary output to a file:
+With `--format arrow`, raw Arrow IPC streaming data is written to the output. Use `--output`/`-o` to direct binary output to a file:
 
 ```bash
-# Write Arrow IPC to a file
+# Unary result as Arrow IPC
 vgi-rpc call add --cmd "python worker.py" a=1.0 b=2.0 --format arrow -o result.arrow
+
+# Producer stream as Arrow IPC
+vgi-rpc call generate --cmd "python worker.py" count=100 --format arrow -o data.arrow
 
 # Stream with header: two concatenated IPC streams (header + data)
 vgi-rpc call generate_with_header --cmd "python worker.py" count=5 --format arrow -o stream.arrow
 ```
 
+The output file contains standard Arrow IPC streaming format data. For unary calls and headerless streams, this is a single IPC stream (schema + batches + EOS). For streams with headers, the file contains two concatenated IPC streams: the header stream first, then the data stream.
+
+Read back a unary or headerless stream result:
+
+```python
+import pyarrow as pa
+from pyarrow import ipc
+
+with ipc.open_stream(pa.OSFile("result.arrow", "rb")) as reader:
+    for batch in reader:
+        print(batch.to_pandas())
+```
+
+Read back a stream with header (two concatenated IPC streams):
+
+```python
+import pyarrow as pa
+from pyarrow import ipc
+
+with open("stream.arrow", "rb") as f:
+    # First IPC stream: header
+    header_reader = ipc.open_stream(f)
+    header_batch = header_reader.read_next_batch()
+    print("Header:", header_batch.to_pydict())
+    # Drain remaining batches to reach EOS
+    for _ in header_reader:
+        pass
+
+    # Second IPC stream: data
+    data_reader = ipc.open_stream(f)
+    for batch in data_reader:
+        print(batch.to_pandas())
+```
+
+Without `--output`, arrow data is written to stdout. A warning is printed to stderr if stdout is a TTY.
+
 ### Stream headers
 
-Stream methods that declare a header type (e.g. `Stream[MyState, MyHeader]`) emit a header before the data rows. The CLI surfaces this header in all formats:
+Stream methods that declare a header type (e.g. `Stream[MyState, MyHeader]`) emit a one-time header before the data rows. The CLI reads this header and surfaces it in all output formats.
 
-- **JSON**: a `{"__header__": {...}}` line before data rows
-- **Table**: a `Header:` section with `key: value` lines before the data table
-- **Arrow**: a separate IPC stream before the data IPC stream
+**JSON** (`--format json`): a `{"__header__": {...}}` line before data rows:
+
+```bash
+$ vgi-rpc call generate_with_header --cmd "python worker.py" count=3 --format json
+{"__header__": {"total_count": 3, "label": "generate"}}
+{"i": 0, "value": 0}
+{"i": 1, "value": 10}
+{"i": 2, "value": 20}
+```
+
+**Table** (`--format table`): a `Header:` section with indented key-value pairs before the data table:
+
+```bash
+$ vgi-rpc call generate_with_header --cmd "python worker.py" count=3 --format table
+Header:
+  total_count: 3
+  label: generate
+
+i  value
+-  -----
+0  0
+1  10
+2  20
+```
+
+**Arrow** (`--format arrow`): the header is written as a separate IPC stream before the data IPC stream (see [reading back concatenated streams](#output-format) above).
+
+Streams without headers are unaffected — no `__header__` line or `Header:` section appears.
 
 ### Options
 
