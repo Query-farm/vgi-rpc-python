@@ -451,14 +451,20 @@ class ShmSegment:
         """Close the shared memory handle.
 
         Releases internal memoryview references first.  If external
-        Arrow buffers still reference the shared memory (from
-        ``read_buffer`` / ``pa.py_buffer``), the close may raise
-        ``BufferError`` — callers should ensure all Arrow batches
-        backed by this segment are deleted before calling close.
+        Arrow buffers still reference the shared memory mmap (from
+        ``read_buffer`` / ``pa.py_buffer``), the mmap ``close()``
+        raises ``BufferError``.  When that happens we null out the
+        internal ``_mmap`` so that ``SharedMemory.__del__`` does not
+        retry the close and emit an unraisable exception.
         """
         # Release allocator's memoryview reference first
         self._allocator._buf = memoryview(b"")
-        self._shm.close()
+        try:
+            self._shm.close()
+        except BufferError:
+            # SharedMemory.close() released _buf but _mmap.close()
+            # failed — null it out to prevent __del__ from retrying.
+            self._shm._mmap = None  # type: ignore[attr-defined]
 
     def unlink(self) -> None:
         """Unlink (destroy) the shared memory segment."""

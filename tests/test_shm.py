@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import gc
 import logging
 import struct
@@ -53,17 +52,14 @@ def _make_batch(n: int = 5) -> pa.RecordBatch:
 
 
 def _cleanup_shm(shm: ShmSegment) -> None:
-    """Unlink and close a ShmSegment, tolerating BufferError.
+    """Unlink and close a ShmSegment.
 
-    Arrow's C++ runtime may hold zero-copy buffer references to the shared
-    memory mmap even after all Python objects are deleted.  ``unlink()``
-    marks the segment for OS-level deletion; ``close()`` may raise
-    ``BufferError`` if Arrow buffers are still live — we suppress that
-    since the segment will be fully reclaimed on process exit.
+    ``unlink()`` marks the segment for OS-level deletion.  ``close()``
+    handles ``BufferError`` internally (nulls out the mmap to prevent
+    ``SharedMemory.__del__`` from retrying).
     """
     shm.unlink()
-    with contextlib.suppress(BufferError):
-        shm.close()
+    shm.close()
 
 
 # ---------------------------------------------------------------------------
