@@ -45,6 +45,28 @@ class MyServiceImpl:
         return data.upper()
 ```
 
+### Access log fields
+
+Every completed RPC call emits one structured INFO record on the `vgi_rpc.access` logger with per-call I/O statistics:
+
+| Field | Type | Description |
+|---|---|---|
+| `server_id` | `str` | Server instance identifier |
+| `protocol` | `str` | Protocol class name |
+| `method` | `str` | Method name |
+| `method_type` | `str` | `"unary"` or `"stream"` |
+| `duration_ms` | `float` | Call duration in milliseconds |
+| `status` | `str` | `"ok"` or `"error"` |
+| `error_type` | `str` | Exception class name (empty on success) |
+| `input_batches` | `int` | Number of input batches read by the server |
+| `output_batches` | `int` | Number of output batches written by the server |
+| `input_rows` | `int` | Total input rows |
+| `output_rows` | `int` | Total output rows |
+| `input_bytes` | `int` | Approximate logical input bytes |
+| `output_bytes` | `int` | Approximate logical output bytes |
+
+> **Note:** Byte counts use `pa.RecordBatch.get_total_buffer_size()` — logical Arrow buffer sizes without IPC framing overhead.
+
 ### Logger hierarchy
 
 | Logger name | Purpose |

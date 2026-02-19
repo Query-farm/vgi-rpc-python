@@ -351,15 +351,27 @@ class MyServiceImpl:
         return data.upper()
 ```
 
-Access logs are emitted automatically on `vgi_rpc.access`. Logger hierarchy:
+Access logs are emitted automatically on `vgi_rpc.access` with per-call I/O statistics (`input_batches`, `output_batches`, `input_rows`, `output_rows`, `input_bytes`, `output_bytes`). Logger hierarchy:
 
 | Logger | Purpose |
 |---|---|
 | `vgi_rpc` | Root — attach handlers here |
-| `vgi_rpc.access` | One INFO record per RPC call (automatic) |
+| `vgi_rpc.access` | One INFO record per RPC call (automatic, with I/O stats) |
 | `vgi_rpc.service.<Protocol>` | `ctx.logger` for each service |
 | `vgi_rpc.rpc` | Framework lifecycle |
 | `vgi_rpc.http` | HTTP transport |
+
+## Call Statistics
+
+`CallStatistics` tracks per-call I/O counters (batches, rows, bytes) for usage accounting. Created automatically at dispatch start, surfaced through the access log and OTel spans:
+
+```python
+from vgi_rpc import CallStatistics  # public export for type references
+```
+
+Counters: `input_batches`, `output_batches`, `input_rows`, `output_rows`, `input_bytes`, `output_bytes`. Byte counts use `pa.RecordBatch.get_total_buffer_size()` (logical Arrow buffer sizes, no IPC framing overhead).
+
+When `instrument_server()` is active, stats appear as span attributes: `rpc.vgi_rpc.input_batches`, `rpc.vgi_rpc.output_batches`, etc.
 
 ## Error Handling
 

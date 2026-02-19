@@ -50,6 +50,10 @@ For more control, use `RpcServer` and `RpcConnection` directly.
 
 See also [`IPCError`](serialization.md#vgi_rpc.utils.IPCError) in the Serialization module.
 
+## CallStatistics
+
+::: vgi_rpc.rpc.CallStatistics
+
 ## Convenience Functions
 
 ::: vgi_rpc.rpc.run_server

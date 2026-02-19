@@ -59,6 +59,10 @@ Over pipe/subprocess transport, `ctx.auth` is always `AuthContext.anonymous()`.
 
 ::: vgi_rpc.rpc.CallContext
 
+### CallStatistics
+
+::: vgi_rpc.rpc.CallStatistics
+
 ### ClientLog
 
 ::: vgi_rpc.rpc.ClientLog

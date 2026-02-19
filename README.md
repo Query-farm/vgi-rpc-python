@@ -17,6 +17,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Shared memory transport** — zero-copy batch transfer between co-located processes
 - **IPC validation** — configurable batch validation levels for untrusted data
 - **Large batch support** — transparent externalization to S3/GCS for oversized data
+- **Per-call I/O statistics** — `CallStatistics` tracks batches, rows, and bytes for usage accounting (access log + OTel spans)
 - **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full visibility into what flows over the wire
 
 ## Installation
@@ -794,6 +795,14 @@ Access log extra fields:
 | `status` | `str` | `"ok"` or `"error"` |
 | `error_type` | `str` | Exception class name (empty on success) |
 | `http_status` | `int` | HTTP response status code (HTTP transport only; reflects the HTTP layer, not the RPC-level `status`) |
+| `input_batches` | `int` | Number of input batches read by the server |
+| `output_batches` | `int` | Number of output batches written by the server |
+| `input_rows` | `int` | Total rows across all input batches |
+| `output_rows` | `int` | Total rows across all output batches |
+| `input_bytes` | `int` | Approximate logical bytes across all input batches |
+| `output_bytes` | `int` | Approximate logical bytes across all output batches |
+
+> **Note:** Byte counts use `pa.RecordBatch.get_total_buffer_size()` — logical Arrow buffer sizes without IPC framing overhead. This is an approximation suitable for usage accounting, not exact wire bytes.
 
 > **Note:** Access logs include `principal` and `remote_addr`, which may be PII under GDPR/CCPA. Configure appropriate log retention and access controls.
 
@@ -813,7 +822,7 @@ logging.getLogger("vgi_rpc").setLevel(logging.INFO)
 Sample JSON output:
 
 ```json
-{"timestamp": "2026-01-15 10:30:00,123", "level": "INFO", "logger": "vgi_rpc.access", "message": "MyService.process ok", "server_id": "a1b2c3d4e5f6", "protocol": "MyService", "method": "process", "method_type": "unary", "principal": "", "auth_domain": "", "remote_addr": "", "duration_ms": 3.45, "status": "ok", "error_type": ""}
+{"timestamp": "2026-01-15 10:30:00,123", "level": "INFO", "logger": "vgi_rpc.access", "message": "MyService.process ok", "server_id": "a1b2c3d4e5f6", "protocol": "MyService", "method": "process", "method_type": "unary", "principal": "", "auth_domain": "", "remote_addr": "", "duration_ms": 3.45, "status": "ok", "error_type": "", "input_batches": 1, "output_batches": 1, "input_rows": 1, "output_rows": 1, "input_bytes": 24, "output_bytes": 16}
 ```
 
 #### Per-service log levels
@@ -845,7 +854,39 @@ with connect(MyService, ["python", "worker.py"], stderr=StderrMode.DEVNULL) as p
 
 `StderrMode.PIPE` starts a daemon thread that drains the child's stderr line-by-line into the `vgi_rpc.subprocess.stderr` logger. `StderrMode.INHERIT` (default) sends stderr to the parent's stderr. Only applies to subprocess transport.
 
-#### OpenTelemetry integration
+#### OpenTelemetry
+
+`instrument_server()` adds distributed tracing spans and metrics to every RPC dispatch. Requires `pip install vgi-rpc[otel]`:
+
+```python
+from vgi_rpc import RpcServer
+from vgi_rpc.otel import OtelConfig, instrument_server
+
+server = RpcServer(MyService, MyServiceImpl())
+instrument_server(server)  # uses global TracerProvider / MeterProvider
+```
+
+Each span includes:
+
+| Attribute | Description |
+|---|---|
+| `rpc.system` | Always `"vgi_rpc"` |
+| `rpc.service` | Protocol class name |
+| `rpc.method` | Method name |
+| `rpc.vgi_rpc.method_type` | `"unary"` or `"stream"` |
+| `rpc.vgi_rpc.server_id` | Server instance identifier |
+| `rpc.vgi_rpc.input_batches` | Number of input batches |
+| `rpc.vgi_rpc.output_batches` | Number of output batches |
+| `rpc.vgi_rpc.input_rows` | Total input rows |
+| `rpc.vgi_rpc.output_rows` | Total output rows |
+| `rpc.vgi_rpc.input_bytes` | Approximate input bytes |
+| `rpc.vgi_rpc.output_bytes` | Approximate output bytes |
+
+Trace context propagates automatically: from contextvars (pipe transport) or W3C `traceparent`/`tracestate` headers (HTTP transport).
+
+Metrics recorded: `rpc.server.requests` (counter) and `rpc.server.duration` (histogram, seconds).
+
+To bridge stdlib access logs into OTel:
 
 ```python
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
@@ -898,6 +939,39 @@ DEBUG vgi_rpc.wire.response Read unary response: method=add, result_type=float
 ```
 
 All formatting is gated behind `isEnabledFor` guards — zero overhead when debug logging is disabled. You can selectively enable individual loggers (e.g. `vgi_rpc.wire.request` only) for targeted debugging.
+
+## Call Statistics
+
+Every RPC dispatch automatically tracks per-call I/O counters via `CallStatistics`:
+
+| Counter | Description |
+|---|---|
+| `input_batches` | Number of input batches read by the server |
+| `output_batches` | Number of output batches written by the server (includes log and error batches) |
+| `input_rows` | Total rows across all input batches |
+| `output_rows` | Total rows across all output batches |
+| `input_bytes` | Approximate logical bytes across all input batches |
+| `output_bytes` | Approximate logical bytes across all output batches |
+
+Statistics are **server-side only** — they measure what the server reads and writes, not client-side wire traffic.
+
+### What gets counted
+
+- **Unary calls**: 1 input batch (params) + 1+ output batches (result + any log messages)
+- **Producer streams**: tick batches count as input; each produced batch + logs count as output
+- **Exchange streams**: each client-sent batch counts as input; each response batch + logs count as output
+- **`__describe__`**: the describe response batch counts as output
+- **Errors**: partial stats up to the error point, including the error batch as output
+
+### Where statistics appear
+
+1. **Access log** — six extra fields on every `vgi_rpc.access` record (see [Logging](#server-side-logging))
+2. **OTel spans** — six span attributes when `instrument_server()` is active (see [OpenTelemetry](#opentelemetry))
+
+### Transport semantics
+
+- **Pipe/subprocess**: stats accumulate across the full call lifecycle
+- **HTTP**: stats are per-HTTP-request (inherent to the stateless model — init, exchange, and continuation are separate requests)
 
 ## Error Handling
 
