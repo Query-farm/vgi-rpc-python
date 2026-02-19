@@ -2,7 +2,7 @@
 
 Provides a built-in ``__describe__`` RPC method that returns machine-readable
 metadata about all methods exposed by an ``RpcServer``.  The response is a
-standard Arrow IPC batch with one row per method, plus schema-level metadata
+standard Arrow IPC batch with one row per method, plus batch ``custom_metadata``
 for protocol name, versions, and server identity.
 
 Server side
@@ -32,7 +32,14 @@ from typing import Annotated, Any, get_args, get_origin
 import pyarrow as pa
 from pyarrow import ipc
 
-from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY, SERVER_ID_KEY
+from vgi_rpc.metadata import (
+    DESCRIBE_VERSION_KEY,
+    PROTOCOL_NAME_KEY,
+    REQUEST_VERSION,
+    REQUEST_VERSION_KEY,
+    RPC_METHOD_KEY,
+    SERVER_ID_KEY,
+)
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     MethodType,
@@ -62,12 +69,6 @@ DESCRIBE_METHOD_NAME = "__describe__"
 
 DESCRIBE_VERSION = "2"
 """Introspection format version for forward compatibility."""
-
-PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"
-"""Schema-level metadata key for the protocol class name."""
-
-DESCRIBE_VERSION_KEY = b"vgi_rpc.describe_version"
-"""Schema-level metadata key for the introspection format version."""
 
 _DESCRIBE_FIELDS: list[pa.Field[pa.DataType]] = [
     pa.field("name", pa.utf8()),
@@ -255,11 +256,12 @@ def build_describe_batch(
     protocol_name: str,
     methods: Mapping[str, RpcMethodInfo],
     server_id: str,
-) -> pa.RecordBatch:
+) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
     """Build the ``__describe__`` response batch.
 
-    One row per method.  Schema-level metadata carries protocol name,
-    wire protocol version, describe format version, and server identity.
+    One row per method.  The returned ``pa.KeyValueMetadata`` carries
+    protocol name, wire protocol version, describe format version, and
+    server identity — callers pass it as ``custom_metadata`` when writing.
 
     Args:
         protocol_name: Name of the Protocol class.
@@ -267,7 +269,9 @@ def build_describe_batch(
         server_id: The server's identity string.
 
     Returns:
-        A ``pa.RecordBatch`` with ``_DESCRIBE_SCHEMA`` plus schema-level metadata.
+        A ``(pa.RecordBatch, pa.KeyValueMetadata)`` tuple.  The batch uses
+        the plain ``_DESCRIBE_SCHEMA`` (no schema-level metadata); the
+        metadata dict carries the four introspection keys.
 
     """
     names: list[str] = []
@@ -306,14 +310,15 @@ def build_describe_batch(
         else:
             header_schemas.append(None)
 
-    # Schema-level metadata
-    schema_metadata = {
-        PROTOCOL_NAME_KEY: protocol_name.encode(),
-        REQUEST_VERSION_KEY: REQUEST_VERSION,
-        DESCRIBE_VERSION_KEY: DESCRIBE_VERSION.encode(),
-        SERVER_ID_KEY: server_id.encode(),
-    }
-    schema_with_metadata = _DESCRIBE_SCHEMA.with_metadata(schema_metadata)
+    # Introspection metadata (written as batch custom_metadata)
+    custom_metadata = pa.KeyValueMetadata(
+        {
+            PROTOCOL_NAME_KEY: protocol_name.encode(),
+            REQUEST_VERSION_KEY: REQUEST_VERSION,
+            DESCRIBE_VERSION_KEY: DESCRIBE_VERSION.encode(),
+            SERVER_ID_KEY: server_id.encode(),
+        }
+    )
 
     batch = pa.RecordBatch.from_pydict(
         {
@@ -328,9 +333,9 @@ def build_describe_batch(
             "has_header": has_headers,
             "header_schema_ipc": header_schemas,
         },
-        schema=schema_with_metadata,
+        schema=_DESCRIBE_SCHEMA,
     )
-    return batch
+    return batch, custom_metadata
 
 
 # ---------------------------------------------------------------------------
@@ -338,28 +343,33 @@ def build_describe_batch(
 # ---------------------------------------------------------------------------
 
 
-def parse_describe_batch(batch: pa.RecordBatch) -> ServiceDescription:
+def parse_describe_batch(
+    batch: pa.RecordBatch,
+    custom_metadata: pa.KeyValueMetadata | None = None,
+) -> ServiceDescription:
     """Parse a ``__describe__`` response batch into a ``ServiceDescription``.
 
-    Reads schema-level metadata for protocol name, versions, and server
+    Reads batch ``custom_metadata`` for protocol name, versions, and server
     identity.  Each row is converted to a ``MethodDescription``.
 
     Args:
         batch: The response ``RecordBatch`` from a ``__describe__`` call.
+        custom_metadata: The batch custom metadata carrying protocol name,
+            versions, and server identity.
 
     Returns:
         A ``ServiceDescription`` with all method metadata.
 
     Raises:
-        ValueError: If required schema metadata is missing.
+        ValueError: If required metadata is missing.
 
     """
-    schema_md = batch.schema.metadata or {}
+    md: pa.KeyValueMetadata | dict[bytes, bytes] = custom_metadata if custom_metadata is not None else {}
 
-    protocol_name = schema_md.get(PROTOCOL_NAME_KEY, b"").decode()
-    request_version = schema_md.get(REQUEST_VERSION_KEY, b"").decode()
-    describe_version = schema_md.get(DESCRIBE_VERSION_KEY, b"").decode()
-    server_id = schema_md.get(SERVER_ID_KEY, b"").decode()
+    protocol_name = md.get(PROTOCOL_NAME_KEY, b"").decode()
+    request_version = md.get(REQUEST_VERSION_KEY, b"").decode()
+    describe_version = md.get(DESCRIBE_VERSION_KEY, b"").decode()
+    server_id = md.get(SERVER_ID_KEY, b"").decode()
 
     method_map: dict[str, MethodDescription] = {}
     for i in range(batch.num_rows):
@@ -451,12 +461,4 @@ def introspect(
             break
     _drain_stream(reader)
 
-    # Reconstruct the schema metadata from the reader's schema
-    # The batch itself doesn't carry schema-level metadata; the IPC stream schema does
-    schema_with_md = reader.schema.with_metadata(reader.schema.metadata or {})
-    batch_with_md = pa.RecordBatch.from_arrays(
-        [batch.column(i) for i in range(batch.num_columns)],
-        schema=schema_with_md,
-    )
-
-    return parse_describe_batch(batch_with_md)
+    return parse_describe_batch(batch, custom_metadata)

@@ -1029,7 +1029,7 @@ logging.getLogger("vgi_rpc.access").setLevel(logging.INFO)
 
 **What to verify for a non-Python client** (sending requests to a Python server):
 
-1. **Schema metadata** — The request IPC stream schema must include `vgi_rpc.method` in schema-level metadata. `wire.request` logs show the expected schema and metadata for every inbound request.
+1. **Batch metadata** — The request IPC stream schema must include `vgi_rpc.method` in batch-level custom metadata. `wire.request` logs show the expected schema and metadata for every inbound request.
 2. **Batch metadata** — Every request batch must include `vgi_rpc.request_version` set to `"1"` in batch-level custom metadata. Missing or wrong version triggers a `VersionError`.
 3. **Single-row batches** — Requests are always exactly one row. The column order must match the schema.
 4. **IPC stream framing** — Each request/response is a complete Arrow IPC stream (schema message + record batch messages + EOS continuation bytes `0xFFFFFFFF 0x00000000`). Multiple streams are written sequentially on the same byte stream.
@@ -1334,7 +1334,7 @@ Multiple Arrow IPC streams are written sequentially on the same byte stream. Eac
 Every request is a single-row Arrow IPC stream:
 
 ```
-[schema (with vgi_rpc.method in schema metadata)]
+[schema (with vgi_rpc.method in batch metadata)]
 [1-row batch (with vgi_rpc.request_version in batch metadata)]
 [EOS]
 ```
@@ -1345,7 +1345,7 @@ All framework metadata keys live in the `vgi_rpc.` namespace:
 
 | Key | Location | Description |
 |---|---|---|
-| `vgi_rpc.method` | schema metadata | Target RPC method name |
+| `vgi_rpc.method` | batch metadata | Target RPC method name |
 | `vgi_rpc.request_version` | batch metadata | Wire protocol version (`"1"`) |
 | `vgi_rpc.stream_state` | batch metadata | Serialized stream state (HTTP transport) |
 | `vgi_rpc.log_level` | batch metadata | Log level on zero-row log/error batches |
@@ -1355,8 +1355,8 @@ All framework metadata keys live in the `vgi_rpc.` namespace:
 | `vgi_rpc.location` | batch metadata | External storage URL for large batches |
 | `vgi_rpc.location.fetch_ms` | batch metadata | Fetch duration (diagnostics) |
 | `vgi_rpc.location.source` | batch metadata | Fetch source (diagnostics) |
-| `vgi_rpc.protocol_name` | schema metadata | Protocol class name (`__describe__` response) |
-| `vgi_rpc.describe_version` | schema metadata | Introspection format version (`__describe__` response) |
+| `vgi_rpc.protocol_name` | batch metadata | Protocol class name (`__describe__` response) |
+| `vgi_rpc.describe_version` | batch metadata | Introspection format version (`__describe__` response) |
 | `vgi_rpc.shm_offset` | batch metadata | Shared memory offset (SHM pointer batch) |
 | `vgi_rpc.shm_length` | batch metadata | Shared memory length (SHM pointer batch) |
 | `vgi_rpc.shm_source` | batch metadata | SHM source indicator (diagnostics) |

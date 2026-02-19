@@ -448,13 +448,7 @@ def http_introspect(
                 break
         _drain_stream(reader)
 
-        # Reconstruct batch with schema metadata from the IPC stream
-        schema_with_md = reader.schema.with_metadata(reader.schema.metadata or {})
-        batch_with_md = pa.RecordBatch.from_arrays(
-            [batch.column(i) for i in range(batch.num_columns)],
-            schema=schema_with_md,
-        )
-        return parse_describe_batch(batch_with_md)
+        return parse_describe_batch(batch, custom_metadata)
     finally:
         if own_client:
             client.close()

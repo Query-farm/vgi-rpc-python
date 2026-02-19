@@ -15,8 +15,6 @@ import pytest
 from vgi_rpc.http import _SyncTestClient, http_introspect, make_sync_client
 from vgi_rpc.introspect import (
     DESCRIBE_VERSION,
-    DESCRIBE_VERSION_KEY,
-    PROTOCOL_NAME_KEY,
     ServiceDescription,
     _safe_defaults_json,
     _type_name,
@@ -24,7 +22,7 @@ from vgi_rpc.introspect import (
     introspect,
     parse_describe_batch,
 )
-from vgi_rpc.metadata import REQUEST_VERSION_KEY, SERVER_ID_KEY
+from vgi_rpc.metadata import DESCRIBE_VERSION_KEY, PROTOCOL_NAME_KEY, REQUEST_VERSION_KEY, SERVER_ID_KEY
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
@@ -287,7 +285,7 @@ class TestBuildDescribeBatch:
     def test_correct_schema_and_row_count(self) -> None:
         """Batch has correct schema and one row per method."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
         assert batch.num_rows == len(methods)
         assert batch.schema.get_field_index("name") >= 0
         assert batch.schema.get_field_index("method_type") >= 0
@@ -298,21 +296,20 @@ class TestBuildDescribeBatch:
         assert batch.schema.get_field_index("param_types_json") >= 0
         assert batch.schema.get_field_index("param_defaults_json") >= 0
 
-    def test_schema_metadata(self) -> None:
-        """Schema-level metadata contains protocol name, versions, server_id."""
+    def test_batch_metadata(self) -> None:
+        """Batch custom_metadata contains protocol name, versions, server_id."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
-        md = batch.schema.metadata
-        assert md is not None
-        assert md[PROTOCOL_NAME_KEY] == b"TestProto"
-        assert md[REQUEST_VERSION_KEY] == b"1"
-        assert md[DESCRIBE_VERSION_KEY] == DESCRIBE_VERSION.encode()
-        assert md[SERVER_ID_KEY] == b"srv123"
+        batch, cm = build_describe_batch("TestProto", methods, "srv123")
+        assert batch.schema.metadata is None
+        assert cm[PROTOCOL_NAME_KEY] == b"TestProto"
+        assert cm[REQUEST_VERSION_KEY] == b"1"
+        assert cm[DESCRIBE_VERSION_KEY] == DESCRIBE_VERSION.encode()
+        assert cm[SERVER_ID_KEY] == b"srv123"
 
     def test_method_types_correct(self) -> None:
         """Method type column matches expected values."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
         rows = batch.to_pydict()
         name_to_type = dict(zip(rows["name"], rows["method_type"], strict=True))
         assert name_to_type["add"] == "unary"
@@ -322,7 +319,7 @@ class TestBuildDescribeBatch:
     def test_has_return_column(self) -> None:
         """has_return is True for unary returning value, False for None/streams."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
         rows = batch.to_pydict()
         name_to_ret = dict(zip(rows["name"], rows["has_return"], strict=True))
         assert name_to_ret["add"] is True
@@ -334,7 +331,7 @@ class TestBuildDescribeBatch:
     def test_schemas_deserializable(self) -> None:
         """params_schema_ipc and result_schema_ipc are valid Arrow schemas."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
         for i in range(batch.num_rows):
             ps_bytes: bytes = batch.column("params_schema_ipc")[i].as_py()
             rs_bytes: bytes = batch.column("result_schema_ipc")[i].as_py()
@@ -346,7 +343,7 @@ class TestBuildDescribeBatch:
     def test_param_types_json_correct(self) -> None:
         """param_types_json has correct type names."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
         rows = batch.to_pydict()
         name_to_pt = dict(zip(rows["name"], rows["param_types_json"], strict=True))
         add_types = json.loads(name_to_pt["add"])
@@ -357,7 +354,7 @@ class TestBuildDescribeBatch:
     def test_param_defaults_json(self) -> None:
         """param_defaults_json contains defaults for methods that have them."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
         rows = batch.to_pydict()
         name_to_pd = dict(zip(rows["name"], rows["param_defaults_json"], strict=True))
         greet_defaults = json.loads(name_to_pd["greet"])
@@ -368,13 +365,13 @@ class TestBuildDescribeBatch:
     def test_empty_protocol(self) -> None:
         """Empty protocol produces 0-row batch."""
         methods = rpc_methods(_EmptyProto)
-        batch = build_describe_batch("EmptyProto", methods, "srv123")
+        batch, _cm = build_describe_batch("EmptyProto", methods, "srv123")
         assert batch.num_rows == 0
 
     def test_doc_column(self) -> None:
         """Doc column contains method docstrings."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
         rows = batch.to_pydict()
         name_to_doc = dict(zip(rows["name"], rows["doc"], strict=True))
         assert name_to_doc["add"] == "Add two numbers."
@@ -392,8 +389,8 @@ class TestParseDescribeBatch:
     def test_round_trip(self) -> None:
         """Build then parse produces correct ServiceDescription."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("TestProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
 
         assert desc.protocol_name == "TestProto"
         assert desc.request_version == "1"
@@ -404,8 +401,8 @@ class TestParseDescribeBatch:
     def test_method_description_fields(self) -> None:
         """Parsed MethodDescription has correct fields."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("TestProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
 
         add = desc.methods["add"]
         assert add.name == "add"
@@ -417,8 +414,8 @@ class TestParseDescribeBatch:
     def test_schemas_preserved(self) -> None:
         """Params and result schemas are correctly round-tripped."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("TestProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
 
         add_info = methods["add"]
         add_desc = desc.methods["add"]
@@ -428,8 +425,8 @@ class TestParseDescribeBatch:
     def test_defaults_preserved(self) -> None:
         """Param defaults survive the round-trip."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("TestProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
 
         greet = desc.methods["greet"]
         assert greet.param_defaults == {"greeting": "Hello"}
@@ -437,8 +434,8 @@ class TestParseDescribeBatch:
     def test_empty_protocol_round_trip(self) -> None:
         """Empty protocol round-trips correctly."""
         methods = rpc_methods(_EmptyProto)
-        batch = build_describe_batch("EmptyProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("EmptyProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
 
         assert desc.protocol_name == "EmptyProto"
         assert len(desc.methods) == 0
@@ -455,8 +452,8 @@ class TestServiceDescriptionStr:
     def test_readable_output(self) -> None:
         """__str__ produces human-readable output."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("TestProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
         text = str(desc)
 
         assert "TestProto" in text
@@ -468,8 +465,8 @@ class TestServiceDescriptionStr:
     def test_doc_in_output(self) -> None:
         """Methods with docs show doc line in __str__."""
         methods = rpc_methods(_TestProto)
-        batch = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("TestProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
         text = str(desc)
         # "noop" has no return but has a doc — tests the doc branch for non-returning methods
         assert "doc: Do nothing." in text
@@ -501,8 +498,8 @@ class TestServiceDescriptionStr:
     def test_empty_protocol_str(self) -> None:
         """Empty protocol produces minimal output."""
         methods = rpc_methods(_EmptyProto)
-        batch = build_describe_batch("EmptyProto", methods, "srv123")
-        desc = parse_describe_batch(batch)
+        batch, cm = build_describe_batch("EmptyProto", methods, "srv123")
+        desc = parse_describe_batch(batch, cm)
         text = str(desc)
         assert "EmptyProto" in text
 

@@ -12,12 +12,14 @@ from __future__ import annotations
 import pyarrow as pa
 
 __all__ = [
+    "DESCRIBE_VERSION_KEY",
     "LOCATION_FETCH_MS_KEY",
     "LOCATION_KEY",
     "LOCATION_SOURCE_KEY",
     "LOG_EXTRA_KEY",
     "LOG_LEVEL_KEY",
     "LOG_MESSAGE_KEY",
+    "PROTOCOL_NAME_KEY",
     "REQUEST_ID_KEY",
     "REQUEST_VERSION",
     "REQUEST_VERSION_KEY",
@@ -66,6 +68,10 @@ SHM_SOURCE_KEY = b"vgi_rpc.shm_source"
 # the segment itself at session level, distinct from per-batch SHM_OFFSET/LENGTH)
 SHM_SEGMENT_NAME_KEY = b"vgi_rpc.shm_segment_name"
 SHM_SEGMENT_SIZE_KEY = b"vgi_rpc.shm_segment_size"
+
+# Introspection (__describe__ response batch metadata)
+PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"
+DESCRIBE_VERSION_KEY = b"vgi_rpc.describe_version"
 
 # W3C trace context propagation (on request batch custom metadata)
 TRACEPARENT_KEY = b"traceparent"

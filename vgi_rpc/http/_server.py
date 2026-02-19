@@ -363,7 +363,7 @@ class _HttpRpcApp:
                 _record_output(describe_batch)
                 resp_buf = BytesIO()
                 with ipc.new_stream(resp_buf, describe_batch.schema) as writer:
-                    writer.write_batch(describe_batch)
+                    writer.write_batch(describe_batch, custom_metadata=self._server._describe_metadata)
                 resp_buf.seek(0)
                 auth, transport_metadata = _get_auth_and_metadata()
                 _emit_access_log(

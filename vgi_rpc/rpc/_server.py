@@ -176,6 +176,7 @@ class RpcServer:
     __slots__ = (
         "_ctx_methods",
         "_describe_batch",
+        "_describe_metadata",
         "_dispatch_hook",
         "_external_config",
         "_impl",
@@ -220,7 +221,9 @@ class RpcServer:
         if enable_describe:
             from vgi_rpc.introspect import DESCRIBE_METHOD_NAME, build_describe_batch
 
-            self._describe_batch: pa.RecordBatch | None = build_describe_batch(
+            self._describe_batch: pa.RecordBatch | None
+            self._describe_metadata: pa.KeyValueMetadata | None
+            self._describe_batch, self._describe_metadata = build_describe_batch(
                 protocol.__name__, self._methods, self._server_id
             )
             # Register __describe__ as a synthetic unary method so normal dispatch handles it.
@@ -238,6 +241,7 @@ class RpcServer:
             }
         else:
             self._describe_batch = None
+            self._describe_metadata = None
 
         # Detect which impl methods accept a `ctx` parameter.
         self._ctx_methods: frozenset[str] = frozenset(
@@ -408,7 +412,7 @@ class RpcServer:
         if self._describe_batch is not None and info.name == "__describe__":
             _record_output(self._describe_batch)
             with ipc.new_stream(transport.writer, self._describe_batch.schema) as writer:
-                writer.write_batch(self._describe_batch)
+                writer.write_batch(self._describe_batch, custom_metadata=self._describe_metadata)
             auth, transport_md = _get_auth_and_metadata()
             _emit_access_log(
                 self.protocol_name,
