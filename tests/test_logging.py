@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import textwrap
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol, cast
 
 import pyarrow as pa
 import pytest
@@ -25,7 +26,9 @@ from vgi_rpc.rpc import (
     _emit_access_log,
     connect,
     serve_pipe,
+    serve_stdio,
 )
+from vgi_rpc.rpc._transport import _drain_stderr
 
 
 def _extra(record: logging.LogRecord, key: str) -> Any:
@@ -953,3 +956,195 @@ class TestHttpServerStreamAccessLog:
         record = access_records[0]
         assert _extra(record, "status") == "error"
         assert _extra(record, "error_type") == "RuntimeError"
+
+
+# ---------------------------------------------------------------------------
+# _drain_stderr edge-case tests
+# ---------------------------------------------------------------------------
+
+
+class TestDrainStderr:
+    """Tests for _drain_stderr error-handling paths."""
+
+    def test_oserror_during_iteration(self, caplog: pytest.LogCaptureFixture) -> None:
+        """OSError while reading lines should be silently caught."""
+        pipe = _FaultyPipe(OSError("fd closed"))
+        _drain_stderr(cast(BinaryIO, pipe), logging.getLogger("test.drain"))
+
+    def test_valueerror_during_iteration(self) -> None:
+        """ValueError while reading lines should be silently caught."""
+        pipe = _FaultyPipe(ValueError("I/O on closed file"))
+        _drain_stderr(cast(BinaryIO, pipe), logging.getLogger("test.drain"))
+
+    def test_unexpected_exception_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Unexpected exceptions should be logged at DEBUG level."""
+        pipe = _FaultyPipe(RuntimeError("unexpected"))
+        with caplog.at_level(logging.DEBUG, logger="vgi_rpc"):
+            _drain_stderr(cast(BinaryIO, pipe), logging.getLogger("test.drain"))
+
+        debug_records = [r for r in caplog.records if r.name == "vgi_rpc.rpc" and "Unexpected error" in r.message]
+        assert len(debug_records) == 1
+
+
+class _FaultyPipe:
+    """Fake pipe whose iterator raises a given exception."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+        self._closed = False
+
+    def __iter__(self) -> _FaultyPipe:
+        return self
+
+    def __next__(self) -> bytes:
+        raise self._exc
+
+    def close(self) -> None:
+        self._closed = True
+
+
+# ---------------------------------------------------------------------------
+# SubprocessTransport.proc and close() edge-case tests
+# ---------------------------------------------------------------------------
+
+
+class TestSubprocessTransportEdgeCases:
+    """Tests for SubprocessTransport edge cases."""
+
+    def test_proc_property_returns_popen(self) -> None:
+        """Verify proc property returns the underlying Popen object."""
+        script = "import sys; sys.stdin.buffer.read()"
+        transport = SubprocessTransport([sys.executable, "-c", script])
+        try:
+            assert transport.proc is not None
+            assert transport.proc.pid > 0
+        finally:
+            transport.close()
+
+    def test_close_timeout_kills_process(self) -> None:
+        """Kill the process when it doesn't exit within timeout."""
+        import subprocess
+        from unittest.mock import patch
+
+        # Spawn a process that hangs
+        script = "import time; time.sleep(3600)"
+        transport = SubprocessTransport([sys.executable, "-c", script])
+
+        # Make wait() always raise TimeoutExpired so close() hits the kill path
+        original_wait = transport._proc.wait
+
+        def fake_wait(timeout: float | None = None) -> int:
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(cmd="test", timeout=timeout)
+            return original_wait()
+
+        with patch.object(transport._proc, "wait", side_effect=fake_wait):
+            transport.close()
+
+        assert transport._proc.returncode is not None
+
+    def test_close_idempotent(self) -> None:
+        """Calling close() twice should be safe."""
+        script = ""
+        transport = SubprocessTransport([sys.executable, "-c", script])
+        transport.close()
+        transport.close()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# serve_stdio tests
+# ---------------------------------------------------------------------------
+
+
+def _make_stdio_fixtures(*, tty: bool) -> tuple[Any, Any, Any]:
+    """Create fake stdin/stdout and a patched fdopen for serve_stdio tests.
+
+    Returns (fake_stdin, fake_stdout, patched_fdopen_func).
+    The caller must close the underlying pipe fds after use.
+    """
+    r_fd, w_fd = os.pipe()
+    r2_fd, w2_fd = os.pipe()
+    os.close(w_fd)  # EOF on reader → server sees end-of-stream
+
+    reader = os.fdopen(r_fd, "rb")
+    writer = os.fdopen(w2_fd, "wb", buffering=0)
+
+    def _isatty(self: Any) -> bool:
+        return tty
+
+    fake_stdin = cast(
+        Any,
+        type("FakeStdin", (), {"isatty": _isatty, "fileno": lambda self: reader.fileno()})(),
+    )
+    fake_stdout = cast(
+        Any,
+        type("FakeStdout", (), {"isatty": _isatty, "fileno": lambda self: writer.fileno()})(),
+    )
+
+    call_count = 0
+
+    def patched_fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return reader
+        return writer
+
+    # Stash references for cleanup
+    fake_stdin._cleanup = (r2_fd, reader, writer)
+    return fake_stdin, fake_stdout, patched_fdopen
+
+
+class TestServeStdio:
+    """Tests for serve_stdio() entry point."""
+
+    def test_tty_warning(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Emit a warning when stdin/stdout is a terminal."""
+        from unittest.mock import patch
+
+        server = RpcServer(LoggingService, LoggingServiceImpl())
+        fake_stdin, fake_stdout, patched_fdopen = _make_stdio_fixtures(tty=True)
+
+        with (
+            patch("sys.stdin", fake_stdin),
+            patch("sys.stdout", fake_stdout),
+            patch("os.fdopen", patched_fdopen),
+        ):
+            serve_stdio(server)
+
+        captured = capsys.readouterr()
+        assert "not intended to be run interactively" in captured.err
+
+        r2_fd, reader, writer = fake_stdin._cleanup
+        os.close(r2_fd)
+        reader.close()
+        writer.close()
+
+    def test_non_tty_with_debug_logging(self) -> None:
+        """Exercise the wire debug log path on a non-tty."""
+        from unittest.mock import patch
+
+        from vgi_rpc.rpc._debug import wire_transport_logger
+
+        server = RpcServer(LoggingService, LoggingServiceImpl())
+        fake_stdin, fake_stdout, patched_fdopen = _make_stdio_fixtures(tty=False)
+
+        old_level = wire_transport_logger.level
+        wire_transport_logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        wire_transport_logger.addHandler(handler)
+        try:
+            with (
+                patch("sys.stdin", fake_stdin),
+                patch("sys.stdout", fake_stdout),
+                patch("os.fdopen", patched_fdopen),
+            ):
+                serve_stdio(server)
+        finally:
+            wire_transport_logger.setLevel(old_level)
+            wire_transport_logger.removeHandler(handler)
+
+        r2_fd, reader, writer = fake_stdin._cleanup
+        os.close(r2_fd)
+        reader.close()
+        writer.close()
