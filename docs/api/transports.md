@@ -8,6 +8,7 @@ All transports implement the `RpcTransport` protocol (a readable + writable byte
 |---|---|---|---|
 | `serve_pipe` | Tests, demos, embedded | Lowest (in-process) | One line |
 | `connect` / `SubprocessTransport` | Isolated workers, CLI tools | Low (stdin/stdout) | Spawn a child process |
+| `serve_unix` / `unix_connect` | Local IPC, long-lived services | Low (Unix socket) | Socket path |
 | `ShmPipeTransport` | Co-located processes, large batches | Lowest (zero-copy) | Shared memory segment |
 | `http_connect` / `make_wsgi_app` | Network services, browser clients | Higher (HTTP) | WSGI server + client |
 
@@ -31,6 +32,44 @@ run_server(MyService, MyServiceImpl())
 from vgi_rpc import connect
 with connect(MyService, ["python", "worker.py"]) as proxy:
     result = proxy.add(a=1.0, b=2.0)
+```
+
+### Unix domain socket
+
+Low-latency local IPC without subprocess management. The server listens on a socket path; clients connect by path. Not available on Windows.
+
+Server entry point:
+
+```python
+# worker.py
+from vgi_rpc.rpc import RpcServer, serve_unix
+
+server = RpcServer(MyService, MyServiceImpl())
+serve_unix(server, "/tmp/my-service.sock")
+```
+
+Client:
+
+```python
+from vgi_rpc.rpc import unix_connect
+
+with unix_connect(MyService, "/tmp/my-service.sock") as proxy:
+    result = proxy.add(a=1.0, b=2.0)
+```
+
+For in-process testing, `serve_unix_pipe` starts the server on a background thread with an auto-generated socket path:
+
+```python
+from vgi_rpc.rpc import serve_unix_pipe
+
+with serve_unix_pipe(MyService, MyServiceImpl()) as proxy:
+    result = proxy.add(a=1.0, b=2.0)
+```
+
+Use `threaded=True` on `serve_unix` to handle multiple concurrent clients (each connection gets its own thread):
+
+```python
+serve_unix(server, "/tmp/my-service.sock", threaded=True)
 ```
 
 ### Shared memory
@@ -72,3 +111,9 @@ Falls back to normal pipe IPC for batches that exceed the segment size.
 ::: vgi_rpc.rpc.make_pipe_pair
 
 ::: vgi_rpc.rpc.serve_stdio
+
+::: vgi_rpc.rpc.serve_unix
+
+::: vgi_rpc.rpc.unix_connect
+
+::: vgi_rpc.rpc.serve_unix_pipe
