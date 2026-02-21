@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -312,3 +313,177 @@ def serve_stdio(server: RpcServer) -> None:
         )
     transport = PipeTransport(reader, writer)
     server.serve(transport)
+
+
+# ---------------------------------------------------------------------------
+# UnixTransport + make_unix_pair + serve_unix
+# ---------------------------------------------------------------------------
+
+
+class UnixTransport:
+    """Transport backed by a connected Unix domain socket.
+
+    The reader is buffered (default ``makefile`` buffering) so that
+    ``read(n)`` returns exactly *n* bytes — required by Arrow IPC.
+    The writer is unbuffered (``buffering=0``) so data is flushed
+    immediately, matching the pattern used by ``PipeTransport``.
+    """
+
+    __slots__ = ("_reader", "_sock", "_writer")
+
+    def __init__(self, sock: socket.socket) -> None:
+        """Initialize from a connected AF_UNIX socket."""
+        self._sock = sock
+        self._reader: IOBase = cast(IOBase, sock.makefile("rb"))
+        self._writer: IOBase = cast(IOBase, sock.makefile("wb", buffering=0))
+
+    @property
+    def reader(self) -> IOBase:
+        """Readable binary stream."""
+        return self._reader
+
+    @property
+    def writer(self) -> IOBase:
+        """Writable binary stream."""
+        return self._writer
+
+    def close(self) -> None:
+        """Close the reader, writer, and underlying socket."""
+        self._reader.close()
+        self._writer.close()
+        self._sock.close()
+
+
+def make_unix_pair() -> tuple[UnixTransport, UnixTransport]:
+    """Create connected client/server transports using ``socketpair()``.
+
+    Returns ``(client_transport, server_transport)``.
+    """
+    s1, s2 = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    if wire_transport_logger.isEnabledFor(logging.DEBUG):
+        wire_transport_logger.debug(
+            "make_unix_pair: fd1=%d, fd2=%d",
+            s1.fileno(),
+            s2.fileno(),
+        )
+    return UnixTransport(s1), UnixTransport(s2)
+
+
+def serve_unix(
+    server: RpcServer,
+    path: str,
+    *,
+    threaded: bool = False,
+    max_connections: int | None = None,
+) -> None:
+    """Serve RPC on a Unix domain socket, accepting connections in a loop.
+
+    Binds to *path*, listens, and accepts connections.  By default connections
+    are handled sequentially (one at a time).  With ``threaded=True`` each
+    accepted connection is served in its own daemon thread, allowing multiple
+    clients to use the same socket concurrently.
+
+    .. note::
+
+       When ``threaded=True`` the *implementation* object passed to
+       :class:`RpcServer` is shared across threads.  If it carries mutable
+       state the caller must ensure thread-safety (e.g. via locks).  Per-
+       connection stream state (:class:`StreamState`) is always isolated.
+
+    Args:
+        server: The RPC server to dispatch requests.
+        path: Filesystem path for the Unix domain socket.
+        threaded: When ``True``, serve each connection in a separate thread.
+        max_connections: Maximum number of connections served simultaneously.
+            Only meaningful when *threaded* is ``True``; ignored otherwise.
+            Excess connections are accepted but queued until a slot is free.
+            ``None`` means unlimited.
+
+    """
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+    sock.bind(path)
+    sock.listen(128 if threaded else 1)
+    if wire_transport_logger.isEnabledFor(logging.DEBUG):
+        wire_transport_logger.debug(
+            "serve_unix: server_id=%s, protocol=%s, path=%s, threaded=%s",
+            server.server_id,
+            server.protocol_name,
+            path,
+            threaded,
+        )
+    try:
+        if threaded:
+            _serve_unix_threaded(server, sock, max_connections)
+        else:
+            _serve_unix_sequential(server, sock)
+    finally:
+        sock.close()
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+
+
+def _serve_unix_sequential(server: RpcServer, sock: socket.socket) -> None:
+    """Accept and serve connections one at a time."""
+    while True:
+        try:
+            conn, _ = sock.accept()
+        except OSError:
+            break
+        transport = UnixTransport(conn)
+        try:
+            server.serve(transport)
+        except Exception:
+            _logger.debug("Error serving Unix connection", exc_info=True)
+        finally:
+            transport.close()
+
+
+def _serve_unix_threaded(
+    server: RpcServer,
+    sock: socket.socket,
+    max_connections: int | None,
+) -> None:
+    """Accept connections and serve each in a daemon thread."""
+    semaphore: threading.Semaphore | None = None
+    if max_connections is not None:
+        semaphore = threading.Semaphore(max_connections)
+    active: set[threading.Thread] = set()
+    lock = threading.Lock()
+
+    def _handle(conn: socket.socket) -> None:
+        if semaphore is not None:
+            semaphore.acquire()
+        transport = UnixTransport(conn)
+        try:
+            server.serve(transport)
+        except Exception:
+            _logger.debug("Error serving Unix connection", exc_info=True)
+        finally:
+            transport.close()
+            if semaphore is not None:
+                semaphore.release()
+            with lock:
+                active.discard(threading.current_thread())
+
+    try:
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                break
+            t = threading.Thread(
+                target=_handle,
+                args=(conn,),
+                daemon=True,
+                name=f"vgi-unix-{conn.fileno()}",
+            )
+            with lock:
+                active.add(t)
+            t.start()
+    finally:
+        with lock:
+            snapshot = list(active)
+        for t in snapshot:
+            t.join(timeout=10)

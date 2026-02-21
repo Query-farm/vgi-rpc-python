@@ -37,8 +37,10 @@ from vgi_rpc.rpc import (
     AnnotatedBatch,
     MethodType,
     RpcError,
+    RpcTransport,
     StreamSession,
     SubprocessTransport,
+    UnixTransport,
     _drain_stream,
     _read_batch_with_log_check,
     _read_raw_stream_header,
@@ -120,6 +122,7 @@ class _CliConfig:
 
     url: str | None = None
     cmd: str | None = None
+    unix: str | None = None
     prefix: str = "/vgi"
     format: OutputFormat = OutputFormat.auto
     output: str | None = None
@@ -196,6 +199,7 @@ def _main(
     ctx: typer.Context,
     url: Annotated[str | None, typer.Option("--url", "-u", help="HTTP base URL")] = None,
     cmd: Annotated[str | None, typer.Option("--cmd", "-c", help="Subprocess command")] = None,
+    unix: Annotated[str | None, typer.Option("--unix", help="Unix domain socket path")] = None,
     prefix: Annotated[str, typer.Option("--prefix", "-p", help="URL path prefix")] = "/vgi",
     fmt: Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format")] = OutputFormat.auto,
     output: Annotated[str | None, typer.Option("--output", "-o", help="Output file path (default: stdout)")] = None,
@@ -211,8 +215,9 @@ def _main(
     ] = False,
 ) -> None:
     """Configure transport and output options."""
-    if url and cmd:
-        raise typer.BadParameter("--url and --cmd are mutually exclusive")
+    given = sum(1 for opt in (url, cmd, unix) if opt)
+    if given > 1:
+        raise typer.BadParameter("--url, --cmd, and --unix are mutually exclusive")
 
     # Resolve effective log level: --debug overrides --log-level
     effective_level: LogLevel | None = log_level
@@ -222,6 +227,7 @@ def _main(
     config = _CliConfig(
         url=url,
         cmd=cmd,
+        unix=unix,
         prefix=prefix,
         format=fmt,
         output=output,
@@ -390,8 +396,8 @@ def _print_json(data: object, *, pretty: bool = False) -> None:
 
 def _ensure_transport(config: _CliConfig) -> None:
     """Validate that a transport option was given."""
-    if not config.url and not config.cmd:
-        raise typer.BadParameter("Either --url or --cmd is required")
+    if not config.url and not config.cmd and not config.unix:
+        raise typer.BadParameter("Either --url, --cmd, or --unix is required")
 
 
 def _get_on_log(config: _CliConfig) -> Callable[[Message], None] | None:
@@ -728,6 +734,25 @@ def _introspect_pipe(cmd: str) -> tuple[ServiceDescription, SubprocessTransport]
     return desc, transport
 
 
+def _introspect_unix(path: str) -> tuple[ServiceDescription, UnixTransport]:
+    """Introspect a Unix socket transport, returning both description and open transport."""
+    import socket as _socket
+
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        sock.connect(path)
+    except BaseException:
+        sock.close()
+        raise
+    transport = UnixTransport(sock)
+    try:
+        desc = introspect(transport)
+    except BaseException:
+        transport.close()
+        raise
+    return desc, transport
+
+
 def _introspect_http(url: str, prefix: str) -> ServiceDescription:
     """Introspect an HTTP transport."""
     from vgi_rpc.http import http_introspect
@@ -737,18 +762,20 @@ def _introspect_http(url: str, prefix: str) -> ServiceDescription:
 
 def _get_service_description(
     config: _CliConfig,
-) -> tuple[ServiceDescription, SubprocessTransport | None]:
+) -> tuple[ServiceDescription, RpcTransport | None]:
     """Get ServiceDescription from configured transport.
 
     Returns:
         A tuple of (description, transport). The transport is non-None only
-        for pipe/subprocess transports, where it is left open for reuse by
-        the caller (who must close it).
+        for pipe/subprocess/unix transports, where it is left open for reuse
+        by the caller (who must close it).
 
     """
     _ensure_transport(config)
     if config.cmd:
         return _introspect_pipe(config.cmd)
+    if config.unix:
+        return _introspect_unix(config.unix)
     assert config.url is not None
     return _introspect_http(config.url, config.prefix), None
 
@@ -762,7 +789,7 @@ def _get_service_description(
 def describe(ctx: typer.Context) -> None:
     """Introspect a vgi-rpc service and show its methods."""
     config: _CliConfig = ctx.obj
-    transport: SubprocessTransport | None = None
+    transport: RpcTransport | None = None
     try:
         desc, transport = _get_service_description(config)
     except RpcError as e:
@@ -834,13 +861,13 @@ def describe(ctx: typer.Context) -> None:
 
 
 def _call_unary_pipe(
-    transport: SubprocessTransport,
+    transport: RpcTransport,
     method: MethodDescription,
     kwargs: dict[str, object],
     on_log: Callable[[Message], None] | None,
     config: _CliConfig,
 ) -> None:
-    """Call a unary method over pipe transport."""
+    """Call a unary method over pipe/unix transport."""
     _write_request(transport.writer, method.name, method.params_schema, kwargs)
     reader = ValidatedReader(ipc.open_stream(transport.reader), IpcValidation.FULL)
     try:
@@ -853,13 +880,13 @@ def _call_unary_pipe(
 
 
 def _call_stream_pipe(
-    transport: SubprocessTransport,
+    transport: RpcTransport,
     method: MethodDescription,
     kwargs: dict[str, object],
     on_log: Callable[[Message], None] | None,
     config: _CliConfig,
 ) -> None:
-    """Call a stream method over pipe transport."""
+    """Call a stream method over pipe/unix transport."""
     _write_request(transport.writer, method.name, method.params_schema, kwargs)
     header_batch: pa.RecordBatch | None = None
     if method.has_header:
@@ -981,7 +1008,7 @@ def call(
     if no_stdin:
         config.no_stdin = True
 
-    transport: SubprocessTransport | None = None
+    transport: RpcTransport | None = None
     try:
         desc, transport = _get_service_description(config)
     except RpcError as e:
@@ -1023,7 +1050,7 @@ def call(
     on_log = _get_on_log(config)
 
     try:
-        if config.cmd:
+        if config.cmd or config.unix:
             # Reuse the transport from introspect for the call
             assert transport is not None
             if md.method_type == MethodType.UNARY:

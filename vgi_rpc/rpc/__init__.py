@@ -119,9 +119,12 @@ from vgi_rpc.rpc._transport import (
     ShmPipeTransport,
     StderrMode,
     SubprocessTransport,
+    UnixTransport,
     _drain_stderr,
     make_pipe_pair,
+    make_unix_pair,
     serve_stdio,
+    serve_unix,
 )
 from vgi_rpc.rpc._types import (
     _TICK_BATCH,
@@ -190,14 +193,19 @@ __all__ = [
     "StreamSession",
     "StreamState",
     "SubprocessTransport",
+    "UnixTransport",
     "VersionError",
     "connect",
     "describe_rpc",
     "make_pipe_pair",
+    "make_unix_pair",
     "rpc_methods",
     "run_server",
     "serve_pipe",
     "serve_stdio",
+    "serve_unix",
+    "serve_unix_pipe",
+    "unix_connect",
     # Internal — used by vgi_rpc.http, vgi_rpc.introspect, vgi_rpc.external, and tests
     "HookToken",
     "_ANONYMOUS",
@@ -360,6 +368,100 @@ def serve_pipe[P](
 
     """
     client_transport, server_transport = make_pipe_pair()
+    server = RpcServer(
+        protocol,
+        implementation,
+        external_location=external_location,
+        ipc_validation=ipc_validation if ipc_validation is not None else IpcValidation.FULL,
+    )
+    thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+    thread.start()
+    try:
+        with RpcConnection(
+            protocol,
+            client_transport,
+            on_log=on_log,
+            external_location=external_location,
+            ipc_validation=ipc_validation if ipc_validation is not None else IpcValidation.FULL,
+        ) as proxy:
+            yield proxy
+    finally:
+        client_transport.close()
+        thread.join(timeout=5)
+        server_transport.close()
+
+
+@contextlib.contextmanager
+def unix_connect[P](
+    protocol: type[P],
+    path: str,
+    *,
+    on_log: Callable[[Message], None] | None = None,
+    external_location: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
+) -> Iterator[P]:
+    """Connect to a Unix domain socket RPC server and yield a typed proxy.
+
+    Args:
+        protocol: The Protocol class defining the RPC interface.
+        path: Filesystem path of the Unix domain socket.
+        on_log: Optional callback for log messages from the server.
+        external_location: Optional ExternalLocation configuration for
+            resolving and producing externalized batches.
+        ipc_validation: Validation level for incoming IPC batches.
+
+    Yields:
+        A typed RPC proxy supporting all methods defined on *protocol*.
+
+    """
+    import socket as _socket
+
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        sock.connect(path)
+    except BaseException:
+        sock.close()
+        raise
+    transport = UnixTransport(sock)
+    try:
+        with RpcConnection(
+            protocol, transport, on_log=on_log, external_location=external_location, ipc_validation=ipc_validation
+        ) as proxy:
+            yield proxy
+    finally:
+        transport.close()
+
+
+@contextlib.contextmanager
+def serve_unix_pipe[P](
+    protocol: type[P],
+    implementation: object,
+    *,
+    on_log: Callable[[Message], None] | None = None,
+    external_location: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation | None = None,
+) -> Iterator[P]:
+    """Start an in-process Unix socket server and yield a typed client proxy.
+
+    Like :func:`serve_pipe` but uses a Unix ``socketpair()`` instead of
+    ``os.pipe()`` pairs.  Useful for tests and demos — no subprocess needed.
+    A background thread runs ``RpcServer.serve()`` on the server side.
+
+    Args:
+        protocol: The Protocol class defining the RPC interface.
+        implementation: The implementation object.
+        on_log: Optional callback for log messages from the server.
+        external_location: Optional ExternalLocation configuration for
+            resolving and producing externalized batches.
+        ipc_validation: Validation level for incoming IPC batches.
+            When ``None`` (the default), both components use
+            ``IpcValidation.FULL``.
+
+    Yields:
+        A typed RPC proxy supporting all methods defined on *protocol*.
+
+    """
+    client_transport, server_transport = make_unix_pair()
     server = RpcServer(
         protocol,
         implementation,

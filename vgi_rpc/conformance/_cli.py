@@ -6,6 +6,7 @@ Usage::
 
     vgi-rpc-conformance --pipe              # stdio pipe transport (default)
     vgi-rpc-conformance --http [PORT]       # HTTP via waitress
+    vgi-rpc-conformance --unix /tmp/s.sock  # Unix domain socket
     vgi-rpc-conformance --describe          # Enable __describe__ introspection
 
 """
@@ -26,16 +27,46 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--pipe", action="store_true", default=True, help="Serve over stdin/stdout pipe (default)")
     group.add_argument("--http", nargs="?", type=int, const=0, default=None, metavar="PORT", help="Serve over HTTP")
+    group.add_argument("--unix", metavar="PATH", help="Serve over a Unix domain socket")
     parser.add_argument("--describe", action="store_true", help="Enable __describe__ introspection")
+    parser.add_argument("--threaded", action="store_true", help="Accept connections concurrently (unix only)")
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max concurrent connections (requires --threaded)",
+    )
     args = parser.parse_args()
+
+    if args.threaded and args.unix is None:
+        parser.error("--threaded requires --unix")
+    if args.max_connections is not None and not args.threaded:
+        parser.error("--max-connections requires --threaded")
 
     impl = ConformanceServiceImpl()
     server = RpcServer(ConformanceService, impl, enable_describe=args.describe)
 
-    if args.http is not None:
+    if args.unix is not None:
+        _serve_unix(server, args.unix, threaded=args.threaded, max_connections=args.max_connections)
+    elif args.http is not None:
         _serve_http(server, args.http)
     else:
         run_server(server)
+
+
+def _serve_unix(
+    server: RpcServer,
+    path: str,
+    *,
+    threaded: bool = False,
+    max_connections: int | None = None,
+) -> None:
+    """Start a Unix domain socket server with the given RpcServer."""
+    from vgi_rpc.rpc import serve_unix
+
+    print(f"UNIX:{path}", flush=True)
+    serve_unix(server, path, threaded=threaded, max_connections=max_connections)
 
 
 def _serve_http(server: RpcServer, port: int) -> None:

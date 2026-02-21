@@ -28,6 +28,8 @@ _DESCRIBE_WORKER = str(Path(__file__).parent / "serve_conformance_describe.py")
 _PIPE_CMD = f"{sys.executable} {_DESCRIBE_WORKER}"
 
 _DESCRIBE_HTTP_WORKER = str(Path(__file__).parent / "serve_conformance_describe_http.py")
+_DESCRIBE_UNIX_WORKER = str(Path(__file__).parent / "serve_conformance_describe_unix.py")
+_DESCRIBE_UNIX_THREADED_WORKER = str(Path(__file__).parent / "serve_conformance_describe_unix_threaded.py")
 
 
 # ---------------------------------------------------------------------------
@@ -57,16 +59,64 @@ def conformance_describe_http_port() -> Iterator[int]:
         proc.wait(timeout=5)
 
 
+@pytest.fixture(scope="module")
+def conformance_describe_unix_path() -> Iterator[str]:
+    """Spawn a Unix socket server with describe enabled for the conformance service."""
+    from tests.conftest import _short_unix_path, _wait_for_unix
+
+    path = _short_unix_path("cli-conf")
+    proc = subprocess.Popen(
+        [sys.executable, _DESCRIBE_UNIX_WORKER, path],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
+        _wait_for_unix(path)
+        yield path
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def conformance_describe_unix_threaded_path() -> Iterator[str]:
+    """Spawn a threaded Unix socket server with describe enabled for the conformance service."""
+    from tests.conftest import _short_unix_path, _wait_for_unix
+
+    path = _short_unix_path("cli-ct")
+    proc = subprocess.Popen(
+        [sys.executable, _DESCRIBE_UNIX_THREADED_WORKER, path],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
+        _wait_for_unix(path)
+        yield path
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
 # ---------------------------------------------------------------------------
 # Parametrized transport fixture
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(params=["pipe", "http"])
+@pytest.fixture(params=["pipe", "http", "unix", "unix_threaded"])
 def transport_args(request: pytest.FixtureRequest) -> list[str]:
-    """Return CLI args that select a transport (``--cmd …`` or ``--url …``)."""
+    """Return CLI args that select a transport (``--cmd …``, ``--url …``, or ``--unix …``)."""
     if request.param == "pipe":
         return ["--cmd", _PIPE_CMD]
+    elif request.param == "unix":
+        path: str = request.getfixturevalue("conformance_describe_unix_path")
+        return ["--unix", path]
+    elif request.param == "unix_threaded":
+        path = request.getfixturevalue("conformance_describe_unix_threaded_path")
+        return ["--unix", path]
     port: int = request.getfixturevalue("conformance_describe_http_port")
     return ["--url", f"http://127.0.0.1:{port}"]
 

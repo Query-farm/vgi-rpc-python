@@ -7,6 +7,7 @@ Usage::
 
     vgi-rpc-test --cmd "./my-server"
     vgi-rpc-test --url http://localhost:8000
+    vgi-rpc-test --unix /tmp/server.sock
     vgi-rpc-test --cmd "./my-server" --shm 4194304
     vgi-rpc-test --cmd "./my-server" --filter "scalar*,void*"
     vgi-rpc-test --list
@@ -239,6 +240,18 @@ def _open_http_transport(
         yield proxy
 
 
+@contextlib.contextmanager
+def _open_unix_transport(
+    path: str,
+    log_collector: LogCollector,
+) -> Iterator[ConformanceService]:
+    """Create a Unix socket transport connection to the server under test."""
+    from vgi_rpc.rpc import unix_connect
+
+    with unix_connect(ConformanceService, path, on_log=log_collector) as proxy:  # type: ignore[type-abstract]
+        yield proxy
+
+
 # ---------------------------------------------------------------------------
 # Progress callback
 # ---------------------------------------------------------------------------
@@ -274,6 +287,7 @@ def _build_parser() -> argparse.ArgumentParser:
     transport_excl = transport_group.add_mutually_exclusive_group()
     transport_excl.add_argument("--cmd", "-c", metavar="CMD", help="Subprocess command to test (pipe transport)")
     transport_excl.add_argument("--url", "-u", metavar="URL", help="HTTP base URL to test")
+    transport_excl.add_argument("--unix", metavar="PATH", help="Unix domain socket path to test")
     transport_group.add_argument("--prefix", default="/vgi", help="URL path prefix (default: /vgi)")
     transport_group.add_argument(
         "--shm",
@@ -344,8 +358,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     # Validate transport
-    if not args.cmd and not args.url:
-        parser.error("Either --cmd or --url is required (unless using --list)")
+    if not args.cmd and not args.url and not args.unix:
+        parser.error("Either --cmd, --url, or --unix is required (unless using --list)")
 
     if args.shm is not None and not args.cmd:
         parser.error("--shm requires --cmd")
@@ -372,6 +386,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.cmd:
             ctx_manager = _open_pipe_transport(args.cmd, args.shm, effective_collector)
+        elif args.unix:
+            ctx_manager = _open_unix_transport(args.unix, effective_collector)
         else:
             ctx_manager = _open_http_transport(args.url, args.prefix, effective_collector)
 
