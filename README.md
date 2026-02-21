@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo-hero.png" alt="vgi-rpc logo" width="200">
+  <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo" width="200">
 </p>
 
 <h1 align="center">vgi-rpc</h1>
