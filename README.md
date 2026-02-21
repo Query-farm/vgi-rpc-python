@@ -9,6 +9,14 @@
   Built by <a href="https://query.farm">🚜 Query.Farm</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/Query-farm/vgi-rpc-python/actions/workflows/ci.yml"><img src="https://github.com/Query-farm/vgi-rpc-python/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Query-farm/vgi-rpc-python/actions/workflows/docs.yml"><img src="https://github.com/Query-farm/vgi-rpc-python/actions/workflows/docs.yml/badge.svg" alt="Docs"></a>
+  <a href="https://pypi.org/project/vgi-rpc/"><img src="https://img.shields.io/pypi/v/vgi-rpc" alt="PyPI"></a>
+  <a href="https://pypi.org/project/vgi-rpc/"><img src="https://img.shields.io/pypi/pyversions/vgi-rpc" alt="Python versions"></a>
+  <a href="https://github.com/Query-farm/vgi-rpc-python/blob/main/LICENSE.md"><img src="https://img.shields.io/pypi/l/vgi-rpc" alt="License"></a>
+</p>
+
 Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow schemas from type annotations and provides typed client proxies with automatic serialization/deserialization. Unlike gRPC, there are no `.proto` files or codegen steps — your Python type annotations are the schema. Unlike JSON-over-HTTP, structured data stays in Arrow columnar format for efficient transfer, especially with large or batch-oriented workloads.
 
 **Key features:**
