@@ -26,13 +26,15 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
 - **Apache Arrow IPC wire format** — zero-copy serialization for structured data
 - **Two method types** — unary and streaming (producer and exchange patterns)
-- **Transport-agnostic** — in-process pipes, subprocess, shared memory, or HTTP
+- **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or HTTP
 - **Automatic schema inference** — Python type annotations map to Arrow types
 - **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
 - **Runtime introspection** — opt-in `__describe__` RPC method for dynamic service discovery
 - **CLI tool** — `vgi-rpc describe` and `vgi-rpc call` for ad-hoc service interaction
 - **Shared memory transport** — zero-copy batch transfer between co-located processes
+- **IPC validation** — configurable batch validation levels for untrusted data
 - **Large batch support** — transparent externalization to S3/GCS for oversized data
+- **Per-call I/O statistics** — `CallStatistics` tracks batches, rows, and bytes for usage accounting (access log + OTel spans)
 - **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full wire-level visibility
 
 ## Two Method Types
@@ -100,7 +102,7 @@ pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
 ```
 
-Requires Python 3.12+.
+Requires Python 3.13+.
 
 ## Quick Start
 

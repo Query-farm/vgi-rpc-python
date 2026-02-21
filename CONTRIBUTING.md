@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.13+
 - [uv](https://docs.astral.sh/uv/) package manager
 
 ## Dev Setup
@@ -13,7 +13,7 @@ cd vgi-rpc-python
 uv sync --all-extras
 ```
 
-This installs the package in editable mode with all optional dependencies (HTTP, S3, GCS, CLI, external storage) plus dev tools (pytest, mypy, ruff, ty, mutmut).
+This installs the package in editable mode with all optional dependencies (HTTP, S3, GCS, CLI, external storage, OpenTelemetry) plus dev tools (pytest, mypy, ruff, ty, mutmut).
 
 If you change entry points or add new modules, reinstall:
 
@@ -65,7 +65,7 @@ All four must pass. Do not skip any.
 |---|---|
 | Line length | 120 |
 | Quote style | Double quotes |
-| Python target | 3.12+ |
+| Python target | 3.13+ |
 | Type checking | mypy strict + ty |
 | Linter | ruff (E, F, I, UP, B, SIM, D, RUF, PERF) |
 | Docstrings | Google style with Args/Returns/Raises |

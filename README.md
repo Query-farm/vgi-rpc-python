@@ -16,7 +16,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
 - **Apache Arrow IPC wire format** — zero-copy serialization for structured data
 - **Two method types** — unary and streaming (producer and exchange patterns)
-- **Transport-agnostic** — in-process pipes, subprocess, shared memory, or HTTP
+- **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or HTTP
 - **Automatic schema inference** — Python type annotations map to Arrow types
 - **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
 - **Runtime introspection** — opt-in `__describe__` RPC method for dynamic service discovery
@@ -36,11 +36,12 @@ pip install vgi-rpc
 Optional extras:
 
 ```bash
-pip install vgi-rpc[http]   # HTTP transport (Falcon + httpx)
-pip install vgi-rpc[s3]     # S3 storage backend
-pip install vgi-rpc[gcs]    # Google Cloud Storage backend
-pip install vgi-rpc[cli]    # CLI tool (typer + httpx)
-pip install vgi-rpc[otel]   # OpenTelemetry instrumentation
+pip install vgi-rpc[http]       # HTTP transport (Falcon + httpx)
+pip install vgi-rpc[s3]         # S3 storage backend
+pip install vgi-rpc[gcs]        # Google Cloud Storage backend
+pip install vgi-rpc[cli]        # CLI tool (typer + httpx)
+pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
+pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
 ```
 
 Requires Python 3.13+.
@@ -104,6 +105,9 @@ vgi-rpc describe --cmd "python worker.py"
 # HTTP transport
 vgi-rpc describe --url http://localhost:8000
 
+# Unix domain socket
+vgi-rpc describe --unix /tmp/my-service.sock
+
 # JSON output
 vgi-rpc describe --cmd "python worker.py" --format json
 ```
@@ -136,6 +140,7 @@ Stream methods with headers display the header before data rows: as a `{"__heade
 |---|---|---|
 | `--url` | `-u` | HTTP base URL |
 | `--cmd` | `-c` | Subprocess command |
+| `--unix` | | Unix domain socket path |
 | `--prefix` | `-p` | URL path prefix (default `/vgi`) |
 | `--format` | `-f` | Output format: `auto`, `json`, `table`, or `arrow` |
 | `--output` | `-o` | Output file path (default: stdout) |
@@ -145,6 +150,8 @@ Stream methods with headers display the header before data rows: as a `{"__heade
 | `--log-logger` | | Target specific logger(s), repeatable |
 | `--log-format` | | Stderr log format: `text` (default) or `json` |
 | `--json` | `-j` | Pass parameters as a JSON string (for `call`) |
+| `--input` | `-i` | Arrow IPC file for exchange stream input (for `call`) |
+| `--version` | `-V` | Show version and exit |
 
 ## Defining Services
 
@@ -203,7 +210,7 @@ Parameters and return types are automatically mapped to Arrow types:
 | `list[T]` | `list_<T>` |
 | `dict[K, V]` | `map_<K, V>` |
 | `frozenset[T]` | `list_<T>` |
-| `Enum` | `dictionary(int32, utf8)` |
+| `Enum` | `dictionary(int16, utf8)` |
 | `Optional[T]` | nullable `T` |
 | `ArrowSerializableDataclass` | `struct` |
 | `Annotated[T, ArrowType(...)]` | explicit override |
@@ -263,7 +270,7 @@ with connect(Calculator, ["python", "worker.py"]) as proxy:
         print(f"  has_return: {method.has_return}")
 ```
 
-Query over HTTP with `http_introspect()`:
+Query over HTTP with `http_introspect()` (requires `pip install vgi-rpc[http]`):
 
 ```python
 from vgi_rpc import http_introspect
@@ -386,6 +393,38 @@ with connect(MyService, [sys.executable, "worker.py"]) as proxy:
     result = proxy.echo(message="hello")  # proxy is typed as MyService
 ```
 
+### Unix Domain Socket
+
+Run the server on a Unix domain socket for low-latency local IPC without subprocess management. The server entry point calls `serve_unix_pipe`:
+
+```python
+# worker.py
+from vgi_rpc.rpc import serve_unix_pipe, RpcServer
+
+from my_service import MyService, MyServiceImpl
+
+server = RpcServer(MyService, MyServiceImpl())
+serve_unix_pipe(server, "/tmp/my-service.sock")
+```
+
+The client connects with `unix_connect`:
+
+```python
+from vgi_rpc.rpc import unix_connect
+
+with unix_connect(MyService, "/tmp/my-service.sock") as proxy:
+    result = proxy.echo(message="hello")  # proxy is typed as MyService
+```
+
+For in-process testing, `serve_unix` starts the server on a background thread with an auto-generated socket path:
+
+```python
+from vgi_rpc.rpc import serve_unix
+
+with serve_unix(MyService, MyServiceImpl()) as proxy:
+    print(proxy.add(a=1.0, b=2.0))  # 3.0
+```
+
 ### Shared memory
 
 `ShmPipeTransport` wraps a `PipeTransport` with a shared memory side-channel for zero-copy batch transfer. When a batch fits in the shared memory segment, only a small pointer is sent over the pipe; the receiver reads the data directly from shared memory. Falls back to normal pipe IPC for oversized batches.
@@ -443,6 +482,8 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `cors_origins` | `None` | Allowed CORS origins — `"*"` for all, a string, or list of strings |
 | `upload_url_provider` | `None` | `UploadUrlProvider` for generating pre-signed upload URLs (enables `__upload_url__/init` endpoint) |
 | `max_upload_bytes` | `None` | Advertise max upload size via `VGI-Max-Upload-Bytes` header (requires `upload_url_provider`) |
+| `otel_config` | `None` | `OtelConfig` for OpenTelemetry instrumentation |
+| `token_ttl` | `3600` | Maximum age (seconds) for stream state tokens |
 
 ### CORS (browser clients)
 
@@ -976,6 +1017,10 @@ logging.getLogger("vgi_rpc").addHandler(handler)
 | `vgi_rpc.service.<Protocol>` | Developer `ctx.logger` per service |
 | `vgi_rpc.rpc` | Framework lifecycle (server init, errors) |
 | `vgi_rpc.http` | HTTP transport lifecycle |
+| `vgi_rpc.http.retry` | HTTP retry logic |
+| `vgi_rpc.pool` | Worker pool lifecycle (borrows, returns, evictions) |
+| `vgi_rpc.shm` | Shared memory transport operations |
+| `vgi_rpc.otel` | OpenTelemetry instrumentation |
 | `vgi_rpc.external` | External storage operations |
 | `vgi_rpc.external_fetch` | URL fetch operations |
 | `vgi_rpc.s3` / `vgi_rpc.gcs` | Storage backend operations |
@@ -1207,7 +1252,7 @@ storage = S3Storage(bucket="my-bucket", prefix="rpc-data/")
 config = ExternalLocationConfig(
     storage=storage,
     externalize_threshold_bytes=1_048_576,  # 1 MiB (default)
-    compression=Compression(),              # optional zstd compression
+    compression=Compression(),              # zstd level 3 by default
     fetch_config=FetchConfig(
         chunk_size_bytes=8 * 1024 * 1024,    # 8 MiB chunks
         max_parallel_requests=8,              # concurrent fetches
@@ -1242,6 +1287,7 @@ storage = GCSStorage(
     bucket="my-bucket",
     prefix="vgi-rpc/",               # key prefix (default)
     presign_expiry_seconds=3600,      # signed URL lifetime (default)
+    project="my-gcp-project",        # optional GCP project ID
 )
 ```
 
@@ -1257,6 +1303,7 @@ storage = GCSStorage(
 | `timeout_seconds` | 60.0 | Overall fetch deadline |
 | `max_fetch_bytes` | 256 MiB | Hard cap on total download size |
 | `speculative_retry_multiplier` | 2.0 | Hedge threshold (multiplier of median chunk time) |
+| `max_speculative_hedges` | 4 | Maximum number of hedge requests per fetch |
 
 ## Examples
 
@@ -1352,8 +1399,8 @@ Multiple Arrow IPC streams are written sequentially on the same byte stream. Eac
 Every request is a single-row Arrow IPC stream:
 
 ```
-[schema (with vgi_rpc.method in batch metadata)]
-[1-row batch (with vgi_rpc.request_version in batch metadata)]
+[schema]
+[1-row batch (with vgi_rpc.method and vgi_rpc.request_version in custom metadata)]
 [EOS]
 ```
 
@@ -1434,7 +1481,8 @@ For streams with headers, the `/init` response body contains the header IPC stre
 State tokens use HMAC-SHA256 signing to prevent tampering. The token is versioned for forward compatibility, and the HMAC is verified before inspecting any payload fields (including the version byte) to avoid leaking format information to unauthenticated callers.
 
 ```
-[1 byte:  version            (uint8, currently 1)]
+[1 byte:  version            (uint8, currently 2)]
+[8 bytes: created_at         (uint64 LE, seconds since epoch)]
 [4 bytes: state_len          (uint32 LE)]
 [state_len bytes: state_bytes]
 [4 bytes: schema_len         (uint32 LE)]
