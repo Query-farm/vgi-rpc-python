@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Exhaustive edge-case tests for the vgi-rpc framework.
 
 Covers protocol introspection boundaries, wire protocol corner cases,

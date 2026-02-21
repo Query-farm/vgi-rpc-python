@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """HTTP retry logic for transient failures.
 
 Provides ``HttpRetryConfig`` for opt-in retry of transient HTTP errors

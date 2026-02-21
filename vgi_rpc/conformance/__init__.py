@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Conformance test server for vgi-rpc wire protocol validation.
 
 Provides a comprehensive RPC service exercising all framework capabilities.

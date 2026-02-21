@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Logging utilities for VGI functions.
 
 This module provides Level and Message for emitting diagnostic information

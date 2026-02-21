@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Subprocess server entry point for CLI describe tests (HTTP transport).
 
 Starts a waitress HTTP server exposing the test RPC fixture service with

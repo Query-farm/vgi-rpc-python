@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Introspection support for vgi-rpc servers.
 
 Provides a built-in ``__describe__`` RPC method that returns machine-readable

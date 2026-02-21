@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Standalone conformance test runner CLI.
 
 Uses argparse (stdlib) to avoid requiring optional dependencies.

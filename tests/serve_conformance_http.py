@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Subprocess server entry point for HTTP-based conformance tests.
 
 Can be run directly: ``python -m tests.serve_conformance_http``

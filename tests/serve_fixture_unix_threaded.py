@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Threaded Unix socket server entry point for RPC fixture tests.
 
 Can be run directly: ``python tests/serve_fixture_unix_threaded.py /path/to/socket``

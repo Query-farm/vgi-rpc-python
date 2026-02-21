@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared helpers for ``pa.KeyValueMetadata`` used across the RPC framework.
 
 Centralises well-known metadata keys (including the wire-protocol version

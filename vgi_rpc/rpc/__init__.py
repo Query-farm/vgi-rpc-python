@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Transport-agnostic RPC framework using Arrow IPC serialization.
 
 Defines RPC interfaces as Python Protocol classes, derives Arrow schemas from

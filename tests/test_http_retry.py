@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for HTTP retry logic (HttpRetryConfig, HttpTransientError, retry helpers).
 
 Tests use ``_TransientFailureClient`` wrapper and ``_sleep=lambda _: None`` or

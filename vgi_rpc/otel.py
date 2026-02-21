@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """OpenTelemetry server-side instrumentation for vgi-rpc.
 
 Provides ``OtelConfig`` and ``instrument_server()`` for adding distributed

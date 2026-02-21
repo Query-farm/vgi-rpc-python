@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared test fixtures for vgi-rpc tests."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for vgi_rpc.utils — ArrowSerializableDataclass and helpers."""
 
 from __future__ import annotations

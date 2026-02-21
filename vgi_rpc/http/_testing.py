@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Synchronous test client for the HTTP transport.
 
 Provides ``_SyncTestClient`` and ``make_sync_client`` which use

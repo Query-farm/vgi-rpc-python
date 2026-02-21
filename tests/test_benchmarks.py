@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Performance benchmarks for vgi-rpc.
 
 Benchmarks are excluded from the default test run (``-m "not benchmark"`` in addopts).

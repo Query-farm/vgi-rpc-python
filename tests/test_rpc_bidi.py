@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Exhaustive tests for exchange stream RPC calls.
 
 Covers edge cases, error handling, state management, session lifecycle,

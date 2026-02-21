@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Debug logging infrastructure for wire protocol diagnostics.
 
 Provides logger instances under the ``vgi_rpc.wire.*`` hierarchy and

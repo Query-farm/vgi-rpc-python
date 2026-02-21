@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Subprocess server entry point for pipe-based RPC fixture tests.
 
 Installed as ``vgi-rpc-test-worker`` via pyproject.toml ``[project.scripts]``.

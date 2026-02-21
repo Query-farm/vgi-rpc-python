@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """HTTP transport for vgi-rpc using Falcon (server) and httpx (client).
 
 Provides ``make_wsgi_app`` to expose an ``RpcServer`` as a Falcon WSGI

@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 r"""ExternalLocation batch support for large data batches.
 
 When record batches exceed a configurable size threshold, they can be

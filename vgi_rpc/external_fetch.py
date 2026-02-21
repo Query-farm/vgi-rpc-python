@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Parallel range-request fetching for external location URLs.
 
 Centralizes all URL fetching with a HEAD-first probing strategy:

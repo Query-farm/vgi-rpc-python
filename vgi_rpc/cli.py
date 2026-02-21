@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Command-line interface for vgi-rpc services.
 
 Provides ``describe``, ``call``, and ``loggers`` commands for introspecting

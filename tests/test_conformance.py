@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Conformance test suite — reference behavior specification for vgi-rpc.
 
 Tests all framework capabilities through the conformance server across

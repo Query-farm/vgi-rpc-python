@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared memory transport support for Arrow IPC batches.
 
 Provides a shared-memory side-channel for zero-copy batch transfer between

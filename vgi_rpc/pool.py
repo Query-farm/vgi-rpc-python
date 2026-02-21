@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Subprocess process pool with shared memory support.
 
 Keeps idle worker subprocesses alive between ``connect()`` calls, avoiding

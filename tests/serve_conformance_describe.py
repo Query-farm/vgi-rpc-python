@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Subprocess server entry point for CLI describe tests (conformance, pipe transport).
 
 Serves the conformance RPC service with ``enable_describe=True`` over

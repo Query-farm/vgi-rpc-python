@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Google Cloud Storage backend for ExternalLocation batches.
 
 Optional dependency: ``pip install vgi-rpc[gcs]``

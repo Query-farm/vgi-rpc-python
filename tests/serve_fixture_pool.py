@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Subprocess server entry point for pool-based RPC fixture tests.
 
 Run directly via ``python tests/serve_fixture_pool.py``.

@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Constants, errors, authentication, and call context for the RPC framework."""
 
 from __future__ import annotations

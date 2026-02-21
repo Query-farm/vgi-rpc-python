@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """ConformanceServiceImpl — implementation of the conformance Protocol.
 
 Straightforward implementations: echo methods return their input,

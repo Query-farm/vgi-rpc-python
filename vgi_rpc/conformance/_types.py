@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Type definitions for the conformance test server.
 
 Enums, dataclasses, and stream state classes used by the conformance

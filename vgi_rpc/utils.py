@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """IPC utility functions for Arrow message reading and writing.
 
 This module provides helper functions for common IPC patterns used in the

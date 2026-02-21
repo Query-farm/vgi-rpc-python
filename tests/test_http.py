@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for HTTP-specific behavior in vgi_rpc.http.
 
 Functional correctness (unary, stream, bidi, type fidelity, logs, errors)

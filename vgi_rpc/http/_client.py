@@ -1,3 +1,6 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
 """HTTP client implementation using httpx.
 
 Provides ``http_connect`` context manager, ``HttpStreamSession``,
