@@ -1,6 +1,8 @@
 """Performance benchmarks for vgi-rpc.
 
-Run with:
+Benchmarks are excluded from the default test run (``-m "not benchmark"`` in addopts).
+Run them explicitly with::
+
     uv run pytest tests/test_benchmarks.py --benchmark-enable --benchmark-only -o "addopts=" --timeout=300
 """
 
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pyarrow as pa
+import pytest
 from pytest_benchmark.fixture import BenchmarkFixture
 
 from vgi_rpc.rpc import AnnotatedBatch
@@ -22,6 +25,8 @@ from vgi_rpc.utils import (
 
 from .conftest import ConnFactory
 from .test_rpc import Color
+
+pytestmark = pytest.mark.benchmark
 
 # ---------------------------------------------------------------------------
 # Helper dataclasses
