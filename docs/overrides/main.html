@@ -1,25 +1,42 @@
 {% extends "base.html" %}
 
 {% block extrahead %}
+  {% if page and page.meta and page.meta.description %}
+    {% set page_desc = page.meta.description %}
+  {% else %}
+    {% set page_desc = config.site_description %}
+  {% endif %}
+  {% if page and page.is_homepage %}
+    {% set page_title = config.site_name ~ " — Transport-agnostic RPC framework built on Apache Arrow" %}
+  {% elif page and page.title %}
+    {% set page_title = page.title ~ " - " ~ config.site_name %}
+  {% else %}
+    {% set page_title = config.site_name %}
+  {% endif %}
+
   <!-- SEO meta tags -->
   <meta name="keywords" content="rpc, arrow, ipc, python, streaming, protocol, transport, serialization, grpc alternative, apache arrow, typed proxy, shared memory">
   <meta name="author" content="Query.Farm">
+  <meta name="robots" content="index, follow">
 
   <!-- Open Graph -->
-  <meta property="og:title" content="{{ page.title }} - vgi-rpc">
-  <meta property="og:description" content="{{ config.site_description }}">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ page_desc }}">
   <meta property="og:type" content="website">
   <meta property="og:url" content="{{ page.canonical_url }}">
   <meta property="og:image" content="{{ config.site_url }}assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:site_name" content="vgi-rpc">
+  <meta property="og:image:alt" content="vgi-rpc: transport-agnostic RPC framework built on Apache Arrow">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:locale" content="en_US">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{{ page.title }} - vgi-rpc">
-  <meta name="twitter:description" content="{{ config.site_description }}">
+  <meta name="twitter:title" content="{{ page_title }}">
+  <meta name="twitter:description" content="{{ page_desc }}">
   <meta name="twitter:image" content="{{ config.site_url }}assets/social-card.png">
+  <meta name="twitter:image:alt" content="vgi-rpc: transport-agnostic RPC framework built on Apache Arrow">
 
   <!-- Additional favicons -->
   <link rel="icon" type="image/png" sizes="32x32" href="{{ config.site_url }}assets/favicon-32x32.png">
