@@ -138,9 +138,8 @@ See the [Examples](examples.md) page for streaming, HTTP transport, authenticati
 
 ## Limitations
 
-vgi-rpc is designed for Python-to-Python RPC with structured, tabular data. Some things it deliberately does not do:
+vgi-rpc is designed for RPC with structured, tabular data. Some things it deliberately does not do:
 
-- **Python only** — no cross-language code generation. The wire format (Arrow IPC) is language-neutral, but there are no client/server libraries for other languages.
 - **No full-duplex streaming** — the exchange pattern is lockstep (one request, one response, repeat), not concurrent bidirectional like gRPC.
 - **No client streaming** — the client cannot push a stream of batches to the server independently. Use exchange for bidirectional workflows.
 - **Columnar data model** — all data crosses the wire as Arrow RecordBatches. Scalar values are wrapped in single-row batches. If your payloads are small heterogeneous messages, a row-oriented format (protobuf, JSON) may be more natural.
