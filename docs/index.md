@@ -24,18 +24,18 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 ## Key Features
 
 - **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
-- **Apache Arrow IPC wire format** — zero-copy serialization for structured data
-- **Two method types** — unary and streaming (producer and exchange patterns)
-- **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or HTTP
-- **Automatic schema inference** — Python type annotations map to Arrow types
-- **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
-- **Runtime introspection** — opt-in `__describe__` RPC method for dynamic service discovery
-- **CLI tool** — `vgi-rpc describe` and `vgi-rpc call` for ad-hoc service interaction
-- **Shared memory transport** — zero-copy batch transfer between co-located processes
+- **Apache Arrow IPC wire format** — zero-copy [serialization](api/serialization.md) for structured data
+- **Two method types** — unary and [streaming](api/streaming.md) (producer and exchange patterns)
+- **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or [HTTP](api/http.md) — see [Transports](api/transports.md)
+- **Automatic schema inference** — Python type annotations map to [Arrow types](api/serialization.md#type-mappings)
+- **Pluggable authentication** — [`AuthContext`](api/auth.md) + middleware for HTTP auth (JWT, API key, etc.)
+- **Runtime introspection** — opt-in [`__describe__`](api/introspection.md) RPC method for dynamic service discovery
+- **CLI tool** — [`vgi-rpc describe` and `vgi-rpc call`](api/cli.md) for ad-hoc service interaction
+- **Shared memory transport** — zero-copy batch transfer between co-located processes — see [Transports](api/transports.md#shared-memory)
 - **IPC validation** — configurable batch validation levels for untrusted data
-- **Large batch support** — transparent externalization to S3/GCS for oversized data
-- **Per-call I/O statistics** — `CallStatistics` tracks batches, rows, and bytes for usage accounting (access log + OTel spans)
-- **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full wire-level visibility
+- **Large batch support** — transparent [externalization to S3/GCS](api/external.md) for oversized data
+- **Per-call I/O statistics** — [`CallStatistics`](api/core.md#callstatistics) tracks batches, rows, and bytes for usage accounting (access log + [OTel](api/otel.md) spans)
+- **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full wire-level visibility — see [Logging](api/logging.md#wire-protocol-debugging)
 
 ## Two Method Types
 
@@ -149,7 +149,11 @@ vgi-rpc is designed for RPC with structured, tabular data. Some things it delibe
 ## Next Steps
 
 - Browse the [API Reference](api/index.md) for detailed documentation
+- Explore available [Transports](api/transports.md) — pipes, subprocess, Unix sockets, shared memory, HTTP
 - Check out the [Examples](examples.md) for runnable scripts
+- Review [Benchmarks](benchmarks.md) for transport performance comparisons
+- Read [Hosting](hosting.md) for production deployment guidance
+- Compare with [gRPC and alternatives](comparison.md)
 - See the [Contributing](contributing.md) guide to get involved
 
 ---
