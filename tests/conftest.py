@@ -222,8 +222,6 @@ def make_conn(
     http_server_port: int,
     subprocess_worker: SubprocessTransport,
     worker_pool: WorkerPool,
-    unix_socket_server: str,
-    unix_threaded_socket_server: str,
 ) -> ConnFactory:
     """Return a factory that creates an RPC connection context manager.
 
@@ -275,9 +273,11 @@ def make_conn(
         elif request.param == "pool":
             return worker_pool.connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
         elif request.param == "unix":
-            return unix_connect(RpcFixtureService, unix_socket_server, on_log=on_log)
+            path: str = request.getfixturevalue("unix_socket_server")
+            return unix_connect(RpcFixtureService, path, on_log=on_log)
         elif request.param == "unix_threaded":
-            return unix_connect(RpcFixtureService, unix_threaded_socket_server, on_log=on_log)
+            path = request.getfixturevalue("unix_threaded_socket_server")
+            return unix_connect(RpcFixtureService, path, on_log=on_log)
         else:
             return http_connect(RpcFixtureService, f"http://127.0.0.1:{http_server_port}", on_log=on_log)
 
@@ -342,8 +342,6 @@ def conformance_conn(
     request: pytest.FixtureRequest,
     conformance_http_port: int,
     conformance_subprocess: SubprocessTransport,
-    conformance_unix_path: str,
-    conformance_unix_threaded_path: str,
 ) -> ConnFactory:
     """Return a factory for conformance service connections.
 
@@ -367,9 +365,11 @@ def conformance_conn(
 
             return _conn()
         elif request.param == "unix":
-            return unix_connect(ConformanceService, conformance_unix_path, on_log=on_log)
+            path: str = request.getfixturevalue("conformance_unix_path")
+            return unix_connect(ConformanceService, path, on_log=on_log)
         elif request.param == "unix_threaded":
-            return unix_connect(ConformanceService, conformance_unix_threaded_path, on_log=on_log)
+            path = request.getfixturevalue("conformance_unix_threaded_path")
+            return unix_connect(ConformanceService, path, on_log=on_log)
         else:
             return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
 

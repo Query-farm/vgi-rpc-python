@@ -42,6 +42,7 @@ def _pool_worker_cmd() -> list[str]:
 # sufficient to let the kernel tear down the child's file descriptors.
 # 0.5 s gives comfortable margin for overloaded CI machines.
 _KILL_SETTLE = 0.5
+_SIGKILL: int = signal.SIGKILL  # type: ignore[attr-defined, unused-ignore]
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +146,7 @@ class TestClientTransportError:
             cmd = _pool_worker_cmd()
             with pool.connect(PoolTestService, cmd) as svc:
                 pid = svc.get_pid()
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError, match="TransportError"):
                     svc.add(a=1.0, b=2.0)
@@ -156,7 +157,7 @@ class TestClientTransportError:
             cmd = _pool_worker_cmd()
             with pool.connect(PoolTestService, cmd) as svc:
                 pid = svc.get_pid()
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError) as exc_info:
                     svc.add(a=1.0, b=2.0)
@@ -173,7 +174,7 @@ class TestClientTransportError:
             with pool.connect(PoolTestService, cmd) as svc:
                 pid = svc.get_pid()
                 session = svc.generate(count=100)
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError, match="TransportError"):
                     for _ in session:
@@ -193,7 +194,7 @@ class TestClientTransportError:
                 result = session.exchange(ab)
                 assert result.batch.column("value").to_pylist() == [1.0]
                 # Kill worker
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError, match="TransportError"):
                     session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
@@ -206,7 +207,7 @@ class TestClientTransportError:
             cmd = _pool_worker_cmd()
             with pool.connect(PoolTestService, cmd) as svc:
                 pid = svc.get_pid()
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError) as exc_info:
                     svc.generate(count=5)
@@ -221,7 +222,7 @@ class TestClientTransportError:
             cmd = _pool_worker_cmd()
             with pool.connect(PoolTestService, cmd) as svc:
                 pid1 = svc.get_pid()
-                os.kill(pid1, signal.SIGKILL)
+                os.kill(pid1, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError, match="TransportError"):
                     svc.add(a=1.0, b=2.0)
@@ -239,7 +240,7 @@ class TestClientTransportError:
             with pool.connect(PoolTestService, cmd) as svc:
                 pid1 = svc.get_pid()
                 session = svc.generate(count=100)
-                os.kill(pid1, signal.SIGKILL)
+                os.kill(pid1, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError, match="TransportError"):
                     for _ in session:
@@ -310,7 +311,7 @@ class TestClientTransportError:
             with pool.connect(PoolTestService, cmd) as svc:
                 pid = svc.get_pid()
                 session = svc.generate(count=100)
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError, match="TransportError"):
                     session.tick()
@@ -359,7 +360,7 @@ class TestBadWorkerCommand:
             cmd = _pool_worker_cmd()
             with caplog.at_level(logging.WARNING, logger="vgi_rpc.pool"), pool.connect(PoolTestService, cmd) as svc:
                 pid = svc.get_pid()
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _SIGKILL)
                 time.sleep(_KILL_SETTLE)
                 with pytest.raises(RpcError, match="TransportError"):
                     svc.add(a=1.0, b=2.0)
