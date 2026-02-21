@@ -42,7 +42,7 @@ def _pool_worker_cmd() -> list[str]:
 # sufficient to let the kernel tear down the child's file descriptors.
 # 0.5 s gives comfortable margin for overloaded CI machines.
 _KILL_SETTLE = 0.5
-_SIGKILL: int = signal.SIGKILL  # type: ignore[attr-defined, unused-ignore]
+_SIGKILL: int = getattr(signal, "SIGKILL", 9)
 
 
 # ---------------------------------------------------------------------------
