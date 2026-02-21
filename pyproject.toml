@@ -35,6 +35,7 @@ otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 [project.scripts]
 vgi-rpc = "vgi_rpc.cli:app"
 vgi-rpc-conformance = "vgi_rpc.conformance._cli:main"
+vgi-rpc-test = "vgi_rpc.conformance._test_cli:main"
 
 [build-system]
 requires = ["hatchling"]

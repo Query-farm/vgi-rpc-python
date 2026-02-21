@@ -14,6 +14,13 @@ Usage::
 
 from vgi_rpc.conformance._impl import ConformanceServiceImpl
 from vgi_rpc.conformance._protocol import ConformanceService
+from vgi_rpc.conformance._runner import (
+    ConformanceResult,
+    ConformanceSuite,
+    LogCollector,
+    list_conformance_tests,
+    run_conformance,
+)
 from vgi_rpc.conformance._types import (
     AllTypes,
     BoundingBox,
@@ -26,8 +33,13 @@ __all__ = [
     "AllTypes",
     "BoundingBox",
     "ConformanceHeader",
+    "ConformanceResult",
     "ConformanceService",
     "ConformanceServiceImpl",
+    "ConformanceSuite",
+    "LogCollector",
     "Point",
     "Status",
+    "list_conformance_tests",
+    "run_conformance",
 ]
