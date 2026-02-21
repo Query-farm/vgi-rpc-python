@@ -1,6 +1,13 @@
-# vgi-rpc
+<p align="center">
+  <img src="docs/assets/logo-hero.png" alt="vgi-rpc logo" width="200">
+</p>
 
-Transport-agnostic RPC framework built on [Apache Arrow](https://arrow.apache.org/) IPC serialization.
+<h1 align="center">vgi-rpc</h1>
+
+<p align="center">
+  Transport-agnostic RPC framework built on <a href="https://arrow.apache.org/">Apache Arrow</a> IPC serialization.<br>
+  Built by <a href="https://query.farm">🚜 Query.Farm</a>
+</p>
 
 Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow schemas from type annotations and provides typed client proxies with automatic serialization/deserialization. Unlike gRPC, there are no `.proto` files or codegen steps — your Python type annotations are the schema. Unlike JSON-over-HTTP, structured data stays in Arrow columnar format for efficient transfer, especially with large or batch-oriented workloads.
 
