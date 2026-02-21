@@ -22,7 +22,7 @@ dependencies = ["pyarrow>=14.0", "tzdata>=2024.1; sys_platform == 'win32'"]
 Homepage = "https://github.com/Query-farm/vgi-rpc-python"
 Repository = "https://github.com/Query-farm/vgi-rpc-python"
 Issues = "https://github.com/Query-farm/vgi-rpc-python/issues"
-Documentation = "https://query-farm.github.io/vgi-rpc-python/"
+Documentation = "https://vgi-rpc-python.query.farm/"
 
 [project.optional-dependencies]
 http = ["falcon>=3.0", "httpx>=0.24", "waitress>=2.0"]

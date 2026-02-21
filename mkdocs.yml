@@ -1,6 +1,6 @@
 site_name: vgi-rpc
 site_description: "vgi-rpc: a transport-agnostic Python RPC framework built on Apache Arrow IPC — typed proxies, streaming, shared memory, HTTP, and external storage"
-site_url: https://query-farm.github.io/vgi-rpc-python/
+site_url: https://vgi-rpc-python.query.farm/
 repo_url: https://github.com/Query-farm/vgi-rpc-python
 repo_name: Query-farm/vgi-rpc-python
 copyright: Built by <a href="https://query.farm">🚜 Query.Farm</a>
