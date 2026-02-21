@@ -88,8 +88,11 @@ class Message:
     __slots__ = ("extra", "level", "message")
     __hash__ = None  # type: ignore[assignment]  # Unhashable since we define __eq__
 
-    _MAX_TRACEBACK_CHARS: ClassVar[int] = 16_000
-    _MAX_TRACEBACK_FRAMES: ClassVar[int] = 5
+    MAX_TRACEBACK_CHARS: ClassVar[int] = 16_000
+    """Maximum character length for formatted tracebacks before truncation."""
+
+    MAX_TRACEBACK_FRAMES: ClassVar[int] = 5
+    """Maximum number of stack frames to include in structured frame data."""
 
     def __init__(self, level: Level, message: str, **kwargs: object) -> None:
         """Create a log message with level, message text, and optional extras."""
@@ -195,8 +198,8 @@ class Message:
         )
 
         formatted_tb = "".join(tb_exc.format())
-        if len(formatted_tb) > cls._MAX_TRACEBACK_CHARS:
-            formatted_tb = formatted_tb[: cls._MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
+        if len(formatted_tb) > cls.MAX_TRACEBACK_CHARS:
+            formatted_tb = formatted_tb[: cls.MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
 
         # Short, semantic summary (LLM anchor)
         summary = f"{type(exc).__name__}: {exc}"
@@ -209,14 +212,14 @@ class Message:
 
         if tb_exc.__cause__:
             cause_str = "".join(tb_exc.__cause__.format())
-            if len(cause_str) > cls._MAX_TRACEBACK_CHARS:
-                cause_str = cause_str[: cls._MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
+            if len(cause_str) > cls.MAX_TRACEBACK_CHARS:
+                cause_str = cause_str[: cls.MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
             extra["cause"] = cause_str
 
         if tb_exc.__context__ and not tb_exc.__suppress_context__:
             context_str = "".join(tb_exc.__context__.format())
-            if len(context_str) > cls._MAX_TRACEBACK_CHARS:
-                context_str = context_str[: cls._MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
+            if len(context_str) > cls.MAX_TRACEBACK_CHARS:
+                context_str = context_str[: cls.MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
             extra["context"] = context_str
 
         extra["frames"] = [
@@ -226,7 +229,7 @@ class Message:
                 "function": f.name,
                 "code": f.line,
             }
-            for f in tb_exc.stack[-cls._MAX_TRACEBACK_FRAMES :]
+            for f in tb_exc.stack[-cls.MAX_TRACEBACK_FRAMES :]
         ]
 
         return cls(

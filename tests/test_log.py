@@ -176,7 +176,7 @@ class TestFromException:
         assert "frames" in m.extra
 
     def test_long_traceback_truncated(self) -> None:
-        """Traceback longer than _MAX_TRACEBACK_CHARS is truncated."""
+        """Traceback longer than MAX_TRACEBACK_CHARS is truncated."""
 
         # Create a deeply nested call to produce a long traceback
         def recursive(n: int) -> None:
@@ -191,7 +191,7 @@ class TestFromException:
 
         assert m.extra is not None
         tb = str(m.extra["traceback"])
-        assert len(tb) <= Message._MAX_TRACEBACK_CHARS + 50  # small margin for suffix
+        assert len(tb) <= Message.MAX_TRACEBACK_CHARS + 50  # small margin for suffix
 
     def test_chained_cause(self) -> None:
         """Exception with __cause__ captures the cause chain."""
