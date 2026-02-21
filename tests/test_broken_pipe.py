@@ -27,6 +27,8 @@ from vgi_rpc.rpc import (
 from vgi_rpc.rpc._types import rpc_methods
 from vgi_rpc.rpc._wire import _send_request
 
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Pipe semantics and SIGKILL not available on Windows")
+
 _SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pool.py")
 
 

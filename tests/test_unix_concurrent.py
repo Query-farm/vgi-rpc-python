@@ -15,6 +15,8 @@ import pytest
 
 from tests.conftest import _short_unix_path, _wait_for_unix
 
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
+
 _SERVE_FIXTURE_UNIX_THREADED = str(Path(__file__).parent / "serve_fixture_unix_threaded.py")
 
 

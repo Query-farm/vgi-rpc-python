@@ -201,6 +201,7 @@ class TestPoolEviction:
             # (we reuse workers, so we may not hit 3 spawns)
             assert m.returns >= 2
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL not available on Windows")
     def test_dead_process_handling(self) -> None:
         """Kill idle subprocess, next borrow spawns new."""
         with WorkerPool(max_idle=4) as pool:
@@ -209,7 +210,7 @@ class TestPoolEviction:
                 pid1 = svc.get_pid()
             assert pool.idle_count == 1
             # Kill the idle process
-            os.kill(pid1, signal.SIGKILL)
+            os.kill(pid1, signal.SIGKILL)  # type: ignore[attr-defined, unused-ignore]
             time.sleep(0.2)  # Let process die
             # Next borrow should detect dead process and spawn new
             with pool.connect(PoolTestService, cmd) as svc:
@@ -463,6 +464,7 @@ class TestPoolEdgeCases:
         with contextlib.suppress(Exception):
             gen.__exit__(None, None, None)
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL not available on Windows")
     def test_worker_died_during_use(self) -> None:
         """Worker killed while borrowed is discarded on return."""
         with WorkerPool(max_idle=4) as pool:
@@ -470,7 +472,7 @@ class TestPoolEdgeCases:
             with pool.connect(PoolTestService, cmd) as svc:
                 pid1 = svc.get_pid()
                 # Kill the worker while it's actively borrowed
-                os.kill(pid1, signal.SIGKILL)
+                os.kill(pid1, signal.SIGKILL)  # type: ignore[attr-defined, unused-ignore]
                 time.sleep(0.2)
             # Worker should be discarded, not returned to pool
             assert pool.idle_count == 0

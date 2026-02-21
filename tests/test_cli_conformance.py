@@ -109,7 +109,17 @@ def conformance_describe_unix_threaded_path() -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(params=["pipe", "http", "unix", "unix_threaded"])
+_SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
+
+
+@pytest.fixture(
+    params=[
+        "pipe",
+        "http",
+        pytest.param("unix", marks=_SKIP_UNIX),
+        pytest.param("unix_threaded", marks=_SKIP_UNIX),
+    ]
+)
 def transport_args(request: pytest.FixtureRequest) -> list[str]:
     """Return CLI args that select a transport (``--cmd …``, ``--url …``, or ``--unix …``)."""
     if request.param == "pipe":

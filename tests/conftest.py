@@ -20,6 +20,8 @@ import pytest
 from vgi_rpc.pool import WorkerPool
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
+_SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
+
 _SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
 _SERVE_FIXTURE_HTTP = str(Path(__file__).parent / "serve_fixture_http.py")
 _SERVE_FIXTURE_UNIX = str(Path(__file__).parent / "serve_fixture_unix.py")
@@ -100,7 +102,7 @@ def _wait_for_unix(path: str, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined, unused-ignore]
             try:
                 sock.connect(path)
                 return
@@ -204,7 +206,17 @@ def conformance_unix_threaded_path() -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(params=["pipe", "shm_pipe", "subprocess", "pool", "http", "unix", "unix_threaded"])
+@pytest.fixture(
+    params=[
+        "pipe",
+        "shm_pipe",
+        "subprocess",
+        "pool",
+        "http",
+        pytest.param("unix", marks=_SKIP_UNIX),
+        pytest.param("unix_threaded", marks=_SKIP_UNIX),
+    ]
+)
 def make_conn(
     request: pytest.FixtureRequest,
     http_server_port: int,
@@ -317,7 +329,15 @@ def conformance_subprocess() -> Iterator[SubprocessTransport]:
     transport.close()
 
 
-@pytest.fixture(params=["pipe", "subprocess", "http", "unix", "unix_threaded"])
+@pytest.fixture(
+    params=[
+        "pipe",
+        "subprocess",
+        "http",
+        pytest.param("unix", marks=_SKIP_UNIX),
+        pytest.param("unix_threaded", marks=_SKIP_UNIX),
+    ]
+)
 def conformance_conn(
     request: pytest.FixtureRequest,
     conformance_http_port: int,
