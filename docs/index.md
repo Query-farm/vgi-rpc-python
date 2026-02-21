@@ -19,12 +19,12 @@ Transport-agnostic RPC framework built on [Apache Arrow](https://arrow.apache.or
 
 </div>
 
-Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow schemas from type annotations and provides typed client proxies with automatic serialization/deserialization.
+Define RPC interfaces as Python [`Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol) classes. The framework derives [Arrow](https://arrow.apache.org/) schemas from type annotations and provides typed client proxies with automatic serialization/deserialization.
 
 ## Key Features
 
-- **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
-- **Apache Arrow IPC wire format** — zero-copy [serialization](api/serialization.md) for structured data
+- **Protocol-based interfaces** — define services as typed Python [`Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol) classes; proxies preserve the Protocol type for full IDE autocompletion
+- **[Apache Arrow](https://arrow.apache.org/) IPC wire format** — zero-copy [serialization](api/serialization.md) for structured data using [PyArrow](https://arrow.apache.org/docs/python/)
 - **Two method types** — unary and [streaming](api/streaming.md) (producer and exchange patterns)
 - **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or [HTTP](api/http.md) — see [Transports](api/transports.md)
 - **Automatic schema inference** — Python type annotations map to [Arrow types](api/serialization.md#type-mappings)
@@ -140,10 +140,10 @@ See the [Examples](examples.md) page for streaming, HTTP transport, authenticati
 
 vgi-rpc is designed for RPC with structured, tabular data. Some things it deliberately does not do:
 
-- **No full-duplex streaming** — the exchange pattern is lockstep (one request, one response, repeat), not concurrent bidirectional like gRPC.
+- **No full-duplex streaming** — the exchange pattern is lockstep (one request, one response, repeat), not concurrent bidirectional like [gRPC](https://grpc.io/).
 - **No client streaming** — the client cannot push a stream of batches to the server independently. Use exchange for bidirectional workflows.
-- **Columnar data model** — all data crosses the wire as Arrow RecordBatches. Scalar values are wrapped in single-row batches. If your payloads are small heterogeneous messages, a row-oriented format (protobuf, JSON) may be more natural.
-- **No service mesh integration** — no built-in load balancing, circuit breaking, or service discovery. The HTTP transport is a standard WSGI app, so you can put it behind any reverse proxy.
+- **Columnar data model** — all data crosses the wire as Arrow [`RecordBatch`](https://arrow.apache.org/docs/python/generated/pyarrow.RecordBatch.html) objects. Scalar values are wrapped in single-row batches. If your payloads are small heterogeneous messages, a row-oriented format ([protobuf](https://protobuf.dev/), JSON) may be more natural.
+- **No service mesh integration** — no built-in load balancing, circuit breaking, or service discovery. The HTTP transport is a standard [WSGI](https://peps.python.org/pep-3333/) app, so you can put it behind any reverse proxy.
 - **No async server** — the server is synchronous. Streaming methods run in a blocking loop. This keeps the implementation simple but limits concurrency to one request at a time per connection (HTTP transport handles concurrency at the WSGI layer).
 
 ## Next Steps
