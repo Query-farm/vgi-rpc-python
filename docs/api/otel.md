@@ -44,7 +44,7 @@ Each span carries the following attributes:
 | `rpc.vgi_rpc.output_bytes` | `int` | Approximate logical bytes across all output batches |
 | `rpc.vgi_rpc.error_type` | `str` | Exception class name (error spans only) |
 
-The I/O statistics attributes (`input_batches` through `output_bytes`) are populated from `CallStatistics` — see [Call Statistics](../README.md#call-statistics) for counting semantics.
+The I/O statistics attributes (`input_batches` through `output_bytes`) are populated from `CallStatistics` — see [CallStatistics](core.md#callstatistics) for counting semantics.
 
 > **Note:** Byte counts use `pa.RecordBatch.get_total_buffer_size()` — logical Arrow buffer sizes without IPC framing overhead.
 
