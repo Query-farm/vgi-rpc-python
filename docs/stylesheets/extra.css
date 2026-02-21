@@ -89,13 +89,17 @@
 }
 
 .hero .built-by {
-  font-size: 0.95rem;
-  opacity: 0.7;
+  font-size: 1.15rem;
+  opacity: 0.85;
 }
 
 .hero .built-by a {
-  color: var(--md-accent-fg-color);
-  font-weight: 600;
+  color: var(--md-primary-fg-color--dark);
+  font-weight: 700;
+}
+
+[data-md-color-scheme="slate"] .hero .built-by a {
+  color: var(--md-primary-fg-color--light);
 }
 
 /* Hero logo */
