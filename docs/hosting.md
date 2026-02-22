@@ -315,7 +315,7 @@ handler = make_lambda_handler(app)
 
 ### Cloudflare Workers
 
-[Cloudflare Workers](https://developers.cloudflare.com/workers/) run on V8 isolates and don't natively support Python WSGI. The recommended pattern is to use Workers as an **edge proxy** in front of a Cloud Run or Lambda backend:
+[Cloudflare Workers](https://developers.cloudflare.com/workers/) run on V8 isolates and don't natively support Python WSGI. The recommended pattern is to use Workers as an **edge proxy** in front of [Cloudflare Containers](https://developers.cloudflare.com/containers/), Cloud Run or Lambda backend:
 
 ```d2
 Client -> Cloudflare Worker: "request"
