@@ -45,6 +45,9 @@ theme:
     - search.highlight
     - search.suggest
     - toc.follow
+  font:
+    text: Inter
+    code: JetBrains Mono
   custom_dir: docs/overrides
   logo: assets/logo.png
   favicon: assets/favicon.ico

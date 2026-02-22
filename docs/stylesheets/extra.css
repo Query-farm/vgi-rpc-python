@@ -1,76 +1,189 @@
-/* Query.Farm palette — earthy greens and warm accents */
+/* Query.Farm palette — earthy greens, warm golds, and cream tones
+   Matched to https://vgi-rpc.query.farm website theme */
 
-/* Light mode */
+/* ── CSS custom properties (farm palette) ── */
+:root {
+  --farm-green-deep: #2d5016;
+  --farm-green-field: #4a7c23;
+  --farm-green-light: #6ba034;
+  --farm-gold: #c8a43a;
+  --farm-gold-light: #d4b64e;
+  --farm-brown: #6b4423;
+  --farm-cream: #faf8f0;
+  --farm-cream-dark: #f0ece0;
+  --farm-dark: #1a1a0e;
+  --farm-dark-card: #252518;
+  --farm-dark-border: #3a3a28;
+  --farm-text: #2c2c1e;
+  --farm-text-muted: #6b6b5a;
+  --farm-text-light: #f5f0e0;
+  --farm-text-light-muted: #b8b0a0;
+}
+
+/* ── Light mode ── */
 [data-md-color-scheme="default"] {
-  --md-primary-fg-color: #2e7d32;
-  --md-primary-fg-color--light: #4caf50;
-  --md-primary-fg-color--dark: #1b5e20;
+  --md-primary-fg-color: var(--farm-green-deep);
+  --md-primary-fg-color--light: var(--farm-green-field);
+  --md-primary-fg-color--dark: #1e3a0e;
   --md-primary-bg-color: #ffffff;
   --md-primary-bg-color--light: #ffffffb3;
-  --md-accent-fg-color: #f9a825;
-  --md-accent-fg-color--transparent: #f9a82533;
+  --md-accent-fg-color: var(--farm-gold);
+  --md-accent-fg-color--transparent: #c8a43a33;
   --md-accent-bg-color: #ffffff;
   --md-accent-bg-color--light: #ffffffb3;
+  --md-default-bg-color: var(--farm-cream);
+  --md-default-bg-color--light: var(--farm-cream-dark);
+  --md-default-fg-color: var(--farm-text);
+  --md-default-fg-color--light: var(--farm-text-muted);
+  --md-typeset-color: var(--farm-text);
+  --md-code-bg-color: #f5f0e6;
 }
 
 /* Dark mode */
 [data-md-color-scheme="slate"] {
-  --md-primary-fg-color: #4caf50;
-  --md-primary-fg-color--light: #66bb6a;
-  --md-primary-fg-color--dark: #2e7d32;
-  --md-primary-bg-color: #ffffff;
-  --md-primary-bg-color--light: #ffffffb3;
-  --md-accent-fg-color: #ffca28;
-  --md-accent-fg-color--transparent: #ffca2833;
+  --md-primary-fg-color: var(--farm-green-field);
+  --md-primary-fg-color--light: var(--farm-green-light);
+  --md-primary-fg-color--dark: var(--farm-green-deep);
+  --md-primary-bg-color: var(--farm-text-light);
+  --md-primary-bg-color--light: #f5f0e0b3;
+  --md-accent-fg-color: var(--farm-gold-light);
+  --md-accent-fg-color--transparent: #d4b64e33;
   --md-accent-bg-color: #000000;
   --md-accent-bg-color--light: #0000004d;
-  --md-default-bg-color: #1a2e1a;
-  --md-default-bg-color--light: #22382280;
-  --md-default-bg-color--lighter: #22382233;
-  --md-default-bg-color--lightest: #2238220d;
+  --md-default-bg-color: var(--farm-dark);
+  --md-default-bg-color--light: var(--farm-dark-card);
+  --md-default-bg-color--lighter: #25251833;
+  --md-default-bg-color--lightest: #2525180d;
+  --md-default-fg-color: var(--farm-text-light);
+  --md-default-fg-color--light: var(--farm-text-light-muted);
+  --md-typeset-color: var(--farm-text-light);
+  --md-code-bg-color: var(--farm-dark-card);
 }
 
-/* Admonition styling — farm tones */
+/* ── Header / nav bar ── */
+[data-md-color-scheme="default"] .md-header {
+  background-color: var(--farm-green-deep);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  background-color: var(--farm-dark);
+  border-bottom: 1px solid var(--farm-dark-border);
+}
+
+[data-md-color-scheme="default"] .md-tabs {
+  background-color: var(--farm-green-deep);
+}
+
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: var(--farm-dark);
+  border-bottom: 1px solid var(--farm-dark-border);
+}
+
+/* Nav tabs — gold underline on active/hover */
+.md-tabs__link--active,
+.md-tabs__link:hover {
+  border-bottom: 2px solid var(--farm-gold);
+}
+
+/* ── Sidebar navigation ── */
+[data-md-color-scheme="default"] .md-sidebar {
+  border-right: 1px solid var(--farm-cream-dark);
+}
+
+[data-md-color-scheme="slate"] .md-sidebar {
+  border-right: 1px solid var(--farm-dark-border);
+}
+
+/* ── Admonition styling — farm tones ── */
 .md-typeset .admonition.farm,
 .md-typeset details.farm {
-  border-color: #4caf50;
+  border-color: var(--farm-green-field);
 }
 .md-typeset .farm > .admonition-title,
 .md-typeset .farm > summary {
-  background-color: #4caf501a;
-  border-color: #4caf50;
+  background-color: #4a7c231a;
+  border-color: var(--farm-green-field);
 }
 
-/* Code block styling */
+/* ── Code block styling ── */
 [data-md-color-scheme="default"] .highlight code {
-  border-left: 3px solid #4caf50;
+  border-left: 3px solid var(--farm-green-field);
 }
 
 /* Inline code */
 [data-md-color-scheme="default"] .md-typeset code {
-  background-color: #e8f5e9;
+  background-color: var(--farm-cream-dark);
+  color: var(--farm-text);
 }
 
 [data-md-color-scheme="slate"] .md-typeset code {
-  background-color: #1b3a1b;
+  background-color: var(--farm-dark-card);
+  color: var(--farm-text-light);
 }
 
-/* Nav tabs — earthy underline */
-.md-tabs__link--active,
-.md-tabs__link:hover {
-  border-bottom: 2px solid #f9a825;
+/* ── Links ── */
+[data-md-color-scheme="default"] .md-typeset a {
+  color: var(--farm-green-deep);
 }
 
-/* Footer Query.Farm branding */
-.md-footer-meta {
-  background-color: #1b5e20;
+[data-md-color-scheme="default"] .md-typeset a:hover {
+  color: var(--farm-green-field);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: var(--farm-green-light);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: var(--farm-gold-light);
+}
+
+/* ── Footer ── */
+.md-footer {
+  border-top: 1px solid var(--farm-cream-dark);
+}
+
+[data-md-color-scheme="default"] .md-footer-meta {
+  background-color: var(--farm-green-deep);
+}
+
+[data-md-color-scheme="slate"] .md-footer {
+  border-top: 1px solid var(--farm-dark-border);
 }
 
 [data-md-color-scheme="slate"] .md-footer-meta {
-  background-color: #0d2e0d;
+  background-color: var(--farm-dark-card);
 }
 
-/* Hero section on landing page */
+/* ── Tables — match website styling ── */
+[data-md-color-scheme="default"] .md-typeset table:not([class]) th {
+  background-color: var(--farm-cream-dark);
+  color: var(--farm-text);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+  background-color: var(--farm-dark-card);
+  color: var(--farm-text-light);
+}
+
+[data-md-color-scheme="default"] .md-typeset table:not([class]) td {
+  border-color: var(--farm-cream-dark);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) td {
+  border-color: var(--farm-dark-border);
+}
+
+/* ── Search ── */
+[data-md-color-scheme="default"] .md-search__input {
+  background-color: #ffffff;
+}
+
+[data-md-color-scheme="slate"] .md-search__input {
+  background-color: var(--farm-dark-card);
+}
+
+/* ── Hero section on landing page ── */
 .hero {
   padding: 2rem 0;
   margin-bottom: 2rem;
@@ -94,12 +207,12 @@
 }
 
 .hero .built-by a {
-  color: var(--md-primary-fg-color--dark);
+  color: var(--farm-green-deep);
   font-weight: 700;
 }
 
 [data-md-color-scheme="slate"] .hero .built-by a {
-  color: var(--md-primary-fg-color--light);
+  color: var(--farm-green-light);
 }
 
 /* Hero logo */
@@ -130,7 +243,7 @@
   object-fit: cover;
 }
 
-/* D2 diagrams — constrain size and center */
+/* ── D2 diagrams — constrain size and center ── */
 .md-typeset .d2 {
   max-width: 360px !important;
   margin: 1rem auto !important;
@@ -139,4 +252,13 @@
 .md-typeset .d2 svg {
   width: 100% !important;
   height: auto !important;
+}
+
+/* ── Content area cards/separators ── */
+[data-md-color-scheme="default"] .md-typeset hr {
+  border-color: var(--farm-cream-dark);
+}
+
+[data-md-color-scheme="slate"] .md-typeset hr {
+  border-color: var(--farm-dark-border);
 }
