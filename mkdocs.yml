@@ -7,6 +7,9 @@ copyright: "&copy; 2026 <a href=\"https://query.farm\">Query.Farm LLC</a>"
 
 extra:
   social:
+    - icon: material/arrow-right-bold-circle
+      link: https://vgi-rpc.query.farm
+      name: vgi-rpc website
     - icon: material/web
       link: https://query.farm
       name: 🚜 Query.Farm

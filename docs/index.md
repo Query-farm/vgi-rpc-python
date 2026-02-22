@@ -15,7 +15,7 @@ hide:
 
 Transport-agnostic RPC framework built on [Apache Arrow](https://arrow.apache.org/) IPC serialization.
 
-<p class="built-by">Built by <a href="https://query.farm">🚜 Query.Farm</a></p>
+<p class="built-by"><a href="https://vgi-rpc.query.farm">Website</a> · Built by <a href="https://query.farm">🚜 Query.Farm</a></p>
 
 </div>
 
@@ -159,6 +159,6 @@ vgi-rpc is designed for RPC with structured, tabular data. Some things it delibe
 ---
 
 <p style="text-align: center; opacity: 0.7;">
-  <a href="https://query.farm">🚜 Query.Farm</a>
+  <a href="https://vgi-rpc.query.farm">vgi-rpc.query.farm</a> · <a href="https://query.farm">🚜 Query.Farm</a>
 </p>
 
