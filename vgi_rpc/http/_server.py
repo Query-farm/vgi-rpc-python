@@ -360,9 +360,7 @@ def _resolve_state_types(
             if isinstance(state_arg, type) and issubclass(state_arg, StreamState):
                 result[name] = state_arg
             elif isinstance(state_arg, _types.UnionType):
-                members = tuple(
-                    t for t in get_args(state_arg) if isinstance(t, type) and issubclass(t, StreamState)
-                )
+                members = tuple(t for t in get_args(state_arg) if isinstance(t, type) and issubclass(t, StreamState))
                 if len(members) == 1:
                     result[name] = members[0]
                 elif members:
