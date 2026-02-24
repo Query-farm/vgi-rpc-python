@@ -176,7 +176,9 @@ async def _create_session(timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSessi
     """Create a new ``aiohttp.ClientSession`` (must run on the pool loop)."""
     import aiohttp as _aiohttp
 
-    return _aiohttp.ClientSession(timeout=timeout)
+    # Keep decompression behavior inside vgi-rpc so we don't double-decompress
+    # when handling Content-Encoding ourselves after probe/read.
+    return _aiohttp.ClientSession(timeout=timeout, auto_decompress=False)
 
 
 def _reset_session(config: FetchConfig, *, url: str = "") -> None:
@@ -340,14 +342,15 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
 async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | None, str, str]:
     """Issue a HEAD request and return (content_length, accept_ranges, content_encoding).
 
-    Returns ``(None, "", "")`` if the server does not support HEAD (405, 501)
-    or returns an error, allowing the caller to fall back to a plain GET.
+    Returns ``(None, "", "")`` if the server does not support HEAD (405, 501),
+    rejects HEAD but allows GET (commonly 403 for signed URLs), or otherwise
+    returns an error that should fall back to a plain GET.
     """
     import aiohttp as _aiohttp
 
     try:
         async with client.head(url) as resp:
-            if resp.status in (405, 501):
+            if resp.status in (403, 405, 501):
                 return None, "", ""
             resp.raise_for_status()
             content_length_str = resp.headers.get("Content-Length")
@@ -363,7 +366,7 @@ async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | No
 
             return content_length, accept_ranges, content_encoding
     except _aiohttp.ClientResponseError as exc:
-        if exc.status in (405, 501):
+        if exc.status in (403, 405, 501):
             return None, "", ""
         raise
 

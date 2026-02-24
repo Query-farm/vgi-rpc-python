@@ -195,6 +195,31 @@ class TestHeadProbeFallback:
 
             assert result == data
 
+    def test_head_403_presigned_falls_back_to_get(self) -> None:
+        """Presigned URL returning 403 on HEAD is treated as probe fallback."""
+        url = (
+            "https://example-bucket.s3.amazonaws.com/object"
+            "?X-Amz-Credential=test%252F20260224%252Fus-east-1%252Fs3%252Faws4_request"
+            "&X-Amz-Signature=deadbeef"
+        )
+        with FetchConfig() as config:
+            pool = _ensure_pool(config)
+            assert pool.loop is not None
+            assert pool.session is not None
+
+            with aioresponses() as mock:
+                mock.head(url, status=403)
+
+                future = asyncio.run_coroutine_threadsafe(
+                    _head_probe(url, pool.session),
+                    pool.loop,
+                )
+                content_length, accept_ranges, content_encoding = future.result(timeout=5)
+
+            assert content_length is None
+            assert accept_ranges == ""
+            assert content_encoding == ""
+
 
 class TestPresignedRangeProbe:
     """Tests for presigned URL probe behavior."""
