@@ -256,6 +256,19 @@ class StreamState(ArrowSerializableDataclass, abc.ABC):
     between requests (required for HTTP transport).
     """
 
+    def rehydrate(self, implementation: object) -> None:
+        """Restore transient fields after deserialization.
+
+        Called by the HTTP server after deserializing state from a token.
+        Override in subclasses to restore non-serializable state
+        (e.g., class references, runtime objects) using the server
+        implementation for context.
+
+        Args:
+            implementation: The server's protocol implementation object.
+
+        """
+
     @abc.abstractmethod
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process an input batch and emit output into the collector."""

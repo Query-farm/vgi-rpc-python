@@ -16,6 +16,7 @@ import logging
 import os
 import struct
 import time
+import types as _types
 import warnings
 from collections.abc import Callable, Iterable, Mapping
 from http import HTTPStatus
@@ -265,23 +266,76 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
     return state_bytes, schema_bytes, input_schema_bytes
 
 
+# Type alias: a single concrete class or a name→class mapping for unions.
+_StateInfo = type[StreamState] | dict[str, type[StreamState]]
+
+# Arrow IPC streams always start with 0xFF (continuation indicator).
+# We use 0x00 as a discriminator byte for the typed-state envelope.
+_TYPED_STATE_MARKER = b"\x00"
+
+
+def _wrap_typed_state(state: StreamState) -> bytes:
+    r"""Serialize state with its concrete type name for polymorphic deserialization.
+
+    Format: ``\x00`` + uint16-LE name length + UTF-8 name + Arrow IPC bytes.
+    """
+    state_bytes = state.serialize_to_bytes()
+    type_name = type(state).__qualname__.encode("utf-8")
+    return _TYPED_STATE_MARKER + struct.pack("<H", len(type_name)) + type_name + state_bytes
+
+
+def _resolve_state_cls(
+    data: bytes,
+    state_info: _StateInfo,
+) -> tuple[type[StreamState], bytes]:
+    """Resolve the concrete state class from (possibly typed) state bytes.
+
+    Returns:
+        ``(state_cls, raw_state_bytes)``
+
+    """
+    if data[:1] == _TYPED_STATE_MARKER and len(data) >= 3:
+        name_len = struct.unpack("<H", data[1:3])[0]
+        type_name = data[3 : 3 + name_len].decode("utf-8")
+        state_bytes = data[3 + name_len :]
+
+        if isinstance(state_info, dict):
+            state_cls = state_info.get(type_name)
+            if state_cls is None:
+                msg = f"Unknown state type '{type_name}'; expected one of {sorted(state_info)}"
+                raise RuntimeError(msg)
+        else:
+            state_cls = state_info
+        return state_cls, state_bytes
+
+    # Legacy token without type prefix — only works for single-type methods.
+    if isinstance(state_info, dict):
+        msg = "Cannot deserialize polymorphic state from untyped token"
+        raise RuntimeError(msg)
+    return state_info, data
+
+
 def _resolve_state_types(
     server: RpcServer,
-) -> dict[str, type[StreamState]]:
+) -> dict[str, _StateInfo]:
     """Introspect server implementation to map method names to concrete state types.
 
     Examines the return type hints of each stream method on the
     implementation (not the protocol) to extract the concrete
     ``StreamState`` subclass.
 
+    For union return types (``Stream[A | B, ...]``), stores a
+    ``{qualname: class}`` mapping so the correct class can be
+    resolved at deserialization time.
+
     Args:
         server: The ``RpcServer`` whose implementation to introspect.
 
     Returns:
-        Mapping of method name to concrete state subclass.
+        Mapping of method name to state info (single class or union dict).
 
     """
-    result: dict[str, type[StreamState]] = {}
+    result: dict[str, _StateInfo] = {}
     for name, info in server.methods.items():
         if info.method_type != MethodType.STREAM:
             continue
@@ -299,8 +353,21 @@ def _resolve_state_types(
         origin = get_origin(return_hint)
         if origin is Stream:
             args = get_args(return_hint)
-            if args and isinstance(args[0], type) and issubclass(args[0], StreamState):
-                result[name] = args[0]
+            if not args:
+                continue
+            state_arg = args[0]
+            if isinstance(state_arg, type) and issubclass(state_arg, StreamState):
+                result[name] = state_arg
+            elif isinstance(state_arg, _types.UnionType):
+                members = {
+                    t.__qualname__: t
+                    for t in get_args(state_arg)
+                    if isinstance(t, type) and issubclass(t, StreamState)
+                }
+                if len(members) == 1:
+                    result[name] = next(iter(members.values()))
+                elif members:
+                    result[name] = members
     return result
 
 
@@ -581,7 +648,7 @@ class _HttpRpcApp:
                         input_schema = result.input_schema
 
                         # Pack state + output schema + input schema into a signed token
-                        state_bytes = state.serialize_to_bytes()
+                        state_bytes = _wrap_typed_state(state)
                         schema_bytes = output_schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
                         token = _pack_state_token(
@@ -649,8 +716,8 @@ class _HttpRpcApp:
         stats = CallStatistics()
         stats_token = _current_call_stats.set(stats)
         try:
-            state_cls = self._state_types.get(method_name)
-            if state_cls is None:
+            state_info = self._state_types.get(method_name)
+            if state_info is None:
                 raise _RpcHttpError(
                     RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -678,7 +745,7 @@ class _HttpRpcApp:
                 )
 
             # Unpack and verify the signed token, recover state + schema + input_schema
-            state_obj, output_schema, input_schema = self._unpack_and_recover_state(token, state_cls)
+            state_obj, output_schema, input_schema = self._unpack_and_recover_state(token, state_info)
 
             is_producer = input_schema == _EMPTY_SCHEMA
 
@@ -783,7 +850,7 @@ class _HttpRpcApp:
                         out.validate()
 
                     # Repack updated state with same schemas into new signed token
-                    updated_state_bytes = state_obj.serialize_to_bytes()
+                    updated_state_bytes = _wrap_typed_state(state_obj)
                     schema_bytes = output_schema.serialize().to_pybytes()
                     input_schema_bytes_upd = input_schema.serialize().to_pybytes()
                     updated_token = _pack_state_token(
@@ -891,7 +958,7 @@ class _HttpRpcApp:
                     # Check size limit after flushing each produce cycle
                     if max_bytes is not None and resp_buf.tell() >= max_bytes:
                         # Serialize state into a continuation token
-                        state_bytes = state.serialize_to_bytes()
+                        state_bytes = _wrap_typed_state(state)
                         schema_bytes = schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
                         token = _pack_state_token(
@@ -911,13 +978,15 @@ class _HttpRpcApp:
     def _unpack_and_recover_state(
         self,
         token: bytes,
-        state_cls: type[StreamState],
+        state_info: _StateInfo,
     ) -> tuple[StreamState, pa.Schema, pa.Schema]:
         """Unpack a signed state token and recover state, output schema, and input schema.
 
         Args:
             token: The signed state token bytes.
-            state_cls: The concrete state class to deserialize into.
+            state_info: A single concrete state class, or a ``{qualname: class}``
+                mapping for union types.  When a mapping is provided the concrete
+                class is resolved from the type name embedded in the state bytes.
 
         Returns:
             Tuple of (state_object, output_schema, input_schema).
@@ -946,7 +1015,9 @@ class _HttpRpcApp:
             ) from exc
 
         try:
-            state_obj = state_cls.deserialize_from_bytes(state_bytes, self._server.ipc_validation)
+            state_cls, raw_state_bytes = _resolve_state_cls(state_bytes, state_info)
+            state_obj = state_cls.deserialize_from_bytes(raw_state_bytes, self._server.ipc_validation)
+            state_obj.rehydrate(self._server.implementation)
         except Exception as exc:
             raise _RpcHttpError(
                 RuntimeError(f"Failed to deserialize state: {exc}"),

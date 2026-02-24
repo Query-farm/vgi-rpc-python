@@ -303,6 +303,9 @@ def _validate_single_row_batch(
             required fields.
 
     """
+    if data.num_columns == 0:
+        # All-transient dataclass: no columns to read, return empty row.
+        return {}
     if data.num_rows == 0:
         raise ValueError(f"Cannot deserialize {class_name} from empty RecordBatch")
     if data.num_rows > 1:
@@ -379,6 +382,19 @@ def _is_transient_field(field_type: object) -> bool:
     if get_origin(field_type) is Annotated:
         for arg in get_args(field_type)[1:]:
             if isinstance(arg, Transient):
+                return True
+    return False
+
+
+def _has_binary_arrow_type(field_type: object) -> bool:
+    """Check if a field type annotation has an explicit ArrowType(pa.binary()).
+
+    When a field is ``Annotated[SomeDataclass, ArrowType(pa.binary())]``, the
+    value should be serialized to IPC bytes rather than a struct dict.
+    """
+    if get_origin(field_type) is Annotated:
+        for arg in get_args(field_type)[1:]:
+            if isinstance(arg, ArrowType) and arg.arrow_type == pa.binary():
                 return True
     return False
 
@@ -648,7 +664,13 @@ class ArrowSerializableDataclass:
             if _is_transient_field(field_type):
                 continue
             value = getattr(self, field.name)
-            value = self._convert_value_for_serialization(value)
+            # If the field has ArrowType(pa.binary()) and the value is an
+            # ArrowSerializableDataclass, serialize to IPC bytes instead of
+            # converting to a struct dict.
+            if isinstance(value, ArrowSerializableDataclass) and _has_binary_arrow_type(field_type):
+                value = value.serialize_to_bytes()
+            else:
+                value = self._convert_value_for_serialization(value)
             row[field.name] = value
         return row
 
