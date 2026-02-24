@@ -34,8 +34,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from types import TracebackType
-from urllib.parse import parse_qsl, urlparse
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qsl, urlparse
 
 if TYPE_CHECKING:
     import aiohttp
