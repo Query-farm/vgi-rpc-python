@@ -29,10 +29,12 @@ import asyncio
 import contextlib
 import logging
 import math
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from types import TracebackType
+from urllib.parse import parse_qsl, urlparse
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -280,17 +282,24 @@ async def _read_response_body(resp: aiohttp.ClientResponse, config: FetchConfig)
 
 
 async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.ClientSession) -> bytes:
-    """Core async fetch: HEAD probe, then parallel Range GETs or simple GET.
+    """Core async fetch: probe, then parallel Range GETs or simple GET.
 
-    Issues a HEAD request first to learn Content-Length and Accept-Ranges
-    without downloading the body.  Falls back to a plain GET when HEAD is
-    unsupported (405 / 501) or the response lacks the headers needed for
-    parallel fetching.
+    For normal URLs this issues a HEAD request first to learn
+    Content-Length and Accept-Ranges without downloading the body.
+    For pre-signed URLs (S3/GCS), where HEAD may be rejected by
+    method-bound signatures, this issues a probe GET with
+    ``Range: bytes=0-0`` instead.
+
+    Falls back to a plain GET when probe metadata is unavailable
+    (or HEAD is unsupported by the origin).
 
     If the HEAD response includes ``Content-Encoding: zstd``, the
     downloaded bytes are automatically decompressed before returning.
     """
-    content_length, accept_ranges, content_encoding = await _head_probe(url, client)
+    if _is_presigned_url(url):
+        content_length, accept_ranges, content_encoding = await _range_probe(url, client)
+    else:
+        content_length, accept_ranges, content_encoding = await _head_probe(url, client)
 
     # Guard: reject before downloading
     if content_length is not None and content_length > config.max_fetch_bytes:
@@ -353,6 +362,59 @@ async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | No
                     content_length = None
 
             return content_length, accept_ranges, content_encoding
+    except _aiohttp.ClientResponseError as exc:
+        if exc.status in (405, 501):
+            return None, "", ""
+        raise
+
+
+def _is_presigned_url(url: str) -> bool:
+    """Return True when URL query looks like S3/GCS pre-signed auth."""
+    query_pairs = parse_qsl(urlparse(url).query, keep_blank_values=True)
+    query_keys = {k for k, _ in query_pairs}
+    return ("X-Amz-Signature" in query_keys and "X-Amz-Credential" in query_keys) or (
+        "X-Goog-Signature" in query_keys and "X-Goog-Credential" in query_keys
+    )
+
+
+def _content_length_from_content_range(content_range: str) -> int | None:
+    """Parse total object size from Content-Range header."""
+    # Example: "bytes 0-0/12345"
+    match = re.match(r"^\s*bytes\s+\d+-\d+/(\d+)\s*$", content_range)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+async def _range_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | None, str, str]:
+    """Issue a tiny probe GET (Range: bytes=0-0) for pre-signed URLs."""
+    import aiohttp as _aiohttp
+
+    headers = {"Range": "bytes=0-0"}
+    try:
+        async with client.get(url, headers=headers) as resp:
+            content_encoding = resp.headers.get("Content-Encoding", "")
+
+            if resp.status == 206:
+                content_range = resp.headers.get("Content-Range", "")
+                content_length = _content_length_from_content_range(content_range)
+                # A 206 response implies byte-range support even if the header is omitted.
+                accept_ranges = resp.headers.get("Accept-Ranges", "bytes")
+                await resp.read()
+                return content_length, accept_ranges, content_encoding
+
+            # Range unsupported/ignored by origin; caller falls back to plain GET.
+            if resp.status == 200:
+                return None, "", content_encoding
+
+            if resp.status in (405, 501):
+                return None, "", ""
+
+            resp.raise_for_status()
+            return None, "", content_encoding  # pragma: no cover
     except _aiohttp.ClientResponseError as exc:
         if exc.status in (405, 501):
             return None, "", ""

@@ -196,6 +196,73 @@ class TestHeadProbeFallback:
             assert result == data
 
 
+class TestPresignedRangeProbe:
+    """Tests for presigned URL probe behavior."""
+
+    def test_presigned_url_uses_range_probe_instead_of_head(self) -> None:
+        """Presigned URLs probe with GET Range bytes=0-0 and then GET body."""
+        data = b"presigned payload"
+        url = (
+            "https://storage.googleapis.com/object"
+            "?X-Goog-Credential=test%2F20260224%2Fauto%2Fstorage%2Fgoog4_request"
+            "&X-Goog-Signature=abc123"
+        )
+
+        seen_probe_ranges: list[str] = []
+
+        def _probe_then_get(url_: Any, **kwargs: Any) -> CallbackResult:
+            headers = kwargs.get("headers", {})
+            range_header = headers.get("Range", "")
+            if range_header:
+                seen_probe_ranges.append(range_header)
+                return CallbackResult(
+                    status=206,
+                    body=data[:1],
+                    headers={
+                        "Content-Range": f"bytes 0-0/{len(data)}",
+                        "Accept-Ranges": "bytes",
+                        "Content-Length": "1",
+                    },
+                )
+            return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
+
+        with FetchConfig(parallel_threshold_bytes=10_000) as config:
+            with aioresponses() as mock:
+                # No HEAD mock on purpose: presigned path should never issue HEAD.
+                mock.get(url, callback=_probe_then_get, repeat=True)
+                result = fetch_url(url, config)
+
+            assert result == data
+            assert seen_probe_ranges == ["bytes=0-0"]
+
+    def test_presigned_probe_200_falls_back_to_plain_get(self) -> None:
+        """If the probe Range is ignored (200), the fetch falls back to plain GET."""
+        data = b"range ignored"
+        url = (
+            "https://example-bucket.s3.amazonaws.com/object"
+            "?X-Amz-Credential=test%2F20260224%2Fus-east-1%2Fs3%2Faws4_request"
+            "&X-Amz-Signature=deadbeef"
+        )
+
+        seen_ranges: list[str] = []
+
+        def _range_ignored(url_: Any, **kwargs: Any) -> CallbackResult:
+            headers = kwargs.get("headers", {})
+            range_header = headers.get("Range", "")
+            if range_header:
+                seen_ranges.append(range_header)
+                return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
+            return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
+
+        with FetchConfig(parallel_threshold_bytes=10_000) as config:
+            with aioresponses() as mock:
+                mock.get(url, callback=_range_ignored, repeat=True)
+                result = fetch_url(url, config)
+
+            assert result == data
+            assert seen_ranges == ["bytes=0-0"]
+
+
 class TestFetchParallelChunks:
     """Tests for parallel range-request fetching."""
 
