@@ -39,6 +39,7 @@ from vgi_rpc.http import (
     make_wsgi_app,
     request_upload_urls,
 )
+from vgi_rpc.http._server import _resolve_state_cls, _serialize_state_bytes
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import (
     AnnotatedBatch,
@@ -60,8 +61,10 @@ from .test_external import (
     _ExternalServiceImpl,
 )
 from .test_rpc import (
+    FailStreamState,
     RpcFixtureService,
     RpcFixtureServiceImpl,
+    TransformState,
 )
 
 # ---------------------------------------------------------------------------
@@ -330,6 +333,30 @@ class TestResumableServerStream:
             assert len(batches) == 1
             assert batches[0].batch.column("i")[0].as_py() == 0
         c.close()
+
+
+class TestStateTokenStateEncoding:
+    """State-byte encoding for HTTP stream state tokens."""
+
+    def test_single_state_is_stored_as_raw_state_bytes(self) -> None:
+        """Single-state methods serialize raw state bytes without an envelope."""
+        state = TransformState(factor=2.0)
+        raw = state.serialize_to_bytes()
+        encoded = _serialize_state_bytes(state, TransformState)
+        assert encoded == raw
+
+    def test_union_state_uses_numeric_tag(self) -> None:
+        """Union-state methods serialize a numeric tag plus raw state bytes."""
+        members = (TransformState, FailStreamState)
+        state = FailStreamState(emitted=False)
+        encoded = _serialize_state_bytes(state, members)
+
+        assert encoded[:1] == b"\x00"
+        state_cls, raw = _resolve_state_cls(encoded, members)
+        assert state_cls is FailStreamState
+        decoded = state_cls.deserialize_from_bytes(raw, IpcValidation.NONE)
+        assert isinstance(decoded, FailStreamState)
+        assert decoded.emitted is False
 
     def test_expired_token_400(self) -> None:
         """Token with a timestamp 2 hours in the past is rejected as expired."""

@@ -266,52 +266,53 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
     return state_bytes, schema_bytes, input_schema_bytes
 
 
-# Type alias: a single concrete class or a name→class mapping for unions.
-_StateInfo = type[StreamState] | dict[str, type[StreamState]]
+# Type alias: a single concrete class or an ordered tuple for unions.
+_StateInfo = type[StreamState] | tuple[type[StreamState], ...]
 
 # Arrow IPC streams always start with 0xFF (continuation indicator).
-# We use 0x00 as a discriminator byte for the typed-state envelope.
-_TYPED_STATE_MARKER = b"\x00"
+# We use 0x00 as a discriminator byte for union-tagged state envelopes.
+_UNION_STATE_MARKER = b"\x00"
 
 
-def _wrap_typed_state(state: StreamState) -> bytes:
-    r"""Serialize state with its concrete type name for polymorphic deserialization.
+def _serialize_state_bytes(state: StreamState, state_info: _StateInfo) -> bytes:
+    r"""Serialize state bytes for state token payload.
 
-    Format: ``\x00`` + uint16-LE name length + UTF-8 name + Arrow IPC bytes.
+    Single-state methods store raw serialized state bytes.
+    Union-state methods store: ``\x00`` + uint16-LE tag + raw bytes.
     """
     state_bytes = state.serialize_to_bytes()
-    type_name = type(state).__qualname__.encode("utf-8")
-    return _TYPED_STATE_MARKER + struct.pack("<H", len(type_name)) + type_name + state_bytes
+    if isinstance(state_info, tuple):
+        try:
+            tag = state_info.index(type(state))
+        except ValueError as exc:
+            msg = (
+                f"State type {type(state).__name__!r} is not valid for union method; "
+                f"expected one of {[t.__name__ for t in state_info]}"
+            )
+            raise RuntimeError(msg) from exc
+        return _UNION_STATE_MARKER + struct.pack("<H", tag) + state_bytes
+    return state_bytes
 
 
 def _resolve_state_cls(
     data: bytes,
     state_info: _StateInfo,
 ) -> tuple[type[StreamState], bytes]:
-    """Resolve the concrete state class from (possibly typed) state bytes.
+    """Resolve the concrete state class from token state bytes.
 
     Returns:
         ``(state_cls, raw_state_bytes)``
 
     """
-    if data[:1] == _TYPED_STATE_MARKER and len(data) >= 3:
-        name_len = struct.unpack("<H", data[1:3])[0]
-        type_name = data[3 : 3 + name_len].decode("utf-8")
-        state_bytes = data[3 + name_len :]
-
-        if isinstance(state_info, dict):
-            state_cls = state_info.get(type_name)
-            if state_cls is None:
-                msg = f"Unknown state type '{type_name}'; expected one of {sorted(state_info)}"
-                raise RuntimeError(msg)
-        else:
-            state_cls = state_info
-        return state_cls, state_bytes
-
-    # Legacy token without type prefix — only works for single-type methods.
-    if isinstance(state_info, dict):
-        msg = "Cannot deserialize polymorphic state from untyped token"
-        raise RuntimeError(msg)
+    if isinstance(state_info, tuple):
+        if data[:1] != _UNION_STATE_MARKER or len(data) < 3:
+            msg = "Cannot deserialize union state from untagged token"
+            raise RuntimeError(msg)
+        tag = struct.unpack("<H", data[1:3])[0]
+        if tag >= len(state_info):
+            msg = f"Unknown union state tag {tag}; expected 0..{len(state_info) - 1}"
+            raise RuntimeError(msg)
+        return state_info[tag], data[3:]
     return state_info, data
 
 
@@ -324,9 +325,9 @@ def _resolve_state_types(
     implementation (not the protocol) to extract the concrete
     ``StreamState`` subclass.
 
-    For union return types (``Stream[A | B, ...]``), stores a
-    ``{qualname: class}`` mapping so the correct class can be
-    resolved at deserialization time.
+    For union return types (``Stream[A | B, ...]``), stores an
+    ordered tuple of classes so token state can carry a compact
+    numeric tag instead of class names.
 
     Args:
         server: The ``RpcServer`` whose implementation to introspect.
@@ -359,13 +360,11 @@ def _resolve_state_types(
             if isinstance(state_arg, type) and issubclass(state_arg, StreamState):
                 result[name] = state_arg
             elif isinstance(state_arg, _types.UnionType):
-                members = {
-                    t.__qualname__: t
-                    for t in get_args(state_arg)
-                    if isinstance(t, type) and issubclass(t, StreamState)
-                }
+                members = tuple(
+                    t for t in get_args(state_arg) if isinstance(t, type) and issubclass(t, StreamState)
+                )
                 if len(members) == 1:
-                    result[name] = next(iter(members.values()))
+                    result[name] = members[0]
                 elif members:
                     result[name] = members
     return result
@@ -560,6 +559,12 @@ class _HttpRpcApp:
         stats = CallStatistics()
         stats_token = _current_call_stats.set(stats)
         try:
+            state_info = self._state_types.get(method_name)
+            if state_info is None:
+                raise _RpcHttpError(
+                    RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
             try:
                 ipc_method, kwargs = _read_request(stream, self._server.ipc_validation)
                 if ipc_method != method_name:
@@ -648,7 +653,7 @@ class _HttpRpcApp:
                         input_schema = result.input_schema
 
                         # Pack state + output schema + input schema into a signed token
-                        state_bytes = _wrap_typed_state(state)
+                        state_bytes = _serialize_state_bytes(state, state_info)
                         schema_bytes = output_schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
                         token = _pack_state_token(
@@ -850,7 +855,7 @@ class _HttpRpcApp:
                         out.validate()
 
                     # Repack updated state with same schemas into new signed token
-                    updated_state_bytes = _wrap_typed_state(state_obj)
+                    updated_state_bytes = _serialize_state_bytes(state_obj, state_info)
                     schema_bytes = output_schema.serialize().to_pybytes()
                     input_schema_bytes_upd = input_schema.serialize().to_pybytes()
                     updated_token = _pack_state_token(
@@ -958,7 +963,13 @@ class _HttpRpcApp:
                     # Check size limit after flushing each produce cycle
                     if max_bytes is not None and resp_buf.tell() >= max_bytes:
                         # Serialize state into a continuation token
-                        state_bytes = _wrap_typed_state(state)
+                        state_info = self._state_types.get(method_name)
+                        if state_info is None:
+                            raise _RpcHttpError(
+                                RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
+                                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            )
+                        state_bytes = _serialize_state_bytes(state, state_info)
                         schema_bytes = schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
                         token = _pack_state_token(
@@ -984,9 +995,10 @@ class _HttpRpcApp:
 
         Args:
             token: The signed state token bytes.
-            state_info: A single concrete state class, or a ``{qualname: class}``
-                mapping for union types.  When a mapping is provided the concrete
-                class is resolved from the type name embedded in the state bytes.
+            state_info: A single concrete state class, or an ordered tuple of
+                concrete classes for union types.  When a tuple is provided, the
+                concrete class is resolved from the numeric tag embedded in
+                ``state_bytes``.
 
         Returns:
             Tuple of (state_object, output_schema, input_schema).
