@@ -410,13 +410,15 @@ async def _range_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | N
             if resp.status == 200:
                 return None, "", content_encoding
 
-            if resp.status in (405, 501):
+            # Some signed URLs are method/header constrained and may reject
+            # the probe even though a normal GET is valid.
+            if resp.status in (403, 405, 501):
                 return None, "", ""
 
             resp.raise_for_status()
             return None, "", content_encoding  # pragma: no cover
     except _aiohttp.ClientResponseError as exc:
-        if exc.status in (405, 501):
+        if exc.status in (403, 405, 501):
             return None, "", ""
         raise
 

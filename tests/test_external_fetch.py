@@ -262,6 +262,33 @@ class TestPresignedRangeProbe:
             assert result == data
             assert seen_ranges == ["bytes=0-0"]
 
+    def test_presigned_probe_403_falls_back_to_plain_get(self) -> None:
+        """If the probe is forbidden (403), the fetch falls back to plain GET."""
+        data = b"probe forbidden"
+        url = (
+            "https://storage.googleapis.com/object"
+            "?X-Goog-Credential=test%2F20260224%2Fauto%2Fstorage%2Fgoog4_request"
+            "&X-Goog-Signature=abc123"
+        )
+
+        seen_ranges: list[str] = []
+
+        def _probe_forbidden(url_: Any, **kwargs: Any) -> CallbackResult:
+            headers = kwargs.get("headers", {})
+            range_header = headers.get("Range", "")
+            if range_header:
+                seen_ranges.append(range_header)
+                return CallbackResult(status=403)
+            return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
+
+        with FetchConfig(parallel_threshold_bytes=10_000) as config:
+            with aioresponses() as mock:
+                mock.get(url, callback=_probe_forbidden, repeat=True)
+                result = fetch_url(url, config)
+
+            assert result == data
+            assert seen_ranges == ["bytes=0-0"]
+
 
 class TestFetchParallelChunks:
     """Tests for parallel range-request fetching."""
