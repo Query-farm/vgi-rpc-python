@@ -11,3 +11,9 @@ wheels/
 
 # MkDocs build output
 site/
+.cache
+.playwright-mcp/
+.wrangler
+.coverage
+*.png
+coverage.json
