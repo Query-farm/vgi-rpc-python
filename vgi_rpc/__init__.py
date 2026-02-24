@@ -60,6 +60,7 @@ from vgi_rpc.utils import (
     ArrowType,
     IPCError,
     IpcValidation,
+    Transient,
     ValidatedReader,
     validate_batch,
 )
@@ -141,6 +142,7 @@ __all__ = [
     # Serialization
     "ArrowSerializableDataclass",
     "ArrowType",
+    "Transient",
     # Validation
     "IpcValidation",
     "ValidatedReader",

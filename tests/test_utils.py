@@ -18,8 +18,10 @@ from vgi_rpc.utils import (
     ArrowSerializableDataclass,
     ArrowType,
     IPCError,
+    Transient,
     _infer_arrow_type,
     _is_optional_type,
+    _is_transient_field,
     _validate_single_row_batch,
     deserialize_record_batch,
     empty_batch,
@@ -175,6 +177,46 @@ class WithNewType(ArrowSerializableDataclass):
     """Dataclass with a NewType field."""
 
     user_id: UserId
+
+
+@dataclass(frozen=True)
+class WithTransientFactory(ArrowSerializableDataclass):
+    """Dataclass with a transient field using default_factory."""
+
+    name: str
+    _cache: Annotated[dict[str, int], Transient()] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WithTransientDefault(ArrowSerializableDataclass):
+    """Dataclass with a transient field using a simple default."""
+
+    value: int
+    label: Annotated[str, Transient()] = "default_label"
+
+
+@dataclass(frozen=True)
+class InnerWithTransient(ArrowSerializableDataclass):
+    """Nested dataclass with a transient field."""
+
+    x: int
+    memo: Annotated[str, Transient()] = ""
+
+
+@dataclass(frozen=True)
+class OuterWithNestedTransient(ArrowSerializableDataclass):
+    """Outer dataclass wrapping a nested dataclass with transient fields."""
+
+    inner: InnerWithTransient
+    tag: str
+
+
+@dataclass(frozen=True)
+class WithTransientOptional(ArrowSerializableDataclass):
+    """Dataclass with a transient optional field."""
+
+    value: int
+    extra: Annotated[str | None, Transient()] = None
 
 
 # ---------------------------------------------------------------------------
@@ -847,3 +889,103 @@ class TestSerializationEdgeCases:
         obj = WithOptionalEnum(color=Color.GREEN)
         restored = WithOptionalEnum.deserialize_from_bytes(obj.serialize_to_bytes())
         assert restored.color is Color.GREEN
+
+
+# ---------------------------------------------------------------------------
+# TestTransient
+# ---------------------------------------------------------------------------
+
+
+class TestTransient:
+    """Tests for Transient field marker."""
+
+    def test_is_transient_field_positive(self) -> None:
+        """_is_transient_field detects Transient marker in Annotated."""
+        assert _is_transient_field(Annotated[int, Transient()]) is True
+
+    def test_is_transient_field_negative(self) -> None:
+        """_is_transient_field returns False for non-transient types."""
+        assert _is_transient_field(int) is False
+        assert _is_transient_field(Annotated[int, ArrowType(pa.int32())]) is False
+
+    def test_excluded_from_schema(self) -> None:
+        """Transient fields are not included in the Arrow schema."""
+        schema = WithTransientFactory.ARROW_SCHEMA
+        assert schema.names == ["name"]
+        assert len(schema) == 1
+
+    def test_excluded_from_schema_simple_default(self) -> None:
+        """Transient field with simple default excluded from schema."""
+        schema = WithTransientDefault.ARROW_SCHEMA
+        assert schema.names == ["value"]
+
+    def test_round_trip_default_factory(self) -> None:
+        """Transient field gets default_factory value after deserialization."""
+        obj = WithTransientFactory(name="hello", _cache={"key": 42})
+        restored = WithTransientFactory.deserialize_from_bytes(obj.serialize_to_bytes())
+        assert restored.name == "hello"
+        assert restored._cache == {}  # default_factory=dict
+
+    def test_round_trip_simple_default(self) -> None:
+        """Transient field gets simple default value after deserialization."""
+        obj = WithTransientDefault(value=42, label="custom")
+        restored = WithTransientDefault.deserialize_from_bytes(obj.serialize_to_bytes())
+        assert restored.value == 42
+        assert restored.label == "default_label"
+
+    def test_serialize_excludes_transient(self) -> None:
+        """Serialized batch does not contain transient field columns."""
+        obj = WithTransientFactory(name="test", _cache={"a": 1})
+        batch = obj._serialize()
+        assert batch.num_columns == 1
+        assert batch.schema.names == ["name"]
+        assert batch.column("name").to_pylist() == ["test"]
+
+    def test_without_default_raises(self) -> None:
+        """Transient field without a default raises TypeError on schema access."""
+
+        @dataclass(frozen=True)
+        class BadTransient(ArrowSerializableDataclass):
+            """Dataclass with transient field missing default."""
+
+            name: str
+            oops: Annotated[int, Transient()]
+
+        with pytest.raises(TypeError, match="must have a default value"):
+            _ = BadTransient.ARROW_SCHEMA
+
+    def test_nested_round_trip(self) -> None:
+        """Transient fields in nested dataclasses get defaults on deserialization."""
+        inner = InnerWithTransient(x=10, memo="temporary")
+        outer = OuterWithNestedTransient(inner=inner, tag="outer")
+        restored = OuterWithNestedTransient.deserialize_from_bytes(outer.serialize_to_bytes())
+        assert restored.tag == "outer"
+        assert restored.inner.x == 10
+        assert restored.inner.memo == ""  # default value
+
+    def test_transient_with_optional(self) -> None:
+        """Transient field with Optional type works correctly."""
+        obj = WithTransientOptional(value=5, extra="temp")
+        schema = WithTransientOptional.ARROW_SCHEMA
+        assert schema.names == ["value"]
+        restored = WithTransientOptional.deserialize_from_bytes(obj.serialize_to_bytes())
+        assert restored.value == 5
+        assert restored.extra is None  # default
+
+    def test_serialize_to_bytes_round_trip(self) -> None:
+        """Full serialize_to_bytes / deserialize_from_bytes cycle."""
+        obj = WithTransientDefault(value=99, label="ephemeral")
+        data = obj.serialize_to_bytes()
+        restored = WithTransientDefault.deserialize_from_bytes(data)
+        assert restored == WithTransientDefault(value=99, label="default_label")
+
+    def test_stream_round_trip(self) -> None:
+        """Transient fields work through stream serialize/deserialize."""
+        obj = WithTransientFactory(name="stream", _cache={"k": 1})
+        buf = BytesIO()
+        obj.serialize(buf)
+        buf.seek(0)
+        batch, cm = deserialize_record_batch(buf.read())
+        restored = WithTransientFactory.deserialize_from_batch(batch, cm)
+        assert restored.name == "stream"
+        assert restored._cache == {}

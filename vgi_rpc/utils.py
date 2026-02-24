@@ -50,6 +50,7 @@ from pyarrow import ipc
 __all__ = [
     "ArrowSerializableDataclass",
     "ArrowType",
+    "Transient",
     "IPCError",
     "IpcValidation",
     "ValidatedReader",
@@ -344,6 +345,44 @@ class ArrowType:
     arrow_type: pa.DataType
 
 
+@dataclass(frozen=True)
+class Transient:
+    """Annotation marker to exclude a field from Arrow serialization.
+
+    Transient fields exist on the Python dataclass but are not included in
+    the Arrow schema, serialization, or deserialization. They must have a
+    default value (either ``default`` or ``default_factory``).
+
+    Use with Annotated to mark a field as transient:
+
+        @dataclass(frozen=True)
+        class MyData(ArrowSerializableDataclass):
+            name: str
+            _cache: Annotated[dict[str, int], Transient()] = field(
+                default_factory=dict,
+            )
+
+    """
+
+
+def _is_transient_field(field_type: object) -> bool:
+    """Check if a field type annotation contains a Transient marker.
+
+    Args:
+        field_type: The resolved type annotation (must come from
+            ``get_type_hints(cls, include_extras=True)``).
+
+    Returns:
+        True if the annotation is ``Annotated[T, Transient()]``.
+
+    """
+    if get_origin(field_type) is Annotated:
+        for arg in get_args(field_type)[1:]:
+            if isinstance(arg, Transient):
+                return True
+    return False
+
+
 def _is_optional_type(python_type: object) -> tuple[object, bool]:
     """Check if a type is Optional (X | None) and extract the inner type.
 
@@ -519,6 +558,15 @@ class _ArrowSchemaDescriptor:
             field_name = field.name
             field_type = type_hints.get(field_name, field.type)
 
+            # Skip transient fields — they don't appear in the Arrow schema
+            if _is_transient_field(field_type):
+                has_default = field.default is not MISSING or field.default_factory is not MISSING
+                if not has_default:
+                    raise TypeError(
+                        f"Transient field {cls.__name__}.{field_name} must have a default value or default_factory"
+                    )
+                continue
+
             # Check for explicit ClassVar override (legacy support)
             if field_name in overrides:
                 arrow_type = overrides[field_name]
@@ -589,8 +637,16 @@ class ArrowSerializableDataclass:
         - list elements -> recursively converted
 
         """
+        try:
+            type_hints = get_type_hints(type(self), include_extras=True)
+        except Exception:
+            type_hints = {f.name: f.type for f in dataclass_fields(self)}
+
         row: dict[str, object] = {}
         for field in dataclass_fields(self):
+            field_type = type_hints.get(field.name, field.type)
+            if _is_transient_field(field_type):
+                continue
             value = getattr(self, field.name)
             value = self._convert_value_for_serialization(value)
             row[field.name] = value
@@ -699,10 +755,21 @@ class ArrowSerializableDataclass:
             KeyError: If an Enum name cannot be resolved.
 
         """
+        # Use get_type_hints to resolve string annotations.
+        # include_extras=True preserves Annotated[T, ...] for Transient detection.
+        try:
+            type_hints = get_type_hints(cls, include_extras=True)
+        except Exception:
+            type_hints = {f.name: f.type for f in dataclass_fields(cls)}
+
         # Get required fields (those without defaults) from dataclass definition.
         # Fields with defaults or default_factory are optional for compatibility.
+        # Transient fields are never required (they are not in the batch).
         required_fields = []
         for f in dataclass_fields(cls):
+            field_type = type_hints.get(f.name, f.type)
+            if _is_transient_field(field_type):
+                continue
             has_default = f.default is not MISSING or f.default_factory is not MISSING
             if not has_default:
                 required_fields.append(f.name)
@@ -714,15 +781,19 @@ class ArrowSerializableDataclass:
             required_fields=required_fields,
         )
 
-        # Use get_type_hints to resolve string annotations
-        try:
-            type_hints = get_type_hints(cls)
-        except Exception:
-            type_hints = {f.name: f.type for f in dataclass_fields(cls)}
-
         # Convert values back to expected Python types
         kwargs: dict[str, Any] = {}
         for field in dataclass_fields(cls):
+            field_type = type_hints.get(field.name, field.type)
+
+            # Transient fields are not in the batch — use their default value
+            if _is_transient_field(field_type):
+                if field.default is not MISSING:
+                    kwargs[field.name] = field.default
+                elif field.default_factory is not MISSING:
+                    kwargs[field.name] = field.default_factory()
+                continue
+
             # Check if field is present in the row
             if field.name not in row:
                 # Use default if available (for backward compatibility)
@@ -734,7 +805,6 @@ class ArrowSerializableDataclass:
                 continue
 
             value = row.get(field.name)
-            field_type = type_hints.get(field.name, field.type)
 
             # Unwrap Annotated to get actual type
             if get_origin(field_type) is Annotated:
@@ -802,13 +872,20 @@ class ArrowSerializableDataclass:
         ):
             # Recursively deserialize nested dataclass
             value_dict = cast("dict[str, object]", value)
-            nested_kwargs = {}
+            nested_kwargs: dict[str, object] = {}
             try:
-                nested_hints = get_type_hints(inner_type)
+                nested_hints = get_type_hints(inner_type, include_extras=True)
             except Exception:
                 nested_hints = {f.name: f.type for f in dataclass_fields(inner_type)}
             for f in dataclass_fields(inner_type):
                 f_type = nested_hints.get(f.name, f.type)
+                # Skip transient fields — use their default value
+                if _is_transient_field(f_type):
+                    if f.default is not MISSING:
+                        nested_kwargs[f.name] = f.default
+                    elif f.default_factory is not MISSING:
+                        nested_kwargs[f.name] = f.default_factory()
+                    continue
                 if get_origin(f_type) is Annotated:
                     f_type = get_args(f_type)[0]
                 nested_kwargs[f.name] = cls._convert_value_for_deserialization(
