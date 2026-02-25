@@ -2222,7 +2222,7 @@ wheels = [
 
 [[package]]
 name = "vgi-rpc"
-version = "0.1.2"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "pyarrow" },

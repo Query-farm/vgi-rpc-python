@@ -184,6 +184,12 @@ class OutputCollector:
         """Emit a pre-built data batch. Raises if a data batch was already emitted."""
         if self._data_batch_idx is not None:
             raise RuntimeError("Only one data batch may be emitted per call")
+        # Reconcile schema if the batch types differ from the output schema.
+        # This handles cases where the caller produces dictionary-encoded
+        # columns (e.g. from Arrow extension types like arrow.duckdb.enum)
+        # but the output schema expects the resolved value type (e.g. string).
+        if batch.schema != self._output_schema:
+            batch = batch.cast(self._output_schema)
         self._data_batch_idx = len(self._batches)
         custom_metadata = encode_metadata(metadata) if metadata else None
         self._batches.append(AnnotatedBatch(batch=batch, custom_metadata=custom_metadata))
