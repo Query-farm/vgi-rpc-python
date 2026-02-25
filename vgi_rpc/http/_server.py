@@ -82,6 +82,8 @@ from ._common import (
     MAX_REQUEST_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
     UPLOAD_URL_HEADER,
+    _compress_body,
+    _decompress_body,
     _RpcHttpError,
 )
 
@@ -1053,7 +1055,7 @@ class _RpcResource:
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
 
-            result_stream, http_status = self._app._unary_sync(method, info, req.bounded_stream)
+            result_stream, http_status = self._app._unary_sync(method, info, _get_request_stream(req))
             resp.content_type = _ARROW_CONTENT_TYPE
             resp.stream = result_stream
             resp.status = str(http_status.value)
@@ -1082,7 +1084,7 @@ class _StreamInitResource:
                     TypeError(f"Method '{method}' is not a stream"),
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
-            result_stream = self._app._stream_init_sync(method, info, req.bounded_stream)
+            result_stream = self._app._stream_init_sync(method, info, _get_request_stream(req))
         except _RpcHttpError as e:
             _set_error_response(
                 resp,
@@ -1111,7 +1113,7 @@ class _ExchangeResource:
                     TypeError(f"Method '{method}' does not support /exchange"),
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
-            result_stream = self._app._stream_exchange_sync(method, req.bounded_stream)
+            result_stream = self._app._stream_exchange_sync(method, _get_request_stream(req))
         except _RpcHttpError as e:
             _set_error_response(
                 resp,
@@ -1141,7 +1143,7 @@ class _UploadUrlResource:
 
             # Read request using standard wire protocol
             try:
-                ipc_method, kwargs = _read_request(req.bounded_stream, self._app._server.ipc_validation)
+                ipc_method, kwargs = _read_request(_get_request_stream(req), self._app._server.ipc_validation)
                 if ipc_method != _UPLOAD_URL_METHOD:
                     raise TypeError(f"Method mismatch: expected '{_UPLOAD_URL_METHOD}', got '{ipc_method}'")
             except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
@@ -1306,6 +1308,91 @@ class _AuthMiddleware:
             _current_transport.reset(token)
 
 
+def _get_request_stream(req: falcon.Request) -> IOBase:
+    """Return the request body stream, using the decompressed stream if available.
+
+    When ``_CompressionMiddleware`` is active and the request body was
+    compressed, the decompressed bytes are stored in ``req.context.decompressed_stream``.
+    This helper returns that stream when present, falling back to Falcon's
+    ``req.bounded_stream``.
+
+    Args:
+        req: The Falcon request.
+
+    Returns:
+        A readable binary stream for the request body.
+
+    """
+    stream: IOBase | None = getattr(req.context, "decompressed_stream", None)
+    if stream is not None:
+        return stream
+    return req.bounded_stream
+
+
+class _CompressionMiddleware:
+    """Falcon middleware for transparent zstd request/response compression.
+
+    On requests: if ``Content-Encoding: zstd`` is present, the request body
+    is decompressed and stored in ``req.context.decompressed_stream`` so that
+    resource handlers read uncompressed data.
+
+    On responses: if the client sent ``Accept-Encoding`` containing ``zstd``
+    and the response has Arrow content, the response body is compressed and
+    ``Content-Encoding: zstd`` is set.
+    """
+
+    __slots__ = ("_level",)
+
+    def __init__(self, level: int) -> None:
+        self._level = level
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Decompress zstd request bodies; record client Accept-Encoding."""
+        # Check if the client accepts zstd responses
+        accept_encoding = req.get_header("Accept-Encoding") or ""
+        req.context.client_accepts_zstd = "zstd" in accept_encoding
+
+        # Decompress request body if Content-Encoding: zstd
+        content_encoding = req.get_header("Content-Encoding") or ""
+        if "zstd" in content_encoding:
+            try:
+                compressed = req.bounded_stream.read()
+                decompressed = _decompress_body(compressed)
+                req.context.decompressed_stream = BytesIO(decompressed)
+            except Exception as exc:
+                raise falcon.HTTPBadRequest(
+                    title="Decompression Error",
+                    description=f"Failed to decompress zstd request body: {exc}",
+                ) from exc
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
+    ) -> None:
+        """Compress Arrow IPC response bodies with zstd when client supports it."""
+        if not getattr(req.context, "client_accepts_zstd", False):
+            return
+        if resp.content_type != _ARROW_CONTENT_TYPE:
+            return
+        stream = resp.stream
+        if stream is None:
+            return
+        if not isinstance(stream, IOBase):
+            return
+
+        body = stream.read()
+        if not body:
+            return
+
+        compressed = _compress_body(body, self._level)
+        resp.data = compressed
+        resp.stream = None
+        resp.set_header("Content-Encoding", "zstd")
+
+
 class _CapabilitiesMiddleware:
     """Falcon middleware that sets capability headers on every response."""
 
@@ -1339,6 +1426,7 @@ def make_wsgi_app(
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
     token_ttl: int = 3600,
+    compression_level: int | None = 3,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -1388,6 +1476,10 @@ def make_wsgi_app(
         token_ttl: Maximum age of stream state tokens in seconds.  Tokens
             older than this are rejected with HTTP 400.  Default is 3600
             (1 hour).  Set to ``0`` to disable expiry checking.
+        compression_level: Zstandard compression level for HTTP request/
+            response bodies.  ``3`` (the default) installs
+            ``_CompressionMiddleware`` at level 3.  Valid range is 1-22.
+            ``None`` disables compression entirely.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -1419,6 +1511,11 @@ def make_wsgi_app(
         token_ttl,
     )
     middleware: list[Any] = [_RequestIdMiddleware()]
+
+    # Compression middleware decompresses request bodies and compresses
+    # responses — must come before auth so handlers read plaintext bodies.
+    if compression_level is not None:
+        middleware.append(_CompressionMiddleware(compression_level))
 
     # OTel middleware must come before auth so spans cover the full request
     if otel_config is not None:

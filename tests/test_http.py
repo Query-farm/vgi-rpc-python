@@ -1241,3 +1241,185 @@ class TestRequestId:
             assert msg.extra is not None
             assert "request_id" in msg.extra
             assert len(str(msg.extra["request_id"])) == 16
+
+
+# ---------------------------------------------------------------------------
+# Tests: Zstd compression
+# ---------------------------------------------------------------------------
+
+# Zstd frame magic number (first 4 bytes of any zstd-compressed data)
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+class TestZstdCompression:
+    """Tests for transparent zstd compression on the HTTP transport."""
+
+    def test_unary_round_trip_compressed(self) -> None:
+        """Unary call works with compression on both client and server."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            compression_level=3,
+        )
+        with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:
+            result = proxy.greet(name="World")
+        assert result == "Hello, World!"
+        client.close()
+
+    def test_stream_init_exchange_compressed(self) -> None:
+        """Stream init + exchange round-trip with compression."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            compression_level=3,
+        )
+        with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:
+            session = proxy.transform(factor=2.0)
+            assert isinstance(session, HttpStreamSession)
+            input_batch = AnnotatedBatch.from_pydict(
+                {"value": [1.0, 2.0, 3.0]},
+                schema=pa.schema([pa.field("value", pa.float64())]),
+            )
+            result = session.exchange(input_batch)
+            assert result.batch.num_rows == 3
+            assert result.batch.column("value")[0].as_py() == 2.0
+            assert result.batch.column("value")[1].as_py() == 4.0
+        client.close()
+
+    def test_producer_stream_continuation_compressed(self) -> None:
+        """Producer stream with continuation works under compression."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            max_stream_response_bytes=200,
+            compression_level=3,
+        )
+        with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:
+            session = proxy.generate(count=10)
+            batches = list(session)
+            assert len(batches) == 10
+            values = [ab.batch.column("i")[0].as_py() for ab in batches]
+            assert values == list(range(10))
+        client.close()
+
+    def test_no_compression(self) -> None:
+        """Full round-trip with compression_level=None on both sides."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            compression_level=None,
+        )
+        with http_connect(RpcFixtureService, client=client, compression_level=None) as proxy:
+            result = proxy.greet(name="NoCompression")
+        assert result == "Hello, NoCompression!"
+        client.close()
+
+    def test_server_compressed_client_uncompressed(self) -> None:
+        """Server compresses responses; client sends uncompressed requests.
+
+        httpx (and _SyncTestResponse) auto-decompress zstd responses, so
+        this works transparently.
+        """
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            compression_level=3,
+        )
+        with http_connect(RpcFixtureService, client=client, compression_level=None) as proxy:
+            result = proxy.greet(name="ServerOnly")
+        assert result == "Hello, ServerOnly!"
+        client.close()
+
+    def test_uncompressed_request_to_compressed_server(self) -> None:
+        """Server with compression middleware handles uncompressed requests fine."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            compression_level=3,
+        )
+        # Client does NOT compress requests (compression_level=None)
+        # but server has compression middleware active — should work fine
+        # because the middleware only decompresses when Content-Encoding: zstd is present
+        with http_connect(RpcFixtureService, client=client, compression_level=None) as proxy:
+            result = proxy.greet(name="PlainRequest")
+        assert result == "Hello, PlainRequest!"
+        client.close()
+
+    def test_compressed_response_has_content_encoding_header(self) -> None:
+        """Verify Content-Encoding: zstd header is present on compressed responses."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test-key", compression_level=3)
+        falcon_client = falcon.testing.TestClient(app)
+
+        # Build a minimal unary request
+        req_buf = BytesIO()
+        schema = pa.schema([pa.field("name", pa.utf8())])
+        request_metadata = pa.KeyValueMetadata({b"vgi_rpc.method": b"greet", b"vgi_rpc.request_version": b"1"})
+        with ipc.new_stream(req_buf, schema) as writer:
+            batch = pa.RecordBatch.from_pydict({"name": ["Test"]}, schema=schema)
+            writer.write_batch(batch, custom_metadata=request_metadata)
+
+        # Send with Accept-Encoding: zstd to trigger response compression
+        result = falcon_client.simulate_post(
+            "/vgi/greet",
+            body=req_buf.getvalue(),
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                "Accept-Encoding": "zstd",
+            },
+        )
+        assert result.headers.get("content-encoding") == "zstd"
+        # Verify the raw body starts with zstd magic bytes
+        assert result.content[:4] == _ZSTD_MAGIC
+
+    def test_compressed_request_body_has_zstd_magic(self) -> None:
+        """Verify client request body is actually zstd-compressed."""
+        from vgi_rpc.http._common import _compress_body
+
+        # Build a minimal IPC request
+        req_buf = BytesIO()
+        schema = pa.schema([pa.field("name", pa.utf8())])
+        request_metadata = pa.KeyValueMetadata({b"vgi_rpc.method": b"greet", b"vgi_rpc.request_version": b"1"})
+        with ipc.new_stream(req_buf, schema) as writer:
+            batch = pa.RecordBatch.from_pydict({"name": ["Test"]}, schema=schema)
+            writer.write_batch(batch, custom_metadata=request_metadata)
+
+        raw = req_buf.getvalue()
+        compressed = _compress_body(raw, 3)
+        # Must start with zstd magic
+        assert compressed[:4] == _ZSTD_MAGIC
+        # Compressed should be different from raw
+        assert compressed != raw
+
+    def test_default_compression_level(self) -> None:
+        """Default compression_level=3 is used when not specified.
+
+        Since fixtures use default compression_level=3, all existing tests
+        run with compression. This test just verifies the default value works.
+        """
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+        )
+        # Default compression_level=3 on both sides
+        with http_connect(RpcFixtureService, client=client) as proxy:
+            result = proxy.greet(name="Default")
+        assert result == "Hello, Default!"
+        client.close()
+
+    def test_stream_exchange_no_compression(self) -> None:
+        """Stream exchange works without compression."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            compression_level=None,
+        )
+        with http_connect(RpcFixtureService, client=client, compression_level=None) as proxy:
+            session = proxy.transform(factor=3.0)
+            input_batch = AnnotatedBatch.from_pydict(
+                {"value": [10.0]},
+                schema=pa.schema([pa.field("value", pa.float64())]),
+            )
+            result = session.exchange(input_batch)
+            assert result.batch.column("value")[0].as_py() == 30.0
+        client.close()

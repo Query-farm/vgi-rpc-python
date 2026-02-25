@@ -30,6 +30,41 @@ _upload_url_fields: list[pa.Field[Any]] = [
 _UPLOAD_URL_SCHEMA = pa.schema(_upload_url_fields)
 
 
+def _compress_body(data: bytes, level: int) -> bytes:
+    """Compress *data* using zstd at the given level.
+
+    A new ``ZstdCompressor`` is created per call (cheap, thread-safe).
+
+    Args:
+        data: Raw bytes to compress.
+        level: Zstandard compression level (1-22).
+
+    Returns:
+        Compressed bytes.
+
+    """
+    import zstandard
+
+    return zstandard.ZstdCompressor(level=level).compress(data)
+
+
+def _decompress_body(data: bytes) -> bytes:
+    """Decompress zstd-compressed *data*.
+
+    A new ``ZstdDecompressor`` is created per call (cheap, thread-safe).
+
+    Args:
+        data: Zstd-compressed bytes.
+
+    Returns:
+        Decompressed bytes.
+
+    """
+    import zstandard
+
+    return zstandard.ZstdDecompressor().decompress(data)
+
+
 class _RpcHttpError(Exception):
     """Internal exception for HTTP-layer errors with status codes."""
 

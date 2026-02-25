@@ -2246,6 +2246,7 @@ http = [
     { name = "falcon" },
     { name = "httpx" },
     { name = "waitress" },
+    { name = "zstandard" },
 ]
 otel = [
     { name = "opentelemetry-api" },
@@ -2305,6 +2306,7 @@ requires-dist = [
     { name = "tzdata", marker = "sys_platform == 'win32'", specifier = ">=2024.1" },
     { name = "waitress", marker = "extra == 'http'", specifier = ">=2.0" },
     { name = "zstandard", marker = "extra == 'external'", specifier = ">=0.20" },
+    { name = "zstandard", marker = "extra == 'http'", specifier = ">=0.20" },
 ]
 provides-extras = ["http", "s3", "gcs", "cli", "external", "otel"]
 

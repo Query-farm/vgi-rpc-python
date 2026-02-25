@@ -22,14 +22,24 @@ from ._server import make_wsgi_app
 
 
 class _SyncTestResponse:
-    """Minimal response object matching what _HttpProxy expects from httpx.Response."""
+    """Minimal response object matching what _HttpProxy expects from httpx.Response.
+
+    Transparently decompresses ``Content-Encoding: zstd`` response bodies,
+    mirroring httpx's built-in ``ZStandardDecoder`` behaviour so that the
+    test client and a real httpx client behave identically.
+    """
 
     __slots__ = ("content", "headers", "status_code")
 
     def __init__(self, status_code: int, content: bytes, headers: dict[str, str] | None = None) -> None:
         self.status_code = status_code
-        self.content = content
         self.headers: dict[str, str] = headers or {}
+        encoding = self.headers.get("content-encoding", "")
+        if "zstd" in encoding:
+            from vgi_rpc.http._common import _decompress_body
+
+            content = _decompress_body(content)
+        self.content = content
 
 
 class _SyncTestClient:
@@ -77,6 +87,7 @@ def make_sync_client(
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
     token_ttl: int = 3600,
+    compression_level: int | None = 3,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -95,6 +106,7 @@ def make_sync_client(
         max_upload_bytes: See ``make_wsgi_app``.
         otel_config: See ``make_wsgi_app``.
         token_ttl: See ``make_wsgi_app``.
+        compression_level: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -111,5 +123,6 @@ def make_sync_client(
         max_upload_bytes=max_upload_bytes,
         otel_config=otel_config,
         token_ttl=token_ttl,
+        compression_level=compression_level,
     )
     return _SyncTestClient(app, default_headers=default_headers)

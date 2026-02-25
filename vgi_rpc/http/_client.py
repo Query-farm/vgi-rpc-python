@@ -55,6 +55,7 @@ from ._common import (
     MAX_REQUEST_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
     UPLOAD_URL_HEADER,
+    _compress_body,
 )
 from ._retry import HttpRetryConfig, _options_with_retry, _post_with_retry
 
@@ -124,6 +125,7 @@ class HttpStreamSession:
 
     __slots__ = (
         "_client",
+        "_compression_level",
         "_external_config",
         "_finished",
         "_header",
@@ -152,6 +154,7 @@ class HttpStreamSession:
         finished: bool = False,
         header: object | None = None,
         retry_config: HttpRetryConfig | None = None,
+        compression_level: int | None = None,
     ) -> None:
         """Initialize with HTTP client, method details, and initial state."""
         self._client = client
@@ -166,6 +169,7 @@ class HttpStreamSession:
         self._finished = finished
         self._header = header
         self._retry_config = retry_config
+        self._compression_level = compression_level
 
     @property
     def header(self) -> object | None:
@@ -191,6 +195,19 @@ class HttpStreamSession:
         if not isinstance(self._header, header_type):
             raise TypeError(f"Header type mismatch: expected {header_type.__name__}, got {type(self._header).__name__}")
         return self._header
+
+    def _build_headers(self) -> dict[str, str]:
+        """Build HTTP headers, adding ``Content-Encoding: zstd`` when compression is enabled."""
+        headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
+        if self._compression_level is not None:
+            headers["Content-Encoding"] = "zstd"
+        return headers
+
+    def _prepare_body(self, content: bytes) -> bytes:
+        """Compress *content* when compression is enabled."""
+        if self._compression_level is not None:
+            return _compress_body(content, self._compression_level)
+        return content
 
     def exchange(self, input_batch: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch and receive the output batch.
@@ -233,8 +250,8 @@ class HttpStreamSession:
         # cause duplicate execution.  Only init/unary/continuation are retried.
         resp = self._client.post(
             f"{self._url_prefix}/{self._method}/exchange",
-            content=req_buf.getvalue(),
-            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            content=self._prepare_body(req_buf.getvalue()),
+            headers=self._build_headers(),
         )
         if wire_http_logger.isEnabledFor(logging.DEBUG):
             wire_http_logger.debug(
@@ -274,8 +291,8 @@ class HttpStreamSession:
         resp = _post_with_retry(
             self._client,
             f"{self._url_prefix}/{self._method}/exchange",
-            content=req_buf.getvalue(),
-            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            content=self._prepare_body(req_buf.getvalue()),
+            headers=self._build_headers(),
             config=self._retry_config,
         )
         return _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
@@ -356,6 +373,7 @@ def http_connect[P](
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
+    compression_level: int | None = 3,
 ) -> Iterator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -374,6 +392,10 @@ def http_connect[P](
         ipc_validation: Validation level for incoming IPC batches.
         retry: Optional retry configuration for transient HTTP failures.
             When ``None`` (the default), no retries are attempted.
+        compression_level: Zstandard compression level for request bodies.
+            ``3`` (the default) compresses requests and adds
+            ``Content-Encoding: zstd``.  ``None`` disables request
+            compression (httpx still auto-decompresses server responses).
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -400,6 +422,7 @@ def http_connect[P](
                 external_config=external_location,
                 ipc_validation=ipc_validation,
                 retry_config=retry,
+                compression_level=compression_level,
             ),
         )
     finally:
@@ -490,6 +513,7 @@ def _init_http_stream_session(
     ipc_validation: IpcValidation = IpcValidation.FULL,
     header: object | None = None,
     retry_config: HttpRetryConfig | None = None,
+    compression_level: int | None = None,
 ) -> HttpStreamSession:
     """Parse an init response and return an ``HttpStreamSession``.
 
@@ -507,6 +531,7 @@ def _init_http_stream_session(
         ipc_validation: Validation level for IPC batches.
         header: Optional pre-read stream header.
         retry_config: Optional retry configuration for transient failures.
+        compression_level: Zstandard compression level for exchange requests.
 
     Returns:
         A configured ``HttpStreamSession`` ready for iteration or exchange.
@@ -564,6 +589,7 @@ def _init_http_stream_session(
         finished=finished,
         header=header,
         retry_config=retry_config,
+        compression_level=compression_level,
     )
 
 
@@ -580,6 +606,7 @@ class _HttpProxy:
         external_config: ExternalLocationConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
         retry_config: HttpRetryConfig | None = None,
+        compression_level: int | None = None,
     ) -> None:
         self._protocol = protocol
         self._client = client
@@ -589,6 +616,20 @@ class _HttpProxy:
         self._external_config = external_config
         self._ipc_validation = ipc_validation
         self._retry_config = retry_config
+        self._compression_level = compression_level
+
+    def _build_headers(self) -> dict[str, str]:
+        """Build HTTP headers, adding ``Content-Encoding: zstd`` when compression is enabled."""
+        headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
+        if self._compression_level is not None:
+            headers["Content-Encoding"] = "zstd"
+        return headers
+
+    def _prepare_body(self, content: bytes) -> bytes:
+        """Compress *content* when compression is enabled."""
+        if self._compression_level is not None:
+            return _compress_body(content, self._compression_level)
+        return content
 
     def __getattr__(self, name: str) -> Any:
         """Resolve RPC method names to callable proxies, caching on first access.
@@ -618,6 +659,8 @@ class _HttpProxy:
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
         retry_cfg = self._retry_config
+        build_headers = self._build_headers
+        prepare_body = self._prepare_body
 
         def caller(**kwargs: object) -> object:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
@@ -628,8 +671,8 @@ class _HttpProxy:
             resp = _post_with_retry(
                 client,
                 f"{url_prefix}/{info.name}",
-                content=req_buf.getvalue(),
-                headers={"Content-Type": _ARROW_CONTENT_TYPE},
+                content=prepare_body(req_buf.getvalue()),
+                headers=build_headers(),
                 config=retry_cfg,
             )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
@@ -652,6 +695,9 @@ class _HttpProxy:
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
         retry_cfg = self._retry_config
+        build_headers = self._build_headers
+        prepare_body = self._prepare_body
+        compression_level = self._compression_level
 
         def caller(**kwargs: object) -> HttpStreamSession:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
@@ -663,8 +709,8 @@ class _HttpProxy:
             resp = _post_with_retry(
                 client,
                 f"{url_prefix}/{info.name}/init",
-                content=req_buf.getvalue(),
-                headers={"Content-Type": _ARROW_CONTENT_TYPE},
+                content=prepare_body(req_buf.getvalue()),
+                headers=build_headers(),
                 config=retry_cfg,
             )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
@@ -698,6 +744,7 @@ class _HttpProxy:
                 ipc_validation=ipc_validation,
                 header=header,
                 retry_config=retry_cfg,
+                compression_level=compression_level,
             )
 
         return caller
