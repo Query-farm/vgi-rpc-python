@@ -16,7 +16,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-dependencies = ["pyarrow>=14.0", "tzdata>=2024.1; sys_platform == 'win32'"]
+dependencies = ["pyarrow>=14.0", "docstring-parser>=0.16", "tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.urls]
 Homepage = "https://github.com/Query-farm/vgi-rpc-python"

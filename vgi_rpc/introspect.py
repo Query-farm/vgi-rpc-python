@@ -70,7 +70,7 @@ __all__ = [
 DESCRIBE_METHOD_NAME = "__describe__"
 """Well-known method name for introspection requests."""
 
-DESCRIBE_VERSION = "2"
+DESCRIBE_VERSION = "3"
 """Introspection format version for forward compatibility."""
 
 _DESCRIBE_FIELDS: list[pa.Field[pa.DataType]] = [
@@ -84,6 +84,8 @@ _DESCRIBE_FIELDS: list[pa.Field[pa.DataType]] = [
     pa.field("param_defaults_json", pa.utf8(), nullable=True),
     pa.field("has_header", pa.bool_()),
     pa.field("header_schema_ipc", pa.binary(), nullable=True),
+    pa.field("is_exchange", pa.bool_(), nullable=True),
+    pa.field("param_docs_json", pa.utf8(), nullable=True),
 ]
 _DESCRIBE_SCHEMA = pa.schema(_DESCRIBE_FIELDS)
 
@@ -194,6 +196,8 @@ class MethodDescription:
         param_defaults: Parsed default values keyed by parameter name.
         has_header: ``True`` for stream methods that declare a header type.
         header_schema: Arrow schema for the header, or ``None`` if no header.
+        is_exchange: For streams, ``True`` if exchange (bidi), ``False`` if
+            producer, ``None`` if unknown.  Always ``None`` for unary.
 
     """
 
@@ -205,8 +209,10 @@ class MethodDescription:
     result_schema: pa.Schema
     param_types: dict[str, str] = field(default_factory=dict)
     param_defaults: dict[str, object] = field(default_factory=dict)
+    param_docs: dict[str, str] = field(default_factory=dict)
     has_header: bool = False
     header_schema: pa.Schema | None = None
+    is_exchange: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -287,6 +293,8 @@ def build_describe_batch(
     param_defaults_jsons: list[str | None] = []
     has_headers: list[bool] = []
     header_schemas: list[bytes | None] = []
+    is_exchanges: list[bool | None] = []
+    param_docs_jsons: list[str | None] = []
 
     for name, info in sorted(methods.items()):
         names.append(name)
@@ -313,6 +321,11 @@ def build_describe_batch(
         else:
             header_schemas.append(None)
 
+        is_exchanges.append(info.is_exchange)
+
+        # Build param_docs_json
+        param_docs_jsons.append(json.dumps(info.param_docs) if info.param_docs else None)
+
     # Introspection metadata (written as batch custom_metadata)
     custom_metadata = pa.KeyValueMetadata(
         {
@@ -335,6 +348,8 @@ def build_describe_batch(
             "param_defaults_json": param_defaults_jsons,
             "has_header": has_headers,
             "header_schema_ipc": header_schemas,
+            "is_exchange": is_exchanges,
+            "param_docs_json": param_docs_jsons,
         },
         schema=_DESCRIBE_SCHEMA,
     )
@@ -402,6 +417,18 @@ def parse_describe_batch(
             if header_schema_bytes is not None:
                 header_schema = pa.ipc.read_schema(pa.py_buffer(header_schema_bytes))
 
+        # Exchange field (v2+)
+        is_exchange: bool | None = None
+        if "is_exchange" in batch.schema.names:
+            is_exchange = batch.column("is_exchange")[i].as_py()
+
+        # Param docs (v3+)
+        param_docs: dict[str, str] = {}
+        if "param_docs_json" in batch.schema.names:
+            pdocs_json: str | None = batch.column("param_docs_json")[i].as_py()
+            if pdocs_json:
+                param_docs = json.loads(pdocs_json)
+
         method_map[name] = MethodDescription(
             name=name,
             method_type=method_type,
@@ -411,8 +438,10 @@ def parse_describe_batch(
             result_schema=result_schema,
             param_types=param_types,
             param_defaults=param_defaults,
+            param_docs=param_docs,
             has_header=has_header,
             header_schema=header_schema,
+            is_exchange=is_exchange,
         )
 
     return ServiceDescription(

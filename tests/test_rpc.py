@@ -69,13 +69,13 @@ class Color(Enum):
 
 
 @dataclass
-class GenerateState(StreamState):
+class GenerateState(ProducerState):
     """State for the generate producer stream."""
 
     count: int
     current: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next batch."""
         if self.current >= self.count:
             out.finish()
@@ -85,14 +85,14 @@ class GenerateState(StreamState):
 
 
 @dataclass
-class GenerateMultiRowState(StreamState):
+class GenerateMultiRowState(ProducerState):
     """State for a producer that emits multi-row batches."""
 
     count: int
     rows_per_batch: int
     offset: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce a batch with multiple rows."""
         if self.offset >= self.count:
             out.finish()
@@ -104,24 +104,24 @@ class GenerateMultiRowState(StreamState):
 
 
 @dataclass
-class TransformState(StreamState):
+class TransformState(ExchangeState):
     """State for the transform exchange stream."""
 
     factor: float
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process an input batch."""
         scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
         out.emit_arrays([scaled])
 
 
 @dataclass
-class FailStreamState(StreamState):
+class FailStreamState(ProducerState):
     """State for a stream that fails after the first batch."""
 
     emitted: bool = False
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce a batch, then fail on the next call."""
         if not self.emitted:
             self.emitted = True
@@ -131,13 +131,13 @@ class FailStreamState(StreamState):
 
 
 @dataclass
-class FailBidiMidState(StreamState):
+class FailBidiMidState(ExchangeState):
     """State for a bidi that fails after processing one batch."""
 
     factor: float
     count: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process one batch, then fail on the next."""
         if self.count > 0:
             raise RuntimeError("bidi boom")
@@ -147,13 +147,13 @@ class FailBidiMidState(StreamState):
 
 
 @dataclass
-class GenerateWithLogsState(StreamState):
+class GenerateWithLogsState(ProducerState):
     """State for generate with interleaved log messages."""
 
     count: int
     current: int = 0
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Produce the next batch with a log message."""
         if self.current >= self.count:
             out.finish()
@@ -164,12 +164,12 @@ class GenerateWithLogsState(StreamState):
 
 
 @dataclass
-class TransformWithLogsState(StreamState):
+class TransformWithLogsState(ExchangeState):
     """State for bidi transform with log messages per exchange."""
 
     factor: float
 
-    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process input with a log message."""
         out.client_log(Level.INFO, f"transforming batch with factor={self.factor}")
         scaled = cast("pa.Array[Any]", pc.multiply(input.batch.column("value"), self.factor))  # type: ignore[redundant-cast]
@@ -247,26 +247,37 @@ class RpcFixtureService(Protocol):
     """Service with unary, stream, bidi, and error methods."""
 
     def add(self, a: float, b: float) -> float:
-        """Add two numbers."""
+        """Add two numbers.
+
+        Args:
+            a: The first number.
+            b: The second number.
+
+        """
         ...
 
     def greet(self, name: str) -> str:
-        """Greet by name."""
+        """Greet by name.
+
+        Args:
+            name: The name to greet.
+
+        """
         ...
 
     def noop(self) -> None:
         """Do nothing."""
         ...
 
-    def generate(self, count: int) -> Stream[StreamState]:
+    def generate(self, count: int) -> Stream[ProducerState]:
         """Generate count batches."""
         ...
 
-    def generate_multi(self, count: int, rows_per_batch: int) -> Stream[StreamState]:
+    def generate_multi(self, count: int, rows_per_batch: int) -> Stream[ProducerState]:
         """Generate batches with multiple rows each."""
         ...
 
-    def transform(self, factor: float) -> Stream[StreamState]:
+    def transform(self, factor: float) -> Stream[ExchangeState]:
         """Scale values by factor."""
         ...
 
@@ -274,11 +285,11 @@ class RpcFixtureService(Protocol):
         """Raise ValueError."""
         ...
 
-    def fail_stream(self) -> Stream[StreamState]:
+    def fail_stream(self) -> Stream[ProducerState]:
         """Stream that fails mid-iteration."""
         ...
 
-    def fail_bidi_mid(self, factor: float) -> Stream[StreamState]:
+    def fail_bidi_mid(self, factor: float) -> Stream[ExchangeState]:
         """Bidi that fails after first batch."""
         ...
 
@@ -310,27 +321,27 @@ class RpcFixtureService(Protocol):
         """Greet by name, emitting log messages."""
         ...
 
-    def generate_with_logs(self, count: int) -> Stream[StreamState]:
+    def generate_with_logs(self, count: int) -> Stream[ProducerState]:
         """Generate batches with interleaved log messages."""
         ...
 
-    def transform_with_logs(self, factor: float) -> Stream[StreamState]:
+    def transform_with_logs(self, factor: float) -> Stream[ExchangeState]:
         """Bidi transform with log messages per exchange."""
         ...
 
-    def generate_with_header(self, count: int) -> Stream[StreamState, StreamHeader]:
+    def generate_with_header(self, count: int) -> Stream[ProducerState, StreamHeader]:
         """Generate batches with a stream header."""
         ...
 
-    def transform_with_header(self, factor: float) -> Stream[StreamState, StreamHeader]:
+    def transform_with_header(self, factor: float) -> Stream[ExchangeState, StreamHeader]:
         """Exchange stream with a stream header."""
         ...
 
-    def fail_stream_init_with_header(self) -> Stream[StreamState, StreamHeader]:
+    def fail_stream_init_with_header(self) -> Stream[ProducerState, StreamHeader]:
         """Stream that raises during init (with header declared)."""
         ...
 
-    def generate_with_header_and_log(self, count: int) -> Stream[StreamState, StreamHeader]:
+    def generate_with_header_and_log(self, count: int) -> Stream[ProducerState, StreamHeader]:
         """Generate batches with a stream header and init log."""
         ...
 
@@ -559,7 +570,15 @@ class TestRpcMethods:
     def test_method_doc(self) -> None:
         """Method docstrings are captured when available."""
         methods = rpc_methods(RpcFixtureService)
-        assert methods["add"].doc == "Add two numbers."
+        assert methods["add"].doc is not None
+        assert methods["add"].doc.startswith("Add two numbers.")
+
+    def test_param_docs_extracted(self) -> None:
+        """Parameter descriptions are extracted from docstring Args sections."""
+        methods = rpc_methods(RpcFixtureService)
+        assert methods["add"].param_docs == {"a": "The first number.", "b": "The second number."}
+        assert methods["greet"].param_docs == {"name": "The name to greet."}
+        assert methods["noop"].param_docs == {}
 
     def test_server_methods_property(self) -> None:
         """RpcServer.methods property returns all protocol methods."""

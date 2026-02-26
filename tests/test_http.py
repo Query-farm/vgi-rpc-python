@@ -1423,3 +1423,268 @@ class TestZstdCompression:
             result = session.exchange(input_batch)
             assert result.batch.column("value")[0].as_py() == 30.0
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# 404 HTML page
+# ---------------------------------------------------------------------------
+
+
+class TestNotFoundHtmlPage:
+    """Custom HTML 404 page for unmatched routes."""
+
+    def test_root_returns_html_404(self, client: _SyncTestClient) -> None:
+        """GET / returns a friendly HTML 404 page."""
+        resp = client._client.simulate_get("/")
+        assert resp.status_code == 404
+        assert "text/html" in resp.headers.get("content-type", "")
+        assert "<code>vgi-rpc</code>" in resp.text
+        assert "vgi-rpc.query.farm" in resp.text
+
+    def test_random_path_returns_html_404(self, client: _SyncTestClient) -> None:
+        """GET /random returns a friendly HTML 404 page."""
+        resp = client._client.simulate_get("/random")
+        assert resp.status_code == 404
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    def test_prefix_without_method_returns_landing_page(self, client: _SyncTestClient) -> None:
+        """GET /vgi (no method segment) returns landing page (200)."""
+        resp = client._client.simulate_get("/vgi")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+        assert "<code>vgi-rpc</code>" in resp.text
+
+    def test_existing_method_404_still_arrow_ipc(self, client: _SyncTestClient) -> None:
+        """Unknown method on a matched route still returns Arrow IPC 404 (not HTML)."""
+        resp = client.post(
+            f"{_BASE_URL}/vgi/nonexistent",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 404
+        assert "text/html" not in (resp.headers.get("content-type") or "")
+
+    def test_protocol_name_in_html(self, client: _SyncTestClient) -> None:
+        """Protocol name appears in the 404 HTML body."""
+        resp = client._client.simulate_get("/")
+        assert resp.status_code == 404
+        assert "RpcFixtureService" in resp.text
+
+    def test_logo_in_html(self, client: _SyncTestClient) -> None:
+        """HTML contains the vgi-rpc logo from the docs site."""
+        resp = client._client.simulate_get("/")
+        assert resp.status_code == 404
+        assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in resp.text
+
+    def test_disabled_not_found_page(self) -> None:
+        """When enable_not_found_page=False, Falcon's default 404 is used."""
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            enable_not_found_page=False,
+        )
+        resp = c._client.simulate_get("/")
+        # Falcon's default 404 does not contain our custom HTML
+        assert resp.status_code == 404
+        assert "<code>vgi-rpc</code>" not in resp.text
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# Landing page
+# ---------------------------------------------------------------------------
+
+
+class TestLandingPage:
+    """HTML landing page at GET {prefix}."""
+
+    @pytest.fixture
+    def landing_client(self) -> Iterator[_SyncTestClient]:
+        """Client with landing page enabled (default)."""
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+        )
+        yield c
+        c.close()
+
+    def test_get_prefix_returns_landing_page(self, landing_client: _SyncTestClient) -> None:
+        """GET /vgi returns 200 with HTML content."""
+        resp = landing_client._client.simulate_get("/vgi")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    def test_protocol_name_in_landing(self, landing_client: _SyncTestClient) -> None:
+        """Protocol name appears in the landing page."""
+        resp = landing_client._client.simulate_get("/vgi")
+        assert "RpcFixtureService" in resp.text
+
+    def test_server_id_in_landing(self, landing_client: _SyncTestClient) -> None:
+        """Server ID appears in the landing page."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), server_id="test-id-abc")
+        c = make_sync_client(server, signing_key=b"test-key")
+        resp = c._client.simulate_get("/vgi")
+        assert "test-id-abc" in resp.text
+        c.close()
+
+    def test_logo_in_landing(self, landing_client: _SyncTestClient) -> None:
+        """Logo URL is present in the landing page."""
+        resp = landing_client._client.simulate_get("/vgi")
+        assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in resp.text
+
+    def test_vgi_rpc_in_code_tag(self, landing_client: _SyncTestClient) -> None:
+        """'vgi-rpc' appears in <code> tags."""
+        resp = landing_client._client.simulate_get("/vgi")
+        assert "<code>vgi-rpc</code>" in resp.text
+
+    def test_vgi_rpc_link(self, landing_client: _SyncTestClient) -> None:
+        """'Learn more about vgi-rpc' link and Query.Farm copyright are present."""
+        resp = landing_client._client.simulate_get("/vgi")
+        assert "Learn more about" in resp.text
+        assert "<code>vgi-rpc</code>" in resp.text
+        assert "Query.Farm LLC" in resp.text
+        assert "2026" in resp.text
+
+    def test_repo_url_in_landing(self) -> None:
+        """Repo URL appears as a link when provided."""
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            repo_url="https://github.com/example/my-service",
+        )
+        resp = c._client.simulate_get("/vgi")
+        assert "https://github.com/example/my-service" in resp.text
+        assert "Source repository" in resp.text
+        c.close()
+
+    def test_describe_link_when_enabled(self) -> None:
+        """Landing page contains describe link when describe is enabled on server."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
+        c = make_sync_client(server, signing_key=b"test-key")
+        resp = c._client.simulate_get("/vgi")
+        assert "/vgi/describe" in resp.text
+        assert "View service API" in resp.text
+        c.close()
+
+    def test_no_describe_link_when_disabled(self, landing_client: _SyncTestClient) -> None:
+        """Landing page omits describe link when enable_describe=False on server."""
+        resp = landing_client._client.simulate_get("/vgi")
+        assert "/vgi/describe" not in resp.text
+
+    def test_no_describe_link_when_page_disabled(self) -> None:
+        """Landing page omits describe link when enable_describe_page=False."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
+        c = make_sync_client(server, signing_key=b"test-key", enable_describe_page=False)
+        resp = c._client.simulate_get("/vgi")
+        assert "/vgi/describe" not in resp.text
+        c.close()
+
+    def test_disabled_landing_page(self) -> None:
+        """When enable_landing_page=False, GET /vgi returns 404."""
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            enable_landing_page=False,
+        )
+        resp = c._client.simulate_get("/vgi")
+        assert resp.status_code == 404
+        c.close()
+
+    def test_post_to_prefix_returns_405(self, landing_client: _SyncTestClient) -> None:
+        """POST /vgi returns 405 Method Not Allowed."""
+        resp = landing_client._client.simulate_post("/vgi")
+        assert resp.status_code == 405
+
+
+# ---------------------------------------------------------------------------
+# Describe HTML page
+# ---------------------------------------------------------------------------
+
+
+class TestDescribeHtmlPage:
+    """HTML describe page at GET {prefix}/describe."""
+
+    @pytest.fixture
+    def describe_client(self) -> Iterator[_SyncTestClient]:
+        """Client with describe page enabled."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
+        c = make_sync_client(server, signing_key=b"test-key")
+        yield c
+        c.close()
+
+    def test_get_describe_returns_page(self, describe_client: _SyncTestClient) -> None:
+        """GET /vgi/describe returns 200 with HTML content."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    def test_protocol_name_in_page(self, describe_client: _SyncTestClient) -> None:
+        """Protocol name appears in the describe page."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "RpcFixtureService" in resp.text
+
+    def test_method_names_in_page(self, describe_client: _SyncTestClient) -> None:
+        """All method names appear in the describe page."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        for method in ("add", "greet", "generate", "transform"):
+            assert method in resp.text
+
+    def test_method_types_shown(self, describe_client: _SyncTestClient) -> None:
+        """UNARY, STREAM, EXCHANGE, PRODUCER, and HEADER badges are shown."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "badge-unary" in resp.text
+        assert "badge-stream" in resp.text
+        assert "badge-exchange" in resp.text
+        assert "badge-producer" in resp.text
+        assert "badge-header" in resp.text
+
+    def test_docstrings_shown(self, describe_client: _SyncTestClient) -> None:
+        """Method docstrings appear in the describe page."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "Add two numbers" in resp.text
+        assert "Greet by name" in resp.text
+
+    def test_parameter_types_shown(self, describe_client: _SyncTestClient) -> None:
+        """Parameter types appear in the describe page."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "float" in resp.text
+
+    def test_logo_in_page(self, describe_client: _SyncTestClient) -> None:
+        """Logo URL is present in the describe page."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in resp.text
+
+    def test_vgi_rpc_in_code_tag(self, describe_client: _SyncTestClient) -> None:
+        """'vgi-rpc' appears in <code> tags."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "<code>vgi-rpc</code>" in resp.text
+
+    def test_describe_method_hidden(self, describe_client: _SyncTestClient) -> None:
+        """The __describe__ method is filtered out of the page."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "__describe__" not in resp.text
+
+    def test_disabled_via_parameter(self) -> None:
+        """When enable_describe_page=False, GET /vgi/describe is not served."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
+        c = make_sync_client(server, signing_key=b"test-key", enable_describe_page=False)
+        resp = c._client.simulate_get("/vgi/describe")
+        # Falls through to {prefix}/{method} route which only has on_post → 405
+        assert resp.status_code == 405
+        c.close()
+
+    def test_parameter_descriptions_shown(self, describe_client: _SyncTestClient) -> None:
+        """Parameter descriptions from docstring Args: sections appear in the page."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        assert "The first number" in resp.text
+        assert "The second number" in resp.text
+        assert "The name to greet" in resp.text
+
+    def test_disabled_when_describe_not_enabled(self) -> None:
+        """When enable_describe=False on server, GET /vgi/describe is not served."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        c = make_sync_client(server, signing_key=b"test-key")
+        resp = c._client.simulate_get("/vgi/describe")
+        # Falls through to {prefix}/{method} route which only has on_post → 405
+        assert resp.status_code == 405
+        c.close()

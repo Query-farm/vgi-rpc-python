@@ -21,6 +21,8 @@ from typing import (
 )
 
 import pyarrow as pa
+from docstring_parser import DocstringStyle
+from docstring_parser import parse as parse_docstring
 
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import SERVER_ID_KEY, encode_metadata, merge_metadata
@@ -461,6 +463,11 @@ class RpcMethodInfo:
         header_type: For stream methods with a header, the concrete
             ``ArrowSerializableDataclass`` subclass for the header.
             ``None`` when the method has no header.
+        is_exchange: For stream methods, ``True`` if the state class
+            extends ``ExchangeState`` (client must send input), ``False``
+            if it extends ``ProducerState`` (server-initiated), ``None``
+            if the state class uses raw ``StreamState`` (unknown).
+            Always ``None`` for unary methods.
 
     """
 
@@ -473,12 +480,30 @@ class RpcMethodInfo:
     doc: str | None
     param_defaults: dict[str, object] = field(default_factory=dict)
     param_types: dict[str, object] = field(default_factory=dict)
+    param_docs: dict[str, str] = field(default_factory=dict)
     header_type: type[ArrowSerializableDataclass] | None = None
+    is_exchange: bool | None = None
 
 
 # ---------------------------------------------------------------------------
 # Protocol introspection
 # ---------------------------------------------------------------------------
+
+
+def _extract_param_docs(doc: str | None) -> dict[str, str]:
+    """Extract parameter descriptions from a Google-style docstring.
+
+    Args:
+        doc: The raw docstring to parse.
+
+    Returns:
+        Mapping of parameter name to description text.
+
+    """
+    if not doc:
+        return {}
+    parsed = parse_docstring(doc, style=DocstringStyle.GOOGLE)
+    return {p.arg_name: p.description.strip() for p in parsed.params if p.description}
 
 
 def _unwrap_annotated(hint: object) -> object:
@@ -616,10 +641,18 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
         # For unary methods, build result schema from the result type
         result_schema = _build_result_schema(result_type) if method_type == MethodType.UNARY else _EMPTY_SCHEMA
 
-        # Extract header type from Stream[S, H] annotations
+        # Extract header type and stream sub-type from Stream[S, H] annotations
         header_type: type[ArrowSerializableDataclass] | None = None
+        is_exchange: bool | None = None
         if method_type == MethodType.STREAM:
             stream_args = get_args(return_hint)
+            if stream_args:
+                s_arg = stream_args[0]
+                if isinstance(s_arg, type):
+                    if issubclass(s_arg, ExchangeState):
+                        is_exchange = True
+                    elif issubclass(s_arg, ProducerState):
+                        is_exchange = False
             if len(stream_args) >= 2:
                 h_arg = stream_args[1]
                 if isinstance(h_arg, type) and issubclass(h_arg, ArrowSerializableDataclass):
@@ -630,6 +663,7 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
         param_types = {k: v for k, v in method_hints.items() if k not in ("self", "return")}
 
         doc = getattr(attr, "__doc__", None)
+        param_docs = _extract_param_docs(doc)
 
         result[name] = RpcMethodInfo(
             name=name,
@@ -641,7 +675,9 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
             doc=doc,
             param_defaults=param_defaults,
             param_types=param_types,
+            param_docs=param_docs,
             header_type=header_type,
+            is_exchange=is_exchange,
         )
 
     return MappingProxyType(result)

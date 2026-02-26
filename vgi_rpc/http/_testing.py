@@ -90,6 +90,9 @@ def make_sync_client(
     token_ttl: int = 3600,
     compression_level: int | None = 3,
     enable_not_found_page: bool = True,
+    enable_landing_page: bool = True,
+    enable_describe_page: bool = True,
+    repo_url: str | None = None,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -111,6 +114,9 @@ def make_sync_client(
         token_ttl: See ``make_wsgi_app``.
         compression_level: See ``make_wsgi_app``.
         enable_not_found_page: See ``make_wsgi_app``.
+        enable_landing_page: See ``make_wsgi_app``.
+        enable_describe_page: See ``make_wsgi_app``.
+        repo_url: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -130,5 +136,8 @@ def make_sync_client(
         token_ttl=token_ttl,
         compression_level=compression_level,
         enable_not_found_page=enable_not_found_page,
+        enable_landing_page=enable_landing_page,
+        enable_describe_page=enable_describe_page,
+        repo_url=repo_url,
     )
     return _SyncTestClient(app, default_headers=default_headers)

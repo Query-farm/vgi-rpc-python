@@ -40,6 +40,45 @@ with http_connect(MyService, client=client) as proxy:
     assert proxy.echo(message="hello") == "hello"
 ```
 
+### Landing Page
+
+By default, `GET {prefix}` (e.g. `GET /vgi`) returns an HTML landing page showing the `vgi-rpc` logo, the protocol name, server ID, and links. When the server has `enable_describe=True`, the landing page includes a link to the [describe page](#describe-page).
+
+To disable the landing page:
+
+```python
+app = make_wsgi_app(server, enable_landing_page=False)
+```
+
+`POST {prefix}` returns 405 Method Not Allowed — it does not interfere with RPC routing.
+
+### Describe Page
+
+When the server has `enable_describe=True`, `GET {prefix}/describe` (e.g. `GET /vgi/describe`) returns an HTML page listing all methods, their parameters (name, type, default), return types, docstrings, and method type badges (UNARY / STREAM). The `__describe__` introspection method is filtered out.
+
+Both `enable_describe=True` on the `RpcServer` **and** `enable_describe_page=True` (the default) on `make_wsgi_app()` are required.
+
+To disable only the HTML page while keeping the `__describe__` RPC method available:
+
+```python
+app = make_wsgi_app(server, enable_describe_page=False)
+```
+
+!!! note "Reserved path"
+    When the describe page is active, the path `{prefix}/describe` is reserved for the HTML page. If your service has an RPC method literally named `describe`, you must set `enable_describe_page=False`.
+
+### Not-Found Page
+
+By default, `make_wsgi_app()` installs a friendly HTML 404 page for any request that does not match an RPC route. If someone navigates to the server root or a random path in a browser, they see the `vgi-rpc` logo, the service protocol name, and a link to [vgi-rpc.query.farm](https://vgi-rpc.query.farm) instead of a generic error.
+
+This does **not** affect RPC clients — a request to a valid RPC route for a non-existent method still returns a machine-readable Arrow IPC error with HTTP 404.
+
+To disable the page:
+
+```python
+app = make_wsgi_app(server, enable_not_found_page=False)
+```
+
 ## API Reference
 
 ### Server
