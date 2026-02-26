@@ -35,6 +35,8 @@ from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pi
 
 from .conftest import ConnFactory
 
+pytestmark = pytest.mark.timeout(5)
+
 
 def _is_subprocess(request: pytest.FixtureRequest) -> bool:
     """Check if current parametrized transport is subprocess."""

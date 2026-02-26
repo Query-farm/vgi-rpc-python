@@ -33,6 +33,7 @@ from io import IOBase
 
 from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.conformance._runner import (
+    DEFAULT_TEST_TIMEOUT,
     ConformanceResult,
     ConformanceSuite,
     LogCollector,
@@ -324,6 +325,17 @@ def _build_parser() -> argparse.ArgumentParser:
     log_group.add_argument("--log-logger", action="append", metavar="NAME", help="Target specific logger(s)")
     log_group.add_argument("--log-format", choices=["text", "json"], default="text", help="Stderr log format")
 
+    # Execution
+    exec_group = parser.add_argument_group("execution")
+    exec_group.add_argument(
+        "--timeout",
+        "-t",
+        type=float,
+        default=DEFAULT_TEST_TIMEOUT,
+        metavar="SECS",
+        help=f"Per-test timeout in seconds; 0 to disable (default: {DEFAULT_TEST_TIMEOUT})",
+    )
+
     # Other
     parser.add_argument("--version", "-V", action="store_true", help="Show version and exit")
 
@@ -408,6 +420,7 @@ def main(argv: list[str] | None = None) -> None:
                 effective_collector,
                 filter_patterns=filter_patterns,
                 on_progress=progress_cb,
+                timeout=args.timeout,
             )
 
             # Format output

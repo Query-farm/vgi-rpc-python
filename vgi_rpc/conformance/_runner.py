@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import fnmatch
 import math
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,6 +45,36 @@ from vgi_rpc.introspect import DESCRIBE_VERSION, ServiceDescription
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
 from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError
+
+# Default per-test timeout in seconds for the standalone runner.
+DEFAULT_TEST_TIMEOUT: float = 5.0
+
+
+class _TestTimeoutError(Exception):
+    """Raised when a conformance test exceeds its timeout."""
+
+
+def _run_with_timeout(fn: Callable[[], None], timeout: float) -> None:
+    """Run *fn* in the current thread, raising ``_TestTimeoutError`` if it exceeds *timeout* seconds."""
+    exc: BaseException | None = None
+    finished = threading.Event()
+
+    def _target() -> None:
+        nonlocal exc
+        try:
+            fn()
+        except BaseException as e:
+            exc = e
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    if not finished.wait(timeout):
+        raise _TestTimeoutError(f"Test exceeded {timeout}s timeout")
+    if exc is not None:
+        raise exc
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -1479,6 +1510,7 @@ def run_conformance(
     *,
     filter_patterns: list[str] | None = None,
     on_progress: Callable[[ConformanceResult], None] | None = None,
+    timeout: float = DEFAULT_TEST_TIMEOUT,
 ) -> ConformanceSuite:
     """Run conformance tests against a proxy and return results.
 
@@ -1487,6 +1519,7 @@ def run_conformance(
         log_collector: LogCollector instance to receive server log messages.
         filter_patterns: Optional glob patterns to filter which tests run.
         on_progress: Optional callback invoked after each test completes.
+        timeout: Per-test timeout in seconds.  Set to ``0`` to disable.
 
     Returns:
         A ConformanceSuite with all results.
@@ -1505,7 +1538,13 @@ def run_conformance(
         error: str | None = None
         passed = True
         try:
-            test.fn(proxy, log_collector)
+            if timeout > 0:
+                _run_with_timeout(lambda t=test: t.fn(proxy, log_collector), timeout)  # type: ignore[misc]
+            else:
+                test.fn(proxy, log_collector)
+        except _TestTimeoutError as e:
+            passed = False
+            error = str(e)
         except AssertionError as e:
             passed = False
             error = str(e) if str(e) else "Assertion failed"
@@ -1563,6 +1602,7 @@ def run_describe_conformance(
     *,
     filter_patterns: list[str] | None = None,
     on_progress: Callable[[ConformanceResult], None] | None = None,
+    timeout: float = DEFAULT_TEST_TIMEOUT,
 ) -> ConformanceSuite:
     """Run describe conformance tests against a ServiceDescription.
 
@@ -1573,6 +1613,7 @@ def run_describe_conformance(
         desc: A ``ServiceDescription`` from ``introspect()`` or ``parse_describe_batch()``.
         filter_patterns: Optional glob patterns to filter which tests run.
         on_progress: Optional callback invoked after each test completes.
+        timeout: Per-test timeout in seconds.  Set to ``0`` to disable.
 
     Returns:
         A ConformanceSuite with all results.
@@ -1590,7 +1631,13 @@ def run_describe_conformance(
         error: str | None = None
         passed = True
         try:
-            test.fn(desc)
+            if timeout > 0:
+                _run_with_timeout(lambda t=test: t.fn(desc), timeout)  # type: ignore[misc]
+            else:
+                test.fn(desc)
+        except _TestTimeoutError as e:
+            passed = False
+            error = str(e)
         except AssertionError as e:
             passed = False
             error = str(e) if str(e) else "Assertion failed"

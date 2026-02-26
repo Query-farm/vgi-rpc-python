@@ -18,6 +18,7 @@ Usage::
 from vgi_rpc.conformance._impl import ConformanceServiceImpl
 from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.conformance._runner import (
+    DEFAULT_TEST_TIMEOUT,
     ConformanceResult,
     ConformanceSuite,
     LogCollector,
@@ -45,6 +46,7 @@ __all__ = [
     "ConformanceService",
     "ConformanceServiceImpl",
     "ConformanceSuite",
+    "DEFAULT_TEST_TIMEOUT",
     "LogCollector",
     "Point",
     "RichHeader",
