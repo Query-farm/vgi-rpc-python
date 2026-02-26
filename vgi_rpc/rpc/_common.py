@@ -12,7 +12,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import pyarrow as pa
 
@@ -344,3 +344,75 @@ class _DispatchHook(Protocol):
     ) -> None:
         """Finalize observability after method dispatch (success or failure)."""
         ...
+
+
+class _CompositeDispatchHook:
+    """Dispatch hook that delegates to multiple inner hooks in order.
+
+    ``on_dispatch_start`` collects ``(hook, token)`` pairs;
+    ``on_dispatch_end`` calls them in reverse (finally-stack semantics).
+    Individual hook failures are logged and swallowed so one failing
+    hook does not prevent the others from running.
+    """
+
+    __slots__ = ("_hooks",)
+
+    def __init__(self, hooks: list[_DispatchHook]) -> None:
+        self._hooks = hooks
+
+    def on_dispatch_start(
+        self,
+        info: RpcMethodInfo,
+        auth: AuthContext,
+        transport_metadata: Mapping[str, Any],
+    ) -> HookToken:
+        """Delegate to all inner hooks and collect tokens."""
+        tokens: list[tuple[_DispatchHook, HookToken]] = []
+        for hook in self._hooks:
+            try:
+                token = hook.on_dispatch_start(info, auth, transport_metadata)
+                tokens.append((hook, token))
+            except Exception:
+                _logger.exception("Dispatch hook %r failed on start", hook)
+        return tokens
+
+    def on_dispatch_end(
+        self,
+        token: HookToken,
+        info: RpcMethodInfo,
+        error: BaseException | None,
+        *,
+        stats: CallStatistics | None = None,
+    ) -> None:
+        """Delegate to all inner hooks in reverse order."""
+        if not isinstance(token, list):
+            return
+        pairs = cast(list[tuple["_DispatchHook", HookToken]], token)
+        for hook, inner_token in reversed(pairs):
+            try:
+                hook.on_dispatch_end(inner_token, info, error, stats=stats)
+            except Exception:
+                _logger.exception("Dispatch hook %r failed on end", hook)
+
+
+def _register_dispatch_hook(existing: _DispatchHook | None, new_hook: _DispatchHook) -> _DispatchHook:
+    """Register a dispatch hook, composing with any existing hook.
+
+    Returns *new_hook* directly when there is no existing hook, wraps
+    both in a ``_CompositeDispatchHook`` otherwise, or appends to an
+    existing composite.
+
+    Args:
+        existing: The current hook on the server (may be ``None``).
+        new_hook: The hook to add.
+
+    Returns:
+        A hook that delegates to all registered hooks.
+
+    """
+    if existing is None:
+        return new_hook
+    if isinstance(existing, _CompositeDispatchHook):
+        existing._hooks.append(new_hook)
+        return existing
+    return _CompositeDispatchHook([existing, new_hook])

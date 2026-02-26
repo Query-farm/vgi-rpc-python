@@ -31,6 +31,7 @@ gcs = ["google-cloud-storage>=2.10"]
 cli = ["typer>=0.9", "httpx>=0.24"]
 external = ["aiohttp>=3.9", "tenacity>=8.0", "zstandard>=0.20"]
 otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
+sentry = ["sentry-sdk>=2.0"]
 
 [project.scripts]
 vgi-rpc = "vgi_rpc.cli:app"
@@ -92,6 +93,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "opentelemetry.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sentry_sdk.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -183,4 +188,5 @@ dev = [
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
     "pytest-benchmark>=4.0",
+    "sentry-sdk>=2.0",
 ]

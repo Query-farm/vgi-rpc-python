@@ -36,6 +36,7 @@ from vgi_rpc.rpc._common import (
     CallStatistics,
     HookToken,
     _current_trace_headers,
+    _register_dispatch_hook,
 )
 
 if TYPE_CHECKING:
@@ -90,7 +91,7 @@ def instrument_server(server: RpcServer, config: OtelConfig | None = None) -> Rp
     if config is None:
         config = OtelConfig()
     hook = _OtelDispatchHook(config, server.protocol_name, server.server_id)
-    server._dispatch_hook = hook
+    server._dispatch_hook = _register_dispatch_hook(server._dispatch_hook, hook)
     return server
 
 

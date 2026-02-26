@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html as _html
 import logging
 import os
 import struct
@@ -1039,6 +1040,72 @@ class _HttpRpcApp:
         return state_obj, output_schema, input_schema
 
 
+# ---------------------------------------------------------------------------
+# 404 sink for unmatched routes
+# ---------------------------------------------------------------------------
+
+_NOT_FOUND_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>404 &mdash; vgi-rpc endpoint</title>
+<style>
+  body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 600px;
+         margin: 60px auto; padding: 0 20px; color: #333; text-align: center; }}
+  .logo {{ margin-bottom: 24px; }}
+  .logo img {{ width: 120px; height: 120px; }}
+  h1 {{ color: #555; }}
+  code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.95em; }}
+  a {{ color: #0066cc; }}
+  p {{ line-height: 1.6; }}
+</style>
+</head>
+<body>
+<div class="logo">
+  <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">
+</div>
+<h1>404 &mdash; Not Found</h1>
+<p>This is a <code>vgi-rpc</code> service endpoint{protocol_fragment}.</p>
+<p>RPC methods are available under <code>{prefix}/&lt;method&gt;</code>.</p>
+<p>Learn more at <a href="https://vgi-rpc.query.farm">vgi-rpc.query.farm</a>.</p>
+</body>
+</html>"""
+
+
+def _make_not_found_sink(
+    prefix: str,
+    protocol_name: str,
+) -> Callable[..., None]:
+    """Create a Falcon sink that returns a 404 HTML page for unmatched routes.
+
+    The HTML is pre-rendered at creation time so there is zero per-request
+    template overhead.
+
+    Args:
+        prefix: The URL prefix for RPC endpoints (e.g. ``/vgi``).
+        protocol_name: The protocol name from the ``RpcServer``.
+
+    Returns:
+        A Falcon sink callable.
+
+    """
+    protocol_fragment = f" serving <strong>{_html.escape(protocol_name)}</strong>" if protocol_name else ""
+    body_bytes = _NOT_FOUND_HTML_TEMPLATE.format(
+        prefix=_html.escape(prefix),
+        protocol_fragment=protocol_fragment,
+    ).encode("utf-8")
+
+    def _not_found_sink(req: falcon.Request, resp: falcon.Response, **kwargs: Any) -> None:
+        """Return an HTML 404 page for requests that do not match any RPC route."""
+        resp.status = "404"
+        resp.content_type = "text/html; charset=utf-8"
+        resp.data = body_bytes
+
+    return _not_found_sink
+
+
 class _RpcResource:
     """Falcon resource for unary calls: ``POST {prefix}/{method}``."""
 
@@ -1425,8 +1492,10 @@ def make_wsgi_app(
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
+    sentry_config: object | None = None,
     token_ttl: int = 3600,
     compression_level: int | None = 3,
+    enable_not_found_page: bool = True,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -1473,6 +1542,9 @@ def make_wsgi_app(
             When provided, ``instrument_server()`` is called and
             ``_OtelFalconMiddleware`` is prepended for W3C trace propagation.
             Requires ``pip install vgi-rpc[otel]``.
+        sentry_config: Optional ``SentryConfig`` for Sentry error reporting.
+            When provided, ``instrument_server_sentry()`` is called.
+            Requires ``pip install vgi-rpc[sentry]``.
         token_ttl: Maximum age of stream state tokens in seconds.  Tokens
             older than this are rejected with HTTP 400.  Default is 3600
             (1 hour).  Set to ``0`` to disable expiry checking.
@@ -1480,6 +1552,10 @@ def make_wsgi_app(
             response bodies.  ``3`` (the default) installs
             ``_CompressionMiddleware`` at level 3.  Valid range is 1-22.
             ``None`` disables compression entirely.
+        enable_not_found_page: When ``True`` (the default), requests to
+            paths that do not match any RPC route receive a friendly HTML
+            404 page.  Set to ``False`` to use Falcon's default 404
+            behaviour instead.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -1500,6 +1576,14 @@ def make_wsgi_app(
         if not isinstance(otel_config, OtelConfig):
             raise TypeError(f"otel_config must be an OtelConfig instance, got {type(otel_config).__name__}")
         instrument_server(server, otel_config)
+
+    # Sentry error reporting (optional)
+    if sentry_config is not None:
+        from vgi_rpc.sentry import SentryConfig, instrument_server_sentry
+
+        if not isinstance(sentry_config, SentryConfig):
+            raise TypeError(f"sentry_config must be a SentryConfig instance, got {type(sentry_config).__name__}")
+        instrument_server_sentry(server, sentry_config)
 
     app_handler = _HttpRpcApp(
         server,
@@ -1550,6 +1634,8 @@ def make_wsgi_app(
     app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))
     if upload_url_provider is not None:
         app.add_route(f"{prefix}/__upload_url__/init", _UploadUrlResource(app_handler))
+    if enable_not_found_page:
+        app.add_sink(_make_not_found_sink(prefix, server.protocol_name))
 
     _logger.info(
         "WSGI app created for %s (server_id=%s, prefix=%s, auth=%s)",

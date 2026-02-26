@@ -86,8 +86,10 @@ def make_sync_client(
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
+    sentry_config: object | None = None,
     token_ttl: int = 3600,
     compression_level: int | None = 3,
+    enable_not_found_page: bool = True,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -105,8 +107,10 @@ def make_sync_client(
         upload_url_provider: See ``make_wsgi_app``.
         max_upload_bytes: See ``make_wsgi_app``.
         otel_config: See ``make_wsgi_app``.
+        sentry_config: See ``make_wsgi_app``.
         token_ttl: See ``make_wsgi_app``.
         compression_level: See ``make_wsgi_app``.
+        enable_not_found_page: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -122,7 +126,9 @@ def make_sync_client(
         upload_url_provider=upload_url_provider,
         max_upload_bytes=max_upload_bytes,
         otel_config=otel_config,
+        sentry_config=sentry_config,
         token_ttl=token_ttl,
         compression_level=compression_level,
+        enable_not_found_page=enable_not_found_page,
     )
     return _SyncTestClient(app, default_headers=default_headers)
