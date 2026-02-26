@@ -22,7 +22,9 @@ from vgi_rpc.conformance._runner import (
     ConformanceSuite,
     LogCollector,
     list_conformance_tests,
+    list_describe_conformance_tests,
     run_conformance,
+    run_describe_conformance,
 )
 from vgi_rpc.conformance._types import (
     AllTypes,
@@ -50,5 +52,7 @@ __all__ = [
     "build_dynamic_schema",
     "build_rich_header",
     "list_conformance_tests",
+    "list_describe_conformance_tests",
     "run_conformance",
+    "run_describe_conformance",
 ]

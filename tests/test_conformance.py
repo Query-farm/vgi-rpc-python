@@ -27,9 +27,11 @@ from vgi_rpc.conformance import (
     Status,
     build_dynamic_schema,
     build_rich_header,
+    run_describe_conformance,
 )
+from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
-from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pipe_pair, rpc_methods
+from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pipe_pair
 
 from .conftest import ConnFactory
 
@@ -572,18 +574,12 @@ class TestBoundaryValues:
 
 
 # ---------------------------------------------------------------------------
-# Large Data (pipe transport only to stay within timeout)
+# Large Data
 # ---------------------------------------------------------------------------
 
 
 class TestLargeData:
-    """Test large data transfers — pipe only to avoid timeout."""
-
-    @pytest.fixture(autouse=True)
-    def _skip_non_pipe(self, request: pytest.FixtureRequest) -> None:
-        """Skip for non-pipe transports."""
-        if request.node.callspec.params.get("conformance_conn") != "pipe":
-            pytest.skip("large data tests only run on pipe transport")
+    """Test large data transfers across all transports."""
 
     def test_large_string(self, conformance_conn: ConnFactory) -> None:
         """Echo a 10KB string."""
@@ -893,73 +889,12 @@ class TestErrorRecovery:
 # ---------------------------------------------------------------------------
 
 
-class TestIntrospection:
-    """Test introspection of the conformance protocol."""
+class TestDescribeConformance:
+    """Validate __describe__ introspection output for the conformance service."""
 
-    def test_describe_all_methods(self) -> None:
-        """Verify all methods are discoverable via rpc_methods."""
-        methods = rpc_methods(ConformanceService)
-        assert len(methods) >= 43
-
-        for name in ["echo_string", "echo_bytes", "echo_int", "produce_n", "exchange_scale"]:
-            assert name in methods
-
-    def test_method_types(self) -> None:
-        """Verify UNARY vs STREAM classification."""
-        methods = rpc_methods(ConformanceService)
-
-        unary_names = [
-            "echo_string",
-            "echo_bytes",
-            "echo_int",
-            "echo_float",
-            "echo_bool",
-            "void_noop",
-            "echo_enum",
-            "echo_point",
-            "raise_value_error",
-            "add_floats",
-        ]
-        for name in unary_names:
-            assert methods[name].method_type == MethodType.UNARY, f"{name} should be UNARY"
-
-        stream_names = [
-            "produce_n",
-            "produce_empty",
-            "produce_with_logs",
-            "exchange_scale",
-            "exchange_accumulate",
-            "produce_with_header",
-            "exchange_with_header",
-        ]
-        for name in stream_names:
-            assert methods[name].method_type == MethodType.STREAM, f"{name} should be STREAM"
-
-    def test_param_schemas(self) -> None:
-        """Verify parameter schemas for a few methods."""
-        methods = rpc_methods(ConformanceService)
-
-        echo_str = methods["echo_string"]
-        assert len(echo_str.params_schema) == 1
-        assert echo_str.params_schema.field("value").type == pa.utf8()
-
-        add = methods["add_floats"]
-        assert len(add.params_schema) == 2
-        assert add.params_schema.field("a").type == pa.float64()
-        assert add.params_schema.field("b").type == pa.float64()
-
-    def test_header_types(self) -> None:
-        """Verify header types for stream methods."""
-        methods = rpc_methods(ConformanceService)
-        assert methods["produce_with_header"].header_type is ConformanceHeader
-        assert methods["exchange_with_header"].header_type is ConformanceHeader
-        assert methods["produce_n"].header_type is None
-        assert methods["exchange_scale"].header_type is None
-
-    def test_describe_via_rpc(self) -> None:
-        """Test __describe__ via actual RPC call."""
-        from vgi_rpc.introspect import introspect
-
+    @pytest.fixture(scope="class")
+    def service_description(self) -> ServiceDescription:
+        """Build a ServiceDescription via in-process pipe introspect()."""
         client_transport, server_transport = make_pipe_pair()
         server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
 
@@ -967,12 +902,25 @@ class TestIntrospection:
         thread.start()
         try:
             desc = introspect(client_transport)
-            assert len(desc.methods) >= 43
-            echo_str = desc.methods["echo_string"]
-            assert echo_str.method_type.value == "unary"
         finally:
             client_transport.close()
             thread.join(timeout=5)
+        return desc
+
+    def test_run_describe_conformance(self, service_description: ServiceDescription) -> None:
+        """Run the full describe conformance suite and fail with detailed errors."""
+        suite = run_describe_conformance(service_description)
+        if not suite.success:
+            failures = [r for r in suite.results if not r.passed]
+            details = "\n".join(f"  {r.name}: {r.error}" for r in failures)
+            pytest.fail(f"{suite.failed}/{suite.total} describe conformance tests failed:\n{details}")
+
+    def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
+        """Smoke test: basic transport-level describe call works."""
+        assert len(service_description.methods) == 46
+        assert service_description.protocol_name == "ConformanceService"
+        echo_str = service_description.methods["echo_string"]
+        assert echo_str.method_type == MethodType.UNARY
 
 
 # ---------------------------------------------------------------------------

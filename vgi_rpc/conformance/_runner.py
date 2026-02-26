@@ -27,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
+import pyarrow as pa
+
 from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.conformance._types import (
     AllTypes,
@@ -38,8 +40,10 @@ from vgi_rpc.conformance._types import (
     build_dynamic_schema,
     build_rich_header,
 )
+from vgi_rpc.introspect import DESCRIBE_VERSION, ServiceDescription
 from vgi_rpc.log import Level, Message
-from vgi_rpc.rpc import AnnotatedBatch, RpcError
+from vgi_rpc.metadata import REQUEST_VERSION
+from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -976,6 +980,474 @@ def _test_rich_exchange_different_seed(proxy: ConformanceService, logs: LogColle
 
 
 # ---------------------------------------------------------------------------
+# Describe test registration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _DescribeTest:
+    """A registered describe conformance test."""
+
+    category: str
+    name: str
+    fn: Callable[[ServiceDescription], None]
+
+    @property
+    def full_name(self) -> str:
+        """Return category.name format."""
+        return f"{self.category}.{self.name}"
+
+
+_DESCRIBE_TESTS: list[_DescribeTest] = []
+
+
+def _describe_test(
+    *, category: str, name: str
+) -> Callable[[Callable[[ServiceDescription], None]], Callable[[ServiceDescription], None]]:
+    """Register a describe conformance test function."""
+
+    def decorator(
+        fn: Callable[[ServiceDescription], None],
+    ) -> Callable[[ServiceDescription], None]:
+        _DESCRIBE_TESTS.append(_DescribeTest(category=category, name=name, fn=fn))
+        return fn
+
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Describe test constants
+# ---------------------------------------------------------------------------
+
+_EXPECTED_METHODS = frozenset(
+    {
+        "add_floats",
+        "concatenate",
+        "echo_all_types",
+        "echo_bool",
+        "echo_bounding_box",
+        "echo_bytes",
+        "echo_dict",
+        "echo_enum",
+        "echo_float",
+        "echo_float32",
+        "echo_int",
+        "echo_int32",
+        "echo_list",
+        "echo_nested_list",
+        "echo_optional_int",
+        "echo_optional_string",
+        "echo_point",
+        "echo_string",
+        "echo_with_info_log",
+        "echo_with_log_extras",
+        "echo_with_multi_logs",
+        "exchange_accumulate",
+        "exchange_error_on_init",
+        "exchange_error_on_nth",
+        "exchange_scale",
+        "exchange_with_header",
+        "exchange_with_logs",
+        "exchange_with_rich_header",
+        "inspect_point",
+        "produce_dynamic_schema",
+        "produce_empty",
+        "produce_error_mid_stream",
+        "produce_error_on_init",
+        "produce_large_batches",
+        "produce_n",
+        "produce_single",
+        "produce_with_header",
+        "produce_with_header_and_logs",
+        "produce_with_logs",
+        "produce_with_rich_header",
+        "raise_runtime_error",
+        "raise_type_error",
+        "raise_value_error",
+        "void_noop",
+        "void_with_param",
+        "with_defaults",
+    }
+)
+
+_UNARY_METHODS = frozenset(
+    {
+        "add_floats",
+        "concatenate",
+        "echo_all_types",
+        "echo_bool",
+        "echo_bounding_box",
+        "echo_bytes",
+        "echo_dict",
+        "echo_enum",
+        "echo_float",
+        "echo_float32",
+        "echo_int",
+        "echo_int32",
+        "echo_list",
+        "echo_nested_list",
+        "echo_optional_int",
+        "echo_optional_string",
+        "echo_point",
+        "echo_string",
+        "echo_with_info_log",
+        "echo_with_log_extras",
+        "echo_with_multi_logs",
+        "inspect_point",
+        "raise_runtime_error",
+        "raise_type_error",
+        "raise_value_error",
+        "void_noop",
+        "void_with_param",
+        "with_defaults",
+    }
+)
+
+_STREAM_METHODS = frozenset(
+    {
+        "exchange_accumulate",
+        "exchange_error_on_init",
+        "exchange_error_on_nth",
+        "exchange_scale",
+        "exchange_with_header",
+        "exchange_with_logs",
+        "exchange_with_rich_header",
+        "produce_dynamic_schema",
+        "produce_empty",
+        "produce_error_mid_stream",
+        "produce_error_on_init",
+        "produce_large_batches",
+        "produce_n",
+        "produce_single",
+        "produce_with_header",
+        "produce_with_header_and_logs",
+        "produce_with_logs",
+        "produce_with_rich_header",
+    }
+)
+
+_VOID_METHODS = frozenset({"void_noop", "void_with_param"})
+
+_HEADER_METHODS = frozenset(
+    {
+        "exchange_with_header",
+        "exchange_with_rich_header",
+        "produce_dynamic_schema",
+        "produce_with_header",
+        "produce_with_header_and_logs",
+        "produce_with_rich_header",
+    }
+)
+
+_PARAM_DOCS_METHODS = frozenset(
+    {
+        "exchange_with_rich_header",
+        "produce_dynamic_schema",
+        "produce_with_rich_header",
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# Describe service-level tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_service", name="protocol_name")
+def _test_desc_protocol_name(desc: ServiceDescription) -> None:
+    assert desc.protocol_name == "ConformanceService"
+
+
+@_describe_test(category="describe_service", name="request_version")
+def _test_desc_request_version(desc: ServiceDescription) -> None:
+    assert desc.request_version == REQUEST_VERSION.decode()
+
+
+@_describe_test(category="describe_service", name="describe_version")
+def _test_desc_describe_version(desc: ServiceDescription) -> None:
+    assert desc.describe_version == DESCRIBE_VERSION
+
+
+@_describe_test(category="describe_service", name="method_count")
+def _test_desc_method_count(desc: ServiceDescription) -> None:
+    assert len(desc.methods) == 46
+
+
+# ---------------------------------------------------------------------------
+# Describe method presence tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_method_presence", name="exact_method_set")
+def _test_desc_exact_method_set(desc: ServiceDescription) -> None:
+    actual = frozenset(desc.methods.keys())
+    missing = _EXPECTED_METHODS - actual
+    extra = actual - _EXPECTED_METHODS
+    assert not missing, f"Missing methods: {sorted(missing)}"
+    assert not extra, f"Extra methods: {sorted(extra)}"
+
+
+# ---------------------------------------------------------------------------
+# Describe method type tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_method_type", name="unary_methods")
+def _test_desc_unary_methods(desc: ServiceDescription) -> None:
+    for name in sorted(_UNARY_METHODS):
+        assert desc.methods[name].method_type == MethodType.UNARY, f"{name} should be UNARY"
+
+
+@_describe_test(category="describe_method_type", name="stream_methods")
+def _test_desc_stream_methods(desc: ServiceDescription) -> None:
+    for name in sorted(_STREAM_METHODS):
+        assert desc.methods[name].method_type == MethodType.STREAM, f"{name} should be STREAM"
+
+
+# ---------------------------------------------------------------------------
+# Describe has_return tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_has_return", name="void_no_return")
+def _test_desc_void_no_return(desc: ServiceDescription) -> None:
+    for name in sorted(_VOID_METHODS):
+        assert desc.methods[name].has_return is False, f"{name} should have has_return=False"
+
+
+@_describe_test(category="describe_has_return", name="returning_unary")
+def _test_desc_returning_unary(desc: ServiceDescription) -> None:
+    returning = _UNARY_METHODS - _VOID_METHODS
+    for name in sorted(returning):
+        assert desc.methods[name].has_return is True, f"{name} should have has_return=True"
+
+
+@_describe_test(category="describe_has_return", name="stream_no_return")
+def _test_desc_stream_no_return(desc: ServiceDescription) -> None:
+    for name in sorted(_STREAM_METHODS):
+        assert desc.methods[name].has_return is False, f"{name} should have has_return=False"
+
+
+# ---------------------------------------------------------------------------
+# Describe docstrings tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_docstrings", name="all_have_docs")
+def _test_desc_all_have_docs(desc: ServiceDescription) -> None:
+    for name, method in sorted(desc.methods.items()):
+        assert method.doc is not None, f"{name} should have a docstring"
+        assert len(method.doc.strip()) > 0, f"{name} docstring should not be empty"
+
+
+@_describe_test(category="describe_docstrings", name="spot_check_content")
+def _test_desc_spot_check_docs(desc: ServiceDescription) -> None:
+    assert "Echo a string" in (desc.methods["echo_string"].doc or "")
+    assert "Add two floats" in (desc.methods["add_floats"].doc or "")
+    assert "void" in (desc.methods["void_noop"].doc or "").lower()
+    assert "Produce" in (desc.methods["produce_n"].doc or "")
+
+
+# ---------------------------------------------------------------------------
+# Describe param_schemas tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_param_schemas", name="echo_string")
+def _test_desc_params_echo_string(desc: ServiceDescription) -> None:
+    schema = desc.methods["echo_string"].params_schema
+    assert schema.names == ["value"]
+    assert schema.field("value").type == pa.utf8()
+
+
+@_describe_test(category="describe_param_schemas", name="add_floats")
+def _test_desc_params_add_floats(desc: ServiceDescription) -> None:
+    schema = desc.methods["add_floats"].params_schema
+    assert schema.names == ["a", "b"]
+    assert schema.field("a").type == pa.float64()
+    assert schema.field("b").type == pa.float64()
+
+
+@_describe_test(category="describe_param_schemas", name="void_noop_empty")
+def _test_desc_params_void_noop(desc: ServiceDescription) -> None:
+    schema = desc.methods["void_noop"].params_schema
+    assert len(schema) == 0
+
+
+@_describe_test(category="describe_param_schemas", name="echo_point_binary")
+def _test_desc_params_echo_point(desc: ServiceDescription) -> None:
+    schema = desc.methods["echo_point"].params_schema
+    assert schema.names == ["point"]
+    assert schema.field("point").type == pa.binary()
+
+
+@_describe_test(category="describe_param_schemas", name="concatenate_three_fields")
+def _test_desc_params_concatenate(desc: ServiceDescription) -> None:
+    schema = desc.methods["concatenate"].params_schema
+    assert schema.names == ["prefix", "suffix", "separator"]
+    for name in schema.names:
+        assert schema.field(name).type == pa.utf8()
+
+
+@_describe_test(category="describe_param_schemas", name="produce_n_count")
+def _test_desc_params_produce_n(desc: ServiceDescription) -> None:
+    schema = desc.methods["produce_n"].params_schema
+    assert schema.names == ["count"]
+    assert schema.field("count").type == pa.int64()
+
+
+# ---------------------------------------------------------------------------
+# Describe param_types tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_param_types", name="scalar_types")
+def _test_desc_param_types_scalar(desc: ServiceDescription) -> None:
+    assert desc.methods["echo_string"].param_types == {"value": "str"}
+    assert desc.methods["echo_int"].param_types == {"value": "int"}
+    assert desc.methods["echo_float"].param_types == {"value": "float"}
+    assert desc.methods["echo_bool"].param_types == {"value": "bool"}
+    assert desc.methods["echo_bytes"].param_types == {"data": "bytes"}
+
+
+@_describe_test(category="describe_param_types", name="complex_types")
+def _test_desc_param_types_complex(desc: ServiceDescription) -> None:
+    assert desc.methods["echo_list"].param_types == {"values": "list[str]"}
+    assert desc.methods["echo_dict"].param_types == {"mapping": "dict[str, int]"}
+    assert desc.methods["echo_nested_list"].param_types == {"matrix": "list[list[int]]"}
+    assert desc.methods["echo_enum"].param_types == {"status": "Status"}
+
+
+@_describe_test(category="describe_param_types", name="optional_types")
+def _test_desc_param_types_optional(desc: ServiceDescription) -> None:
+    assert desc.methods["echo_optional_string"].param_types == {"value": "str | None"}
+    assert desc.methods["echo_optional_int"].param_types == {"value": "int | None"}
+
+
+@_describe_test(category="describe_param_types", name="dataclass_types")
+def _test_desc_param_types_dataclass(desc: ServiceDescription) -> None:
+    assert desc.methods["echo_point"].param_types == {"point": "Point"}
+    assert desc.methods["echo_all_types"].param_types == {"data": "AllTypes"}
+    assert desc.methods["echo_bounding_box"].param_types == {"box": "BoundingBox"}
+
+
+@_describe_test(category="describe_param_types", name="annotated_types")
+def _test_desc_param_types_annotated(desc: ServiceDescription) -> None:
+    # Annotated[int, ArrowType(...)] unwraps to "int"
+    assert desc.methods["echo_int32"].param_types == {"value": "int"}
+    assert desc.methods["echo_float32"].param_types == {"value": "float"}
+
+
+@_describe_test(category="describe_param_types", name="multi_param_types")
+def _test_desc_param_types_multi(desc: ServiceDescription) -> None:
+    assert desc.methods["add_floats"].param_types == {"a": "float", "b": "float"}
+    assert desc.methods["concatenate"].param_types == {"prefix": "str", "suffix": "str", "separator": "str"}
+    assert desc.methods["produce_n"].param_types == {"count": "int"}
+
+
+# ---------------------------------------------------------------------------
+# Describe param_defaults tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_param_defaults", name="concatenate_separator")
+def _test_desc_defaults_concatenate(desc: ServiceDescription) -> None:
+    defaults = desc.methods["concatenate"].param_defaults
+    assert "separator" in defaults
+    assert defaults["separator"] == "-"
+
+
+@_describe_test(category="describe_param_defaults", name="with_defaults_values")
+def _test_desc_defaults_with_defaults(desc: ServiceDescription) -> None:
+    defaults = desc.methods["with_defaults"].param_defaults
+    assert defaults["optional_str"] == "default"
+    assert defaults["optional_int"] == 42
+
+
+@_describe_test(category="describe_param_defaults", name="echo_string_no_defaults")
+def _test_desc_defaults_echo_string(desc: ServiceDescription) -> None:
+    assert len(desc.methods["echo_string"].param_defaults) == 0
+
+
+# ---------------------------------------------------------------------------
+# Describe stream_properties tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_stream_properties", name="has_header_true")
+def _test_desc_has_header_true(desc: ServiceDescription) -> None:
+    for name in sorted(_HEADER_METHODS):
+        assert desc.methods[name].has_header is True, f"{name} should have has_header=True"
+
+
+@_describe_test(category="describe_stream_properties", name="has_header_false")
+def _test_desc_has_header_false(desc: ServiceDescription) -> None:
+    non_header_streams = _STREAM_METHODS - _HEADER_METHODS
+    for name in sorted(non_header_streams):
+        assert desc.methods[name].has_header is False, f"{name} should have has_header=False"
+
+
+@_describe_test(category="describe_stream_properties", name="is_exchange_none")
+def _test_desc_is_exchange_none(desc: ServiceDescription) -> None:
+    for name in sorted(_STREAM_METHODS):
+        assert desc.methods[name].is_exchange is None, f"{name} should have is_exchange=None"
+
+
+# ---------------------------------------------------------------------------
+# Describe header_schemas tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_header_schemas", name="conformance_header_schema")
+def _test_desc_conformance_header_schema(desc: ServiceDescription) -> None:
+    for name in ("produce_with_header", "produce_with_header_and_logs", "exchange_with_header"):
+        schema = desc.methods[name].header_schema
+        assert schema is not None, f"{name} should have a header_schema"
+        assert len(schema) == 2
+        assert "total_expected" in schema.names
+        assert "description" in schema.names
+
+
+@_describe_test(category="describe_header_schemas", name="rich_header_schema")
+def _test_desc_rich_header_schema(desc: ServiceDescription) -> None:
+    for name in ("produce_with_rich_header", "produce_dynamic_schema", "exchange_with_rich_header"):
+        schema = desc.methods[name].header_schema
+        assert schema is not None, f"{name} should have a header_schema"
+        assert len(schema) == 18
+        assert "str_field" in schema.names
+        assert "nested_point" in schema.names
+        assert "dict_str_str" in schema.names
+
+
+@_describe_test(category="describe_header_schemas", name="no_header_none")
+def _test_desc_no_header_schema(desc: ServiceDescription) -> None:
+    non_header = _STREAM_METHODS - _HEADER_METHODS
+    for name in sorted(non_header):
+        assert desc.methods[name].header_schema is None, f"{name} should have header_schema=None"
+
+
+# ---------------------------------------------------------------------------
+# Describe param_docs tests
+# ---------------------------------------------------------------------------
+
+
+@_describe_test(category="describe_param_docs", name="methods_with_args")
+def _test_desc_param_docs_present(desc: ServiceDescription) -> None:
+    for name in sorted(_PARAM_DOCS_METHODS):
+        pdocs = desc.methods[name].param_docs
+        assert len(pdocs) > 0, f"{name} should have non-empty param_docs"
+        for param_name, doc_text in pdocs.items():
+            assert len(doc_text.strip()) > 0, f"{name}.{param_name} doc should not be empty"
+
+
+@_describe_test(category="describe_param_docs", name="methods_without_args")
+def _test_desc_param_docs_empty(desc: ServiceDescription) -> None:
+    for name, method in sorted(desc.methods.items()):
+        if name not in _PARAM_DOCS_METHODS:
+            assert len(method.param_docs) == 0, f"{name} should have empty param_docs"
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -1040,6 +1512,88 @@ def run_conformance(
         except RpcError as e:
             passed = False
             error = f"RpcError({e.error_type}): {e.error_message}"
+        except Exception as e:
+            passed = False
+            error = f"{type(e).__name__}: {e}"
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        result = ConformanceResult(
+            name=test.full_name,
+            category=test.category,
+            passed=passed,
+            duration_ms=elapsed_ms,
+            error=error,
+        )
+        results.append(result)
+        if on_progress:
+            on_progress(result)
+
+    suite_elapsed = (time.monotonic() - suite_start) * 1000
+    passed_count = sum(1 for r in results if r.passed)
+    failed_count = sum(1 for r in results if not r.passed)
+
+    return ConformanceSuite(
+        results=results,
+        total=len(results),
+        passed=passed_count,
+        failed=failed_count,
+        skipped=0,
+        duration_ms=suite_elapsed,
+    )
+
+
+def list_describe_conformance_tests(filter_patterns: list[str] | None = None) -> list[str]:
+    """Return sorted names of available describe conformance tests, optionally filtered.
+
+    Args:
+        filter_patterns: Optional glob patterns to filter tests.
+
+    Returns:
+        Sorted list of test names in ``category.name`` format.
+
+    """
+    names = [t.full_name for t in _DESCRIBE_TESTS]
+    if filter_patterns:
+        names = [n for n in names if _matches_filter(n, filter_patterns)]
+    return sorted(names)
+
+
+def run_describe_conformance(
+    desc: ServiceDescription,
+    *,
+    filter_patterns: list[str] | None = None,
+    on_progress: Callable[[ConformanceResult], None] | None = None,
+) -> ConformanceSuite:
+    """Run describe conformance tests against a ServiceDescription.
+
+    Validates that the ``__describe__`` introspection output matches the
+    expected structure and content for the conformance service.
+
+    Args:
+        desc: A ``ServiceDescription`` from ``introspect()`` or ``parse_describe_batch()``.
+        filter_patterns: Optional glob patterns to filter which tests run.
+        on_progress: Optional callback invoked after each test completes.
+
+    Returns:
+        A ConformanceSuite with all results.
+
+    """
+    suite_start = time.monotonic()
+    results: list[ConformanceResult] = []
+
+    tests_to_run = _DESCRIBE_TESTS
+    if filter_patterns:
+        tests_to_run = [t for t in _DESCRIBE_TESTS if _matches_filter(t.full_name, filter_patterns)]
+
+    for test in tests_to_run:
+        start = time.monotonic()
+        error: str | None = None
+        passed = True
+        try:
+            test.fn(desc)
+        except AssertionError as e:
+            passed = False
+            error = str(e) if str(e) else "Assertion failed"
         except Exception as e:
             passed = False
             error = f"{type(e).__name__}: {e}"
