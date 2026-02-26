@@ -23,6 +23,7 @@ from ._types import (
     BoundingBox,
     ConformanceHeader,
     Point,
+    RichHeader,
     Status,
 )
 
@@ -258,4 +259,45 @@ class ConformanceService(Protocol):
 
     def exchange_with_header(self, factor: float) -> Stream[StreamState, ConformanceHeader]:
         """Exchange stream with a header."""
+        ...
+
+    # ------------------------------------------------------------------
+    # Dynamic Streams With Rich Multi-Type Headers
+    # ------------------------------------------------------------------
+
+    def produce_with_rich_header(self, seed: int, count: int) -> Stream[StreamState, RichHeader]:
+        """Produce batches with a rich multi-type stream header.
+
+        Args:
+            seed: Determines all header field values deterministically.
+            count: Number of {index, value} batches to produce.
+
+        """
+        ...
+
+    def produce_dynamic_schema(
+        self, seed: int, count: int, include_strings: bool, include_floats: bool
+    ) -> Stream[StreamState, RichHeader]:
+        """Produce batches with a dynamic output schema and rich header.
+
+        The output schema changes based on ``include_strings`` and
+        ``include_floats``. Always includes ``index: int64``.
+
+        Args:
+            seed: Determines all header field values deterministically.
+            count: Number of batches to produce.
+            include_strings: Whether to include a ``label: utf8`` column.
+            include_floats: Whether to include a ``score: float64`` column.
+
+        """
+        ...
+
+    def exchange_with_rich_header(self, seed: int, factor: float) -> Stream[StreamState, RichHeader]:
+        """Exchange stream with a rich multi-type header.
+
+        Args:
+            seed: Determines all header field values deterministically.
+            factor: Multiplier applied to input values.
+
+        """
         ...

@@ -277,3 +277,120 @@ class FailOnExchangeNState(ExchangeState):
         if self.exchange_count >= self.fail_on:
             raise RuntimeError(f"intentional error on exchange {self.exchange_count}")
         out.emit(input.batch)
+
+
+# ---------------------------------------------------------------------------
+# Rich multi-type stream header
+# ---------------------------------------------------------------------------
+
+_STATUS_CYCLE: list[Status] = [Status.PENDING, Status.ACTIVE, Status.CLOSED]
+
+
+@dataclass(frozen=True)
+class RichHeader(ArrowSerializableDataclass):
+    """Multi-type stream header for cross-language conformance testing.
+
+    Every field is computed from a ``seed`` parameter so tests can verify
+    the full range of Arrow type mappings in stream headers.
+    """
+
+    str_field: str
+    bytes_field: bytes
+    int_field: int
+    float_field: float
+    bool_field: bool
+    list_of_int: list[int]
+    list_of_str: list[str]
+    dict_field: dict[str, int]
+    enum_field: Status
+    nested_point: Point
+    optional_str: str | None
+    optional_int: int | None
+    optional_nested: Point | None
+    list_of_nested: list[Point]
+    nested_list: list[list[int]]
+    annotated_int32: Annotated[int, ArrowType(pa.int32())]
+    annotated_float32: Annotated[float, ArrowType(pa.float32())]
+    dict_str_str: dict[str, str]
+
+
+def build_rich_header(seed: int) -> RichHeader:
+    """Build a ``RichHeader`` deterministically from *seed*.
+
+    This is the reference specification: other language implementations
+    must produce identical field values for the same seed.
+
+    Args:
+        seed: Determines all header field values.
+
+    Returns:
+        A fully-populated ``RichHeader``.
+
+    """
+    return RichHeader(
+        str_field=f"seed-{seed}",
+        bytes_field=bytes([seed % 256, (seed + 1) % 256, (seed + 2) % 256]),
+        int_field=seed * 7,
+        float_field=seed * 1.5,
+        bool_field=seed % 2 == 0,
+        list_of_int=[seed, seed + 1, seed + 2],
+        list_of_str=[f"item-{seed}", f"item-{seed + 1}"],
+        dict_field={"a": seed, "b": seed + 1},
+        enum_field=_STATUS_CYCLE[seed % 3],
+        nested_point=Point(x=float(seed), y=float(seed * 2)),
+        optional_str=f"opt-{seed}" if seed % 2 == 0 else None,
+        optional_int=seed * 3 if seed % 2 == 1 else None,
+        optional_nested=Point(x=float(seed), y=0.0) if seed % 3 == 0 else None,
+        list_of_nested=[Point(x=float(seed), y=float(seed + 1))],
+        nested_list=[[seed, seed + 1], [seed + 2]],
+        annotated_int32=seed % 1000,
+        annotated_float32=float(seed) / 3.0,
+        dict_str_str={"key": f"val-{seed}"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dynamic schema producer
+# ---------------------------------------------------------------------------
+
+
+def build_dynamic_schema(include_strings: bool, include_floats: bool) -> pa.Schema:
+    """Build the output schema for ``produce_dynamic_schema``.
+
+    Args:
+        include_strings: Whether to include a ``label: utf8`` column.
+        include_floats: Whether to include a ``score: float64`` column.
+
+    Returns:
+        An Arrow schema with the requested columns.
+
+    """
+    fields: list[pa.Field[pa.DataType]] = [pa.field("index", pa.int64())]
+    if include_strings:
+        fields.append(pa.field("label", pa.utf8()))
+    if include_floats:
+        fields.append(pa.field("score", pa.float64()))
+    return pa.schema(fields)
+
+
+@dataclass
+class DynamicProducerState(ProducerState):
+    """Producer with a schema that varies based on boolean flags."""
+
+    count: int
+    include_strings: bool
+    include_floats: bool
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Produce the next batch or finish."""
+        if self.current >= self.count:
+            out.finish()
+            return
+        data: dict[str, list[Any]] = {"index": [self.current]}
+        if self.include_strings:
+            data["label"] = [f"row-{self.current}"]
+        if self.include_floats:
+            data["score"] = [self.current * 1.5]
+        out.emit_pydict(data)
+        self.current += 1

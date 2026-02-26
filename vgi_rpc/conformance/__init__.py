@@ -29,7 +29,10 @@ from vgi_rpc.conformance._types import (
     BoundingBox,
     ConformanceHeader,
     Point,
+    RichHeader,
     Status,
+    build_dynamic_schema,
+    build_rich_header,
 )
 
 __all__ = [
@@ -42,7 +45,10 @@ __all__ = [
     "ConformanceSuite",
     "LogCollector",
     "Point",
+    "RichHeader",
     "Status",
+    "build_dynamic_schema",
+    "build_rich_header",
     "list_conformance_tests",
     "run_conformance",
 ]

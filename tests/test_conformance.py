@@ -23,7 +23,10 @@ from vgi_rpc.conformance import (
     ConformanceService,
     ConformanceServiceImpl,
     Point,
+    RichHeader,
     Status,
+    build_dynamic_schema,
+    build_rich_header,
 )
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pipe_pair, rpc_methods
@@ -970,3 +973,167 @@ class TestIntrospection:
         finally:
             client_transport.close()
             thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Streams With Rich Multi-Type Headers
+# ---------------------------------------------------------------------------
+
+
+def _assert_rich_header(actual: RichHeader, seed: int) -> None:
+    """Assert all fields of a ``RichHeader`` match the expected seed values."""
+    expected = build_rich_header(seed)
+    assert actual.str_field == expected.str_field
+    assert actual.bytes_field == expected.bytes_field
+    assert actual.int_field == expected.int_field
+    assert actual.float_field == pytest.approx(expected.float_field)
+    assert actual.bool_field == expected.bool_field
+    assert actual.list_of_int == expected.list_of_int
+    assert actual.list_of_str == expected.list_of_str
+    assert actual.dict_field == expected.dict_field
+    assert actual.enum_field == expected.enum_field
+    assert actual.nested_point.x == pytest.approx(expected.nested_point.x)
+    assert actual.nested_point.y == pytest.approx(expected.nested_point.y)
+    assert actual.optional_str == expected.optional_str
+    assert actual.optional_int == expected.optional_int
+    if expected.optional_nested is None:
+        assert actual.optional_nested is None
+    else:
+        assert actual.optional_nested is not None
+        assert actual.optional_nested.x == pytest.approx(expected.optional_nested.x)
+        assert actual.optional_nested.y == pytest.approx(expected.optional_nested.y)
+    assert len(actual.list_of_nested) == len(expected.list_of_nested)
+    for a_pt, e_pt in zip(actual.list_of_nested, expected.list_of_nested, strict=True):
+        assert a_pt.x == pytest.approx(e_pt.x)
+        assert a_pt.y == pytest.approx(e_pt.y)
+    assert actual.nested_list == expected.nested_list
+    assert actual.annotated_int32 == expected.annotated_int32
+    assert actual.annotated_float32 == pytest.approx(expected.annotated_float32)
+    assert actual.dict_str_str == expected.dict_str_str
+
+
+class TestDynamicRichHeader:
+    """Test producer streams with rich multi-type headers."""
+
+    def test_seed_42(self, conformance_conn: ConnFactory) -> None:
+        """Rich header with seed=42: PENDING, bool=True, opt_nested present."""
+        with conformance_conn() as proxy:
+            session = proxy.produce_with_rich_header(seed=42, count=3)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, RichHeader)
+            _assert_rich_header(header, 42)
+            batches = list(session)
+            assert len(batches) == 3
+            for i, ab in enumerate(batches):
+                assert ab.batch.column("index")[0].as_py() == i
+                assert ab.batch.column("value")[0].as_py() == i * 10
+
+    def test_seed_7(self, conformance_conn: ConnFactory) -> None:
+        """Rich header with seed=7: ACTIVE, bool=False, opt_int present."""
+        with conformance_conn() as proxy:
+            session = proxy.produce_with_rich_header(seed=7, count=2)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, RichHeader)
+            _assert_rich_header(header, 7)
+            batches = list(session)
+            assert len(batches) == 2
+
+    def test_seed_0(self, conformance_conn: ConnFactory) -> None:
+        """Rich header with seed=0: edge case zeros."""
+        with conformance_conn() as proxy:
+            session = proxy.produce_with_rich_header(seed=0, count=1)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, RichHeader)
+            _assert_rich_header(header, 0)
+            batches = list(session)
+            assert len(batches) == 1
+
+
+class TestDynamicSchemaProducer:
+    """Test producer streams with dynamic output schema and rich header."""
+
+    def test_all_columns(self, conformance_conn: ConnFactory) -> None:
+        """Dynamic schema with all columns: index + label + score."""
+        with conformance_conn() as proxy:
+            session = proxy.produce_dynamic_schema(seed=42, count=3, include_strings=True, include_floats=True)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, RichHeader)
+            _assert_rich_header(header, 42)
+            batches = list(session)
+            assert len(batches) == 3
+            expected_schema = build_dynamic_schema(include_strings=True, include_floats=True)
+            for i, ab in enumerate(batches):
+                assert ab.batch.schema.equals(expected_schema)
+                assert ab.batch.column("index")[0].as_py() == i
+                assert ab.batch.column("label")[0].as_py() == f"row-{i}"
+                assert ab.batch.column("score")[0].as_py() == pytest.approx(i * 1.5)
+
+    def test_strings_only(self, conformance_conn: ConnFactory) -> None:
+        """Dynamic schema with strings only: index + label."""
+        with conformance_conn() as proxy:
+            session = proxy.produce_dynamic_schema(seed=7, count=2, include_strings=True, include_floats=False)
+            header = session.header
+            assert header is not None
+            _assert_rich_header(header, 7)
+            batches = list(session)
+            assert len(batches) == 2
+            for i, ab in enumerate(batches):
+                assert ab.batch.schema.names == ["index", "label"]
+                assert ab.batch.column("label")[0].as_py() == f"row-{i}"
+
+    def test_floats_only(self, conformance_conn: ConnFactory) -> None:
+        """Dynamic schema with floats only: index + score."""
+        with conformance_conn() as proxy:
+            session = proxy.produce_dynamic_schema(seed=5, count=2, include_strings=False, include_floats=True)
+            header = session.header
+            assert header is not None
+            _assert_rich_header(header, 5)
+            batches = list(session)
+            assert len(batches) == 2
+            for i, ab in enumerate(batches):
+                assert ab.batch.schema.names == ["index", "score"]
+                assert ab.batch.column("score")[0].as_py() == pytest.approx(i * 1.5)
+
+    def test_minimal(self, conformance_conn: ConnFactory) -> None:
+        """Dynamic schema minimal: index only."""
+        with conformance_conn() as proxy:
+            session = proxy.produce_dynamic_schema(seed=0, count=1, include_strings=False, include_floats=False)
+            header = session.header
+            assert header is not None
+            _assert_rich_header(header, 0)
+            batches = list(session)
+            assert len(batches) == 1
+            assert batches[0].batch.schema.names == ["index"]
+            assert batches[0].batch.column("index")[0].as_py() == 0
+
+
+class TestRichHeaderExchange:
+    """Test exchange streams with rich multi-type headers."""
+
+    def test_header_then_exchange(self, conformance_conn: ConnFactory) -> None:
+        """Exchange with rich header seed=5, factor=2.5."""
+        with conformance_conn() as proxy:
+            session = proxy.exchange_with_rich_header(seed=5, factor=2.5)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, RichHeader)
+            _assert_rich_header(header, 5)
+            with session:
+                out = session.exchange(AnnotatedBatch.from_pydict({"value": [4.0]}))
+                assert out.batch.column("value")[0].as_py() == pytest.approx(10.0)
+
+    def test_different_seed(self, conformance_conn: ConnFactory) -> None:
+        """Exchange with rich header seed=12, factor=1.0."""
+        with conformance_conn() as proxy:
+            session = proxy.exchange_with_rich_header(seed=12, factor=1.0)
+            header = session.header
+            assert header is not None
+            assert isinstance(header, RichHeader)
+            _assert_rich_header(header, 12)
+            with session:
+                out = session.exchange(AnnotatedBatch.from_pydict({"value": [7.0]}))
+                assert out.batch.column("value")[0].as_py() == pytest.approx(7.0)

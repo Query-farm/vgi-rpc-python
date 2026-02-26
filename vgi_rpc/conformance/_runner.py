@@ -33,7 +33,10 @@ from vgi_rpc.conformance._types import (
     BoundingBox,
     ConformanceHeader,
     Point,
+    RichHeader,
     Status,
+    build_dynamic_schema,
+    build_rich_header,
 )
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import AnnotatedBatch, RpcError
@@ -801,6 +804,175 @@ def _test_multiple_sequential_sessions(proxy: ConformanceService, logs: LogColle
         out = session.exchange(AnnotatedBatch.from_pydict({"value": [3.0]}))
         assert abs(cast(float, out.batch.column("value")[0].as_py()) - 6.0) < 1e-6
     assert proxy.echo_string(value="end") == "end"
+
+
+# ---------------------------------------------------------------------------
+# Rich header helper
+# ---------------------------------------------------------------------------
+
+
+def _assert_rich_header_equal(actual: RichHeader, expected: RichHeader) -> None:
+    """Assert all fields of two ``RichHeader`` instances match.
+
+    Float comparisons use a tolerance of 1e-6.
+    """
+    assert actual.str_field == expected.str_field
+    assert actual.bytes_field == expected.bytes_field
+    assert actual.int_field == expected.int_field
+    assert abs(actual.float_field - expected.float_field) < 1e-6
+    assert actual.bool_field == expected.bool_field
+    assert actual.list_of_int == expected.list_of_int
+    assert actual.list_of_str == expected.list_of_str
+    assert actual.dict_field == expected.dict_field
+    assert actual.enum_field == expected.enum_field
+    assert abs(actual.nested_point.x - expected.nested_point.x) < 1e-6
+    assert abs(actual.nested_point.y - expected.nested_point.y) < 1e-6
+    assert actual.optional_str == expected.optional_str
+    assert actual.optional_int == expected.optional_int
+    if expected.optional_nested is None:
+        assert actual.optional_nested is None
+    else:
+        assert actual.optional_nested is not None
+        assert abs(actual.optional_nested.x - expected.optional_nested.x) < 1e-6
+        assert abs(actual.optional_nested.y - expected.optional_nested.y) < 1e-6
+    assert len(actual.list_of_nested) == len(expected.list_of_nested)
+    for a_pt, e_pt in zip(actual.list_of_nested, expected.list_of_nested, strict=True):
+        assert abs(a_pt.x - e_pt.x) < 1e-6
+        assert abs(a_pt.y - e_pt.y) < 1e-6
+    assert actual.nested_list == expected.nested_list
+    assert actual.annotated_int32 == expected.annotated_int32
+    assert abs(actual.annotated_float32 - expected.annotated_float32) < 1e-6
+    assert actual.dict_str_str == expected.dict_str_str
+
+
+# ---------------------------------------------------------------------------
+# Rich header producer tests
+# ---------------------------------------------------------------------------
+
+
+@_conformance_test(category="rich_header_producer", name="seed_42")
+def _test_rich_header_seed_42(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.produce_with_rich_header(seed=42, count=3)
+    header = session.header
+    assert header is not None
+    assert isinstance(header, RichHeader)
+    _assert_rich_header_equal(header, build_rich_header(42))
+    batches = list(session)
+    assert len(batches) == 3
+    for i, ab in enumerate(batches):
+        assert cast(int, ab.batch.column("index")[0].as_py()) == i
+        assert cast(int, ab.batch.column("value")[0].as_py()) == i * 10
+
+
+@_conformance_test(category="rich_header_producer", name="seed_7")
+def _test_rich_header_seed_7(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.produce_with_rich_header(seed=7, count=2)
+    header = session.header
+    assert header is not None
+    assert isinstance(header, RichHeader)
+    _assert_rich_header_equal(header, build_rich_header(7))
+    batches = list(session)
+    assert len(batches) == 2
+
+
+@_conformance_test(category="rich_header_producer", name="seed_0")
+def _test_rich_header_seed_0(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.produce_with_rich_header(seed=0, count=1)
+    header = session.header
+    assert header is not None
+    assert isinstance(header, RichHeader)
+    _assert_rich_header_equal(header, build_rich_header(0))
+    batches = list(session)
+    assert len(batches) == 1
+
+
+# ---------------------------------------------------------------------------
+# Dynamic schema producer tests
+# ---------------------------------------------------------------------------
+
+
+@_conformance_test(category="dynamic_schema_producer", name="all_columns")
+def _test_dynamic_all_columns(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.produce_dynamic_schema(seed=42, count=3, include_strings=True, include_floats=True)
+    header = session.header
+    assert header is not None
+    assert isinstance(header, RichHeader)
+    _assert_rich_header_equal(header, build_rich_header(42))
+    batches = list(session)
+    assert len(batches) == 3
+    expected_schema = build_dynamic_schema(include_strings=True, include_floats=True)
+    for i, ab in enumerate(batches):
+        assert ab.batch.schema.equals(expected_schema)
+        assert cast(int, ab.batch.column("index")[0].as_py()) == i
+        assert ab.batch.column("label")[0].as_py() == f"row-{i}"
+        assert abs(cast(float, ab.batch.column("score")[0].as_py()) - i * 1.5) < 1e-6
+
+
+@_conformance_test(category="dynamic_schema_producer", name="strings_only")
+def _test_dynamic_strings_only(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.produce_dynamic_schema(seed=7, count=2, include_strings=True, include_floats=False)
+    header = session.header
+    assert header is not None
+    _assert_rich_header_equal(header, build_rich_header(7))
+    batches = list(session)
+    assert len(batches) == 2
+    for i, ab in enumerate(batches):
+        assert ab.batch.schema.names == ["index", "label"]
+        assert ab.batch.column("label")[0].as_py() == f"row-{i}"
+
+
+@_conformance_test(category="dynamic_schema_producer", name="floats_only")
+def _test_dynamic_floats_only(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.produce_dynamic_schema(seed=5, count=2, include_strings=False, include_floats=True)
+    header = session.header
+    assert header is not None
+    _assert_rich_header_equal(header, build_rich_header(5))
+    batches = list(session)
+    assert len(batches) == 2
+    for i, ab in enumerate(batches):
+        assert ab.batch.schema.names == ["index", "score"]
+        assert abs(cast(float, ab.batch.column("score")[0].as_py()) - i * 1.5) < 1e-6
+
+
+@_conformance_test(category="dynamic_schema_producer", name="minimal")
+def _test_dynamic_minimal(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.produce_dynamic_schema(seed=0, count=1, include_strings=False, include_floats=False)
+    header = session.header
+    assert header is not None
+    _assert_rich_header_equal(header, build_rich_header(0))
+    batches = list(session)
+    assert len(batches) == 1
+    assert batches[0].batch.schema.names == ["index"]
+    assert cast(int, batches[0].batch.column("index")[0].as_py()) == 0
+
+
+# ---------------------------------------------------------------------------
+# Rich header exchange tests
+# ---------------------------------------------------------------------------
+
+
+@_conformance_test(category="rich_header_exchange", name="header_then_exchange")
+def _test_rich_exchange_header(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.exchange_with_rich_header(seed=5, factor=2.5)
+    header = session.header
+    assert header is not None
+    assert isinstance(header, RichHeader)
+    _assert_rich_header_equal(header, build_rich_header(5))
+    with session:
+        out = session.exchange(AnnotatedBatch.from_pydict({"value": [4.0]}))
+        assert abs(cast(float, out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
+
+
+@_conformance_test(category="rich_header_exchange", name="different_seed")
+def _test_rich_exchange_different_seed(proxy: ConformanceService, logs: LogCollector) -> None:
+    session = proxy.exchange_with_rich_header(seed=12, factor=1.0)
+    header = session.header
+    assert header is not None
+    assert isinstance(header, RichHeader)
+    _assert_rich_header_equal(header, build_rich_header(12))
+    with session:
+        out = session.exchange(AnnotatedBatch.from_pydict({"value": [7.0]}))
+        assert abs(cast(float, out.batch.column("value")[0].as_py()) - 7.0) < 1e-6
 
 
 # ---------------------------------------------------------------------------

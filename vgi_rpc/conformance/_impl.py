@@ -26,6 +26,7 @@ from ._types import (
     BoundingBox,
     ConformanceHeader,
     CounterState,
+    DynamicProducerState,
     EmptyProducerState,
     ErrorAfterNState,
     FailOnExchangeNState,
@@ -34,9 +35,12 @@ from ._types import (
     LoggingExchangeState,
     LoggingProducerState,
     Point,
+    RichHeader,
     ScaleExchangeState,
     SingleProducerState,
     Status,
+    build_dynamic_schema,
+    build_rich_header,
 )
 
 # Reusable schemas
@@ -313,4 +317,39 @@ class ConformanceServiceImpl:
             state=ScaleExchangeState(factor=factor),
             input_schema=_SCALE_INPUT_SCHEMA,
             header=header,
+        )
+
+    # ------------------------------------------------------------------
+    # Dynamic Streams With Rich Multi-Type Headers
+    # ------------------------------------------------------------------
+
+    def produce_with_rich_header(self, seed: int, count: int) -> Stream[HeaderProducerState, RichHeader]:
+        """Produce batches with a rich multi-type header."""
+        return Stream(
+            output_schema=_COUNTER_SCHEMA,
+            state=HeaderProducerState(count=count),
+            header=build_rich_header(seed),
+        )
+
+    def produce_dynamic_schema(
+        self, seed: int, count: int, include_strings: bool, include_floats: bool
+    ) -> Stream[DynamicProducerState, RichHeader]:
+        """Produce batches with dynamic output schema and rich header."""
+        return Stream(
+            output_schema=build_dynamic_schema(include_strings, include_floats),
+            state=DynamicProducerState(
+                count=count,
+                include_strings=include_strings,
+                include_floats=include_floats,
+            ),
+            header=build_rich_header(seed),
+        )
+
+    def exchange_with_rich_header(self, seed: int, factor: float) -> Stream[ScaleExchangeState, RichHeader]:
+        """Exchange stream with a rich multi-type header."""
+        return Stream(
+            output_schema=_SCALE_OUTPUT_SCHEMA,
+            state=ScaleExchangeState(factor=factor),
+            input_schema=_SCALE_INPUT_SCHEMA,
+            header=build_rich_header(seed),
         )
