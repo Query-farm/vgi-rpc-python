@@ -53,7 +53,6 @@ from vgi_rpc.rpc import (
     _current_request_id,
     _current_transport,
     _deserialize_params,
-    _drain_stream,
     _emit_access_log,
     _flush_collector,
     _generate_request_id,
@@ -739,11 +738,14 @@ class _HttpRpcApp:
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
 
-            # Read the input batch + extract token from metadata
+            # Read the input batch + extract token from metadata.
+            # Note: unlike pipe transport we do NOT drain the stream here —
+            # each HTTP request is independent, so there is no shared pipe to
+            # keep in sync, and some WSGI servers raise if you read from the
+            # request body after the response has started.
             try:
                 req_reader = ValidatedReader(ipc.open_stream(stream), self._server.ipc_validation)
                 input_batch, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
-                _drain_stream(req_reader)
             except pa.ArrowInvalid as exc:
                 raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
