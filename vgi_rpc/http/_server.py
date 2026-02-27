@@ -225,11 +225,11 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
     """
     try:
         token = base64.b64decode(token, validate=True)
-    except Exception:
+    except Exception as exc:
         raise _RpcHttpError(
             RuntimeError("Malformed state token"),
             status_code=HTTPStatus.BAD_REQUEST,
-        )
+        ) from exc
 
     if len(token) < _MIN_TOKEN_LEN:
         raise _RpcHttpError(
