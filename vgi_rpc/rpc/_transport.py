@@ -265,8 +265,11 @@ class SubprocessTransport:
         """Close stdin (sends EOF), wait for exit, close stdout."""
         if self._closed:
             return
-        if wire_transport_logger.isEnabledFor(logging.DEBUG):
-            wire_transport_logger.debug("SubprocessTransport closing: pid=%d", self._proc.pid)
+        try:
+            if wire_transport_logger.isEnabledFor(logging.DEBUG):
+                wire_transport_logger.debug("SubprocessTransport closing: pid=%d", self._proc.pid)
+        except ValueError:
+            pass  # stderr closed during interpreter shutdown (Windows)
         self._closed = True
         if self._proc.stdin:
             self._proc.stdin.close()
@@ -278,12 +281,15 @@ class SubprocessTransport:
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
         self._reader.close()
-        if wire_transport_logger.isEnabledFor(logging.DEBUG):
-            wire_transport_logger.debug(
-                "SubprocessTransport closed: pid=%d, exit_code=%s",
-                self._proc.pid,
-                self._proc.returncode,
-            )
+        try:
+            if wire_transport_logger.isEnabledFor(logging.DEBUG):
+                wire_transport_logger.debug(
+                    "SubprocessTransport closed: pid=%d, exit_code=%s",
+                    self._proc.pid,
+                    self._proc.returncode,
+                )
+        except ValueError:
+            pass  # stderr closed during interpreter shutdown (Windows)
 
 
 def serve_stdio(server: RpcServer) -> None:
