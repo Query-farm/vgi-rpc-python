@@ -1424,6 +1424,46 @@ class TestZstdCompression:
             assert result.batch.column("value")[0].as_py() == 30.0
         client.close()
 
+    def test_client_sends_accept_encoding_zstd(self) -> None:
+        """Client sends Accept-Encoding: zstd when compression is enabled."""
+        captured_headers: list[dict[str, str]] = []
+
+        class _CapturingClient(_SyncTestClient):
+            """Test client that captures request headers."""
+
+            def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
+                captured_headers.append(dict(headers))
+                return super().post(url, content=content, headers=headers)
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test-key", compression_level=3)
+        test_client = _CapturingClient(app)
+
+        with http_connect(RpcFixtureService, client=test_client, compression_level=3) as proxy:
+            proxy.greet(name="ZstdAccept")
+        assert any(h.get("Accept-Encoding") == "zstd" for h in captured_headers)
+        test_client.close()
+
+    def test_client_omits_accept_encoding_without_compression(self) -> None:
+        """Client does not send Accept-Encoding: zstd when compression is disabled."""
+        captured_headers: list[dict[str, str]] = []
+
+        class _CapturingClient(_SyncTestClient):
+            """Test client that captures request headers."""
+
+            def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
+                captured_headers.append(dict(headers))
+                return super().post(url, content=content, headers=headers)
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test-key", compression_level=None)
+        test_client = _CapturingClient(app)
+
+        with http_connect(RpcFixtureService, client=test_client, compression_level=None) as proxy:
+            proxy.greet(name="NoZstd")
+        assert all("Accept-Encoding" not in h for h in captured_headers)
+        test_client.close()
+
 
 # ---------------------------------------------------------------------------
 # 404 HTML page

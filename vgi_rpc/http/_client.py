@@ -197,10 +197,11 @@ class HttpStreamSession:
         return self._header
 
     def _build_headers(self) -> dict[str, str]:
-        """Build HTTP headers, adding ``Content-Encoding: zstd`` when compression is enabled."""
+        """Build HTTP headers, adding ``Content-Encoding`` and ``Accept-Encoding`` when compression is enabled."""
         headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
         if self._compression_level is not None:
             headers["Content-Encoding"] = "zstd"
+            headers["Accept-Encoding"] = "zstd"
         return headers
 
     def _prepare_body(self, content: bytes) -> bytes:
@@ -619,10 +620,11 @@ class _HttpProxy:
         self._compression_level = compression_level
 
     def _build_headers(self) -> dict[str, str]:
-        """Build HTTP headers, adding ``Content-Encoding: zstd`` when compression is enabled."""
+        """Build HTTP headers, adding ``Content-Encoding`` and ``Accept-Encoding`` when compression is enabled."""
         headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
         if self._compression_level is not None:
             headers["Content-Encoding"] = "zstd"
+            headers["Accept-Encoding"] = "zstd"
         return headers
 
     def _prepare_body(self, content: bytes) -> bytes:
