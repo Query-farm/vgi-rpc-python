@@ -1420,7 +1420,7 @@ All framework metadata keys live in the `vgi_rpc.` namespace:
 |---|---|---|
 | `vgi_rpc.method` | batch metadata | Target RPC method name |
 | `vgi_rpc.request_version` | batch metadata | Wire protocol version (`"1"`) |
-| `vgi_rpc.stream_state` | batch metadata | Serialized stream state (HTTP transport) |
+| `vgi_rpc.stream_state#b64` | batch metadata | Base64-encoded serialized stream state (HTTP transport). The `#b64` suffix indicates the value is base64-encoded binary data. |
 | `vgi_rpc.log_level` | batch metadata | Log level on zero-row log/error batches |
 | `vgi_rpc.log_message` | batch metadata | Log message text |
 | `vgi_rpc.log_extra` | batch metadata | JSON-encoded extra fields |
@@ -1480,7 +1480,7 @@ All endpoints use `Content-Type: application/vnd.apache.arrow.stream`.
 | `{prefix}/{method}/init` | POST | Stream initialization (producer and exchange) |
 | `{prefix}/{method}/exchange` | POST | Stream continuation (producer and exchange) |
 
-Over HTTP, streaming is **stateless**: each exchange carries serialized `StreamState` in a signed token in the `vgi_rpc.stream_state` batch metadata key. Producer stream init returns data batches directly; exchange stream init returns a state token.
+Over HTTP, streaming is **stateless**: each exchange carries serialized `StreamState` in a signed token in the `vgi_rpc.stream_state#b64` batch metadata key. The token is base64-encoded to ensure the metadata value is valid UTF-8. Producer stream init returns data batches directly; exchange stream init returns a state token.
 
 For streams with headers, the `/init` response body contains the header IPC stream prepended to the main output IPC stream. The `/exchange` endpoint never re-sends the header — it is only included in the initial response.
 

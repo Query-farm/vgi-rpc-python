@@ -15,7 +15,7 @@ All endpoints use ``Content-Type: application/vnd.apache.arrow.stream``.
 - **Stream Exchange**: ``POST /vgi/{method}/exchange``
 
 Streaming is implemented statelessly: each exchange is a separate HTTP POST
-carrying serialized state in Arrow custom metadata (``vgi_rpc.stream_state``).
+carrying serialized state in Arrow custom metadata (``vgi_rpc.stream_state#b64``).
 When ``max_stream_response_bytes`` is set, producer-stream responses are
 split across multiple exchanges; the client transparently resumes via
 ``POST /vgi/{method}/exchange``.

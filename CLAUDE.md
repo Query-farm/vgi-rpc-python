@@ -59,7 +59,7 @@ Then you can commit.
 
 - **`logging_utils.py`** — `VgiJsonFormatter`, a `logging.Formatter` subclass that serializes log records as single-line JSON. Not auto-imported; must be imported explicitly from `vgi_rpc.logging_utils`.
 
-- **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.stream_state`, `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`, `vgi_rpc.server_id`, `vgi_rpc.request_version`, `vgi_rpc.location`, `vgi_rpc.shm_offset`, etc.) and provides encoding, merging, and key-stripping utilities used by `rpc/`, `http/`, `log.py`, `external.py`, `shm.py`, and `introspect.py`.
+- **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.stream_state#b64`, `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`, `vgi_rpc.server_id`, `vgi_rpc.request_version`, `vgi_rpc.location`, `vgi_rpc.shm_offset`, etc.) and provides encoding, merging, and key-stripping utilities used by `rpc/`, `http/`, `log.py`, `external.py`, `shm.py`, and `introspect.py`.
 
 - **`introspect.py`** — Introspection support. Provides the built-in `__describe__` RPC method, `MethodDescription`, `ServiceDescription`, `build_describe_batch`, `parse_describe_batch`, and `introspect()`. Enabled on `RpcServer` via `enable_describe=True`.
 

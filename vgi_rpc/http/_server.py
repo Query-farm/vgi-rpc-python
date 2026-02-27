@@ -10,6 +10,7 @@ helpers, and the app factory live here.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import html as _html
@@ -189,7 +190,7 @@ def _pack_state_token(
         created_at: Token creation time as seconds since epoch.
 
     Returns:
-        The opaque signed token.
+        The opaque signed token, base64-encoded for UTF-8 safe metadata.
 
     """
     payload = (
@@ -203,7 +204,7 @@ def _pack_state_token(
         + input_schema_bytes
     )
     mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
-    return payload + mac
+    return base64.b64encode(payload + mac)
 
 
 def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) -> tuple[bytes, bytes, bytes]:
@@ -222,6 +223,14 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
         _RpcHttpError: On malformed, tampered, or expired tokens (HTTP 400).
 
     """
+    try:
+        token = base64.b64decode(token, validate=True)
+    except Exception:
+        raise _RpcHttpError(
+            RuntimeError("Malformed state token"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
     if len(token) < _MIN_TOKEN_LEN:
         raise _RpcHttpError(
             RuntimeError("Malformed state token"),

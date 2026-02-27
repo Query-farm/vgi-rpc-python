@@ -83,7 +83,7 @@ where they appear, and their semantics:
 
 | Key (bytes) | Value | Description |
 |-------------|-------|-------------|
-| `vgi_rpc.stream_state` | Opaque binary (signed token) | Serialized stream state for stateless HTTP exchanges. |
+| `vgi_rpc.stream_state#b64` | Base64-encoded binary (signed token) | Serialized stream state for stateless HTTP exchanges. The `#b64` suffix signals that the value is base64-encoded binary data. |
 
 ### Shared memory pointer batch metadata
 
@@ -277,7 +277,7 @@ receive(batch, custom_metadata):
   IF custom_metadata contains "vgi_rpc.shm_offset":
     → SHM POINTER batch → resolve via shared memory (see Section 11)
 
-  IF custom_metadata contains "vgi_rpc.stream_state":
+  IF custom_metadata contains "vgi_rpc.stream_state#b64":
     → STATE TOKEN batch → stream continuation (see Section 10)
 
   // Zero-row batch with unrecognized metadata
@@ -578,7 +578,7 @@ Response body:
 
 All produced data batches are included inline. If the response would exceed
 `max_stream_response_bytes`, the server truncates the output and appends a
-**continuation batch**: a zero-row batch with `vgi_rpc.stream_state` in its
+**continuation batch**: a zero-row batch with `vgi_rpc.stream_state#b64` in its
 custom metadata. The client then follows up with `/exchange` requests.
 
 #### Exchange stream init response
@@ -590,7 +590,7 @@ Response body:
 ```
 
 The zero-row batch carries the signed state token in
-`vgi_rpc.stream_state` custom metadata.
+`vgi_rpc.stream_state#b64` custom metadata.
 
 ### Stream exchange (HTTP)
 
@@ -601,8 +601,8 @@ Request body:  IPC stream (input_schema, 1 input batch with state token in metad
 Response body: IPC stream (output_schema, 0..N log batches, 1 data batch with updated state token, EOS)
 ```
 
-The request batch's custom metadata MUST contain `vgi_rpc.stream_state`
-with the current state token.
+The request batch's custom metadata MUST contain `vgi_rpc.stream_state#b64`
+with the current state token (base64-encoded).
 
 For **producer continuation**, the input is a zero-row batch on empty schema
 with the state token. The response may contain multiple data batches and
@@ -611,12 +611,13 @@ may end with another continuation token.
 For **exchange**, the input carries real data plus the state token. The
 response data batch carries an updated state token for the next exchange.
 
-The client MUST strip `vgi_rpc.stream_state` from the batch metadata before
+The client MUST strip `vgi_rpc.stream_state#b64` from the batch metadata before
 exposing it to application code.
 
 ### State token binary format
 
-The state token is an opaque signed blob with the following wire format (v2):
+The state token is an opaque signed blob, base64-encoded for UTF-8 safe
+metadata storage. After base64-decoding, the binary wire format (v2) is:
 
 ```
 Offset      Size     Field

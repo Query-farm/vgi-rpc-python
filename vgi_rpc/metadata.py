@@ -46,7 +46,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 RPC_METHOD_KEY = b"vgi_rpc.method"
-STATE_KEY = b"vgi_rpc.stream_state"
+STATE_KEY = b"vgi_rpc.stream_state#b64"
 LOG_LEVEL_KEY = b"vgi_rpc.log_level"
 LOG_MESSAGE_KEY = b"vgi_rpc.log_message"
 LOG_EXTRA_KEY = b"vgi_rpc.log_extra"

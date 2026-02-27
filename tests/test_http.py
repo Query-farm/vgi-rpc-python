@@ -280,6 +280,7 @@ class TestResumableServerStream:
 
     def test_wrong_token_version_400(self, resumable_client: _SyncTestClient) -> None:
         """Token with an unsupported version byte returns 400."""
+        import base64
         import hashlib
         import hmac as hmac_mod
         import struct
@@ -305,7 +306,7 @@ class TestResumableServerStream:
             + input_bytes
         )
         mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
-        token = payload + mac
+        token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: token})
@@ -360,6 +361,7 @@ class TestStateTokenStateEncoding:
 
     def test_expired_token_400(self) -> None:
         """Token with a timestamp 2 hours in the past is rejected as expired."""
+        import base64
         import hashlib
         import hmac as hmac_mod
         import struct
@@ -386,7 +388,7 @@ class TestStateTokenStateEncoding:
             + input_bytes
         )
         mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
-        token = payload + mac
+        token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: token})
@@ -411,6 +413,7 @@ class TestStateTokenStateEncoding:
 
     def test_token_ttl_zero_disables_expiry(self) -> None:
         """Token with old timestamp is accepted when token_ttl=0."""
+        import base64
         import hashlib
         import hmac as hmac_mod
         import struct
@@ -439,7 +442,7 @@ class TestStateTokenStateEncoding:
             + input_bytes
         )
         mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
-        token = payload + mac
+        token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: token})
@@ -464,6 +467,33 @@ class TestStateTokenStateEncoding:
             err = _extract_rpc_error(resp)
             assert "expired" not in err.error_message.lower()
         c.close()
+
+    def test_pack_token_is_valid_utf8(self) -> None:
+        """Packed state token is valid UTF-8 (base64-encoded)."""
+        from vgi_rpc.http._server import _pack_state_token
+
+        # Use bytes with high bytes that are invalid UTF-8 on their own
+        token = _pack_state_token(b"\x00\xff\xfe", b"\x80\x81", b"\x90\x91", b"key", 0)
+        # Token must be valid UTF-8 (base64 produces only ASCII)
+        token.decode("utf-8")  # Should not raise
+
+    def test_pack_unpack_roundtrip_with_base64(self) -> None:
+        """Pack and unpack produce consistent results through base64 encoding."""
+        from vgi_rpc.http._server import _pack_state_token, _unpack_state_token
+
+        state = b"test-state-data"
+        schema = b"test-schema-data"
+        input_schema = b"test-input-schema"
+        key = b"signing-key"
+
+        token = _pack_state_token(state, schema, input_schema, key, 1000)
+        # Verify it's valid UTF-8
+        token.decode("utf-8")
+
+        s, sch, inp = _unpack_state_token(token, key)
+        assert s == state
+        assert sch == schema
+        assert inp == input_schema
 
 
 # ---------------------------------------------------------------------------

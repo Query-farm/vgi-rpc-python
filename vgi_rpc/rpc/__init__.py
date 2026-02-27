@@ -51,7 +51,7 @@ on the batch.
 
 Over HTTP, streaming is stateless: each exchange is a separate
 ``POST /vgi/{method}/exchange`` carrying the input batch and serialized
-``StreamState`` in Arrow custom metadata (``vgi_rpc.stream_state``).
+``StreamState`` in Arrow custom metadata (``vgi_rpc.stream_state#b64``).
 
 State-Based Stream Model
 -------------------------
