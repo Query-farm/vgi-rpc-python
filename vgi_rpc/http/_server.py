@@ -1162,7 +1162,6 @@ _LANDING_HTML_TEMPLATE = (
   a {{ color: #2d5016; text-decoration: none; }}
   a:hover {{ color: #4a7c23; }}
   p {{ line-height: 1.7; color: #6b6b5a; }}
-  .meta {{ font-size: 0.9em; color: #6b6b5a; }}
   .links {{ margin-top: 28px; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }}
   .links a {{ display: inline-block; padding: 8px 18px; border-radius: 6px;
               border: 1px solid #4a7c23; color: #2d5016; font-weight: 600;
@@ -1181,7 +1180,6 @@ _LANDING_HTML_TEMPLATE = (
   <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">
 </div>
 <h1>{protocol_name}</h1>
-<p class="meta">Powered by <code>vgi-rpc</code> v{version} &middot; server <code>{server_id}</code></p>
 <p>This is a <code>vgi-rpc</code> service endpoint.</p>
 <div class="links">
 {describe_link}
@@ -1189,7 +1187,8 @@ _LANDING_HTML_TEMPLATE = (
 <a href="https://vgi-rpc.query.farm">Learn more about <code>vgi-rpc</code></a>
 </div>
 <footer>
-  &copy; 2026 &#x1F69C; <a href="https://query.farm">Query.Farm LLC</a>
+  Powered by <code>vgi-rpc</code> v{version} &middot; server <code>{server_id}</code>
+  <br>&copy; 2026 &#x1F69C; <a href="https://query.farm">Query.Farm LLC</a>
 </footer>
 </body>
 </html>"""
@@ -1242,6 +1241,7 @@ class _LandingPageResource:
     def on_get(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Return the landing page HTML."""
         resp.content_type = "text/html; charset=utf-8"
+        resp.set_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
         resp.data = self._body
 
 
@@ -1443,6 +1443,7 @@ class _DescribePageResource:
     def on_get(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Return the describe page HTML."""
         resp.content_type = "text/html; charset=utf-8"
+        resp.set_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
         resp.data = self._body
 
 

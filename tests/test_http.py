@@ -1660,6 +1660,14 @@ class TestLandingPage:
         assert resp.status_code == 404
         c.close()
 
+    def test_cache_control_header(self, landing_client: _SyncTestClient) -> None:
+        """Landing page sets Cache-Control to prevent caching."""
+        resp = landing_client._client.simulate_get("/vgi")
+        cc = resp.headers.get("cache-control", "")
+        assert "no-cache" in cc
+        assert "no-store" in cc
+        assert "max-age=0" in cc
+
     def test_post_to_prefix_returns_405(self, landing_client: _SyncTestClient) -> None:
         """POST /vgi returns 405 Method Not Allowed."""
         resp = landing_client._client.simulate_post("/vgi")
@@ -1733,6 +1741,14 @@ class TestDescribeHtmlPage:
         """The __describe__ method is filtered out of the page."""
         resp = describe_client._client.simulate_get("/vgi/describe")
         assert "__describe__" not in resp.text
+
+    def test_cache_control_header(self, describe_client: _SyncTestClient) -> None:
+        """Describe page sets Cache-Control to prevent caching."""
+        resp = describe_client._client.simulate_get("/vgi/describe")
+        cc = resp.headers.get("cache-control", "")
+        assert "no-cache" in cc
+        assert "no-store" in cc
+        assert "max-age=0" in cc
 
     def test_disabled_via_parameter(self) -> None:
         """When enable_describe_page=False, GET /vgi/describe is not served."""
