@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
-from typing import NewType, Protocol
+from typing import Any, NewType, Protocol
 
 import pyarrow as pa
 import pytest
@@ -50,6 +50,7 @@ from vgi_rpc.rpc import (
     describe_rpc,
     make_pipe_pair,
     rpc_methods,
+    run_server,
     serve_pipe,
 )
 from vgi_rpc.utils import (
@@ -1150,3 +1151,233 @@ class TestRpcError:
         assert err.error_type == "ValueError"
         assert err.error_message == "msg"
         assert err.remote_traceback == "tb"
+
+
+# ===================================================================
+# 26. run_server arg parsing
+# ===================================================================
+
+
+class TestRunServerArgParsing:
+    """Tests for run_server() CLI argument parsing."""
+
+    def test_no_args_calls_serve_stdio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """run_server with no CLI flags calls serve_stdio."""
+        monkeypatch.setattr("sys.argv", ["worker"])
+        called_with: list[object] = []
+        monkeypatch.setattr("vgi_rpc.rpc.serve_stdio", lambda server: called_with.append(server))
+
+        class P(Protocol):
+            """Protocol."""
+
+            def ping(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def ping(self) -> str:
+                """Return pong."""
+                return "pong"
+
+        run_server(P, Impl())
+        assert len(called_with) == 1
+        assert isinstance(called_with[0], RpcServer)
+
+    def test_http_flag_calls_serve_http(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """run_server --http calls serve_http with default host/port."""
+        monkeypatch.setattr("sys.argv", ["worker", "--http"])
+        called_with: list[tuple[object, str, int]] = []
+
+        def fake_serve_http(server: object, *, host: str = "127.0.0.1", port: int = 0) -> None:
+            called_with.append((server, host, port))
+
+        monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)
+        monkeypatch.setattr("vgi_rpc.http._server.serve_http", fake_serve_http)
+
+        class P(Protocol):
+            """Protocol."""
+
+            def ping(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def ping(self) -> str:
+                """Return pong."""
+                return "pong"
+
+        run_server(P, Impl())
+        assert len(called_with) == 1
+        _, host, port = called_with[0]
+        assert host == "127.0.0.1"
+        assert port == 0
+
+    def test_http_with_port_and_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """run_server --http --host/--port passes values through."""
+        monkeypatch.setattr("sys.argv", ["worker", "--http", "--host", "0.0.0.0", "--port", "9999"])
+        called_with: list[tuple[object, str, int]] = []
+
+        def fake_serve_http(server: object, *, host: str = "127.0.0.1", port: int = 0) -> None:
+            called_with.append((server, host, port))
+
+        monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)
+        monkeypatch.setattr("vgi_rpc.http._server.serve_http", fake_serve_http)
+
+        class P(Protocol):
+            """Protocol."""
+
+            def ping(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def ping(self) -> str:
+                """Return pong."""
+                return "pong"
+
+        run_server(P, Impl())
+        assert len(called_with) == 1
+        _, host, port = called_with[0]
+        assert host == "0.0.0.0"
+        assert port == 9999
+
+    def test_unknown_arg_raises_system_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """run_server rejects unknown CLI arguments."""
+        monkeypatch.setattr("sys.argv", ["worker", "--bogus"])
+
+        class P(Protocol):
+            """Protocol."""
+
+            def ping(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def ping(self) -> str:
+                """Return pong."""
+                return "pong"
+
+        with pytest.raises(SystemExit):
+            run_server(P, Impl())
+
+    def test_http_missing_dependency(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """run_server --http exits when vgi_rpc.http is not importable."""
+        monkeypatch.setattr("sys.argv", ["worker", "--http"])
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: Any, **kwargs: Any) -> object:
+            if name == "vgi_rpc.http":
+                raise ImportError("no http")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        class P(Protocol):
+            """Protocol."""
+
+            def ping(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def ping(self) -> str:
+                """Return pong."""
+                return "pong"
+
+        with pytest.raises(SystemExit):
+            run_server(P, Impl())
+
+
+# ===================================================================
+# 27. serve_http
+# ===================================================================
+
+
+class TestServeHttp:
+    """Tests for serve_http() convenience wrapper."""
+
+    def test_serve_http_calls_waitress(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """serve_http invokes waitress.serve with correct arguments."""
+        from unittest.mock import MagicMock
+
+        mock_waitress = MagicMock()
+        monkeypatch.setattr("vgi_rpc.http._server._waitress", mock_waitress, raising=False)
+
+        # We need to prevent the real import inside serve_http —
+        # monkeypatch the import to return our mock
+        import importlib
+        import sys as _sys
+
+        fake_mod = type(_sys)("waitress")
+        fake_mod.serve = mock_waitress.serve  # type: ignore[attr-defined]
+        monkeypatch.setitem(_sys.modules, "waitress", fake_mod)
+
+        class P(Protocol):
+            """Protocol."""
+
+            def ping(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def ping(self) -> str:
+                """Return pong."""
+                return "pong"
+
+        server = RpcServer(P, Impl())
+        # Reload to pick up the mocked waitress
+        import vgi_rpc.http._server as _srv_mod
+
+        importlib.reload(_srv_mod)
+
+        # Use port=12345 to avoid socket bind
+        _srv_mod.serve_http(server, host="127.0.0.1", port=12345)
+
+        fake_mod.serve.assert_called_once()
+        call_kwargs = fake_mod.serve.call_args
+        assert call_kwargs[1]["host"] == "127.0.0.1"
+        assert call_kwargs[1]["port"] == 12345
+        assert call_kwargs[1]["_quiet"] is True
+
+        # Reload to restore original state
+        importlib.reload(_srv_mod)
+
+    def test_serve_http_auto_port(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        """serve_http with port=0 selects a free port and prints PORT:<n>."""
+        import importlib
+        import sys as _sys
+
+        # Mock waitress so it doesn't actually block
+        fake_mod = type(_sys)("waitress")
+        fake_mod.serve = lambda *a, **kw: None  # type: ignore[attr-defined]
+        monkeypatch.setitem(_sys.modules, "waitress", fake_mod)
+
+        import vgi_rpc.http._server as _srv_mod
+
+        importlib.reload(_srv_mod)
+
+        class P(Protocol):
+            """Protocol."""
+
+            def ping(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def ping(self) -> str:
+                """Return pong."""
+                return "pong"
+
+        server = RpcServer(P, Impl())
+        _srv_mod.serve_http(server, port=0)
+
+        captured = capsys.readouterr()
+        assert captured.out.startswith("PORT:")
+        port_str = captured.out.strip().split(":")[1]
+        port_num = int(port_str)
+        assert port_num > 0
+
+        # Reload to restore original state
+        importlib.reload(_srv_mod)

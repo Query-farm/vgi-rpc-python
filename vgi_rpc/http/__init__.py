@@ -40,7 +40,7 @@ from vgi_rpc.http._common import (
     _RpcHttpError,
 )
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
-from vgi_rpc.http._server import make_wsgi_app
+from vgi_rpc.http._server import make_wsgi_app, serve_http
 from vgi_rpc.http._testing import (
     _SyncTestClient,
     _SyncTestResponse,
@@ -65,5 +65,6 @@ __all__ = [
     "http_introspect",
     "make_sync_client",
     "make_wsgi_app",
+    "serve_http",
     "request_upload_urls",
 ]

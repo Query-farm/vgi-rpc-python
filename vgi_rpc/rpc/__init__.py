@@ -72,8 +72,10 @@ the method signature — it does **not** appear in the Protocol definition.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import logging
+import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
 
@@ -271,10 +273,20 @@ __all__ = [
 
 
 def run_server(protocol_or_server: type | RpcServer, implementation: object | None = None) -> None:
-    """Serve RPC requests over stdin/stdout.
+    """Serve RPC requests, defaulting to stdin/stdout pipe transport.
 
     This is the recommended entry point for subprocess workers.  Accepts
     either a ``(protocol, implementation)`` pair or a pre-built ``RpcServer``.
+
+    The function parses ``sys.argv`` and supports the following CLI flags:
+
+    - ``--http``  — Serve over HTTP instead of stdin/stdout (requires
+      ``vgi-rpc[http]``).
+    - ``--host HOST`` — HTTP bind address (default ``127.0.0.1``).
+    - ``--port PORT`` — HTTP port (default ``0``, auto-select).
+
+    Without ``--http`` the server runs over stdin/stdout pipes (the
+    default, suitable for ``SubprocessTransport``).
 
     Args:
         protocol_or_server: A Protocol class (requires *implementation*) or
@@ -297,7 +309,22 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         server = RpcServer(protocol_or_server, implementation)
     else:
         raise TypeError(f"Expected a Protocol class or RpcServer, got {type(protocol_or_server).__name__}")
-    serve_stdio(server)
+
+    parser = argparse.ArgumentParser(description="vgi-rpc server")
+    parser.add_argument("--http", action="store_true", default=False, help="Serve over HTTP instead of stdin/stdout")
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=0, help="HTTP port (default: auto-select)")
+    args = parser.parse_args()
+
+    if args.http:
+        try:
+            from vgi_rpc.http import serve_http
+        except ImportError:
+            print("HTTP transport requires vgi-rpc[http]: pip install vgi-rpc[http]", file=sys.stderr)
+            sys.exit(1)
+        serve_http(server, host=args.host, port=args.port)
+    else:
+        serve_stdio(server)
 
 
 @contextlib.contextmanager

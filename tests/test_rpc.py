@@ -1904,8 +1904,10 @@ class TestConvenienceFunctions:
             svc.greet_with_logs(name="Bob")
         assert len(logs) == 2
 
-    def test_run_server_type_errors(self) -> None:
+    def test_run_server_type_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """run_server raises TypeError on invalid argument combinations."""
+        monkeypatch.setattr("sys.argv", ["test"])
+
         with pytest.raises(TypeError, match="implementation is required"):
             run_server(RpcFixtureService)
 

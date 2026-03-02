@@ -21,7 +21,7 @@ import sys
 
 from vgi_rpc.conformance._impl import ConformanceServiceImpl
 from vgi_rpc.conformance._protocol import ConformanceService
-from vgi_rpc.rpc import RpcServer, run_server
+from vgi_rpc.rpc import RpcServer, serve_stdio
 
 
 def main() -> None:
@@ -55,7 +55,7 @@ def main() -> None:
     elif args.http is not None:
         _serve_http(server, args.http)
     else:
-        run_server(server)
+        serve_stdio(server)
 
 
 def _serve_unix(
