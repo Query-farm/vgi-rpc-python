@@ -11,6 +11,7 @@ helpers, and the app factory live here.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import html as _html
@@ -748,10 +749,10 @@ class _HttpRpcApp:
                 )
 
             # Read the input batch + extract token from metadata.
-            # Note: unlike pipe transport we do NOT drain the stream here —
+            # Note: unlike pipe transport we do not drain the stream here —
             # each HTTP request is independent, so there is no shared pipe to
-            # keep in sync, and some WSGI servers raise if you read from the
-            # request body after the response has started.
+            # keep in sync.  _DrainRequestMiddleware handles draining any
+            # unconsumed body in process_response.
             try:
                 req_reader = ValidatedReader(ipc.open_stream(stream), self._server.ipc_validation)
                 input_batch, custom_metadata = req_reader.read_next_batch_with_custom_metadata()
@@ -1618,6 +1619,28 @@ class _UploadUrlResource:
 _REQUEST_ID_HEADER = "X-Request-ID"
 
 
+class _DrainRequestMiddleware:
+    """Falcon middleware that drains unconsumed request body data.
+
+    Some HTTP servers — notably Cloudflare Workers — require the entire
+    request body to be consumed before the response can be sent, raising
+    ``TypeError("Can't read from request stream after response has been
+    sent.")`` otherwise.  This middleware ensures any unread request data
+    is discarded after the resource handler completes.
+    """
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
+    ) -> None:
+        """Drain any unread request body data."""
+        with contextlib.suppress(Exception):
+            req.bounded_stream.read()
+
+
 class _RequestIdMiddleware:
     """Falcon middleware that sets a per-request correlation ID.
 
@@ -1947,7 +1970,7 @@ def make_wsgi_app(
         max_upload_bytes,
         token_ttl,
     )
-    middleware: list[Any] = [_RequestIdMiddleware()]
+    middleware: list[Any] = [_DrainRequestMiddleware(), _RequestIdMiddleware()]
 
     # Compression middleware decompresses request bodies and compresses
     # responses — must come before auth so handlers read plaintext bodies.
