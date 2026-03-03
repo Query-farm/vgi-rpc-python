@@ -401,6 +401,7 @@ class _HttpRpcApp:
     __slots__ = (
         "_max_request_bytes",
         "_max_stream_response_bytes",
+        "_max_stream_response_time",
         "_max_upload_bytes",
         "_server",
         "_signing_key",
@@ -414,6 +415,7 @@ class _HttpRpcApp:
         server: RpcServer,
         signing_key: bytes,
         max_stream_response_bytes: int | None = None,
+        max_stream_response_time: float | None = None,
         max_request_bytes: int | None = None,
         upload_url_provider: UploadUrlProvider | None = None,
         max_upload_bytes: int | None = None,
@@ -423,6 +425,7 @@ class _HttpRpcApp:
         self._signing_key = signing_key
         self._state_types = _resolve_state_types(server)
         self._max_stream_response_bytes = max_stream_response_bytes
+        self._max_stream_response_time = max_stream_response_time
         self._max_request_bytes = max_request_bytes
         self._upload_url_provider = upload_url_provider
         self._max_upload_bytes = max_upload_bytes
@@ -958,11 +961,13 @@ class _HttpRpcApp:
         protocol_name = self._server.protocol_name
         resp_buf = BytesIO()
         max_bytes = self._max_stream_response_bytes
+        max_time = self._max_stream_response_time
         produce_error_type: str | None = None
         with ipc.new_stream(resp_buf, schema) as writer:
             if sink is not None:
                 sink.flush_contents(writer, schema)
             cumulative_bytes = 0
+            start_time = time.monotonic()
             try:
                 while True:
                     out = OutputCollector(
@@ -983,8 +988,17 @@ class _HttpRpcApp:
                     if out.finished:
                         break
                     cumulative_bytes = out.total_data_bytes
-                    # Check size limit after flushing each produce cycle
+                    # Decide whether to continue producing or break with a
+                    # continuation token.  By default (no limits configured),
+                    # break after every produce cycle so the client receives
+                    # data incrementally.  When limits are configured, buffer
+                    # multiple batches until a limit is reached.
+                    should_continue = max_bytes is not None or max_time is not None
                     if max_bytes is not None and resp_buf.tell() >= max_bytes:
+                        should_continue = False
+                    if max_time is not None and (time.monotonic() - start_time) >= max_time:
+                        should_continue = False
+                    if not should_continue:
                         # Serialize state into a continuation token
                         state_info = self._state_types.get(method_name)
                         if state_info is None:
@@ -1849,6 +1863,7 @@ def make_wsgi_app(
     prefix: str = "/vgi",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
+    max_stream_response_time: float | None = None,
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     cors_origins: str | Iterable[str] | None = None,
@@ -1873,11 +1888,18 @@ def make_wsgi_app(
             This means state tokens issued by one worker are invalid in
             another — you **must** provide a shared key for multi-process
             deployments (e.g. gunicorn with multiple workers).
-        max_stream_response_bytes: When set, producer stream responses are
-            broken into multiple HTTP exchanges once the response body
-            exceeds this size.  The client transparently resumes via
-            ``POST /{method}/exchange``.  ``None`` (default) disables
-            resumable streaming.
+        max_stream_response_bytes: When set, producer stream responses may
+            buffer multiple batches in a single HTTP response up to this
+            size before emitting a continuation token.  The client
+            transparently resumes via ``POST /{method}/exchange``.
+            When ``None`` (the default) and ``max_stream_response_time``
+            is also ``None``, each produce cycle emits one batch per HTTP
+            response for incremental streaming.
+        max_stream_response_time: When set, producer stream responses may
+            buffer multiple batches up to this many seconds of wall time
+            before emitting a continuation token.  Can be combined with
+            ``max_stream_response_bytes`` — the response breaks on
+            whichever limit is reached first.
         max_request_bytes: When set, the value is advertised via the
             ``VGI-Max-Request-Bytes`` response header on every response
             (including OPTIONS).  Clients can use ``http_capabilities()``
@@ -1966,6 +1988,7 @@ def make_wsgi_app(
         server,
         signing_key,
         max_stream_response_bytes,
+        max_stream_response_time,
         max_request_bytes,
         upload_url_provider,
         max_upload_bytes,
