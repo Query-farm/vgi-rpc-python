@@ -61,11 +61,9 @@ def describe_http_port() -> Iterator[int]:
         proc.wait(timeout=5)
 
 
-
 # ---------------------------------------------------------------------------
 # Parametrized transport fixture
 # ---------------------------------------------------------------------------
-
 
 
 @pytest.fixture(
