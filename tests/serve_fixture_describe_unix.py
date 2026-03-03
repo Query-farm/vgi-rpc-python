@@ -1,7 +1,7 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unix socket server entry point for CLI describe tests (fixture service).
+"""Unix socket server entry point for CLI describe tests.
 
 Serves the test RPC fixture service with ``enable_describe=True`` over
 a Unix domain socket for introspection via the CLI.

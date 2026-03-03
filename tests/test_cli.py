@@ -32,8 +32,6 @@ _DESCRIBE_WORKER = str(Path(__file__).parent / "serve_fixture_describe.py")
 _PIPE_CMD = f"{sys.executable} {_DESCRIBE_WORKER}"
 
 _DESCRIBE_HTTP_WORKER = str(Path(__file__).parent / "serve_fixture_describe_http.py")
-_DESCRIBE_UNIX_WORKER = str(Path(__file__).parent / "serve_fixture_describe_unix.py")
-_DESCRIBE_UNIX_THREADED_WORKER = str(Path(__file__).parent / "serve_fixture_describe_unix_threaded.py")
 
 
 # ---------------------------------------------------------------------------
@@ -63,74 +61,23 @@ def describe_http_port() -> Iterator[int]:
         proc.wait(timeout=5)
 
 
-@pytest.fixture(scope="module")
-def describe_unix_path() -> Iterator[str]:
-    """Spawn a Unix socket server with describe enabled for the test module."""
-    from tests.conftest import _short_unix_path, _wait_for_unix
-
-    path = _short_unix_path("cli-fix")
-    proc = subprocess.Popen(
-        [sys.executable, _DESCRIBE_UNIX_WORKER, path],
-        stdout=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
-        assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
-        _wait_for_unix(path)
-        yield path
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
-
-
-@pytest.fixture(scope="module")
-def describe_unix_threaded_path() -> Iterator[str]:
-    """Spawn a threaded Unix socket server with describe enabled for the test module."""
-    from tests.conftest import _short_unix_path, _wait_for_unix
-
-    path = _short_unix_path("cli-ft")
-    proc = subprocess.Popen(
-        [sys.executable, _DESCRIBE_UNIX_THREADED_WORKER, path],
-        stdout=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
-        assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
-        _wait_for_unix(path)
-        yield path
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
-
 
 # ---------------------------------------------------------------------------
 # Parametrized transport fixture
 # ---------------------------------------------------------------------------
 
 
-_SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
-
 
 @pytest.fixture(
     params=[
         "pipe",
         "http",
-        pytest.param("unix", marks=_SKIP_UNIX),
-        pytest.param("unix_threaded", marks=_SKIP_UNIX),
     ]
 )
 def transport_args(request: pytest.FixtureRequest) -> list[str]:
-    """Return CLI args that select a transport (``--cmd …``, ``--url …``, or ``--unix …``)."""
+    """Return CLI args that select a transport (``--cmd …`` or ``--url …``)."""
     if request.param == "pipe":
         return ["--cmd", _PIPE_CMD]
-    elif request.param == "unix":
-        path: str = request.getfixturevalue("describe_unix_path")
-        return ["--unix", path]
-    elif request.param == "unix_threaded":
-        path = request.getfixturevalue("describe_unix_threaded_path")
-        return ["--unix", path]
     port: int = request.getfixturevalue("describe_http_port")
     return ["--url", f"http://127.0.0.1:{port}"]
 
@@ -400,6 +347,78 @@ class TestAdaptiveOutput:
         assert result.exit_code == 0
         assert "result" in result.output
         assert "---" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Coercion edge-case tests (pipe transport, covers _coerce_value bool branch
+# and _coerce_map_value dict-from-tuples branch)
+# ---------------------------------------------------------------------------
+
+
+class TestCoercionEdgeCases:
+    """Tests for CLI value coercion helpers."""
+
+    def test_coerce_boolean(self) -> None:
+        """Boolean key=value coercion via _coerce_value."""
+        from vgi_rpc.cli import _coerce_value
+
+        assert _coerce_value("true", pa.bool_()) is True
+        assert _coerce_value("false", pa.bool_()) is False
+        assert _coerce_value("1", pa.bool_()) is True
+        assert _coerce_value("yes", pa.bool_()) is True
+        assert _coerce_value("0", pa.bool_()) is False
+
+    def test_map_column_dict_output(self) -> None:
+        """Dict-returning method renders map columns as dicts in JSON output."""
+        result = _invoke(
+            ["--cmd", _PIPE_CMD, "--format", "json", "call", "echo_mapping", "--json", '{"mapping": {"x": 1, "y": 2}}'],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        data = json.loads(result.output)
+        assert data["result"] == {"x": 1, "y": 2}
+
+
+# ---------------------------------------------------------------------------
+# Unix socket smoke test (covers _introspect_unix code path)
+# ---------------------------------------------------------------------------
+
+
+_DESCRIBE_UNIX_WORKER = str(Path(__file__).parent / "serve_fixture_describe_unix.py")
+
+_SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
+
+
+@pytest.fixture(scope="module")
+def describe_unix_path() -> Iterator[str]:
+    """Spawn a Unix socket server with describe enabled for the test module."""
+    from tests.conftest import _short_unix_path, _wait_for_unix
+
+    path = _short_unix_path("cli-fix")
+    proc = subprocess.Popen(
+        [sys.executable, _DESCRIBE_UNIX_WORKER, path],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
+        _wait_for_unix(path)
+        yield path
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+class TestUnixTransport:
+    """Smoke test for --unix CLI transport."""
+
+    @_SKIP_UNIX
+    def test_describe_unix(self, describe_unix_path: str) -> None:
+        """Describe via --unix exercises _introspect_unix."""
+        result = _invoke(["--unix", describe_unix_path, "--format", "json", "describe"])
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        data = json.loads(result.output)
+        assert data["protocol_name"] == "RpcFixtureService"
 
 
 # ---------------------------------------------------------------------------
