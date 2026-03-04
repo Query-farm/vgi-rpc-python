@@ -835,6 +835,76 @@ class TestExchangeStream:
 
 
 # ---------------------------------------------------------------------------
+# Exchange Streams: Cast-Compatible Schemas
+# ---------------------------------------------------------------------------
+
+
+class TestExchangeCastCompatible:
+    """Test that exchange streams cast compatible input schemas (e.g. int32 -> float64)."""
+
+    def test_cast_int32_to_float64(self, conformance_conn: ConnFactory) -> None:
+        """Send int32 values to a float64 exchange, expect float64 output."""
+        with conformance_conn() as proxy, proxy.exchange_cast_compatible() as session:
+            batch = pa.record_batch(
+                [pa.array([1, 2, 3], type=pa.int32())],
+                schema=pa.schema([pa.field("value", pa.int32())]),
+            )
+            out = session.exchange(AnnotatedBatch(batch=batch))
+            assert out.batch.schema.field("value").type == pa.float64()
+            assert out.batch.column("value").to_pylist() == [
+                pytest.approx(1.0),
+                pytest.approx(2.0),
+                pytest.approx(3.0),
+            ]
+
+    def test_cast_int64_to_float64(self, conformance_conn: ConnFactory) -> None:
+        """Send int64 values to a float64 exchange, expect float64 output."""
+        with conformance_conn() as proxy, proxy.exchange_cast_compatible() as session:
+            batch = pa.record_batch(
+                [pa.array([10, 20, 30], type=pa.int64())],
+                schema=pa.schema([pa.field("value", pa.int64())]),
+            )
+            out = session.exchange(AnnotatedBatch(batch=batch))
+            assert out.batch.schema.field("value").type == pa.float64()
+            assert out.batch.column("value").to_pylist() == [
+                pytest.approx(10.0),
+                pytest.approx(20.0),
+                pytest.approx(30.0),
+            ]
+
+    def test_cast_float32_to_float64(self, conformance_conn: ConnFactory) -> None:
+        """Send float32 values to a float64 exchange, expect float64 output."""
+        with conformance_conn() as proxy, proxy.exchange_cast_compatible() as session:
+            batch = pa.record_batch(
+                [pa.array([1.5, 2.5, 3.5], type=pa.float32())],
+                schema=pa.schema([pa.field("value", pa.float32())]),
+            )
+            out = session.exchange(AnnotatedBatch(batch=batch))
+            assert out.batch.schema.field("value").type == pa.float64()
+            assert out.batch.column("value").to_pylist() == [
+                pytest.approx(1.5),
+                pytest.approx(2.5),
+                pytest.approx(3.5),
+            ]
+
+    def test_cast_exact_schema(self, conformance_conn: ConnFactory) -> None:
+        """Send matching float64 values — no cast needed."""
+        with conformance_conn() as proxy, proxy.exchange_cast_compatible() as session:
+            out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0, 10.0]}))
+            assert out.batch.column("value").to_pylist() == [pytest.approx(5.0), pytest.approx(10.0)]
+
+    def test_cast_incompatible_column_name(self, conformance_conn: ConnFactory) -> None:
+        """Send wrong column name, expect RpcError."""
+        with conformance_conn() as proxy, proxy.exchange_cast_compatible() as session:
+            batch = pa.record_batch(
+                [pa.array([1.0], type=pa.float64())],
+                schema=pa.schema([pa.field("wrong", pa.float64())]),
+            )
+            with pytest.raises(RpcError):
+                session.exchange(AnnotatedBatch(batch=batch))
+
+
+# ---------------------------------------------------------------------------
 # Exchange Streams With Headers
 # ---------------------------------------------------------------------------
 
@@ -933,7 +1003,7 @@ class TestDescribeConformance:
 
     def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
-        assert len(service_description.methods) == 47
+        assert len(service_description.methods) == 48
         assert service_description.protocol_name == "ConformanceService"
         echo_str = service_description.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

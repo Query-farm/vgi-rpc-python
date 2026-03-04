@@ -784,6 +784,79 @@ def _test_exchange_empty_session(proxy: ConformanceService, logs: LogCollector) 
 
 
 # ---------------------------------------------------------------------------
+# Exchange cast-compatible tests
+# ---------------------------------------------------------------------------
+
+
+@_conformance_test(category="exchange_stream", name="cast_int32_to_float64")
+def _test_cast_int32(proxy: ConformanceService, logs: LogCollector) -> None:
+    with proxy.exchange_cast_compatible() as session:
+        batch = pa.record_batch(
+            [pa.array([1, 2, 3], type=pa.int32())],
+            schema=pa.schema([pa.field("value", pa.int32())]),
+        )
+        out = session.exchange(AnnotatedBatch(batch=batch))
+        assert out.batch.schema.field("value").type == pa.float64()
+        values = cast("list[float]", out.batch.column("value").to_pylist())
+        assert abs(values[0] - 1.0) < 1e-6
+        assert abs(values[1] - 2.0) < 1e-6
+        assert abs(values[2] - 3.0) < 1e-6
+
+
+@_conformance_test(category="exchange_stream", name="cast_int64_to_float64")
+def _test_cast_int64(proxy: ConformanceService, logs: LogCollector) -> None:
+    with proxy.exchange_cast_compatible() as session:
+        batch = pa.record_batch(
+            [pa.array([10, 20, 30], type=pa.int64())],
+            schema=pa.schema([pa.field("value", pa.int64())]),
+        )
+        out = session.exchange(AnnotatedBatch(batch=batch))
+        assert out.batch.schema.field("value").type == pa.float64()
+        values = cast("list[float]", out.batch.column("value").to_pylist())
+        assert abs(values[0] - 10.0) < 1e-6
+        assert abs(values[1] - 20.0) < 1e-6
+        assert abs(values[2] - 30.0) < 1e-6
+
+
+@_conformance_test(category="exchange_stream", name="cast_float32_to_float64")
+def _test_cast_float32(proxy: ConformanceService, logs: LogCollector) -> None:
+    with proxy.exchange_cast_compatible() as session:
+        batch = pa.record_batch(
+            [pa.array([1.5, 2.5, 3.5], type=pa.float32())],
+            schema=pa.schema([pa.field("value", pa.float32())]),
+        )
+        out = session.exchange(AnnotatedBatch(batch=batch))
+        assert out.batch.schema.field("value").type == pa.float64()
+        values = cast("list[float]", out.batch.column("value").to_pylist())
+        assert abs(values[0] - 1.5) < 1e-6
+        assert abs(values[1] - 2.5) < 1e-6
+        assert abs(values[2] - 3.5) < 1e-6
+
+
+@_conformance_test(category="exchange_stream", name="cast_exact_schema")
+def _test_cast_exact(proxy: ConformanceService, logs: LogCollector) -> None:
+    with proxy.exchange_cast_compatible() as session:
+        out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0, 10.0]}))
+        values = cast("list[float]", out.batch.column("value").to_pylist())
+        assert abs(values[0] - 5.0) < 1e-6
+        assert abs(values[1] - 10.0) < 1e-6
+
+
+@_conformance_test(category="exchange_stream", name="cast_incompatible_column_name")
+def _test_cast_incompatible(proxy: ConformanceService, logs: LogCollector) -> None:
+    with proxy.exchange_cast_compatible() as session:
+        batch = pa.record_batch(
+            [pa.array([1.0], type=pa.float64())],
+            schema=pa.schema([pa.field("wrong", pa.float64())]),
+        )
+        try:
+            session.exchange(AnnotatedBatch(batch=batch))
+            raise AssertionError("Expected RpcError")
+        except RpcError as e:
+            assert "TypeError" in str(e) or "type" in str(e).lower()
+
+
+# ---------------------------------------------------------------------------
 # Exchange header tests
 # ---------------------------------------------------------------------------
 
@@ -1074,6 +1147,7 @@ _EXPECTED_METHODS = frozenset(
         "echo_with_log_extras",
         "echo_with_multi_logs",
         "exchange_accumulate",
+        "exchange_cast_compatible",
         "exchange_error_on_init",
         "exchange_error_on_nth",
         "exchange_scale",
@@ -1138,6 +1212,7 @@ _UNARY_METHODS = frozenset(
 _STREAM_METHODS = frozenset(
     {
         "exchange_accumulate",
+        "exchange_cast_compatible",
         "exchange_error_on_init",
         "exchange_error_on_nth",
         "exchange_scale",
@@ -1203,7 +1278,7 @@ def _test_desc_describe_version(desc: ServiceDescription) -> None:
 
 @_describe_test(category="describe_service", name="method_count")
 def _test_desc_method_count(desc: ServiceDescription) -> None:
-    assert len(desc.methods) == 47
+    assert len(desc.methods) == 48
 
 
 # ---------------------------------------------------------------------------

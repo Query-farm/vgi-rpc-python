@@ -3,7 +3,7 @@
 
 """ConformanceService Protocol definition.
 
-Defines ~44 RPC methods covering every framework capability:
+Defines ~45 RPC methods covering every framework capability:
 scalar echo, void, complex types, optionals, dataclass round-trip,
 annotated types, multi-param, errors, logging, producer streams,
 exchange streams, headers, and introspection.
@@ -294,6 +294,10 @@ class ConformanceService(Protocol):
             include_floats: Whether to include a ``score: float64`` column.
 
         """
+        ...
+
+    def exchange_cast_compatible(self) -> Stream[StreamState]:
+        """Exchange expecting float64 input — tests server-side cast for compatible schemas."""
         ...
 
     def exchange_with_rich_header(self, seed: int, factor: float) -> Stream[StreamState, RichHeader]:

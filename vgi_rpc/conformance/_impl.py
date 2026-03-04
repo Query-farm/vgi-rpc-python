@@ -307,6 +307,14 @@ class ConformanceServiceImpl:
             input_schema=_SCALE_INPUT_SCHEMA,
         )
 
+    def exchange_cast_compatible(self) -> Stream[ScaleExchangeState]:
+        """Exchange expecting float64 input — echoes values via factor=1.0."""
+        return Stream(
+            output_schema=_SCALE_OUTPUT_SCHEMA,
+            state=ScaleExchangeState(factor=1.0),
+            input_schema=_SCALE_INPUT_SCHEMA,
+        )
+
     def exchange_error_on_init(self) -> Stream[ScaleExchangeState]:
         """Raise during exchange init."""
         raise RuntimeError("intentional exchange init error")
