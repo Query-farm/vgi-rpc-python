@@ -284,6 +284,7 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
       ``vgi-rpc[http]``).
     - ``--host HOST`` — HTTP bind address (default ``127.0.0.1``).
     - ``--port PORT`` — HTTP port (default ``0``, auto-select).
+    - ``--describe`` — Enable the ``__describe__`` introspection method.
 
     Without ``--http`` the server runs over stdin/stdout pipes (the
     default, suitable for ``SubprocessTransport``).
@@ -299,6 +300,15 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         TypeError: On invalid argument combinations.
 
     """
+    parser = argparse.ArgumentParser(description="vgi-rpc server")
+    parser.add_argument("--http", action="store_true", default=False, help="Serve over HTTP instead of stdin/stdout")
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=0, help="HTTP port (default: auto-select)")
+    parser.add_argument(
+        "--describe", action="store_true", default=False, help="Enable __describe__ introspection method"
+    )
+    args = parser.parse_args()
+
     if isinstance(protocol_or_server, RpcServer):
         if implementation is not None:
             raise TypeError("implementation must be None when passing an RpcServer")
@@ -306,15 +316,9 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     elif isinstance(protocol_or_server, type):
         if implementation is None:
             raise TypeError("implementation is required when passing a Protocol class")
-        server = RpcServer(protocol_or_server, implementation)
+        server = RpcServer(protocol_or_server, implementation, enable_describe=args.describe)
     else:
         raise TypeError(f"Expected a Protocol class or RpcServer, got {type(protocol_or_server).__name__}")
-
-    parser = argparse.ArgumentParser(description="vgi-rpc server")
-    parser.add_argument("--http", action="store_true", default=False, help="Serve over HTTP instead of stdin/stdout")
-    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=0, help="HTTP port (default: auto-select)")
-    args = parser.parse_args()
 
     if args.http:
         try:
