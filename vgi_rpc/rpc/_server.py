@@ -580,7 +580,12 @@ class RpcServer:
                         input_batch, resolved_cm, release_fn = resolve_shm_batch(input_batch, resolved_cm, shm)
 
                         if input_batch.schema != input_schema:
-                            raise TypeError(f"Input schema mismatch: expected {input_schema}, got {input_batch.schema}")
+                            # Cast compatible types (e.g., decimal→double, int32→int64)
+                            try:
+                                input_batch = input_batch.cast(input_schema)
+                            except (pa.ArrowInvalid, pa.ArrowNotImplementedError, ValueError):
+                                msg = f"Input schema mismatch: expected {input_schema}, got {input_batch.schema}"
+                                raise TypeError(msg) from None
 
                         ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm, _release_fn=release_fn)
                         if prev_input is not None:
