@@ -222,18 +222,6 @@ class EmptyStreamState(StreamState):
         out.finish()
 
 
-@dataclass
-class ZeroColumnExchangeState(ExchangeState):
-    """State for an exchange stream with zero-column batches."""
-
-    call_count: int = 0
-
-    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
-        """Accept a zero-column batch and emit a zero-column batch."""
-        self.call_count += 1
-        out.emit(pa.record_batch([], schema=pa.schema([])))
-
-
 # ---------------------------------------------------------------------------
 # Test fixtures: Protocol + Implementation
 # ---------------------------------------------------------------------------
@@ -349,10 +337,6 @@ class RpcFixtureService(Protocol):
         """Exchange stream with a stream header."""
         ...
 
-    def zero_column_exchange(self) -> Stream[ExchangeState]:
-        """Exchange stream with zero-column input and output."""
-        ...
-
     def fail_stream_init_with_header(self) -> Stream[ProducerState, StreamHeader]:
         """Stream that raises during init (with header declared)."""
         ...
@@ -465,11 +449,6 @@ class RpcFixtureServiceImpl:
         return Stream(
             output_schema=schema, state=TransformWithHeaderState(factor=factor), input_schema=schema, header=header
         )
-
-    def zero_column_exchange(self) -> Stream[ZeroColumnExchangeState]:
-        """Exchange stream with zero-column input and output."""
-        empty = pa.schema([])
-        return Stream(output_schema=empty, state=ZeroColumnExchangeState(), input_schema=empty)
 
     def fail_stream_init_with_header(self) -> Stream[GenerateWithHeaderState, StreamHeader]:
         """Stream that raises during init (with header declared)."""
@@ -741,17 +720,6 @@ class TestBidiStream:
         with make_conn() as proxy, proxy.transform(factor=2.0) as session:
             output = session.exchange(AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"value": [5.0]})))
             assert output.batch.column("value").to_pylist() == [10.0]
-
-    def test_zero_column_exchange_100_batches(self, make_conn: ConnFactory) -> None:
-        """Exchange stream with zero-column batches works over 100 iterations."""
-        empty_schema = pa.schema([])
-        empty_input = AnnotatedBatch(batch=pa.record_batch([], schema=empty_schema))
-        with make_conn() as proxy, proxy.zero_column_exchange() as session:
-            for _ in range(100):
-                output = session.exchange(empty_input)
-                assert output.batch.schema == empty_schema
-                assert output.batch.num_rows == 0
-                assert output.batch.num_columns == 0
 
 
 # ---------------------------------------------------------------------------

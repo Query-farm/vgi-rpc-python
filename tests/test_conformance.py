@@ -811,6 +811,17 @@ class TestExchangeStream:
             # Verify transport is still usable
             assert proxy.echo_int(value=42) == 42
 
+    def test_zero_column_exchange(self, conformance_conn: ConnFactory) -> None:
+        """Exchange stream with zero-column batches works over 100 iterations."""
+        empty_schema = pa.schema([])
+        empty_input = AnnotatedBatch(batch=pa.record_batch([], schema=empty_schema))
+        with conformance_conn() as proxy, proxy.exchange_zero_columns() as session:
+            for _ in range(100):
+                output = session.exchange(empty_input)
+                assert output.batch.schema == empty_schema
+                assert output.batch.num_rows == 0
+                assert output.batch.num_columns == 0
+
     def test_zero_row_input(self, conformance_conn: ConnFactory) -> None:
         """Send zero-row batch to exchange."""
         with conformance_conn() as proxy, proxy.exchange_scale(factor=2.0) as session:
@@ -919,7 +930,7 @@ class TestDescribeConformance:
 
     def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
-        assert len(service_description.methods) == 46
+        assert len(service_description.methods) == 47
         assert service_description.protocol_name == "ConformanceService"
         echo_str = service_description.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

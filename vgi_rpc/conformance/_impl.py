@@ -39,6 +39,7 @@ from ._types import (
     ScaleExchangeState,
     SingleProducerState,
     Status,
+    ZeroColumnExchangeState,
     build_dynamic_schema,
     build_rich_header,
 )
@@ -292,6 +293,11 @@ class ConformanceServiceImpl:
             state=LoggingExchangeState(),
             input_schema=_LOGGING_EXCHANGE_INPUT,
         )
+
+    def exchange_zero_columns(self) -> Stream[ZeroColumnExchangeState]:
+        """Exchange stream with zero-column input and output."""
+        empty = pa.schema([])
+        return Stream(output_schema=empty, state=ZeroColumnExchangeState(), input_schema=empty)
 
     def exchange_error_on_nth(self, fail_on: int) -> Stream[FailOnExchangeNState]:
         """Raise on Nth exchange."""

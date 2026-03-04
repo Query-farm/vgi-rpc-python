@@ -1080,6 +1080,7 @@ _EXPECTED_METHODS = frozenset(
         "exchange_with_header",
         "exchange_with_logs",
         "exchange_with_rich_header",
+        "exchange_zero_columns",
         "inspect_point",
         "produce_dynamic_schema",
         "produce_empty",
@@ -1143,6 +1144,7 @@ _STREAM_METHODS = frozenset(
         "exchange_with_header",
         "exchange_with_logs",
         "exchange_with_rich_header",
+        "exchange_zero_columns",
         "produce_dynamic_schema",
         "produce_empty",
         "produce_error_mid_stream",
@@ -1201,7 +1203,7 @@ def _test_desc_describe_version(desc: ServiceDescription) -> None:
 
 @_describe_test(category="describe_service", name="method_count")
 def _test_desc_method_count(desc: ServiceDescription) -> None:
-    assert len(desc.methods) == 46
+    assert len(desc.methods) == 47
 
 
 # ---------------------------------------------------------------------------

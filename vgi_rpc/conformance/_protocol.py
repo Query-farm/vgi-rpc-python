@@ -3,7 +3,7 @@
 
 """ConformanceService Protocol definition.
 
-Defines ~43 RPC methods covering every framework capability:
+Defines ~44 RPC methods covering every framework capability:
 scalar echo, void, complex types, optionals, dataclass round-trip,
 annotated types, multi-param, errors, logging, producer streams,
 exchange streams, headers, and introspection.
@@ -247,6 +247,10 @@ class ConformanceService(Protocol):
 
     def exchange_error_on_nth(self, fail_on: int) -> Stream[StreamState]:
         """Raise on the Nth exchange (1-indexed)."""
+        ...
+
+    def exchange_zero_columns(self) -> Stream[StreamState]:
+        """Exchange stream with zero-column input and output."""
         ...
 
     def exchange_error_on_init(self) -> Stream[StreamState]:

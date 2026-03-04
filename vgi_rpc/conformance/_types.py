@@ -265,6 +265,18 @@ class LoggingExchangeState(ExchangeState):
 
 
 @dataclass
+class ZeroColumnExchangeState(ExchangeState):
+    """Accept and emit zero-column batches."""
+
+    call_count: int = 0
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Accept a zero-column batch and emit a zero-column batch."""
+        self.call_count += 1
+        out.emit(pa.record_batch([], schema=pa.schema([])))
+
+
+@dataclass
 class FailOnExchangeNState(ExchangeState):
     """Raise on the Nth exchange (1-indexed)."""
 
