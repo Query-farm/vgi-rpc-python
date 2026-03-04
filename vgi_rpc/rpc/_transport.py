@@ -24,6 +24,14 @@ if TYPE_CHECKING:
     from vgi_rpc.rpc._server import RpcServer
 
 
+def _stderr_open() -> bool:
+    """Return True if stderr is still writable (guards against Windows shutdown)."""
+    try:
+        return sys.stderr is not None and not sys.stderr.closed
+    except ValueError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # RpcTransport protocol
 # ---------------------------------------------------------------------------
@@ -265,11 +273,8 @@ class SubprocessTransport:
         """Close stdin (sends EOF), wait for exit, close stdout."""
         if self._closed:
             return
-        try:
-            if wire_transport_logger.isEnabledFor(logging.DEBUG):
-                wire_transport_logger.debug("SubprocessTransport closing: pid=%d", self._proc.pid)
-        except ValueError:
-            pass  # stderr closed during interpreter shutdown (Windows)
+        if _stderr_open() and wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug("SubprocessTransport closing: pid=%d", self._proc.pid)
         self._closed = True
         if self._proc.stdin:
             self._proc.stdin.close()
@@ -281,15 +286,12 @@ class SubprocessTransport:
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
         self._reader.close()
-        try:
-            if wire_transport_logger.isEnabledFor(logging.DEBUG):
-                wire_transport_logger.debug(
-                    "SubprocessTransport closed: pid=%d, exit_code=%s",
-                    self._proc.pid,
-                    self._proc.returncode,
-                )
-        except ValueError:
-            pass  # stderr closed during interpreter shutdown (Windows)
+        if _stderr_open() and wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug(
+                "SubprocessTransport closed: pid=%d, exit_code=%s",
+                self._proc.pid,
+                self._proc.returncode,
+            )
 
 
 def serve_stdio(server: RpcServer) -> None:

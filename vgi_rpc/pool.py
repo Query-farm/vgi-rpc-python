@@ -27,7 +27,7 @@ from io import IOBase
 from vgi_rpc.external import ExternalLocationConfig
 from vgi_rpc.log import Message
 from vgi_rpc.rpc._client import RpcConnection, StreamSession
-from vgi_rpc.rpc._transport import StderrMode, SubprocessTransport
+from vgi_rpc.rpc._transport import StderrMode, SubprocessTransport, _stderr_open
 from vgi_rpc.shm import ShmSegment
 from vgi_rpc.utils import IpcValidation
 
@@ -325,9 +325,10 @@ class WorkerPool:
                 dq.clear()
             self._idle.clear()
 
-        if active > 0:
+        if active > 0 and _stderr_open():
             _logger.warning("WorkerPool closing with %d active connections", active)
-        _logger.info("WorkerPool closed: terminated %d idle workers", len(all_idle))
+        if _stderr_open():
+            _logger.info("WorkerPool closed: terminated %d idle workers", len(all_idle))
 
         for transport in all_idle:
             self._discards += 1
