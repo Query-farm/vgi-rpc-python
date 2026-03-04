@@ -7,4 +7,4 @@ The canonical test classes live in the package so other language implementations
 can import and run them without cloning the repository.
 """
 
-from vgi_rpc.conformance._pytest_suite import *  # noqa: F401,F403
+from vgi_rpc.conformance._pytest_suite import *  # noqa: F403

@@ -296,7 +296,7 @@ def _conformance_pipe_cmd() -> list[str]:
 
 def _conformance_http_cmd() -> list[str]:
     """Return the command to launch the conformance HTTP worker."""
-    return [sys.executable, _CONFORMANCE_HTTP]
+    return [sys.executable, _CONFORMANCE_HTTP, "--http"]
 
 
 @pytest.fixture(scope="session")
