@@ -25,6 +25,7 @@ Optional dependencies: ``pip install vgi-rpc[http]``
 
 import contextlib
 
+from vgi_rpc.http._bearer import bearer_authenticate, bearer_authenticate_static, chain_authenticate
 from vgi_rpc.http._client import (
     HttpServerCapabilities,
     HttpStreamSession,
@@ -45,21 +46,24 @@ from vgi_rpc.http._common import (
     UPLOAD_URL_HEADER,
     _RpcHttpError,
 )
-from vgi_rpc.http._bearer import bearer_authenticate, bearer_authenticate_static, chain_authenticate
+from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc
 from vgi_rpc.http._oauth import OAuthResourceMetadata
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
-
-with contextlib.suppress(ImportError):
-    from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401
-with contextlib.suppress(ImportError):
-    from vgi_rpc.http._mtls import mtls_authenticate, mtls_authenticate_fingerprint, mtls_authenticate_subject  # noqa: F401
-from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc  # noqa: F401
 from vgi_rpc.http._server import make_wsgi_app, serve_http
 from vgi_rpc.http._testing import (
     _SyncTestClient,
     _SyncTestResponse,
     make_sync_client,
 )
+
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http._mtls import (  # noqa: F401
+        mtls_authenticate,
+        mtls_authenticate_fingerprint,
+        mtls_authenticate_subject,
+    )
 
 __all__ = [
     "bearer_authenticate",
