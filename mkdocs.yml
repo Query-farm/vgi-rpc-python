@@ -119,6 +119,7 @@ nav:
     - Streaming: api/streaming.md
     - Auth & Context: api/auth.md
     - OAuth Discovery: api/oauth.md
+    - Mutual TLS: api/mtls.md
     - Transports: api/transports.md
     - HTTP: api/http.md
     - Serialization: api/serialization.md

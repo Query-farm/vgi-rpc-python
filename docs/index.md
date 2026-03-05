@@ -15,7 +15,7 @@ hide:
 
 Transport-agnostic RPC framework built on [Apache Arrow](https://arrow.apache.org/) IPC serialization.
 
-<p class="built-by"><a href="https://vgi-rpc.query.farm">Website</a> · Built by <a href="https://query.farm">🚜 Query.Farm</a></p>
+<p class="built-by">Built by <a href="https://query.farm">🚜 Query.Farm</a></p>
 
 </div>
 
@@ -28,7 +28,8 @@ Define RPC interfaces as Python [`Protocol`](https://docs.python.org/3/library/t
 - **Two method types** — unary and [streaming](api/streaming.md) (producer and exchange patterns)
 - **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or [HTTP](api/http.md) — see [Transports](api/transports.md)
 - **Automatic schema inference** — Python type annotations map to [Arrow types](api/serialization.md#type-mappings)
-- **Pluggable authentication** — [`AuthContext`](api/auth.md) + middleware for HTTP auth (JWT, API key, etc.)
+- **Pluggable authentication** — [`AuthContext`](api/auth.md) + middleware for HTTP auth (JWT, API key, [mTLS](api/mtls.md), etc.)
+- **Mutual TLS** — [client certificate authentication](api/mtls.md) via proxy headers (PEM-in-header, Envoy XFCC) with fingerprint, subject, and custom validation
 - **OAuth discovery** — [RFC 9728](api/oauth.md) protected resource metadata + JWT authentication via Authlib
 - **Runtime introspection** — opt-in [`__describe__`](api/introspection.md) RPC method for dynamic service discovery
 - **CLI tool** — [`vgi-rpc describe` and `vgi-rpc call`](api/cli.md) for ad-hoc service interaction
@@ -102,6 +103,7 @@ pip install vgi-rpc[cli]        # CLI tool (typer + httpx)
 pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
 pip install vgi-rpc[oauth]      # JWT authentication (Authlib)
+pip install vgi-rpc[mtls]       # mTLS client certificate auth (cryptography)
 ```
 
 Requires Python 3.13+.

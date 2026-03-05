@@ -51,6 +51,9 @@ from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
 
 with contextlib.suppress(ImportError):
     from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http._mtls import mtls_authenticate, mtls_authenticate_fingerprint, mtls_authenticate_subject  # noqa: F401
+from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc  # noqa: F401
 from vgi_rpc.http._server import make_wsgi_app, serve_http
 from vgi_rpc.http._testing import (
     _SyncTestClient,
@@ -86,7 +89,11 @@ __all__ = [
     "make_wsgi_app",
     "serve_http",
     "request_upload_urls",
+    "XfccElement",
+    "mtls_authenticate_xfcc",
 ]
 
 if "jwt_authenticate" in dir():
     __all__.append("jwt_authenticate")
+if "mtls_authenticate" in dir():
+    __all__.extend(["mtls_authenticate", "mtls_authenticate_fingerprint", "mtls_authenticate_subject"])

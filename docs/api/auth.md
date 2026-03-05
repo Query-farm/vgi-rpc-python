@@ -51,9 +51,13 @@ write the callback yourself:
 | [`bearer_authenticate`](oauth.md#bearer_authenticate) | Opaque tokens / API keys with custom validation | None |
 | [`bearer_authenticate_static`](oauth.md#bearer_authenticate_static) | Fixed set of pre-shared tokens | None |
 | [`jwt_authenticate`](oauth.md#jwt_authenticate) | JWT validation against a JWKS endpoint | `vgi-rpc[oauth]` |
-| [`chain_authenticate`](oauth.md#chain_authenticate) | Compose multiple authenticators (e.g. JWT + API key) | None |
+| [`mtls_authenticate`](mtls.md#mtls_authenticate) | Client certificate with custom validation | `vgi-rpc[mtls]` |
+| [`mtls_authenticate_fingerprint`](mtls.md#mtls_authenticate_fingerprint) | Certificate fingerprint lookup | `vgi-rpc[mtls]` |
+| [`mtls_authenticate_subject`](mtls.md#mtls_authenticate_subject) | Certificate Subject CN extraction | `vgi-rpc[mtls]` |
+| [`mtls_authenticate_xfcc`](mtls.md#mtls_authenticate_xfcc) | Envoy XFCC header parsing | None |
+| [`chain_authenticate`](oauth.md#chain_authenticate) | Compose multiple authenticators (e.g. JWT + mTLS + API key) | None |
 
-See [OAuth Discovery](oauth.md) for details and examples.
+See [OAuth Discovery](oauth.md) for bearer/JWT details and [Mutual TLS](mtls.md) for mTLS details.
 
 Over pipe/subprocess transport, `ctx.auth` is always `AuthContext.anonymous()`.
 
