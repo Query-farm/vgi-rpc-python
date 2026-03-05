@@ -1,6 +1,6 @@
 [project]
 name = "vgi-rpc"
-version = "0.1.16"
+version = "0.1.17"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
 requires-python = ">=3.13"

@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  attestations: write
 
 jobs:
   publish:
@@ -24,5 +25,12 @@ jobs:
       - name: Build package
         run: uv build
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
