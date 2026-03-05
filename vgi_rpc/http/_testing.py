@@ -10,6 +10,7 @@ Provides ``_SyncTestClient`` and ``make_sync_client`` which use
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import falcon
@@ -19,6 +20,9 @@ from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, RpcServer
 
 from ._server import make_wsgi_app
+
+if TYPE_CHECKING:
+    from vgi_rpc.http._oauth import OAuthResourceMetadata
 
 
 class _SyncTestResponse:
@@ -63,6 +67,13 @@ class _SyncTestClient:
         result = self._client.simulate_post(path, body=content, headers=merged)
         return _SyncTestResponse(result.status_code, result.content, headers=dict(result.headers))
 
+    def get(self, url: str, *, headers: dict[str, str] | None = None) -> _SyncTestResponse:
+        """Send a synchronous GET using the Falcon test client."""
+        merged = {**self._default_headers, **(headers or {})}
+        path = urlparse(url).path
+        result = self._client.simulate_get(path, headers=merged)
+        return _SyncTestResponse(result.status_code, result.content, headers=dict(result.headers))
+
     def options(self, url: str, *, headers: dict[str, str] | None = None) -> _SyncTestResponse:
         """Send a synchronous OPTIONS using the Falcon test client."""
         merged = {**self._default_headers, **(headers or {})}
@@ -93,6 +104,7 @@ def make_sync_client(
     enable_landing_page: bool = True,
     enable_describe_page: bool = True,
     repo_url: str | None = None,
+    oauth_resource_metadata: OAuthResourceMetadata | None = None,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -117,6 +129,7 @@ def make_sync_client(
         enable_landing_page: See ``make_wsgi_app``.
         enable_describe_page: See ``make_wsgi_app``.
         repo_url: See ``make_wsgi_app``.
+        oauth_resource_metadata: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -139,5 +152,6 @@ def make_sync_client(
         enable_landing_page=enable_landing_page,
         enable_describe_page=enable_describe_page,
         repo_url=repo_url,
+        oauth_resource_metadata=oauth_resource_metadata,
     )
     return _SyncTestClient(app, default_headers=default_headers)

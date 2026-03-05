@@ -21,6 +21,7 @@ Everything else is optional and can be added incrementally.
 | [Core RPC](core.md) | `RpcServer`, `RpcConnection`, errors, `serve_pipe`, `connect` | Yes |
 | [Streaming](streaming.md) | `Stream`, `StreamState`, `ProducerState`, `ExchangeState` | If using streams |
 | [Auth & Context](auth.md) | `AuthContext`, `CallContext`, `ClientLog` | If using auth or logging |
+| [OAuth Discovery](oauth.md) | `OAuthResourceMetadata`, `jwt_authenticate`, `http_oauth_metadata` | `pip install vgi-rpc[http,oauth]` |
 | [Transports](transports.md) | `PipeTransport`, `SubprocessTransport`, `ShmPipeTransport` | Built-in |
 | [Serialization](serialization.md) | `ArrowSerializableDataclass`, `ArrowType`, `IpcValidation` | If using custom dataclasses |
 | [HTTP](http.md) | `make_wsgi_app`, `http_connect`, `make_sync_client` | `pip install vgi-rpc[http]` |

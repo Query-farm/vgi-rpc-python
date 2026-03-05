@@ -23,13 +23,19 @@ split across multiple exchanges; the client transparently resumes via
 Optional dependencies: ``pip install vgi-rpc[http]``
 """
 
+import contextlib
+
 from vgi_rpc.http._client import (
     HttpServerCapabilities,
     HttpStreamSession,
+    OAuthResourceMetadataResponse,
     _init_http_stream_session,
+    fetch_oauth_metadata,
     http_capabilities,
     http_connect,
     http_introspect,
+    http_oauth_metadata,
+    parse_resource_metadata_url,
     request_upload_urls,
 )
 from vgi_rpc.http._common import (
@@ -39,7 +45,11 @@ from vgi_rpc.http._common import (
     UPLOAD_URL_HEADER,
     _RpcHttpError,
 )
+from vgi_rpc.http._oauth import OAuthResourceMetadata
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
+
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401
 from vgi_rpc.http._server import make_wsgi_app, serve_http
 from vgi_rpc.http._testing import (
     _SyncTestClient,
@@ -54,17 +64,25 @@ __all__ = [
     "HttpTransientError",
     "MAX_REQUEST_BYTES_HEADER",
     "MAX_UPLOAD_BYTES_HEADER",
+    "OAuthResourceMetadata",
+    "OAuthResourceMetadataResponse",
     "UPLOAD_URL_HEADER",
     "_ARROW_CONTENT_TYPE",
     "_RpcHttpError",
     "_SyncTestClient",
     "_init_http_stream_session",
     "_SyncTestResponse",
+    "fetch_oauth_metadata",
     "http_capabilities",
     "http_connect",
     "http_introspect",
+    "http_oauth_metadata",
     "make_sync_client",
+    "parse_resource_metadata_url",
     "make_wsgi_app",
     "serve_http",
     "request_upload_urls",
 ]
+
+if "jwt_authenticate" in dir():
+    __all__.append("jwt_authenticate")

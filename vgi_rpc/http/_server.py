@@ -25,7 +25,10 @@ import warnings
 from collections.abc import Callable, Iterable, Mapping
 from http import HTTPStatus
 from io import BytesIO, IOBase
-from typing import Any, Literal, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin, get_type_hints
+
+if TYPE_CHECKING:
+    from vgi_rpc.http._oauth import OAuthResourceMetadata
 
 import falcon
 import pyarrow as pa
@@ -1700,10 +1703,15 @@ class _AuthMiddleware:
     silently swallowed as 401s.
     """
 
-    __slots__ = ("_authenticate",)
+    __slots__ = ("_authenticate", "_www_authenticate")
 
-    def __init__(self, authenticate: Callable[[falcon.Request], AuthContext]) -> None:
+    def __init__(
+        self,
+        authenticate: Callable[[falcon.Request], AuthContext],
+        www_authenticate: str | None = None,
+    ) -> None:
         self._authenticate = authenticate
+        self._www_authenticate = www_authenticate
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Authenticate the request and populate the transport contextvar.
@@ -1715,7 +1723,12 @@ class _AuthMiddleware:
 
         The 401 response is plain text (not Arrow IPC) because at this
         stage no method has been resolved and the output schema is unknown.
+
+        Well-known paths (``/.well-known/``) are exempt from authentication
+        so that clients can discover OAuth metadata before authenticating.
         """
+        if req.path.startswith("/.well-known/"):
+            return
         try:
             auth = self._authenticate(req)
         except (ValueError, PermissionError) as exc:
@@ -1729,7 +1742,8 @@ class _AuthMiddleware:
                     "auth_error": str(exc),
                 },
             )
-            raise falcon.HTTPUnauthorized(description=str(exc)) from exc
+            challenges = [self._www_authenticate] if self._www_authenticate else None
+            raise falcon.HTTPUnauthorized(description=str(exc), challenges=challenges) from exc
         transport_metadata: dict[str, str] = {}
         if req.remote_addr:
             transport_metadata["remote_addr"] = req.remote_addr
@@ -1877,6 +1891,7 @@ def make_wsgi_app(
     enable_landing_page: bool = True,
     enable_describe_page: bool = True,
     repo_url: str | None = None,
+    oauth_resource_metadata: OAuthResourceMetadata | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -1955,6 +1970,11 @@ def make_wsgi_app(
         repo_url: Optional URL to the service's source repository (e.g. a
             GitHub URL).  When provided, a "Source repository" link appears
             on the landing page and describe page.
+        oauth_resource_metadata: Optional ``OAuthResourceMetadata`` for
+            RFC 9728 OAuth discovery.  When provided, serves
+            ``/.well-known/oauth-protected-resource`` and adds
+            ``WWW-Authenticate: Bearer resource_metadata="..."`` to 401
+            responses.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -2019,16 +2039,41 @@ def make_wsgi_app(
             capability_headers[MAX_UPLOAD_BYTES_HEADER] = str(max_upload_bytes)
             cors_expose.append(MAX_UPLOAD_BYTES_HEADER)
 
+    # OAuth resource metadata (RFC 9728)
+    from vgi_rpc.http._oauth import OAuthResourceMetadata as _OAuthMeta
+    from vgi_rpc.http._oauth import _build_www_authenticate
+
+    www_authenticate: str | None = None
+    _validated_oauth_metadata: _OAuthMeta | None = None
+    if oauth_resource_metadata is not None:
+        if not isinstance(oauth_resource_metadata, _OAuthMeta):
+            raise TypeError(
+                f"oauth_resource_metadata must be an OAuthResourceMetadata instance, "
+                f"got {type(oauth_resource_metadata).__name__}"
+            )
+        _validated_oauth_metadata = oauth_resource_metadata
+        www_authenticate = _build_www_authenticate(_validated_oauth_metadata, prefix)
+
     if cors_origins is not None:
         cors_kwargs: dict[str, Any] = {"allow_origins": cors_origins}
         if cors_expose:
             cors_kwargs["expose_headers"] = cors_expose
         middleware.append(falcon.CORSMiddleware(**cors_kwargs))
     if authenticate is not None:
-        middleware.append(_AuthMiddleware(authenticate))
+        middleware.append(_AuthMiddleware(authenticate, www_authenticate=www_authenticate))
     if capability_headers:
         middleware.append(_CapabilitiesMiddleware(capability_headers))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)
+
+    # OAuth well-known endpoint (must be before RPC routes)
+    if _validated_oauth_metadata is not None:
+        from vgi_rpc.http._oauth import _OAuthResourceMetadataResource
+
+        well_known = _OAuthResourceMetadataResource(_validated_oauth_metadata)
+        app.add_route("/.well-known/oauth-protected-resource", well_known)
+        if prefix != "/":
+            app.add_route(f"/.well-known/oauth-protected-resource{prefix}", well_known)
+
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/init", _StreamInitResource(app_handler))
     app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))

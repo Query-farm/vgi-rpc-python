@@ -96,6 +96,16 @@ HTTP authentication with Bearer tokens. Shows `authenticate` callback, `AuthCont
 --8<-- "examples/auth.py"
 ```
 
+### OAuth Discovery
+
+OAuth 2.0 Protected Resource Metadata (RFC 9728) with JWT authentication.
+Shows `OAuthResourceMetadata`, `jwt_authenticate()`, and client-side
+discovery via `http_oauth_metadata()`.
+
+```python
+--8<-- "examples/oauth_discovery.py"
+```
+
 ### Introspection
 
 Runtime service discovery with `enable_describe=True`. Shows `introspect()` for pipe transport and `http_introspect()` for HTTP.

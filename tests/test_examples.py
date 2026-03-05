@@ -79,6 +79,16 @@ class TestSelfContainedExamples:
         assert "alice" in out
         assert "secret" in out
 
+    def test_oauth_discovery(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """oauth_discovery.py: OAuth metadata discovery and JWT authentication."""
+        from examples.oauth_discovery import main
+
+        main()
+        out = capsys.readouterr().out
+        assert "authorization_servers" in out
+        assert "You are" in out
+        assert "Claims for" in out
+
     def test_introspection(self, capsys: pytest.CaptureFixture[str]) -> None:
         """introspection.py: runtime service introspection with enable_describe."""
         from examples.introspection import main

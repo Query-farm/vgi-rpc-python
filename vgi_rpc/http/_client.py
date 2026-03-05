@@ -10,7 +10,9 @@ Provides ``http_connect`` context manager, ``HttpStreamSession``,
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -62,7 +64,7 @@ from ._retry import HttpRetryConfig, _options_with_retry, _post_with_retry
 if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
 
-    from ._testing import _SyncTestClient
+    from ._testing import _SyncTestClient, _SyncTestResponse
 
 
 def _open_response_stream(
@@ -917,6 +919,180 @@ def request_upload_urls(
             raise
         _drain_stream(reader)
         return urls
+    finally:
+        if own_client:
+            client.close()
+
+
+# ---------------------------------------------------------------------------
+# OAuth Protected Resource Metadata discovery (RFC 9728)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OAuthResourceMetadataResponse:
+    """Parsed RFC 9728 metadata received from a server (client-side).
+
+    Returned by ``http_oauth_metadata()`` and ``fetch_oauth_metadata()``.
+    For the server-side configuration class, see ``OAuthResourceMetadata``
+    in ``vgi_rpc.http._oauth``.
+
+    Attributes:
+        resource: Canonical URL of the protected resource.
+        authorization_servers: Authorization server issuer URLs.
+        scopes_supported: OAuth scopes the resource understands.
+        bearer_methods_supported: Token delivery methods supported.
+        resource_signing_alg_values_supported: JWS algorithms for
+            resource-signed responses.
+        resource_name: Human-readable name of the resource.
+        resource_documentation: URL to developer documentation.
+        resource_policy_uri: URL to the resource's privacy policy.
+        resource_tos_uri: URL to the resource's terms of service.
+
+    """
+
+    resource: str
+    authorization_servers: tuple[str, ...]
+    scopes_supported: tuple[str, ...] = ()
+    bearer_methods_supported: tuple[str, ...] = ("header",)
+    resource_signing_alg_values_supported: tuple[str, ...] = ()
+    resource_name: str | None = None
+    resource_documentation: str | None = None
+    resource_policy_uri: str | None = None
+    resource_tos_uri: str | None = None
+
+
+def http_oauth_metadata(
+    base_url: str | None = None,
+    *,
+    prefix: str = "/vgi",
+    client: httpx.Client | _SyncTestClient | None = None,
+) -> OAuthResourceMetadataResponse | None:
+    """Discover OAuth Protected Resource Metadata (RFC 9728).
+
+    Sends ``GET /.well-known/oauth-protected-resource{prefix}`` and parses
+    the JSON response into an ``OAuthResourceMetadataResponse``.
+
+    Args:
+        base_url: Base URL of the server (e.g. ``http://localhost:8000``).
+            Required when *client* is ``None``.
+        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+            Must match the ``prefix`` passed to ``make_wsgi_app()`` on the
+            server side — a mismatch will result in a 404 (``None`` return).
+        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+
+    Returns:
+        An ``OAuthResourceMetadataResponse`` with discovered metadata, or
+        ``None`` if the server does not advertise metadata (404).
+
+    Raises:
+        ValueError: If *base_url* is ``None`` and *client* is ``None``,
+            or if the server returns an unexpected HTTP error.
+
+    """
+    own_client = client is None
+    if client is None:
+        if base_url is None:
+            raise ValueError("base_url is required when client is not provided")
+        client = httpx.Client(base_url=base_url, follow_redirects=True)
+
+    try:
+        url = f"/.well-known/oauth-protected-resource{prefix}"
+        resp: httpx.Response | _SyncTestResponse = client.get(url)
+        if resp.status_code == HTTPStatus.NOT_FOUND:
+            return None
+        if resp.status_code != HTTPStatus.OK:
+            raise ValueError(f"Failed to fetch OAuth metadata from {url}: HTTP {resp.status_code}")
+        body: dict[str, Any] = json.loads(resp.content)
+        return _parse_metadata_json(body)
+    finally:
+        if own_client:
+            client.close()
+
+
+_RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"')
+
+
+def parse_resource_metadata_url(www_authenticate: str) -> str | None:
+    """Extract the ``resource_metadata`` URL from a ``WWW-Authenticate`` header.
+
+    Parses a ``Bearer`` challenge per RFC 9728 Section 5.1 and returns
+    the ``resource_metadata`` parameter value, or ``None`` if not present.
+
+    Args:
+        www_authenticate: The ``WWW-Authenticate`` header value
+            (e.g. ``'Bearer resource_metadata="https://..."'``).
+
+    Returns:
+        The metadata URL string, or ``None`` if the header does not
+        contain a ``resource_metadata`` parameter.
+
+    """
+    match = _RESOURCE_METADATA_RE.search(www_authenticate)
+    return match.group(1) if match else None
+
+
+def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
+    """Parse a JSON dict into an ``OAuthResourceMetadataResponse``.
+
+    Raises:
+        ValueError: If required fields (``resource``, ``authorization_servers``)
+            are missing from the JSON.
+
+    """
+    try:
+        resource = body["resource"]
+        authorization_servers = body["authorization_servers"]
+    except KeyError as exc:
+        raise ValueError(f"OAuth metadata response missing required field {exc}") from exc
+    return OAuthResourceMetadataResponse(
+        resource=resource,
+        authorization_servers=tuple(authorization_servers),
+        scopes_supported=tuple(body.get("scopes_supported", ())),
+        bearer_methods_supported=tuple(body.get("bearer_methods_supported", ("header",))),
+        resource_signing_alg_values_supported=tuple(body.get("resource_signing_alg_values_supported", ())),
+        resource_name=body.get("resource_name"),
+        resource_documentation=body.get("resource_documentation"),
+        resource_policy_uri=body.get("resource_policy_uri"),
+        resource_tos_uri=body.get("resource_tos_uri"),
+    )
+
+
+def fetch_oauth_metadata(
+    metadata_url: str,
+    *,
+    client: httpx.Client | _SyncTestClient | None = None,
+) -> OAuthResourceMetadataResponse:
+    """Fetch OAuth metadata from a URL extracted from a 401 ``WWW-Authenticate`` header.
+
+    Unlike ``http_oauth_metadata()`` which constructs the well-known URL
+    from a base URL + prefix, this function fetches from an explicit URL
+    — typically parsed from a 401 response via
+    ``parse_resource_metadata_url()``.
+
+    Args:
+        metadata_url: Full URL to the metadata document (e.g.
+            ``https://api.example.com/.well-known/oauth-protected-resource/vgi``).
+        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+
+    Returns:
+        An ``OAuthResourceMetadataResponse`` with the server's OAuth metadata.
+
+    Raises:
+        ValueError: If the server returns a non-200 status code or the
+            response is missing required fields.
+
+    """
+    own_client = client is None
+    if client is None:
+        client = httpx.Client(follow_redirects=True)
+
+    try:
+        resp: httpx.Response | _SyncTestResponse = client.get(metadata_url)
+        if resp.status_code != HTTPStatus.OK:
+            raise ValueError(f"Failed to fetch OAuth metadata from {metadata_url}: HTTP {resp.status_code}")
+        body: dict[str, Any] = json.loads(resp.content)
+        return _parse_metadata_json(body)
     finally:
         if own_client:
             client.close()

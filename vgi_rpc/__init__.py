@@ -75,13 +75,22 @@ with contextlib.suppress(ImportError):
         HttpServerCapabilities,
         HttpStreamSession,
         HttpTransientError,
+        OAuthResourceMetadata,
+        OAuthResourceMetadataResponse,
+        fetch_oauth_metadata,
         http_capabilities,
         http_connect,
         http_introspect,
+        http_oauth_metadata,
         make_sync_client,
         make_wsgi_app,
+        parse_resource_metadata_url,
         request_upload_urls,
     )
+
+# OAuth JWT authentication (optional — requires `pip install vgi-rpc[oauth]`)
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401
 
 # OpenTelemetry instrumentation (optional — requires `pip install vgi-rpc[otel]`)
 with contextlib.suppress(ImportError):
@@ -184,14 +193,21 @@ if "HttpStreamSession" in dir():
         "HttpTransientError",
         "MAX_REQUEST_BYTES_HEADER",
         "MAX_UPLOAD_BYTES_HEADER",
+        "OAuthResourceMetadata",
+        "OAuthResourceMetadataResponse",
         "UPLOAD_URL_HEADER",
+        "fetch_oauth_metadata",
         "http_capabilities",
         "http_connect",
         "http_introspect",
+        "http_oauth_metadata",
         "make_wsgi_app",
         "make_sync_client",
+        "parse_resource_metadata_url",
         "request_upload_urls",
     ]
+if "jwt_authenticate" in dir():
+    __all__.append("jwt_authenticate")
 
 # Attach NullHandler to the root logger so library users don't get
 # "No handler found" warnings.  Must come after all imports so the
