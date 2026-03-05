@@ -91,6 +91,113 @@ Pass to `make_wsgi_app(oauth_resource_metadata=...)` to enable OAuth discovery.
 
 Raises `ValueError` if `resource` is empty or `authorization_servers` is empty.
 
+## Bearer Token Authentication
+
+For API keys, opaque tokens, or any non-JWT bearer token, use `bearer_authenticate`.
+No extra dependencies beyond `vgi-rpc[http]`.
+
+### bearer_authenticate()
+
+Factory that creates a bearer-token `authenticate` callback with a custom `validate` function.
+Supports any validation logic: database lookups, introspection endpoints, expiry checks, etc.
+
+```python
+from vgi_rpc.http import bearer_authenticate, make_wsgi_app
+from vgi_rpc import AuthContext, RpcServer
+
+def validate(token: str) -> AuthContext:
+    # Look up token in database, call an introspection endpoint, etc.
+    user = db.get_user_by_api_key(token)
+    if user is None:
+        raise ValueError("Invalid API key")
+    return AuthContext(
+        domain="apikey",
+        authenticated=True,
+        principal=user.name,
+        claims={"role": user.role},
+    )
+
+auth = bearer_authenticate(validate=validate)
+
+server = RpcServer(MyService, MyServiceImpl())
+app = make_wsgi_app(server, authenticate=auth)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `validate` | `Callable[[str], AuthContext]` | Receives the raw token, returns `AuthContext` on success, raises `ValueError` on failure |
+
+### bearer_authenticate_static()
+
+Convenience wrapper for a fixed set of known tokens. Useful for development,
+testing, or services with a small number of pre-shared API keys.
+
+```python
+from vgi_rpc.http import bearer_authenticate_static, make_wsgi_app
+from vgi_rpc import AuthContext, RpcServer
+
+tokens = {
+    "key-abc123": AuthContext(domain="apikey", authenticated=True, principal="alice"),
+    "key-def456": AuthContext(domain="apikey", authenticated=True, principal="bob",
+                              claims={"role": "admin"}),
+}
+
+auth = bearer_authenticate_static(tokens=tokens)
+
+server = RpcServer(MyService, MyServiceImpl())
+app = make_wsgi_app(server, authenticate=auth)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `tokens` | `Mapping[str, AuthContext]` | Maps bearer token strings to pre-built `AuthContext` values |
+
+## chain_authenticate()
+
+Compose multiple `authenticate` callbacks into a single callback.
+Authenticators are tried in order — `ValueError` (bad credentials) falls through
+to the next; `PermissionError` or other exceptions propagate immediately.
+
+This lets you accept **both** JWT and API key tokens on the same server:
+
+```python
+from vgi_rpc.http import (
+    bearer_authenticate_static,
+    chain_authenticate,
+    jwt_authenticate,
+    make_wsgi_app,
+)
+from vgi_rpc import AuthContext, RpcServer
+
+# Accept JWTs from your identity provider
+jwt_auth = jwt_authenticate(
+    issuer="https://auth.example.com",
+    audience="https://api.example.com/vgi",
+)
+
+# Also accept static API keys
+api_key_auth = bearer_authenticate_static(tokens={
+    "sk-service-account": AuthContext(
+        domain="apikey", authenticated=True, principal="ci-bot",
+    ),
+})
+
+# Try JWT first, fall back to API key lookup
+auth = chain_authenticate(jwt_auth, api_key_auth)
+
+server = RpcServer(MyService, MyServiceImpl())
+app = make_wsgi_app(server, authenticate=auth)
+```
+
+| Behaviour | Exception | Result |
+|---|---|---|
+| Credentials accepted | *(none)* | Returns `AuthContext`, stops chain |
+| Bad / missing credentials | `ValueError` | Tries next authenticator |
+| Authenticated but forbidden | `PermissionError` | Propagates immediately (401) |
+| Bug in authenticator | Any other exception | Propagates immediately (500) |
+
+Raises `ValueError` at construction time if called with no authenticators.
+
 ## jwt_authenticate()
 
 Factory that creates a JWT-validating `authenticate` callback using Authlib.

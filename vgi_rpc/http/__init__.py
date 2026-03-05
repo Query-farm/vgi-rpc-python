@@ -45,6 +45,7 @@ from vgi_rpc.http._common import (
     UPLOAD_URL_HEADER,
     _RpcHttpError,
 )
+from vgi_rpc.http._bearer import bearer_authenticate, bearer_authenticate_static, chain_authenticate
 from vgi_rpc.http._oauth import OAuthResourceMetadata
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
 
@@ -58,6 +59,9 @@ from vgi_rpc.http._testing import (
 )
 
 __all__ = [
+    "bearer_authenticate",
+    "bearer_authenticate_static",
+    "chain_authenticate",
     "HttpRetryConfig",
     "HttpServerCapabilities",
     "HttpStreamSession",

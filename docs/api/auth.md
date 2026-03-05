@@ -43,6 +43,18 @@ server = RpcServer(MyService, MyServiceImpl())
 app = make_wsgi_app(server, authenticate=authenticate)
 ```
 
+vgi-rpc ships several built-in authenticate factories so you don't have to
+write the callback yourself:
+
+| Factory | Use case | Extra deps |
+|---|---|---|
+| [`bearer_authenticate`](oauth.md#bearer_authenticate) | Opaque tokens / API keys with custom validation | None |
+| [`bearer_authenticate_static`](oauth.md#bearer_authenticate_static) | Fixed set of pre-shared tokens | None |
+| [`jwt_authenticate`](oauth.md#jwt_authenticate) | JWT validation against a JWKS endpoint | `vgi-rpc[oauth]` |
+| [`chain_authenticate`](oauth.md#chain_authenticate) | Compose multiple authenticators (e.g. JWT + API key) | None |
+
+See [OAuth Discovery](oauth.md) for details and examples.
+
 Over pipe/subprocess transport, `ctx.auth` is always `AuthContext.anonymous()`.
 
 ### Transport metadata
