@@ -125,6 +125,7 @@ class TestMtlsAuthenticate:
 
         def noop(c: x509.Certificate) -> AuthContext:
             return _noop_ctx
+
         auth_fn = mtls_authenticate(validate=noop)
         req = _make_req(cert_header=quote("not a certificate"))
         with pytest.raises(ValueError, match="not a PEM certificate"):
@@ -136,6 +137,7 @@ class TestMtlsAuthenticate:
 
         def noop(c: x509.Certificate) -> AuthContext:
             return _noop_ctx
+
         auth_fn = mtls_authenticate(validate=noop)
         req = _make_req()
         with pytest.raises(ValueError, match="Missing"):
