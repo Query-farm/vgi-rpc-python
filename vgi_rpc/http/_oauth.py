@@ -13,10 +13,13 @@ No external dependencies beyond Falcon (already required by ``[http]``).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import falcon
+
+_URL_SAFE_RE = re.compile(r"[A-Za-z0-9\-._~]+")
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,9 @@ class OAuthResourceMetadata:
         resource_documentation: URL to developer documentation.
         resource_policy_uri: URL to the resource's privacy policy.
         resource_tos_uri: URL to the resource's terms of service.
+        client_id: OAuth client_id that clients should use when
+            authenticating with the authorization server.  Custom
+            extension (not defined in RFC 9728).
 
     Raises:
         ValueError: If *resource* is empty or *authorization_servers* is empty.
@@ -54,6 +60,7 @@ class OAuthResourceMetadata:
     resource_documentation: str | None = None
     resource_policy_uri: str | None = None
     resource_tos_uri: str | None = None
+    client_id: str | None = None
 
     def __post_init__(self) -> None:
         """Validate required fields."""
@@ -61,6 +68,11 @@ class OAuthResourceMetadata:
             raise ValueError("OAuthResourceMetadata.resource must not be empty")
         if not self.authorization_servers:
             raise ValueError("OAuthResourceMetadata.authorization_servers must contain at least one entry")
+        if self.client_id is not None and not _URL_SAFE_RE.fullmatch(self.client_id):
+            raise ValueError(
+                "OAuthResourceMetadata.client_id must contain only URL-safe characters "
+                "(alphanumeric, hyphen, underscore, period, tilde)"
+            )
 
     def to_json_dict(self) -> dict[str, object]:
         """Serialize to a JSON-compatible dict per RFC 9728.
@@ -89,6 +101,8 @@ class OAuthResourceMetadata:
             d["resource_policy_uri"] = self.resource_policy_uri
         if self.resource_tos_uri is not None:
             d["resource_tos_uri"] = self.resource_tos_uri
+        if self.client_id is not None:
+            d["client_id"] = self.client_id
         return d
 
 
@@ -132,4 +146,7 @@ def _build_www_authenticate(metadata: OAuthResourceMetadata, prefix: str = "/vgi
     parsed = urlparse(metadata.resource)
     path_suffix = prefix if prefix != "/" else ""
     well_known_url = f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-protected-resource{path_suffix}"
-    return f'Bearer resource_metadata="{well_known_url}"'
+    challenge = f'Bearer resource_metadata="{well_known_url}"'
+    if metadata.client_id is not None:
+        challenge += f', client_id="{metadata.client_id}"'
+    return challenge

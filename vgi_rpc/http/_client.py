@@ -948,6 +948,8 @@ class OAuthResourceMetadataResponse:
         resource_documentation: URL to developer documentation.
         resource_policy_uri: URL to the resource's privacy policy.
         resource_tos_uri: URL to the resource's terms of service.
+        client_id: OAuth client_id to use when authenticating with the
+            authorization server.  Custom extension (not in RFC 9728).
 
     """
 
@@ -960,6 +962,7 @@ class OAuthResourceMetadataResponse:
     resource_documentation: str | None = None
     resource_policy_uri: str | None = None
     resource_tos_uri: str | None = None
+    client_id: str | None = None
 
 
 def http_oauth_metadata(
@@ -1011,6 +1014,7 @@ def http_oauth_metadata(
 
 
 _RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"')
+_CLIENT_ID_RE = re.compile(r'client_id="([^"]+)"')
 
 
 def parse_resource_metadata_url(www_authenticate: str) -> str | None:
@@ -1029,6 +1033,24 @@ def parse_resource_metadata_url(www_authenticate: str) -> str | None:
 
     """
     match = _RESOURCE_METADATA_RE.search(www_authenticate)
+    return match.group(1) if match else None
+
+
+def parse_client_id(www_authenticate: str) -> str | None:
+    """Extract the ``client_id`` from a ``WWW-Authenticate`` header.
+
+    Parses a ``Bearer`` challenge and returns the ``client_id`` parameter
+    value, or ``None`` if not present.  This is a custom extension (not
+    defined in RFC 9728).
+
+    Args:
+        www_authenticate: The ``WWW-Authenticate`` header value.
+
+    Returns:
+        The client_id string, or ``None`` if not present.
+
+    """
+    match = _CLIENT_ID_RE.search(www_authenticate)
     return match.group(1) if match else None
 
 
@@ -1055,6 +1077,7 @@ def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
         resource_documentation=body.get("resource_documentation"),
         resource_policy_uri=body.get("resource_policy_uri"),
         resource_tos_uri=body.get("resource_tos_uri"),
+        client_id=body.get("client_id"),
     )
 
 

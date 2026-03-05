@@ -47,7 +47,7 @@ with http_connect(MyService, "https://api.example.com") as svc:
 ## How It Works
 
 1. Server serves `/.well-known/oauth-protected-resource` (RFC 9728)
-2. 401 responses include `WWW-Authenticate: Bearer resource_metadata="..."`
+2. 401 responses include `WWW-Authenticate: Bearer resource_metadata="..."` (and optionally `client_id="..."`)
 3. Client fetches metadata to discover authorization server(s)
 4. Client authenticates with the AS and sends Bearer token
 
@@ -57,19 +57,21 @@ If a client doesn't know the server's auth requirements upfront, it can
 discover them from a 401 response:
 
 ```python
-from vgi_rpc.http import parse_resource_metadata_url, fetch_oauth_metadata
+from vgi_rpc.http import parse_resource_metadata_url, parse_client_id, fetch_oauth_metadata
 
 # 1. Make a request that returns 401
 resp = client.post("/vgi/my_method", ...)
 
-# 2. Parse the metadata URL from WWW-Authenticate header
+# 2. Parse the metadata URL and optional client_id from WWW-Authenticate header
 www_auth = resp.headers["www-authenticate"]
 metadata_url = parse_resource_metadata_url(www_auth)
 # "https://api.example.com/.well-known/oauth-protected-resource/vgi"
+client_id = parse_client_id(www_auth)  # e.g. "my-app" or None
 
 # 3. Fetch the metadata
 meta = fetch_oauth_metadata(metadata_url)
 print(meta.authorization_servers)  # use these to authenticate
+print(meta.client_id)  # also available from the metadata document
 ```
 
 ## OAuthResourceMetadata
@@ -88,6 +90,7 @@ Pass to `make_wsgi_app(oauth_resource_metadata=...)` to enable OAuth discovery.
 | `resource_documentation` | `str \| None` | No | URL to developer docs |
 | `resource_policy_uri` | `str \| None` | No | URL to privacy policy |
 | `resource_tos_uri` | `str \| None` | No | URL to terms of service |
+| `client_id` | `str \| None` | No | OAuth client_id for auth server *(custom extension, not in RFC 9728)* |
 
 Raises `ValueError` if `resource` is empty or `authorization_servers` is empty.
 
@@ -271,10 +274,23 @@ url = parse_resource_metadata_url('Bearer resource_metadata="https://..."')
 
 Returns `None` if the header doesn't contain `resource_metadata`.
 
+## parse_client_id()
+
+Extract the `client_id` from a `WWW-Authenticate` header. Custom extension (not in RFC 9728).
+
+```python
+from vgi_rpc.http import parse_client_id
+
+client_id = parse_client_id('Bearer resource_metadata="https://...", client_id="my-app"')
+# "my-app"
+```
+
+Returns `None` if the header doesn't contain `client_id`.
+
 ## OAuthResourceMetadataResponse
 
 Frozen dataclass returned by `http_oauth_metadata()` and `fetch_oauth_metadata()`.
-Same fields as `OAuthResourceMetadata` (the server-side config class).
+Same fields as `OAuthResourceMetadata` (the server-side config class), including `client_id`.
 
 ## Standards Compliance
 
@@ -282,6 +298,7 @@ Same fields as `OAuthResourceMetadata` (the server-side config class).
 - [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) — OAuth 2.0 Authorization Server Metadata
 - [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750) — Bearer Token Usage
 - Compatible with MCP's OAuth implementation
+- **Custom extension**: `client_id` field on `OAuthResourceMetadata` / `OAuthResourceMetadataResponse` and in `WWW-Authenticate` headers is not defined in RFC 9728
 
 ## Installation
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from collections.abc import Callable
@@ -24,6 +25,7 @@ from vgi_rpc.http import (
     http_oauth_metadata,
     jwt_authenticate,
     make_sync_client,
+    parse_client_id,
     parse_resource_metadata_url,
 )
 
@@ -120,6 +122,8 @@ _METADATA = OAuthResourceMetadata(
     resource_name="Test Service",
 )
 
+_METADATA_WITH_CLIENT_ID = dataclasses.replace(_METADATA, client_id="my-client-id")
+
 
 # ---------------------------------------------------------------------------
 # TestOAuthResourceMetadata
@@ -183,6 +187,7 @@ class TestOAuthResourceMetadata:
         assert "scopes_supported" not in d
         assert "bearer_methods_supported" not in d
         assert "resource_name" not in d
+        assert "client_id" not in d
 
     def test_well_known_exempt_from_auth(self) -> None:
         """Well-known endpoint is accessible even with auth enabled."""
@@ -286,6 +291,91 @@ class TestOAuthResourceMetadata:
         assert parse_resource_metadata_url("Bearer") is None
         assert parse_resource_metadata_url("Basic realm=test") is None
         assert parse_resource_metadata_url("") is None
+
+    def test_client_id_rejects_unsafe_characters(self) -> None:
+        """client_id with non-URL-safe characters raises ValueError."""
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                client_id='bad"id',
+            )
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                client_id="has space",
+            )
+
+    def test_client_id_in_well_known_json(self) -> None:
+        """client_id appears in well-known JSON when set."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_ID)
+        resp = client.get("/.well-known/oauth-protected-resource")
+        body = json.loads(resp.content)
+        assert body["client_id"] == "my-client-id"
+
+    def test_client_id_in_www_authenticate(self) -> None:
+        """client_id appears in WWW-Authenticate header when metadata has client_id."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA_WITH_CLIENT_ID,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert 'client_id="my-client-id"' in www_auth
+
+    def test_client_id_absent_from_www_authenticate(self) -> None:
+        """client_id absent from WWW-Authenticate when metadata has no client_id."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert "client_id" not in www_auth
+
+    def test_parse_client_id_extracts_value(self) -> None:
+        """parse_client_id() extracts value from header."""
+        header = (
+            'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi"'
+            ', client_id="my-app"'
+        )
+        assert parse_client_id(header) == "my-app"
+
+    def test_parse_client_id_returns_none_when_absent(self) -> None:
+        """parse_client_id() returns None when not present."""
+        assert parse_client_id("Bearer") is None
+        assert parse_client_id('Bearer resource_metadata="https://example.com"') is None
+        assert parse_client_id("") is None
+
+    def test_client_discovery_round_trip_with_client_id(self) -> None:
+        """Client discovers client_id set on server."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_ID)
+        meta = http_oauth_metadata(client=client)
+        assert meta is not None
+        assert meta.client_id == "my-client-id"
 
     def test_401_discovery_flow(self) -> None:
         """Full 401-based discovery: get 401, parse header, fetch metadata."""
