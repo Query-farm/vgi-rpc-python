@@ -29,6 +29,7 @@ Define RPC interfaces as Python [`Protocol`](https://docs.python.org/3/library/t
 - **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or [HTTP](api/http.md) — see [Transports](api/transports.md)
 - **Automatic schema inference** — Python type annotations map to [Arrow types](api/serialization.md#type-mappings)
 - **Pluggable authentication** — [`AuthContext`](api/auth.md) + middleware for HTTP auth (JWT, API key, etc.)
+- **OAuth discovery** — [RFC 9728](api/oauth.md) protected resource metadata + JWT authentication via Authlib
 - **Runtime introspection** — opt-in [`__describe__`](api/introspection.md) RPC method for dynamic service discovery
 - **CLI tool** — [`vgi-rpc describe` and `vgi-rpc call`](api/cli.md) for ad-hoc service interaction
 - **Shared memory transport** — zero-copy batch transfer between co-located processes — see [Transports](api/transports.md#shared-memory)
@@ -100,6 +101,7 @@ pip install vgi-rpc[gcs]        # Google Cloud Storage backend
 pip install vgi-rpc[cli]        # CLI tool (typer + httpx)
 pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
+pip install vgi-rpc[oauth]      # JWT authentication (Authlib)
 ```
 
 Requires Python 3.13+.
@@ -134,7 +136,7 @@ with serve_pipe(Calculator, CalculatorImpl()) as proxy:
     print(proxy.add(a=2.0, b=3.0))  # 5.0
 ```
 
-See the [Examples](examples.md) page for streaming, HTTP transport, authentication, and more.
+See the [Examples](examples.md) page for streaming, HTTP transport, authentication, OAuth discovery, and more.
 
 ## Limitations
 

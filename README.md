@@ -27,6 +27,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or HTTP
 - **Automatic schema inference** — Python type annotations map to Arrow types
 - **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
+- **OAuth discovery** — RFC 9728 protected resource metadata + JWT authentication via Authlib
 - **Runtime introspection** — opt-in `__describe__` RPC method for dynamic service discovery
 - **CLI tool** — `vgi-rpc describe` and `vgi-rpc call` for ad-hoc service interaction
 - **Shared memory transport** — zero-copy batch transfer between co-located processes
@@ -50,6 +51,7 @@ pip install vgi-rpc[gcs]        # Google Cloud Storage backend
 pip install vgi-rpc[cli]        # CLI tool (typer + httpx)
 pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
+pip install vgi-rpc[oauth]      # JWT authentication (Authlib)
 ```
 
 Requires Python 3.13+.
@@ -1245,6 +1247,45 @@ class MyServiceImpl:
 
 Over pipe transport, `ctx.auth` is always `AuthContext.anonymous()` (unauthenticated).
 
+### OAuth Discovery (RFC 9728)
+
+vgi-rpc supports [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) OAuth 2.0 Protected Resource Metadata, allowing clients to automatically discover a server's authentication requirements.
+
+**Server setup** — pass `OAuthResourceMetadata` to `make_wsgi_app` to serve `/.well-known/oauth-protected-resource` and include `WWW-Authenticate` headers on 401 responses:
+
+```python
+from vgi_rpc import RpcServer
+from vgi_rpc.http import OAuthResourceMetadata, jwt_authenticate, make_wsgi_app
+
+metadata = OAuthResourceMetadata(
+    resource="https://api.example.com/vgi",
+    authorization_servers=("https://auth.example.com",),
+    scopes_supported=("read", "write"),
+)
+
+auth = jwt_authenticate(
+    issuer="https://auth.example.com",
+    audience="https://api.example.com/vgi",
+)
+
+server = RpcServer(MyService, MyServiceImpl())
+app = make_wsgi_app(server, authenticate=auth, oauth_resource_metadata=metadata)
+```
+
+**Client discovery** — fetch the metadata to learn which authorization server(s) to use:
+
+```python
+from vgi_rpc.http import http_oauth_metadata
+
+meta = http_oauth_metadata("https://api.example.com")
+if meta is not None:
+    print(meta.authorization_servers)  # ("https://auth.example.com",)
+```
+
+Clients can also discover auth requirements from a 401 response's `WWW-Authenticate` header using `parse_resource_metadata_url()` and `fetch_oauth_metadata()`.
+
+**`jwt_authenticate()`** creates a ready-to-use `authenticate` callback that validates Bearer JWTs against a JWKS endpoint (with automatic key refresh on unknown `kid`). If `jwks_uri` is not provided, it is discovered from the issuer's `/.well-known/openid-configuration`. Requires `pip install vgi-rpc[oauth]`.
+
 ### Transport metadata
 
 `ctx.transport_metadata` provides transport-level information (e.g. `remote_addr`, `user_agent` for HTTP). This is a read-only mapping populated by the transport layer.
@@ -1329,6 +1370,7 @@ The [`examples/`](examples/) directory contains runnable scripts demonstrating k
 | [`testing_pipe.py`](examples/testing_pipe.py) | Unit-testing with `serve_pipe()` (no network) |
 | [`testing_http.py`](examples/testing_http.py) | Unit-testing the HTTP transport with `make_sync_client()` |
 | [`auth.py`](examples/auth.py) | HTTP authentication with Bearer tokens and guarded methods |
+| [`oauth_discovery.py`](examples/oauth_discovery.py) | RFC 9728 OAuth discovery with JWT authentication |
 | [`introspection.py`](examples/introspection.py) | Runtime service introspection with `enable_describe` |
 | [`shared_memory.py`](examples/shared_memory.py) | Zero-copy shared memory transport with `ShmPipeTransport` |
 
