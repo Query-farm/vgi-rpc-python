@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,7 @@ def test_readme_syntax(example: CodeExample) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Subprocess transports unreliable on Windows CI")
 def test_readme_runnable(eval_example: EvalExample) -> None:
     """Execute README blocks sequentially with accumulated globals.
 
