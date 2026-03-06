@@ -747,7 +747,7 @@ class TestMetricAuthDomain:
                 for metric in scope_metric.metrics:
                     if metric.name == "rpc.server.requests":
                         for dp in metric.data.data_points:
-                            attrs = dict(dp.attributes or {})  # type: ignore[union-attr]
+                            attrs = dict(dp.attributes or {})
                             if attrs.get("rpc.vgi_rpc.auth.domain") == "jwt":
                                 found_domain = True
         assert found_domain, "rpc.vgi_rpc.auth.domain not found in metrics"
@@ -958,7 +958,7 @@ class TestAuthFailureCounter:
                 for metric in scope_metric.metrics:
                     if metric.name == "rpc.server.auth_failure":
                         for dp in metric.data.data_points:
-                            attrs = dict(dp.attributes or {})  # type: ignore[union-attr]
+                            attrs = dict(dp.attributes or {})
                             et = attrs.get("error.type")
                             if et:
                                 error_types.add(str(et))
@@ -1012,7 +1012,7 @@ class TestAuthFailureCounter:
                 for metric in scope_metric.metrics:
                     if metric.name == "rpc.server.auth_failure":
                         for dp in metric.data.data_points:
-                            attrs = dict(dp.attributes or {})  # type: ignore[union-attr]
+                            attrs = dict(dp.attributes or {})
                             if attrs.get("deployment.environment") == "test":
                                 found_env = True
         assert found_env, "custom_attributes not found on auth failure counter"
