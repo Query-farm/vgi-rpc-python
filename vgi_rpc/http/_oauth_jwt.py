@@ -17,8 +17,6 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 import falcon
 import httpx
 
@@ -29,6 +27,8 @@ except ImportError as _exc:
     raise ImportError("jwt_authenticate requires authlib: pip install vgi-rpc[oauth]") from _exc
 
 from vgi_rpc.rpc import AuthContext
+
+logger = logging.getLogger(__name__)
 
 
 def jwt_authenticate(
