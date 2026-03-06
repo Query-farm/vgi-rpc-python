@@ -48,6 +48,9 @@ class OAuthResourceMetadata:
         client_secret: OAuth client_secret that clients should use when
             authenticating with the authorization server.  Custom
             extension (not defined in RFC 9728).
+        use_id_token_as_bearer: When ``True``, tells clients to use the
+            OIDC ``id_token`` as the Bearer token instead of the
+            ``access_token``.  Custom extension (not defined in RFC 9728).
 
     Raises:
         ValueError: If *resource* is empty or *authorization_servers* is empty.
@@ -65,6 +68,7 @@ class OAuthResourceMetadata:
     resource_tos_uri: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
+    use_id_token_as_bearer: bool = False
 
     def __post_init__(self) -> None:
         """Validate required fields."""
@@ -114,6 +118,8 @@ class OAuthResourceMetadata:
             d["client_id"] = self.client_id
         if self.client_secret is not None:
             d["client_secret"] = self.client_secret
+        if self.use_id_token_as_bearer:
+            d["use_id_token_as_bearer"] = True
         return d
 
 
@@ -164,4 +170,6 @@ def _build_www_authenticate(metadata: OAuthResourceMetadata, prefix: str = "/vgi
     # as a "public" secret for native/SPA apps, not a truly confidential value.
     if metadata.client_secret is not None:
         challenge += f', client_secret="{metadata.client_secret}"'
+    if metadata.use_id_token_as_bearer:
+        challenge += ', use_id_token_as_bearer="true"'
     return challenge

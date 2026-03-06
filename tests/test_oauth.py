@@ -28,6 +28,7 @@ from vgi_rpc.http import (
     parse_client_id,
     parse_client_secret,
     parse_resource_metadata_url,
+    parse_use_id_token_as_bearer,
 )
 
 # ---------------------------------------------------------------------------
@@ -127,6 +128,7 @@ _METADATA_WITH_CLIENT_ID = dataclasses.replace(_METADATA, client_id="my-client-i
 _METADATA_WITH_CLIENT_SECRET = dataclasses.replace(
     _METADATA, client_id="my-client-id", client_secret="my-client-secret"
 )
+_METADATA_WITH_ID_TOKEN = dataclasses.replace(_METADATA, use_id_token_as_bearer=True)
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +468,81 @@ class TestOAuthResourceMetadata:
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert meta.client_secret == "my-client-secret"
+
+    def test_use_id_token_as_bearer_in_well_known_json_when_true(self) -> None:
+        """use_id_token_as_bearer appears in well-known JSON when True."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_ID_TOKEN)
+        resp = client.get("/.well-known/oauth-protected-resource")
+        body = json.loads(resp.content)
+        assert body["use_id_token_as_bearer"] is True
+
+    def test_use_id_token_as_bearer_absent_from_well_known_json_when_false(self) -> None:
+        """use_id_token_as_bearer absent from well-known JSON when False."""
+        d = _METADATA.to_json_dict()
+        assert "use_id_token_as_bearer" not in d
+
+    def test_use_id_token_as_bearer_in_www_authenticate(self) -> None:
+        """use_id_token_as_bearer appears in WWW-Authenticate header when True."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA_WITH_ID_TOKEN,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert 'use_id_token_as_bearer="true"' in www_auth
+
+    def test_use_id_token_as_bearer_absent_from_www_authenticate(self) -> None:
+        """use_id_token_as_bearer absent from WWW-Authenticate when False."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert "use_id_token_as_bearer" not in www_auth
+
+    def test_parse_use_id_token_as_bearer_extracts_value(self) -> None:
+        """parse_use_id_token_as_bearer() extracts value from header."""
+        header = (
+            'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi"'
+            ', use_id_token_as_bearer="true"'
+        )
+        assert parse_use_id_token_as_bearer(header) is True
+
+    def test_parse_use_id_token_as_bearer_returns_false_when_absent(self) -> None:
+        """parse_use_id_token_as_bearer() returns False when not present."""
+        assert parse_use_id_token_as_bearer("Bearer") is False
+        assert parse_use_id_token_as_bearer('Bearer resource_metadata="https://example.com"') is False
+        assert parse_use_id_token_as_bearer("") is False
+
+    def test_client_discovery_round_trip_with_use_id_token_as_bearer(self) -> None:
+        """Client discovers use_id_token_as_bearer set on server."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_ID_TOKEN)
+        meta = http_oauth_metadata(client=client)
+        assert meta is not None
+        assert meta.use_id_token_as_bearer is True
 
     def test_401_discovery_flow(self) -> None:
         """Full 401-based discovery: get 401, parse header, fetch metadata."""

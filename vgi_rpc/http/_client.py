@@ -952,6 +952,9 @@ class OAuthResourceMetadataResponse:
             authorization server.  Custom extension (not in RFC 9728).
         client_secret: OAuth client_secret to use when authenticating with the
             authorization server.  Custom extension (not in RFC 9728).
+        use_id_token_as_bearer: When ``True``, the client should use the
+            OIDC ``id_token`` as the Bearer token instead of the
+            ``access_token``.  Custom extension (not in RFC 9728).
 
     """
 
@@ -966,6 +969,7 @@ class OAuthResourceMetadataResponse:
     resource_tos_uri: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
+    use_id_token_as_bearer: bool = False
 
 
 def http_oauth_metadata(
@@ -1019,6 +1023,7 @@ def http_oauth_metadata(
 _RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"')
 _CLIENT_ID_RE = re.compile(r'client_id="([^"]+)"')
 _CLIENT_SECRET_RE = re.compile(r'client_secret="([^"]+)"')
+_USE_ID_TOKEN_RE = re.compile(r'use_id_token_as_bearer="([^"]+)"')
 
 
 def parse_resource_metadata_url(www_authenticate: str) -> str | None:
@@ -1076,6 +1081,25 @@ def parse_client_secret(www_authenticate: str) -> str | None:
     return match.group(1) if match else None
 
 
+def parse_use_id_token_as_bearer(www_authenticate: str) -> bool:
+    """Extract the ``use_id_token_as_bearer`` flag from a ``WWW-Authenticate`` header.
+
+    Parses a ``Bearer`` challenge and returns ``True`` if the
+    ``use_id_token_as_bearer`` parameter is present with value ``"true"``.
+    This is a custom extension (not defined in RFC 9728).
+
+    Args:
+        www_authenticate: The ``WWW-Authenticate`` header value.
+
+    Returns:
+        ``True`` if the header contains ``use_id_token_as_bearer="true"``,
+        ``False`` otherwise.
+
+    """
+    match = _USE_ID_TOKEN_RE.search(www_authenticate)
+    return match.group(1) == "true" if match else False
+
+
 def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
     """Parse a JSON dict into an ``OAuthResourceMetadataResponse``.
 
@@ -1101,6 +1125,7 @@ def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
         resource_tos_uri=body.get("resource_tos_uri"),
         client_id=body.get("client_id"),
         client_secret=body.get("client_secret"),
+        use_id_token_as_bearer=body.get("use_id_token_as_bearer", False),
     )
 
 

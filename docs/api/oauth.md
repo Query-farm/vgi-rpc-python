@@ -47,7 +47,7 @@ with http_connect(MyService, "https://api.example.com") as svc:
 ## How It Works
 
 1. Server serves `/.well-known/oauth-protected-resource` (RFC 9728)
-2. 401 responses include `WWW-Authenticate: Bearer resource_metadata="..."` (and optionally `client_id="..."`, `client_secret="..."`)
+2. 401 responses include `WWW-Authenticate: Bearer resource_metadata="..."` (and optionally `client_id="..."`, `client_secret="..."`, `use_id_token_as_bearer="true"`)
 3. Client fetches metadata to discover authorization server(s)
 4. Client authenticates with the AS and sends Bearer token
 
@@ -57,17 +57,18 @@ If a client doesn't know the server's auth requirements upfront, it can
 discover them from a 401 response:
 
 ```python
-from vgi_rpc.http import parse_resource_metadata_url, parse_client_id, parse_client_secret, fetch_oauth_metadata
+from vgi_rpc.http import parse_resource_metadata_url, parse_client_id, parse_client_secret, parse_use_id_token_as_bearer, fetch_oauth_metadata
 
 # 1. Make a request that returns 401
 resp = client.post("/vgi/my_method", ...)
 
-# 2. Parse the metadata URL, optional client_id and client_secret from WWW-Authenticate header
+# 2. Parse the metadata URL, optional client_id, client_secret, and use_id_token_as_bearer from WWW-Authenticate header
 www_auth = resp.headers["www-authenticate"]
 metadata_url = parse_resource_metadata_url(www_auth)
 # "https://api.example.com/.well-known/oauth-protected-resource/vgi"
 client_id = parse_client_id(www_auth)  # e.g. "my-app" or None
 client_secret = parse_client_secret(www_auth)  # e.g. "my-secret" or None
+use_id_token = parse_use_id_token_as_bearer(www_auth)  # True or False
 
 # 3. Fetch the metadata
 meta = fetch_oauth_metadata(metadata_url)
@@ -94,6 +95,7 @@ Pass to `make_wsgi_app(oauth_resource_metadata=...)` to enable OAuth discovery.
 | `resource_tos_uri` | `str \| None` | No | URL to terms of service |
 | `client_id` | `str \| None` | No | OAuth client_id for auth server *(custom extension, not in RFC 9728)* |
 | `client_secret` | `str \| None` | No | OAuth client_secret for auth server *(custom extension, not in RFC 9728)*. Intended for public/PKCE clients (e.g. Google OAuth) where the secret is not truly confidential. |
+| `use_id_token_as_bearer` | `bool` | No | When `True`, clients should use the OIDC `id_token` as the Bearer token instead of `access_token` *(custom extension, not in RFC 9728)* |
 
 Raises `ValueError` if `resource` is empty or `authorization_servers` is empty.
 
@@ -303,10 +305,23 @@ client_secret = parse_client_secret('Bearer resource_metadata="https://...", cli
 
 Returns `None` if the header doesn't contain `client_secret`.
 
+## parse_use_id_token_as_bearer()
+
+Extract the `use_id_token_as_bearer` flag from a `WWW-Authenticate` header. Custom extension (not in RFC 9728).
+
+```python
+from vgi_rpc.http import parse_use_id_token_as_bearer
+
+use_id_token = parse_use_id_token_as_bearer('Bearer resource_metadata="https://...", use_id_token_as_bearer="true"')
+# True
+```
+
+Returns `False` if the header doesn't contain `use_id_token_as_bearer`.
+
 ## OAuthResourceMetadataResponse
 
 Frozen dataclass returned by `http_oauth_metadata()` and `fetch_oauth_metadata()`.
-Same fields as `OAuthResourceMetadata` (the server-side config class), including `client_id` and `client_secret`.
+Same fields as `OAuthResourceMetadata` (the server-side config class), including `client_id`, `client_secret`, and `use_id_token_as_bearer`.
 
 ## Standards Compliance
 
@@ -314,7 +329,7 @@ Same fields as `OAuthResourceMetadata` (the server-side config class), including
 - [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) — OAuth 2.0 Authorization Server Metadata
 - [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750) — Bearer Token Usage
 - Compatible with MCP's OAuth implementation
-- **Custom extensions**: `client_id` and `client_secret` fields on `OAuthResourceMetadata` / `OAuthResourceMetadataResponse` and in `WWW-Authenticate` headers are not defined in RFC 9728
+- **Custom extensions**: `client_id`, `client_secret`, and `use_id_token_as_bearer` fields on `OAuthResourceMetadata` / `OAuthResourceMetadataResponse` and in `WWW-Authenticate` headers are not defined in RFC 9728
 
 ## Installation
 

@@ -39,6 +39,7 @@ from vgi_rpc.http._client import (
     parse_client_id,
     parse_client_secret,
     parse_resource_metadata_url,
+    parse_use_id_token_as_bearer,
     request_upload_urls,
 )
 from vgi_rpc.http._common import (
@@ -94,6 +95,7 @@ __all__ = [
     "parse_client_id",
     "parse_client_secret",
     "parse_resource_metadata_url",
+    "parse_use_id_token_as_bearer",
     "make_wsgi_app",
     "serve_http",
     "request_upload_urls",
