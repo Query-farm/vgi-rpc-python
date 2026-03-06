@@ -86,11 +86,12 @@ def _make_local_auth(
     public_key: dict[str, object],
     *,
     issuer: str = "https://auth.example.com",
-    audience: str = "https://api.example.com/vgi",
+    audience: str | tuple[str, ...] = "https://api.example.com/vgi",
     principal_claim: str = "sub",
     domain: str = "jwt",
 ) -> Callable[[falcon.Request], AuthContext]:
     """Create a local JWT authenticate callback (no JWKS endpoint needed)."""
+    audiences = (audience,) if isinstance(audience, str) else audience
 
     def authenticate(req: falcon.Request) -> AuthContext:
         auth_header = req.get_header("Authorization") or ""
@@ -103,7 +104,7 @@ def _make_local_auth(
                 public_key,
                 claims_options={
                     "iss": {"essential": True, "value": issuer},
-                    "aud": {"essential": True, "value": audience},
+                    "aud": {"essential": True, "values": list(audiences)},
                 },
             )
             claims.validate()
@@ -858,3 +859,53 @@ class TestJwtAuthenticate:
             jwks_uri="https://auth.example.com/.well-known/jwks.json",
         )
         assert callable(auth_fn)
+
+    def test_multiple_audiences_first_matches(self) -> None:
+        """A JWT matching the first of multiple audiences is accepted."""
+        priv, pub = _make_rsa_key()
+        aud1 = "https://api.example.com/vgi"
+        aud2 = "https://api.example.com/other"
+        token = _mint_jwt(priv, aud=aud1)
+        auth_fn = _make_local_auth(pub, audience=(aud1, aud2))
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        auth = auth_fn(req)
+        assert auth.authenticated is True
+        assert auth.principal == "testuser"
+
+    def test_multiple_audiences_second_matches(self) -> None:
+        """A JWT matching the second of multiple audiences is accepted."""
+        priv, pub = _make_rsa_key()
+        aud1 = "https://api.example.com/vgi"
+        aud2 = "https://api.example.com/other"
+        token = _mint_jwt(priv, aud=aud2)
+        auth_fn = _make_local_auth(pub, audience=(aud1, aud2))
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        auth = auth_fn(req)
+        assert auth.authenticated is True
+
+    def test_multiple_audiences_none_match(self) -> None:
+        """A JWT with an unrecognized audience is rejected."""
+        priv, pub = _make_rsa_key()
+        token = _mint_jwt(priv, aud="https://unknown.example.com")
+        auth_fn = _make_local_auth(pub, audience=("https://a.example.com", "https://b.example.com"))
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        with pytest.raises(ValueError):
+            auth_fn(req)
+
+    def test_single_audience_string_still_works(self) -> None:
+        """Passing audience as a plain string still works (backwards compat)."""
+        priv, pub = _make_rsa_key()
+        token = _mint_jwt(priv)
+        auth_fn = _make_local_auth(pub, audience="https://api.example.com/vgi")
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        auth = auth_fn(req)
+        assert auth.authenticated is True
+
+    def test_empty_audience_tuple_raises(self) -> None:
+        """Passing an empty audience tuple raises ValueError eagerly."""
+        with pytest.raises(ValueError, match="audience must not be empty"):
+            jwt_authenticate(
+                issuer="https://auth.example.com",
+                audience=(),
+                jwks_uri="https://auth.example.com/.well-known/jwks.json",
+            )

@@ -31,7 +31,7 @@ from vgi_rpc.rpc import AuthContext
 def jwt_authenticate(
     *,
     issuer: str,
-    audience: str,
+    audience: str | tuple[str, ...],
     jwks_uri: str | None = None,
     claims_options: Mapping[str, Any] | None = None,
     principal_claim: str = "sub",
@@ -45,7 +45,9 @@ def jwt_authenticate(
 
     Args:
         issuer: Expected ``iss`` claim in the JWT.
-        audience: Expected ``aud`` claim in the JWT.
+        audience: Expected ``aud`` claim(s) in the JWT.  A single string
+            or a tuple of strings.  When multiple audiences are given, a
+            token matching **any** of them is accepted.
         jwks_uri: URL to fetch the JWKS from.  When ``None``, discovered
             from ``{issuer}/.well-known/openid-configuration``.
         claims_options: Additional Authlib claim validation options.
@@ -92,9 +94,13 @@ def jwt_authenticate(
                     return _fetch_jwks()
         return key_set
 
+    audiences = (audience,) if isinstance(audience, str) else audience
+    if not audiences:
+        raise ValueError("audience must not be empty")
+
     base_claims_options: dict[str, Any] = {
         "iss": {"essential": True, "value": issuer},
-        "aud": {"essential": True, "value": audience},
+        "aud": {"essential": True, "values": list(audiences)},
     }
     if claims_options:
         base_claims_options.update(claims_options)
