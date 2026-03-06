@@ -26,6 +26,7 @@ from vgi_rpc.http import (
     jwt_authenticate,
     make_sync_client,
     parse_client_id,
+    parse_client_secret,
     parse_resource_metadata_url,
 )
 
@@ -123,6 +124,9 @@ _METADATA = OAuthResourceMetadata(
 )
 
 _METADATA_WITH_CLIENT_ID = dataclasses.replace(_METADATA, client_id="my-client-id")
+_METADATA_WITH_CLIENT_SECRET = dataclasses.replace(
+    _METADATA, client_id="my-client-id", client_secret="my-client-secret"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +192,7 @@ class TestOAuthResourceMetadata:
         assert "bearer_methods_supported" not in d
         assert "resource_name" not in d
         assert "client_id" not in d
+        assert "client_secret" not in d
 
     def test_well_known_exempt_from_auth(self) -> None:
         """Well-known endpoint is accessible even with auth enabled."""
@@ -271,7 +276,7 @@ class TestOAuthResourceMetadata:
         resp = client.get("/.well-known/oauth-protected-resource")
         assert resp.status_code == 200
         cache = resp.headers.get("cache-control", "")
-        assert "max-age" in cache
+        assert "max-age=60" in cache
 
     def test_backwards_compatible(self) -> None:
         """Server without oauth_resource_metadata still works normally."""
@@ -376,6 +381,91 @@ class TestOAuthResourceMetadata:
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert meta.client_id == "my-client-id"
+
+    def test_client_secret_rejects_unsafe_characters(self) -> None:
+        """client_secret with non-URL-safe characters raises ValueError."""
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                client_secret='bad"secret',
+            )
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                client_secret="has space",
+            )
+
+    def test_client_secret_in_well_known_json(self) -> None:
+        """client_secret appears in well-known JSON when set."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET)
+        resp = client.get("/.well-known/oauth-protected-resource")
+        body = json.loads(resp.content)
+        assert body["client_secret"] == "my-client-secret"
+
+    def test_client_secret_in_www_authenticate(self) -> None:
+        """client_secret appears in WWW-Authenticate header when metadata has client_secret."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert 'client_secret="my-client-secret"' in www_auth
+
+    def test_client_secret_absent_from_www_authenticate(self) -> None:
+        """client_secret absent from WWW-Authenticate when metadata has no client_secret."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert "client_secret" not in www_auth
+
+    def test_parse_client_secret_extracts_value(self) -> None:
+        """parse_client_secret() extracts value from header."""
+        header = (
+            'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi"'
+            ', client_id="my-app", client_secret="my-secret"'
+        )
+        assert parse_client_secret(header) == "my-secret"
+
+    def test_parse_client_secret_returns_none_when_absent(self) -> None:
+        """parse_client_secret() returns None when not present."""
+        assert parse_client_secret("Bearer") is None
+        assert parse_client_secret('Bearer resource_metadata="https://example.com"') is None
+        assert parse_client_secret("") is None
+
+    def test_client_discovery_round_trip_with_client_secret(self) -> None:
+        """Client discovers client_secret set on server."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET)
+        meta = http_oauth_metadata(client=client)
+        assert meta is not None
+        assert meta.client_secret == "my-client-secret"
 
     def test_401_discovery_flow(self) -> None:
         """Full 401-based discovery: get 401, parse header, fetch metadata."""

@@ -37,6 +37,7 @@ from vgi_rpc.http._client import (
     http_introspect,
     http_oauth_metadata,
     parse_client_id,
+    parse_client_secret,
     parse_resource_metadata_url,
     request_upload_urls,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "http_oauth_metadata",
     "make_sync_client",
     "parse_client_id",
+    "parse_client_secret",
     "parse_resource_metadata_url",
     "make_wsgi_app",
     "serve_http",

@@ -45,6 +45,9 @@ class OAuthResourceMetadata:
         client_id: OAuth client_id that clients should use when
             authenticating with the authorization server.  Custom
             extension (not defined in RFC 9728).
+        client_secret: OAuth client_secret that clients should use when
+            authenticating with the authorization server.  Custom
+            extension (not defined in RFC 9728).
 
     Raises:
         ValueError: If *resource* is empty or *authorization_servers* is empty.
@@ -61,6 +64,7 @@ class OAuthResourceMetadata:
     resource_policy_uri: str | None = None
     resource_tos_uri: str | None = None
     client_id: str | None = None
+    client_secret: str | None = None
 
     def __post_init__(self) -> None:
         """Validate required fields."""
@@ -71,6 +75,11 @@ class OAuthResourceMetadata:
         if self.client_id is not None and not _URL_SAFE_RE.fullmatch(self.client_id):
             raise ValueError(
                 "OAuthResourceMetadata.client_id must contain only URL-safe characters "
+                "(alphanumeric, hyphen, underscore, period, tilde)"
+            )
+        if self.client_secret is not None and not _URL_SAFE_RE.fullmatch(self.client_secret):
+            raise ValueError(
+                "OAuthResourceMetadata.client_secret must contain only URL-safe characters "
                 "(alphanumeric, hyphen, underscore, period, tilde)"
             )
 
@@ -103,6 +112,8 @@ class OAuthResourceMetadata:
             d["resource_tos_uri"] = self.resource_tos_uri
         if self.client_id is not None:
             d["client_id"] = self.client_id
+        if self.client_secret is not None:
+            d["client_secret"] = self.client_secret
         return d
 
 
@@ -124,7 +135,7 @@ class _OAuthResourceMetadataResource:
         """
         resp.content_type = falcon.MEDIA_JSON
         resp.data = self._body
-        resp.set_header("Cache-Control", "public, max-age=3600")
+        resp.set_header("Cache-Control", "public, max-age=60")
 
 
 def _build_www_authenticate(metadata: OAuthResourceMetadata, prefix: str = "/vgi") -> str:
@@ -149,4 +160,8 @@ def _build_www_authenticate(metadata: OAuthResourceMetadata, prefix: str = "/vgi
     challenge = f'Bearer resource_metadata="{well_known_url}"'
     if metadata.client_id is not None:
         challenge += f', client_id="{metadata.client_id}"'
+    # client_secret in the header is intentional: Google's PKCE flow treats it
+    # as a "public" secret for native/SPA apps, not a truly confidential value.
+    if metadata.client_secret is not None:
+        challenge += f', client_secret="{metadata.client_secret}"'
     return challenge
