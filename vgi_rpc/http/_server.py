@@ -1703,15 +1703,17 @@ class _AuthMiddleware:
     silently swallowed as 401s.
     """
 
-    __slots__ = ("_authenticate", "_www_authenticate")
+    __slots__ = ("_authenticate", "_on_auth_failure", "_www_authenticate")
 
     def __init__(
         self,
         authenticate: Callable[[falcon.Request], AuthContext],
         www_authenticate: str | None = None,
+        on_auth_failure: Callable[[str | None, str], None] | None = None,
     ) -> None:
         self._authenticate = authenticate
         self._www_authenticate = www_authenticate
+        self._on_auth_failure = on_auth_failure
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Authenticate the request and populate the transport contextvar.
@@ -1742,6 +1744,8 @@ class _AuthMiddleware:
                     "auth_error": str(exc),
                 },
             )
+            if self._on_auth_failure is not None:
+                self._on_auth_failure(req.remote_addr, type(exc).__name__)
             challenges = [self._www_authenticate] if self._www_authenticate else None
             raise falcon.HTTPUnauthorized(description=str(exc), challenges=challenges) from exc
         transport_metadata: dict[str, str] = {}
@@ -2060,7 +2064,16 @@ def make_wsgi_app(
             cors_kwargs["expose_headers"] = cors_expose
         middleware.append(falcon.CORSMiddleware(**cors_kwargs))
     if authenticate is not None:
-        middleware.append(_AuthMiddleware(authenticate, www_authenticate=www_authenticate))
+        on_auth_failure: Callable[[str | None, str], None] | None = None
+        if otel_config is not None:
+            from vgi_rpc.otel import OtelConfig as _OtelCfg
+            from vgi_rpc.otel import make_auth_failure_counter
+
+            assert isinstance(otel_config, _OtelCfg)  # validated above
+            on_auth_failure = make_auth_failure_counter(otel_config, server.protocol_name)
+        middleware.append(
+            _AuthMiddleware(authenticate, www_authenticate=www_authenticate, on_auth_failure=on_auth_failure)
+        )
     if capability_headers:
         middleware.append(_CapabilitiesMiddleware(capability_headers))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)

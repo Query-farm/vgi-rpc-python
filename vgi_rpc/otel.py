@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -36,6 +36,7 @@ from vgi_rpc.rpc._common import (
     CallStatistics,
     HookToken,
     _current_trace_headers,
+    _format_claim_value,
     _register_dispatch_hook,
 )
 
@@ -64,6 +65,9 @@ class OtelConfig:
         enable_metrics: Enable counter/histogram recording (default ``True``).
         record_exceptions: Record exceptions on error spans (default ``True``).
         custom_attributes: Extra span/metric attributes merged into every dispatch.
+        claim_attributes: Maps claim keys to span attribute names, e.g.
+            ``{"tenant_id": "rpc.vgi_rpc.auth.claim.tenant_id"}``.  Claims go
+            on spans only (never metrics) to avoid arbitrary cardinality.
 
     """
 
@@ -73,6 +77,7 @@ class OtelConfig:
     enable_metrics: bool = True
     record_exceptions: bool = True
     custom_attributes: Mapping[str, str] = field(default_factory=dict)
+    claim_attributes: Mapping[str, str] = field(default_factory=dict)
 
 
 def instrument_server(server: RpcServer, config: OtelConfig | None = None) -> RpcServer:
@@ -184,12 +189,14 @@ class _OtelHookToken:
     method_name: str
     method_type: str
     service: str
+    auth_domain: str | None
 
 
 class _OtelDispatchHook:
     """Implements ``_DispatchHook`` with OpenTelemetry spans and metrics."""
 
     __slots__ = (
+        "_claim_attributes",
         "_config",
         "_counter",
         "_histogram",
@@ -203,6 +210,7 @@ class _OtelDispatchHook:
         self._config = config
         self._protocol_name = protocol_name
         self._server_id = server_id
+        self._claim_attributes = config.claim_attributes
 
         # Tracer
         tp = config.tracer_provider or get_tracer_provider()
@@ -249,14 +257,19 @@ class _OtelDispatchHook:
             }
             # Auth attributes
             if auth.principal:
-                attrs["enduser.id"] = auth.principal
+                attrs["rpc.vgi_rpc.auth.principal"] = auth.principal
             if auth.domain:
                 attrs["rpc.vgi_rpc.auth.domain"] = auth.domain
             attrs["rpc.vgi_rpc.auth.authenticated"] = str(auth.authenticated).lower()
+            # Claim attributes
+            for claim_key, attr_name in self._claim_attributes.items():
+                formatted = _format_claim_value(auth.claims.get(claim_key))
+                if formatted is not None:
+                    attrs[attr_name] = str(formatted) if not isinstance(formatted, str) else formatted
             # Transport attributes (HTTP)
             remote_addr = transport_metadata.get("remote_addr")
             if remote_addr:
-                attrs["net.peer.ip"] = str(remote_addr)
+                attrs["client.address"] = str(remote_addr)
             user_agent = transport_metadata.get("user_agent")
             if user_agent:
                 attrs["user_agent.original"] = str(user_agent)
@@ -285,6 +298,7 @@ class _OtelDispatchHook:
             method_name=info.name,
             method_type=info.method_type.value,
             service=self._protocol_name,
+            auth_domain=auth.domain,
         )
 
     def on_dispatch_end(
@@ -332,5 +346,46 @@ class _OtelDispatchHook:
                 "rpc.vgi_rpc.method_type": token.method_type,
                 "status": status,
             }
+            if token.auth_domain:
+                metric_attrs["rpc.vgi_rpc.auth.domain"] = token.auth_domain
             self._counter.add(1, metric_attrs)
             self._histogram.record(duration, metric_attrs)
+
+
+# ---------------------------------------------------------------------------
+# Auth failure counter factory (wired into _AuthMiddleware by make_wsgi_app)
+# ---------------------------------------------------------------------------
+
+
+def make_auth_failure_counter(config: OtelConfig, protocol_name: str) -> Callable[[str | None, str], None]:
+    """Create a callback that increments an ``rpc.server.auth_failure`` counter.
+
+    Intended to be wired into ``_AuthMiddleware`` so that HTTP 401 rejections
+    that happen *before* RPC dispatch are visible to OTel metrics.
+
+    Args:
+        config: OTel config (provides ``meter_provider`` and ``custom_attributes``).
+        protocol_name: Protocol name used as ``rpc.service`` label.
+
+    Returns:
+        A ``(remote_addr, error_type) -> None`` callback.
+
+    """
+    mp: MeterProvider = config.meter_provider or get_meter_provider()
+    meter: Meter = mp.get_meter("vgi_rpc", "0.1.0")
+    counter: Counter = meter.create_counter(
+        "rpc.server.auth_failure",
+        unit="{failure}",
+        description="Number of authentication failures before RPC dispatch",
+    )
+    base_attrs: dict[str, str] = {
+        "rpc.system": "vgi_rpc",
+        "rpc.service": protocol_name,
+    }
+    base_attrs.update(config.custom_attributes)
+
+    def _record(remote_addr: str | None, error_type: str) -> None:
+        attrs = {**base_attrs, "error.type": error_type}
+        counter.add(1, attrs)
+
+    return _record

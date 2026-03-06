@@ -80,6 +80,17 @@ _ANONYMOUS: Final[AuthContext] = AuthContext(domain=None, authenticated=False)
 _EMPTY_TRANSPORT_METADATA: Final[Mapping[str, Any]] = MappingProxyType({})
 
 
+def _format_claim_value(value: object) -> str | int | float | bool | None:
+    """Format a claim value for use as an OTel attribute or Sentry tag.
+
+    Scalars (str, int, float, bool) pass through natively.
+    Returns ``None`` for unsupported types (dict, list, None).
+    """
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return None
+
+
 class _ContextLoggerAdapter(logging.LoggerAdapter[logging.Logger]):
     """LoggerAdapter that preserves framework-bound extra fields.
 

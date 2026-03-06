@@ -518,3 +518,86 @@ class TestHttpSentry:
         ):
             proxy.fail()
         mock_sdk.capture_exception.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Auth authenticated tag and claim tag tests
+# ---------------------------------------------------------------------------
+
+
+class TestSentryAuthTags:
+    """Sentry auth.authenticated tag and claim tags."""
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_auth_authenticated_tag(self, mock_sdk: MagicMock) -> None:
+        """auth.authenticated tag is set to 'true' for authenticated requests."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server)
+        auth = AuthContext(domain="test", authenticated=True, principal="alice")
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["auth.authenticated"] == "true"
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_auth_authenticated_false_tag(self, mock_sdk: MagicMock) -> None:
+        """auth.authenticated tag is set to 'false' for anonymous requests."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server)
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2})
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["auth.authenticated"] == "false"
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_auth_authenticated_respects_context_disabled(self, mock_sdk: MagicMock) -> None:
+        """auth.authenticated tag is not set when record_request_context=False."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        config = SentryConfig(record_request_context=False)
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2})
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert "auth.authenticated" not in tag_calls
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_claim_tags(self, mock_sdk: MagicMock) -> None:
+        """Configured claim tags appear on Sentry scope."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        config = SentryConfig(claim_tags={"tenant_id": "auth.tenant_id"})
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        auth = AuthContext(domain="jwt", authenticated=True, claims={"tenant_id": "acme"})
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["auth.tenant_id"] == "acme"
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_claim_tags_missing_key(self, mock_sdk: MagicMock) -> None:
+        """Missing claim key does not set tag."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        config = SentryConfig(claim_tags={"nonexistent": "auth.nonexistent"})
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        auth = AuthContext(domain="jwt", authenticated=True, claims={})
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert "auth.nonexistent" not in tag_calls
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_claim_tags_complex_type_skipped(self, mock_sdk: MagicMock) -> None:
+        """Dict/list claim values are skipped."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        config = SentryConfig(claim_tags={"roles": "auth.roles"})
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        auth = AuthContext(domain="jwt", authenticated=True, claims={"roles": ["admin", "user"]})
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert "auth.roles" not in tag_calls

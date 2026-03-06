@@ -36,6 +36,7 @@ from vgi_rpc.rpc._common import (
     AuthContext,
     CallStatistics,
     HookToken,
+    _format_claim_value,
     _register_dispatch_hook,
 )
 
@@ -64,6 +65,8 @@ class SentryConfig:
         custom_tags: Extra tags applied to every Sentry event.
         ignored_exceptions: Exception types to skip when reporting (e.g. ``PermissionError``).
         op_name: Sentry transaction operation name (default ``"rpc.server"``).
+        claim_tags: Maps claim keys to Sentry tag names, e.g.
+            ``{"tenant_id": "auth.tenant_id"}``.
 
     """
 
@@ -73,6 +76,7 @@ class SentryConfig:
     custom_tags: Mapping[str, str] = field(default_factory=dict)
     ignored_exceptions: tuple[type[BaseException], ...] = ()
     op_name: str = "rpc.server"
+    claim_tags: Mapping[str, str] = field(default_factory=dict)
 
 
 def instrument_server_sentry(server: RpcServer, config: SentryConfig | None = None) -> RpcServer:
@@ -142,6 +146,11 @@ class _SentryDispatchHook:
                 scope.set_user({"username": auth.principal})
             if auth.domain:
                 scope.set_tag("auth.domain", auth.domain)
+            scope.set_tag("auth.authenticated", str(auth.authenticated).lower())
+            for claim_key, tag_name in self._config.claim_tags.items():
+                formatted = _format_claim_value(auth.claims.get(claim_key))
+                if formatted is not None:
+                    scope.set_tag(tag_name, str(formatted))
 
         for key, value in self._config.custom_tags.items():
             scope.set_tag(key, value)

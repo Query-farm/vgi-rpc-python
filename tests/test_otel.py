@@ -28,6 +28,7 @@ from vgi_rpc.rpc import (
     OutputCollector,
     ProducerState,
     RpcConnection,
+    RpcError,
     RpcServer,
     Stream,
     _current_transport,
@@ -269,9 +270,10 @@ class TestPipeOtel:
         spans = exporter.get_finished_spans()
         assert len(spans) == 1
         attrs = dict(spans[0].attributes or {})
-        assert attrs["enduser.id"] == "alice"
+        assert attrs["rpc.vgi_rpc.auth.principal"] == "alice"
         assert attrs["rpc.vgi_rpc.auth.domain"] == "test"
         assert attrs["rpc.vgi_rpc.auth.authenticated"] == "true"
+        assert "enduser.id" not in attrs  # deprecated semconv removed
 
     def test_custom_attributes(
         self,
@@ -483,6 +485,275 @@ class TestPipeOtel:
 
 
 # ---------------------------------------------------------------------------
+# Claim attribute tests
+# ---------------------------------------------------------------------------
+
+
+class TestClaimAttributes:
+    """Tests for configurable claim extraction in OTel spans."""
+
+    def test_claim_attributes(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Configured claim keys appear in span attributes."""
+        tracer_provider, meter_provider, exporter, _ = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+            claim_attributes={"tenant": "rpc.vgi_rpc.auth.claim.tenant"},
+        )
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        instrument_server(server, config)
+
+        auth = AuthContext(domain="jwt", authenticated=True, principal="alice", claims={"tenant": "acme"})
+        tc = _TransportContext(auth=auth)
+
+        def _serve_with_auth() -> None:
+            token = _current_transport.set(tc)
+            try:
+                server.serve(server_transport)
+            finally:
+                _current_transport.reset(token)
+
+        thread = threading.Thread(target=_serve_with_auth, daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(OtelTestService, client_transport) as proxy:
+                proxy.add(a=1, b=2)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        attrs = dict(spans[0].attributes or {})
+        assert attrs["rpc.vgi_rpc.auth.claim.tenant"] == "acme"
+
+    def test_claim_attributes_non_string_value(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Int and bool claim values pass through correctly."""
+        tracer_provider, meter_provider, exporter, _ = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+            claim_attributes={
+                "level": "rpc.vgi_rpc.auth.claim.level",
+                "admin": "rpc.vgi_rpc.auth.claim.admin",
+            },
+        )
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        instrument_server(server, config)
+
+        auth = AuthContext(domain="jwt", authenticated=True, claims={"level": 42, "admin": True})
+        tc = _TransportContext(auth=auth)
+
+        def _serve_with_auth() -> None:
+            token = _current_transport.set(tc)
+            try:
+                server.serve(server_transport)
+            finally:
+                _current_transport.reset(token)
+
+        thread = threading.Thread(target=_serve_with_auth, daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(OtelTestService, client_transport) as proxy:
+                proxy.add(a=1, b=2)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        attrs = dict(spans[0].attributes or {})
+        assert attrs["rpc.vgi_rpc.auth.claim.level"] == "42"
+        assert attrs["rpc.vgi_rpc.auth.claim.admin"] == "True"
+
+    def test_claim_attributes_complex_type_skipped(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Dict/list claim values are silently skipped."""
+        tracer_provider, meter_provider, exporter, _ = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+            claim_attributes={"roles": "rpc.vgi_rpc.auth.claim.roles"},
+        )
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        instrument_server(server, config)
+
+        auth = AuthContext(domain="jwt", authenticated=True, claims={"roles": ["admin", "user"]})
+        tc = _TransportContext(auth=auth)
+
+        def _serve_with_auth() -> None:
+            token = _current_transport.set(tc)
+            try:
+                server.serve(server_transport)
+            finally:
+                _current_transport.reset(token)
+
+        thread = threading.Thread(target=_serve_with_auth, daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(OtelTestService, client_transport) as proxy:
+                proxy.add(a=1, b=2)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        attrs = dict(spans[0].attributes or {})
+        assert "rpc.vgi_rpc.auth.claim.roles" not in attrs
+
+    def test_claim_attributes_none_value_skipped(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """None claim value does not set attribute."""
+        tracer_provider, meter_provider, exporter, _ = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+            claim_attributes={"missing": "rpc.vgi_rpc.auth.claim.missing"},
+        )
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        instrument_server(server, config)
+
+        auth = AuthContext(domain="jwt", authenticated=True, claims={"missing": None})
+        tc = _TransportContext(auth=auth)
+
+        def _serve_with_auth() -> None:
+            token = _current_transport.set(tc)
+            try:
+                server.serve(server_transport)
+            finally:
+                _current_transport.reset(token)
+
+        thread = threading.Thread(target=_serve_with_auth, daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(OtelTestService, client_transport) as proxy:
+                proxy.add(a=1, b=2)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        attrs = dict(spans[0].attributes or {})
+        assert "rpc.vgi_rpc.auth.claim.missing" not in attrs
+
+    def test_claim_attributes_missing_key(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Absent claim key does not cause KeyError."""
+        tracer_provider, meter_provider, exporter, _ = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+            claim_attributes={"nonexistent": "rpc.vgi_rpc.auth.claim.nonexistent"},
+        )
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        instrument_server(server, config)
+
+        auth = AuthContext(domain="jwt", authenticated=True, claims={})
+        tc = _TransportContext(auth=auth)
+
+        def _serve_with_auth() -> None:
+            token = _current_transport.set(tc)
+            try:
+                server.serve(server_transport)
+            finally:
+                _current_transport.reset(token)
+
+        thread = threading.Thread(target=_serve_with_auth, daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(OtelTestService, client_transport) as proxy:
+                proxy.add(a=1, b=2)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        attrs = dict(spans[0].attributes or {})
+        assert "rpc.vgi_rpc.auth.claim.nonexistent" not in attrs
+
+
+# ---------------------------------------------------------------------------
+# Metric auth domain tests
+# ---------------------------------------------------------------------------
+
+
+class TestMetricAuthDomain:
+    """Tests for auth domain in metrics."""
+
+    def test_metric_auth_domain(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Metrics include rpc.vgi_rpc.auth.domain when auth has a domain."""
+        tracer_provider, meter_provider, _exporter, metric_reader = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+        )
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        instrument_server(server, config)
+
+        auth = AuthContext(domain="jwt", authenticated=True, principal="alice")
+        tc = _TransportContext(auth=auth)
+
+        def _serve_with_auth() -> None:
+            token = _current_transport.set(tc)
+            try:
+                server.serve(server_transport)
+            finally:
+                _current_transport.reset(token)
+
+        thread = threading.Thread(target=_serve_with_auth, daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(OtelTestService, client_transport) as proxy:
+                proxy.add(a=1, b=2)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        metrics_data = metric_reader.get_metrics_data()
+        assert metrics_data is not None
+        found_domain = False
+        for resource_metric in metrics_data.resource_metrics:
+            for scope_metric in resource_metric.scope_metrics:
+                for metric in scope_metric.metrics:
+                    if metric.name == "rpc.server.requests":
+                        for dp in metric.data.data_points:
+                            attrs = dict(dp.attributes or {})  # type: ignore[union-attr]
+                            if attrs.get("rpc.vgi_rpc.auth.domain") == "jwt":
+                                found_domain = True
+        assert found_domain, "rpc.vgi_rpc.auth.domain not found in metrics"
+
+
+# ---------------------------------------------------------------------------
 # HTTP transport tests
 # ---------------------------------------------------------------------------
 
@@ -599,3 +870,149 @@ class TestHttpOtel:
         assert span.status.status_code == StatusCode.ERROR
         attrs = dict(span.attributes or {})
         assert attrs["rpc.vgi_rpc.error_type"] == "ValueError"
+
+
+# ---------------------------------------------------------------------------
+# Auth failure counter tests
+# ---------------------------------------------------------------------------
+
+
+class TestAuthFailureCounter:
+    """Tests for auth failure OTel counter on HTTP transport."""
+
+    def test_auth_failure_counter(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """HTTP auth failure increments counter and produces no dispatch span."""
+        tracer_provider, meter_provider, exporter, metric_reader = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+        )
+
+        def _bad_auth(req: object) -> AuthContext:
+            raise ValueError("bad token")
+
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        client = make_sync_client(server, signing_key=b"test-key", otel_config=config, authenticate=_bad_auth)
+        with (
+            pytest.raises(RpcError, match="bad token"),
+            http_connect(OtelTestService, "http://test", client=client) as proxy,
+        ):
+            proxy.add(a=1, b=2)
+
+        # No dispatch span (auth failed before dispatch)
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 0
+
+        # Auth failure counter should have incremented
+        metrics_data = metric_reader.get_metrics_data()
+        assert metrics_data is not None
+        found_counter = False
+        for resource_metric in metrics_data.resource_metrics:
+            for scope_metric in resource_metric.scope_metrics:
+                for metric in scope_metric.metrics:
+                    if metric.name == "rpc.server.auth_failure":
+                        total = sum(dp.value for dp in metric.data.data_points)  # type: ignore[union-attr, misc]
+                        assert total >= 1
+                        found_counter = True
+        assert found_counter, "rpc.server.auth_failure counter not found"
+
+    def test_auth_failure_counter_distinguishes_error_types(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """ValueError and PermissionError appear with different error.type labels."""
+        tracer_provider, meter_provider, _exporter, metric_reader = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+        )
+
+        call_count = 0
+
+        def _alternating_auth(req: object) -> AuthContext:
+            nonlocal call_count
+            call_count += 1
+            if call_count % 2 == 1:
+                raise ValueError("bad token")
+            raise PermissionError("forbidden")
+
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        client = make_sync_client(server, signing_key=b"test-key", otel_config=config, authenticate=_alternating_auth)
+
+        # Make two failing calls
+        for _ in range(2):
+            with (
+                pytest.raises(RpcError),
+                http_connect(OtelTestService, "http://test", client=client) as proxy,
+            ):
+                proxy.add(a=1, b=2)
+
+        metrics_data = metric_reader.get_metrics_data()
+        assert metrics_data is not None
+        error_types: set[str] = set()
+        for resource_metric in metrics_data.resource_metrics:
+            for scope_metric in resource_metric.scope_metrics:
+                for metric in scope_metric.metrics:
+                    if metric.name == "rpc.server.auth_failure":
+                        for dp in metric.data.data_points:
+                            attrs = dict(dp.attributes or {})  # type: ignore[union-attr]
+                            et = attrs.get("error.type")
+                            if et:
+                                error_types.add(str(et))
+        assert "ValueError" in error_types
+        assert "PermissionError" in error_types
+
+    def test_auth_failure_counter_not_wired_without_otel(self) -> None:
+        """make_wsgi_app without otel_config does not create counter."""
+        import falcon
+
+        def _bad_auth(req: falcon.Request) -> AuthContext:
+            raise ValueError("bad token")
+
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        client = make_sync_client(server, signing_key=b"test-key", authenticate=_bad_auth)
+        with (
+            pytest.raises(RpcError, match="bad token"),
+            http_connect(OtelTestService, "http://test", client=client) as proxy,
+        ):
+            proxy.add(a=1, b=2)
+        # No crash — counter callback was None
+
+    def test_auth_failure_counter_includes_custom_attributes(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """custom_attributes from config appear on auth failure counter metrics."""
+        tracer_provider, meter_provider, _exporter, metric_reader = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=cast("MeterProvider", meter_provider),
+            custom_attributes={"deployment.environment": "test"},
+        )
+
+        def _bad_auth(req: object) -> AuthContext:
+            raise ValueError("bad token")
+
+        server = RpcServer(OtelTestService, OtelTestServiceImpl())
+        client = make_sync_client(server, signing_key=b"test-key", otel_config=config, authenticate=_bad_auth)
+        with (
+            pytest.raises(RpcError, match="bad token"),
+            http_connect(OtelTestService, "http://test", client=client) as proxy,
+        ):
+            proxy.add(a=1, b=2)
+
+        metrics_data = metric_reader.get_metrics_data()
+        assert metrics_data is not None
+        found_env = False
+        for resource_metric in metrics_data.resource_metrics:
+            for scope_metric in resource_metric.scope_metrics:
+                for metric in scope_metric.metrics:
+                    if metric.name == "rpc.server.auth_failure":
+                        for dp in metric.data.data_points:
+                            attrs = dict(dp.attributes or {})  # type: ignore[union-attr]
+                            if attrs.get("deployment.environment") == "test":
+                                found_env = True
+        assert found_env, "custom_attributes not found on auth failure counter"
