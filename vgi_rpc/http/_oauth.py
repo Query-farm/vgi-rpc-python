@@ -86,23 +86,23 @@ class OAuthResourceMetadata:
             raise ValueError("OAuthResourceMetadata.authorization_servers must contain at least one entry")
         if self.client_id is not None and not _URL_SAFE_RE.fullmatch(self.client_id):
             raise ValueError(
-                "OAuthResourceMetadata.client_id must contain only URL-safe characters "
-                "(alphanumeric, hyphen, underscore, period, tilde)"
+                f"OAuthResourceMetadata.client_id must contain only URL-safe characters "
+                f"(alphanumeric, hyphen, underscore, period, tilde), got: {self.client_id!r}"
             )
         if self.client_secret is not None and not _URL_SAFE_RE.fullmatch(self.client_secret):
             raise ValueError(
-                "OAuthResourceMetadata.client_secret must contain only URL-safe characters "
-                "(alphanumeric, hyphen, underscore, period, tilde)"
+                f"OAuthResourceMetadata.client_secret must contain only URL-safe characters "
+                f"(alphanumeric, hyphen, underscore, period, tilde), got: {self.client_secret!r}"
             )
         if self.device_code_client_id is not None and not _URL_SAFE_RE.fullmatch(self.device_code_client_id):
             raise ValueError(
-                "OAuthResourceMetadata.device_code_client_id must contain only URL-safe characters "
-                "(alphanumeric, hyphen, underscore, period, tilde)"
+                f"OAuthResourceMetadata.device_code_client_id must contain only URL-safe characters "
+                f"(alphanumeric, hyphen, underscore, period, tilde), got: {self.device_code_client_id!r}"
             )
         if self.device_code_client_secret is not None and not _URL_SAFE_RE.fullmatch(self.device_code_client_secret):
             raise ValueError(
-                "OAuthResourceMetadata.device_code_client_secret must contain only URL-safe characters "
-                "(alphanumeric, hyphen, underscore, period, tilde)"
+                f"OAuthResourceMetadata.device_code_client_secret must contain only URL-safe characters "
+                f"(alphanumeric, hyphen, underscore, period, tilde), got: {self.device_code_client_secret!r}"
             )
 
     def to_json_dict(self) -> dict[str, object]:

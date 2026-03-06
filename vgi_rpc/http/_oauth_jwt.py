@@ -12,9 +12,12 @@ Requires ``pip install vgi-rpc[oauth]`` (Authlib).
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import falcon
 import httpx
@@ -105,6 +108,28 @@ def jwt_authenticate(
     if claims_options:
         base_claims_options.update(claims_options)
 
+    def _log_claim_mismatch(token: str, keys: _KeySet, exc: JoseError) -> None:
+        """Log expected vs actual claims on JWT validation failure."""
+        try:
+            # Decode without validation to inspect the payload
+            raw_claims = jwt.decode(token, keys)
+            token_aud = raw_claims.get("aud")
+            token_iss = raw_claims.get("iss")
+            logger.warning(
+                "JWT validation failed: %s\n"
+                "  expected iss: %s\n"
+                "  token   iss: %s\n"
+                "  expected aud (any of): %s\n"
+                "  token   aud: %s",
+                exc,
+                issuer,
+                token_iss,
+                list(audiences),
+                token_aud,
+            )
+        except Exception:
+            logger.warning("JWT validation failed: %s (could not decode token for diagnostics)", exc)
+
     def authenticate(req: falcon.Request) -> AuthContext:
         auth_header = req.get_header("Authorization") or ""
         if not auth_header.startswith("Bearer "):
@@ -123,9 +148,11 @@ def jwt_authenticate(
                 claims = jwt.decode(token, keys, claims_options=base_claims_options)
                 claims.validate()
             except JoseError as exc:
+                _log_claim_mismatch(token, keys, exc)
                 raise ValueError(f"Invalid JWT: {exc}") from exc
         except JoseError as exc:
             # Expired tokens, bad claims, etc. — no point refreshing keys
+            _log_claim_mismatch(token, keys, exc)
             raise ValueError(f"Invalid JWT: {exc}") from exc
 
         principal = str(claims.get(principal_claim, ""))

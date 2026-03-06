@@ -2256,7 +2256,7 @@ wheels = [
 
 [[package]]
 name = "vgi-rpc"
-version = "0.1.22"
+version = "0.1.24"
 source = { editable = "." }
 dependencies = [
     { name = "docstring-parser" },
