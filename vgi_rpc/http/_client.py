@@ -955,6 +955,11 @@ class OAuthResourceMetadataResponse:
         use_id_token_as_bearer: When ``True``, the client should use the
             OIDC ``id_token`` as the Bearer token instead of the
             ``access_token``.  Custom extension (not in RFC 9728).
+        device_code_client_id: OAuth client_id to use specifically for the
+            device code grant flow.  Custom extension (not in RFC 9728).
+        device_code_client_secret: OAuth client_secret to use specifically
+            for the device code grant flow.  Custom extension (not in
+            RFC 9728).
 
     """
 
@@ -970,6 +975,8 @@ class OAuthResourceMetadataResponse:
     client_id: str | None = None
     client_secret: str | None = None
     use_id_token_as_bearer: bool = False
+    device_code_client_id: str | None = None
+    device_code_client_secret: str | None = None
 
 
 def http_oauth_metadata(
@@ -1024,6 +1031,8 @@ _RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"')
 _CLIENT_ID_RE = re.compile(r'client_id="([^"]+)"')
 _CLIENT_SECRET_RE = re.compile(r'client_secret="([^"]+)"')
 _USE_ID_TOKEN_RE = re.compile(r'use_id_token_as_bearer="([^"]+)"')
+_DEVICE_CODE_CLIENT_ID_RE = re.compile(r'device_code_client_id="([^"]+)"')
+_DEVICE_CODE_CLIENT_SECRET_RE = re.compile(r'device_code_client_secret="([^"]+)"')
 
 
 def parse_resource_metadata_url(www_authenticate: str) -> str | None:
@@ -1100,6 +1109,42 @@ def parse_use_id_token_as_bearer(www_authenticate: str) -> bool:
     return match.group(1) == "true" if match else False
 
 
+def parse_device_code_client_id(www_authenticate: str) -> str | None:
+    """Extract the ``device_code_client_id`` from a ``WWW-Authenticate`` header.
+
+    Parses a ``Bearer`` challenge and returns the ``device_code_client_id``
+    parameter value, or ``None`` if not present.  This is a custom extension
+    (not defined in RFC 9728).
+
+    Args:
+        www_authenticate: The ``WWW-Authenticate`` header value.
+
+    Returns:
+        The device_code_client_id string, or ``None`` if not present.
+
+    """
+    match = _DEVICE_CODE_CLIENT_ID_RE.search(www_authenticate)
+    return match.group(1) if match else None
+
+
+def parse_device_code_client_secret(www_authenticate: str) -> str | None:
+    """Extract the ``device_code_client_secret`` from a ``WWW-Authenticate`` header.
+
+    Parses a ``Bearer`` challenge and returns the ``device_code_client_secret``
+    parameter value, or ``None`` if not present.  This is a custom extension
+    (not defined in RFC 9728).
+
+    Args:
+        www_authenticate: The ``WWW-Authenticate`` header value.
+
+    Returns:
+        The device_code_client_secret string, or ``None`` if not present.
+
+    """
+    match = _DEVICE_CODE_CLIENT_SECRET_RE.search(www_authenticate)
+    return match.group(1) if match else None
+
+
 def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
     """Parse a JSON dict into an ``OAuthResourceMetadataResponse``.
 
@@ -1126,6 +1171,8 @@ def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
         client_id=body.get("client_id"),
         client_secret=body.get("client_secret"),
         use_id_token_as_bearer=body.get("use_id_token_as_bearer", False),
+        device_code_client_id=body.get("device_code_client_id"),
+        device_code_client_secret=body.get("device_code_client_secret"),
     )
 
 

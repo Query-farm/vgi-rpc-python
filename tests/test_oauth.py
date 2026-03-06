@@ -27,6 +27,8 @@ from vgi_rpc.http import (
     make_sync_client,
     parse_client_id,
     parse_client_secret,
+    parse_device_code_client_id,
+    parse_device_code_client_secret,
     parse_resource_metadata_url,
     parse_use_id_token_as_bearer,
 )
@@ -129,6 +131,10 @@ _METADATA_WITH_CLIENT_SECRET = dataclasses.replace(
     _METADATA, client_id="my-client-id", client_secret="my-client-secret"
 )
 _METADATA_WITH_ID_TOKEN = dataclasses.replace(_METADATA, use_id_token_as_bearer=True)
+_METADATA_WITH_DEVICE_CODE_CLIENT_ID = dataclasses.replace(_METADATA, device_code_client_id="device-client-id")
+_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET = dataclasses.replace(
+    _METADATA, device_code_client_id="device-client-id", device_code_client_secret="device-client-secret"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +201,8 @@ class TestOAuthResourceMetadata:
         assert "resource_name" not in d
         assert "client_id" not in d
         assert "client_secret" not in d
+        assert "device_code_client_id" not in d
+        assert "device_code_client_secret" not in d
 
     def test_well_known_exempt_from_auth(self) -> None:
         """Well-known endpoint is accessible even with auth enabled."""
@@ -543,6 +551,184 @@ class TestOAuthResourceMetadata:
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert meta.use_id_token_as_bearer is True
+
+    def test_device_code_client_id_rejects_unsafe_characters(self) -> None:
+        """device_code_client_id with non-URL-safe characters raises ValueError."""
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                device_code_client_id='bad"id',
+            )
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                device_code_client_id="has space",
+            )
+
+    def test_device_code_client_id_in_well_known_json(self) -> None:
+        """device_code_client_id appears in well-known JSON when set."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID
+        )
+        resp = client.get("/.well-known/oauth-protected-resource")
+        body = json.loads(resp.content)
+        assert body["device_code_client_id"] == "device-client-id"
+
+    def test_device_code_client_id_in_www_authenticate(self) -> None:
+        """device_code_client_id appears in WWW-Authenticate header when set."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert 'device_code_client_id="device-client-id"' in www_auth
+
+    def test_device_code_client_id_absent_from_www_authenticate(self) -> None:
+        """device_code_client_id absent from WWW-Authenticate when not set."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert "device_code_client_id" not in www_auth
+
+    def test_parse_device_code_client_id_extracts_value(self) -> None:
+        """parse_device_code_client_id() extracts value from header."""
+        header = (
+            'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi"'
+            ', device_code_client_id="my-device-app"'
+        )
+        assert parse_device_code_client_id(header) == "my-device-app"
+
+    def test_parse_device_code_client_id_returns_none_when_absent(self) -> None:
+        """parse_device_code_client_id() returns None when not present."""
+        assert parse_device_code_client_id("Bearer") is None
+        assert parse_device_code_client_id('Bearer resource_metadata="https://example.com"') is None
+        assert parse_device_code_client_id("") is None
+
+    def test_client_discovery_round_trip_with_device_code_client_id(self) -> None:
+        """Client discovers device_code_client_id set on server."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID
+        )
+        meta = http_oauth_metadata(client=client)
+        assert meta is not None
+        assert meta.device_code_client_id == "device-client-id"
+
+    def test_device_code_client_secret_rejects_unsafe_characters(self) -> None:
+        """device_code_client_secret with non-URL-safe characters raises ValueError."""
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                device_code_client_secret='bad"secret',
+            )
+        with pytest.raises(ValueError, match="URL-safe"):
+            OAuthResourceMetadata(
+                resource="https://example.com/vgi",
+                authorization_servers=("https://auth.example.com",),
+                device_code_client_secret="has space",
+            )
+
+    def test_device_code_client_secret_in_well_known_json(self) -> None:
+        """device_code_client_secret appears in well-known JSON when set."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET
+        )
+        resp = client.get("/.well-known/oauth-protected-resource")
+        body = json.loads(resp.content)
+        assert body["device_code_client_secret"] == "device-client-secret"
+
+    def test_device_code_client_secret_in_www_authenticate(self) -> None:
+        """device_code_client_secret appears in WWW-Authenticate header when set."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert 'device_code_client_secret="device-client-secret"' in www_auth
+
+    def test_device_code_client_secret_absent_from_www_authenticate(self) -> None:
+        """device_code_client_secret absent from WWW-Authenticate when not set."""
+        _priv, pub = _make_rsa_key()
+        auth_fn = _make_local_auth(pub)
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server,
+            signing_key=b"k",
+            authenticate=auth_fn,
+            oauth_resource_metadata=_METADATA,
+        )
+        resp = client.post(
+            "/vgi/echo",
+            content=b"garbage",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status_code == 401
+        www_auth = resp.headers.get("www-authenticate", "")
+        assert "device_code_client_secret" not in www_auth
+
+    def test_parse_device_code_client_secret_extracts_value(self) -> None:
+        """parse_device_code_client_secret() extracts value from header."""
+        header = (
+            'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi"'
+            ', device_code_client_id="my-device-app", device_code_client_secret="my-device-secret"'
+        )
+        assert parse_device_code_client_secret(header) == "my-device-secret"
+
+    def test_parse_device_code_client_secret_returns_none_when_absent(self) -> None:
+        """parse_device_code_client_secret() returns None when not present."""
+        assert parse_device_code_client_secret("Bearer") is None
+        assert parse_device_code_client_secret('Bearer resource_metadata="https://example.com"') is None
+        assert parse_device_code_client_secret("") is None
+
+    def test_client_discovery_round_trip_with_device_code_client_secret(self) -> None:
+        """Client discovers device_code_client_secret set on server."""
+        server = RpcServer(_EchoService, _EchoImpl())
+        client = make_sync_client(
+            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET
+        )
+        meta = http_oauth_metadata(client=client)
+        assert meta is not None
+        assert meta.device_code_client_secret == "device-client-secret"
 
     def test_401_discovery_flow(self) -> None:
         """Full 401-based discovery: get 401, parse header, fetch metadata."""
