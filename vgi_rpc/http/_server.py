@@ -1810,9 +1810,11 @@ class _CompressionMiddleware:
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Decompress zstd request bodies; record client Accept-Encoding."""
-        # Check if the client accepts zstd responses
+        # Check if the client accepts zstd responses (standard or custom header)
         accept_encoding = req.get_header("Accept-Encoding") or ""
-        req.context.client_accepts_zstd = "zstd" in accept_encoding
+        custom_accept = req.get_header("X-VGI-Accept-Encoding") or ""
+        req.context.client_accepts_zstd = "zstd" in accept_encoding or "zstd" in custom_accept
+        req.context.use_custom_encoding_header = "zstd" in custom_accept
 
         # Decompress request body if Content-Encoding: zstd
         content_encoding = req.get_header("Content-Encoding") or ""
@@ -1852,7 +1854,10 @@ class _CompressionMiddleware:
         compressed = _compress_body(body, self._level)
         resp.data = compressed
         resp.stream = None
-        resp.set_header("Content-Encoding", "zstd")
+        if getattr(req.context, "use_custom_encoding_header", False):
+            resp.set_header("X-VGI-Content-Encoding", "zstd")
+        else:
+            resp.set_header("Content-Encoding", "zstd")
 
 
 class _CapabilitiesMiddleware:
