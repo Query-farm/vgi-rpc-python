@@ -87,7 +87,17 @@ from vgi_rpc.metadata import (
 )
 from vgi_rpc.utils import IpcValidation, ValidatedReader
 
+try:
+    from opentelemetry import trace as _otel_trace
+
+    _HAS_OTEL = True
+except ImportError:
+    _otel_trace = None  # type: ignore[assignment]
+    _HAS_OTEL = False
+
 if TYPE_CHECKING:
+    from opentelemetry.trace import Span as _OtelSpan
+
     from vgi_rpc.rpc import OutputCollector
 
 _logger = logging.getLogger(__name__)
@@ -101,6 +111,46 @@ __all__ = [
     "UploadUrlProvider",
     "https_only_validator",
 ]
+
+
+# ---------------------------------------------------------------------------
+# OTel helpers
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_url(url: str) -> str:
+    """Strip query parameters from a URL to avoid leaking pre-signed credentials."""
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(url)
+    return urlunparse(parsed._replace(query="", fragment=""))
+
+
+def _traced_upload(
+    ipc_bytes: bytes,
+    schema: pa.Schema,
+    storage: ExternalStorage,
+    *,
+    content_encoding: str | None = None,
+    original_bytes: int | None = None,
+) -> str:
+    """Upload IPC bytes, wrapping in an OTel span if available."""
+    if not _HAS_OTEL:
+        return storage.upload(ipc_bytes, schema, content_encoding=content_encoding)
+
+    tracer = _otel_trace.get_tracer("vgi_rpc", "0.1.0")
+    with tracer.start_as_current_span(
+        "vgi_rpc.external/upload",
+        kind=_otel_trace.SpanKind.CLIENT,
+    ) as span:
+        url = storage.upload(ipc_bytes, schema, content_encoding=content_encoding)
+        span.set_attribute("url", _sanitize_url(url))
+        span.set_attribute("upload_bytes", len(ipc_bytes))
+        if content_encoding is not None:
+            span.set_attribute("compression", content_encoding)
+        if original_bytes is not None:
+            span.set_attribute("original_bytes", original_bytes)
+        return url
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +470,13 @@ def resolve_external_location(
 
     retry_types: tuple[type[BaseException], ...] = (OSError, pa.ArrowInvalid, aiohttp.ClientError)
 
+    span: _OtelSpan | None = None
+    if _HAS_OTEL:
+        tracer = _otel_trace.get_tracer("vgi_rpc", "0.1.0")
+        span = tracer.start_span("vgi_rpc.external/fetch", kind=_otel_trace.SpanKind.CLIENT)
+        span.set_attribute("url", _sanitize_url(url))
+
+    t0 = time.monotonic()
     try:
         retryer = Retrying(
             stop=stop_after_attempt(max_retries + 1),
@@ -427,8 +484,20 @@ def resolve_external_location(
             retry=retry_if_exception_type(retry_types),
             reraise=True,
         )
-        return retryer(_fetch_and_resolve, batch.schema, url, config, on_log, ipc_validation)
+        result = retryer(_fetch_and_resolve, batch.schema, url, config, on_log, ipc_validation)
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if span is not None:
+            span.set_attribute("fetch_duration_ms", elapsed_ms)
+            span.set_status(_otel_trace.StatusCode.OK)
+            span.end()
+        return result
     except (*retry_types,) as exc:
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if span is not None:
+            span.set_status(_otel_trace.StatusCode.ERROR, str(exc))
+            span.record_exception(exc)
+            span.set_attribute("fetch_duration_ms", elapsed_ms)
+            span.end()
         _logger.error(
             "ExternalLocation resolution failed: %s (attempts=%d)",
             url,
@@ -546,15 +615,19 @@ def maybe_externalize_collector(
                 writer.write_batch(ab.batch)
 
     ipc_bytes = buf.getvalue()
+    original_bytes: int | None = None
 
     content_encoding: str | None = None
     if config.compression is not None:
         import zstandard
 
+        original_bytes = len(ipc_bytes)
         ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
         content_encoding = config.compression.algorithm
 
-    url = config.storage.upload(ipc_bytes, out.output_schema, content_encoding=content_encoding)
+    url = _traced_upload(
+        ipc_bytes, out.output_schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
+    )
     _logger.debug(
         "Batch externalized: %s (%d bytes, compressed=%s)",
         url,
@@ -611,15 +684,19 @@ def maybe_externalize_batch(
             writer.write_batch(batch)
 
     ipc_bytes = buf.getvalue()
+    original_bytes: int | None = None
 
     content_encoding: str | None = None
     if config.compression is not None:
         import zstandard
 
+        original_bytes = len(ipc_bytes)
         ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
         content_encoding = config.compression.algorithm
 
-    url = config.storage.upload(ipc_bytes, batch.schema, content_encoding=content_encoding)
+    url = _traced_upload(
+        ipc_bytes, batch.schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
+    )
     _logger.debug(
         "Batch externalized: %s (%d bytes, compressed=%s)",
         url,

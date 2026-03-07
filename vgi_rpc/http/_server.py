@@ -765,9 +765,6 @@ class _HttpRpcApp:
             except pa.ArrowInvalid as exc:
                 raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
-            # Record input batch for stats
-            _record_input(input_batch)
-
             # Extract state token before resolution — resolve_external_location
             # replaces metadata with what was stored in the external IPC stream.
             token = custom_metadata.get(STATE_KEY) if custom_metadata is not None else None
@@ -782,6 +779,11 @@ class _HttpRpcApp:
             state_obj, output_schema, input_schema = self._unpack_and_recover_state(token, state_info)
 
             is_producer = input_schema == _EMPTY_SCHEMA
+
+            # Record input batch for stats — skip tick batches on producer
+            # continuations (zero-row, empty-schema protocol artifacts).
+            if not is_producer:
+                _record_input(input_batch)
 
             # Resolve method info for hook (may be None for unknown methods, but
             # _stream_exchange_sync is only reached for known stream methods)

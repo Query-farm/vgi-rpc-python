@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Protocol, cast
 
 import pyarrow as pa
 import pytest
+from aioresponses import aioresponses as aioresponses_ctx
 from opentelemetry.metrics import MeterProvider
 from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -19,7 +23,16 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from pyarrow import ipc
 
+from vgi_rpc.external import (
+    ExternalLocationConfig,
+    ExternalStorage,
+    make_external_location_batch,
+    maybe_externalize_batch,
+    resolve_external_location,
+)
+from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.http import http_connect, make_sync_client
 from vgi_rpc.otel import OtelConfig, instrument_server
 from vgi_rpc.rpc import (
@@ -1016,3 +1029,203 @@ class TestAuthFailureCounter:
                             if attrs.get("deployment.environment") == "test":
                                 found_env = True
         assert found_env, "custom_attributes not found on auth failure counter"
+
+
+# ---------------------------------------------------------------------------
+# External data OTel span tests
+# ---------------------------------------------------------------------------
+
+_EXT_SCHEMA = pa.schema([pa.field("value", pa.int64())])
+
+
+class _MockStorage(ExternalStorage):
+    """In-memory ExternalStorage for OTel tests."""
+
+    def __init__(self) -> None:
+        """Initialize with empty data store."""
+        self.data: dict[str, bytes] = {}
+        self._counter = 0
+
+    def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
+        """Store data and return a mock URL."""
+        self._counter += 1
+        url = f"https://mock.storage/{self._counter}"
+        self.data[url] = data
+        return url
+
+
+def _serialize_ipc(
+    schema: pa.Schema,
+    batches: list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]],
+) -> bytes:
+    """Serialize a list of (batch, custom_metadata) into IPC stream bytes."""
+    buf = BytesIO()
+    with ipc.new_stream(buf, schema) as writer:
+        for batch, cm in batches:
+            if cm is not None:
+                writer.write_batch(batch, custom_metadata=cm)
+            else:
+                writer.write_batch(batch)
+    return buf.getvalue()
+
+
+@contextmanager
+def _mock_aio(storage: _MockStorage) -> Iterator[aioresponses_ctx]:
+    """Register all MockStorage URLs in aioresponses."""
+    with aioresponses_ctx() as mock:
+        for url, body in storage.data.items():
+            headers = {"Content-Length": str(len(body))}
+            mock.head(url, headers=headers)
+            mock.get(url, body=body, headers=headers)
+        yield mock
+
+
+class TestExternalOtel:
+    """OTel span tests for external data upload and fetch."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_tracer(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Patch external.py to use the test TracerProvider."""
+        import vgi_rpc.external as _ext_mod
+
+        tracer_provider = otel_providers[0]
+
+        class _PatchedTrace:
+            """Minimal trace module proxy that uses the test TracerProvider."""
+
+            SpanKind = SpanKind
+            StatusCode = StatusCode
+
+            @staticmethod
+            def get_tracer(name: str, version: str = "") -> object:
+                """Return a tracer from the test provider."""
+                return tracer_provider.get_tracer(name, version)
+
+        monkeypatch.setattr(_ext_mod, "_otel_trace", _PatchedTrace)
+        monkeypatch.setattr(_ext_mod, "_HAS_OTEL", True)
+
+    def test_upload_span(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Upload creates a span with correct attributes."""
+        _, _, exporter, _ = otel_providers
+        storage = _MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=1)
+
+        batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_EXT_SCHEMA)
+        maybe_externalize_batch(batch, None, config)
+
+        spans = exporter.get_finished_spans()
+        upload_spans = [s for s in spans if s.name == "vgi_rpc.external/upload"]
+        assert len(upload_spans) == 1
+        span = upload_spans[0]
+        assert span.kind == SpanKind.CLIENT
+        attrs = dict(span.attributes or {})
+        assert attrs["url"] == "https://mock.storage/1"
+        assert isinstance(attrs["upload_bytes"], int) and attrs["upload_bytes"] > 0
+        assert "compression" not in attrs
+
+    def test_upload_span_with_compression(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Upload span includes compression and original_bytes when compressed."""
+        _, _, exporter, _ = otel_providers
+        from vgi_rpc.external import Compression
+
+        storage = _MockStorage()
+        config = ExternalLocationConfig(
+            storage=storage,
+            externalize_threshold_bytes=1,
+            compression=Compression(),
+        )
+
+        batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_EXT_SCHEMA)
+        maybe_externalize_batch(batch, None, config)
+
+        spans = exporter.get_finished_spans()
+        upload_spans = [s for s in spans if s.name == "vgi_rpc.external/upload"]
+        assert len(upload_spans) == 1
+        attrs = dict(upload_spans[0].attributes or {})
+        assert attrs["compression"] == "zstd"
+        assert isinstance(attrs["original_bytes"], int) and attrs["original_bytes"] > 0
+
+    def test_fetch_span(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Fetch creates a span with correct attributes."""
+        _, _, exporter, _ = otel_providers
+        storage = _MockStorage()
+        data_batch = pa.RecordBatch.from_pydict({"value": [99]}, schema=_EXT_SCHEMA)
+        ipc_bytes = _serialize_ipc(_EXT_SCHEMA, [(data_batch, None)])
+        url = "https://mock.storage/fetch1"
+        storage.data[url] = ipc_bytes
+
+        pointer, cm = make_external_location_batch(_EXT_SCHEMA, url)
+        config = ExternalLocationConfig(
+            storage=storage,
+            url_validator=None,
+            fetch_config=FetchConfig(parallel_threshold_bytes=len(ipc_bytes) + 1000),
+        )
+
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(pointer, cm, config)
+
+        assert resolved.num_rows == 1
+        spans = exporter.get_finished_spans()
+        fetch_spans = [s for s in spans if s.name == "vgi_rpc.external/fetch"]
+        assert len(fetch_spans) == 1
+        span = fetch_spans[0]
+        assert span.kind == SpanKind.CLIENT
+        assert span.status.status_code == StatusCode.OK
+        attrs = dict(span.attributes or {})
+        assert attrs["url"] == "https://mock.storage/fetch1"
+        assert isinstance(attrs["fetch_duration_ms"], float) and attrs["fetch_duration_ms"] >= 0
+
+    def test_fetch_span_error(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Fetch span records error status on failure."""
+        _, _, exporter, _ = otel_providers
+        url = "https://mock.storage/fail"
+        pointer, cm = make_external_location_batch(_EXT_SCHEMA, url)
+        config = ExternalLocationConfig(
+            url_validator=None,
+            max_retries=0,
+            fetch_config=FetchConfig(parallel_threshold_bytes=999999),
+        )
+
+        with aioresponses_ctx() as mock:
+            mock.head(url, exception=OSError("connection refused"))
+            mock.get(url, exception=OSError("connection refused"))
+            with pytest.raises(RuntimeError, match="Failed to resolve"):
+                resolve_external_location(pointer, cm, config)
+
+        spans = exporter.get_finished_spans()
+        fetch_spans = [s for s in spans if s.name == "vgi_rpc.external/fetch"]
+        assert len(fetch_spans) == 1
+        span = fetch_spans[0]
+        assert span.status.status_code == StatusCode.ERROR
+        event_names = [e.name for e in span.events]
+        assert "exception" in event_names
+
+    def test_upload_span_sanitizes_url(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Upload span strips query params from URL to avoid credential leakage."""
+        from vgi_rpc.external import _sanitize_url
+
+        assert _sanitize_url("https://bucket.s3.amazonaws.com/key?X-Amz-Credential=AKIA") == (
+            "https://bucket.s3.amazonaws.com/key"
+        )
+        assert _sanitize_url("https://storage.googleapis.com/b/o?token=secret") == (
+            "https://storage.googleapis.com/b/o"
+        )

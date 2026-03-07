@@ -308,8 +308,9 @@ class TestPipeStats:
         assert len(access_records) >= 1
         record = access_records[0]
         assert _extra(record, "status") == "ok"
-        # 3 ticks + 1 final tick (for finish) = 4 input batches (ticks)
-        assert _extra(record, "input_batches") >= 4  # params + ticks
+        # Tick batches (producer protocol artifacts) are excluded from input stats;
+        # only the initial params batch is counted.
+        assert _extra(record, "input_batches") == 1  # params only, no ticks
         # 3 data batches from producer
         assert _extra(record, "output_batches") >= 3
 

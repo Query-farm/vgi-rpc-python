@@ -565,8 +565,10 @@ class RpcServer:
                         except StopIteration:
                             break
 
-                        # Record input batch for stats (including producer ticks)
-                        _record_input(input_batch)
+                        # Record input batch for stats — skip tick batches on
+                        # producer streams (zero-row, empty-schema protocol artifacts).
+                        if input_schema != _EMPTY_SCHEMA:
+                            _record_input(input_batch)
 
                         # Resolve ExternalLocation on input batch
                         input_batch, resolved_cm = resolve_external_location(
