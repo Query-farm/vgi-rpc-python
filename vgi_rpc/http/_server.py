@@ -1082,26 +1082,53 @@ class _HttpRpcApp:
 
 
 # ---------------------------------------------------------------------------
+# Shared HTML styles for error and landing pages
+# ---------------------------------------------------------------------------
+
+_FONT_IMPORTS = (
+    '<link rel="preconnect" href="https://fonts.googleapis.com">'
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">'  # noqa: E501
+)
+
+# ---------------------------------------------------------------------------
 # 404 sink for unmatched routes
 # ---------------------------------------------------------------------------
 
-_NOT_FOUND_HTML_TEMPLATE = """\
+_ERROR_PAGE_STYLE = """\
+<style>
+  body {{ font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 600px;
+         margin: 0 auto; padding: 60px 20px 0; color: #2c2c1e; text-align: center;
+         background: #faf8f0; }}
+  .logo {{ margin-bottom: 24px; }}
+  .logo img {{ width: 120px; height: 120px; border-radius: 50%;
+               box-shadow: 0 4px 24px rgba(0,0,0,0.12); }}
+  h1 {{ color: #2d5016; margin-bottom: 8px; font-weight: 700; }}
+  code {{ font-family: 'JetBrains Mono', monospace; background: #f0ece0;
+          padding: 2px 6px; border-radius: 3px; font-size: 0.9em; color: #2c2c1e; }}
+  a {{ color: #2d5016; text-decoration: none; }}
+  a:hover {{ color: #4a7c23; }}
+  p {{ line-height: 1.7; color: #6b6b5a; }}
+  .detail {{ margin-top: 12px; padding: 12px 16px; background: #f0ece0;
+             border-radius: 6px; font-size: 0.9em; color: #6b6b5a; }}
+  footer {{ margin-top: 48px; padding: 20px 0; border-top: 1px solid #f0ece0;
+            color: #6b6b5a; font-size: 0.85em; }}
+  footer a {{ color: #2d5016; font-weight: 600; }}
+  footer a:hover {{ color: #4a7c23; }}
+</style>"""
+
+_NOT_FOUND_HTML_TEMPLATE = (
+    """\
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>404 &mdash; vgi-rpc endpoint</title>
-<style>
-  body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 600px;
-         margin: 60px auto; padding: 0 20px; color: #333; text-align: center; }}
-  .logo {{ margin-bottom: 24px; }}
-  .logo img {{ width: 120px; height: 120px; }}
-  h1 {{ color: #555; }}
-  code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.95em; }}
-  a {{ color: #0066cc; }}
-  p {{ line-height: 1.6; }}
-</style>
+<title>404 &mdash; vgi-rpc</title>
+"""
+    + _FONT_IMPORTS
+    + _ERROR_PAGE_STYLE
+    + """
 </head>
 <body>
 <div class="logo">
@@ -1110,9 +1137,82 @@ _NOT_FOUND_HTML_TEMPLATE = """\
 <h1>404 &mdash; Not Found</h1>
 <p>This is a <code>vgi-rpc</code> service endpoint{protocol_fragment}.</p>
 <p>RPC methods are available under <code>{prefix}/&lt;method&gt;</code>.</p>
-<p>Learn more at <a href="https://vgi-rpc.query.farm">vgi-rpc.query.farm</a>.</p>
+<footer>
+  Powered by <a href="https://vgi-rpc.query.farm"><code>vgi-rpc</code></a>
+</footer>
 </body>
 </html>"""
+)
+
+_UNAUTHORIZED_HTML_TEMPLATE = (
+    """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>401 &mdash; Unauthorized</title>
+"""
+    + _FONT_IMPORTS
+    + _ERROR_PAGE_STYLE
+    + """
+</head>
+<body>
+<div class="logo">
+  <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">
+</div>
+<h1>401 &mdash; Unauthorized</h1>
+<p>Authentication is required to access this <code>vgi-rpc</code> service.</p>
+{detail}
+<footer>
+  Powered by <a href="https://vgi-rpc.query.farm"><code>vgi-rpc</code></a>
+</footer>
+</body>
+</html>"""
+)
+
+_UNAUTHORIZED_BODY_CACHE: dict[str, bytes] = {}
+
+
+def _get_unauthorized_body(detail: str) -> bytes:
+    """Return cached UTF-8 bytes for a 401 HTML page with the given detail message.
+
+    Args:
+        detail: The error description to display on the page.
+
+    Returns:
+        UTF-8 encoded HTML bytes.
+
+    """
+    body = _UNAUTHORIZED_BODY_CACHE.get(detail)
+    if body is not None:
+        return body
+    detail_html = f'<div class="detail">{_html.escape(detail)}</div>' if detail else ""
+    body = _UNAUTHORIZED_HTML_TEMPLATE.format(detail=detail_html).encode("utf-8")
+    # Bound cache size to prevent memory issues with unique error messages.
+    if len(_UNAUTHORIZED_BODY_CACHE) < 64:
+        _UNAUTHORIZED_BODY_CACHE[detail] = body
+    return body
+
+
+def _error_serializer(req: falcon.Request, resp: falcon.Response, exc: falcon.HTTPError) -> None:
+    """Serialize Falcon HTTP errors as styled HTML pages.
+
+    Only ``HTTPUnauthorized`` (401) gets a styled HTML page; all other errors
+    fall back to Falcon's default JSON serialization.
+
+    Args:
+        req: The Falcon request.
+        resp: The Falcon response.
+        exc: The Falcon HTTP error being serialized.
+
+    """
+    if isinstance(exc, falcon.HTTPUnauthorized):
+        resp.content_type = "text/html; charset=utf-8"
+        resp.data = _get_unauthorized_body(exc.description or "")
+    else:
+        resp.content_type = falcon.MEDIA_JSON
+        resp.data = exc.to_json()
 
 
 def _make_not_found_sink(
@@ -1150,12 +1250,6 @@ def _make_not_found_sink(
 # ---------------------------------------------------------------------------
 # Landing page at GET {prefix}
 # ---------------------------------------------------------------------------
-
-_FONT_IMPORTS = (
-    '<link rel="preconnect" href="https://fonts.googleapis.com">'
-    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">'  # noqa: E501
-)
 
 _LANDING_HTML_TEMPLATE = (
     """\
@@ -2084,6 +2178,7 @@ def make_wsgi_app(
     if capability_headers:
         middleware.append(_CapabilitiesMiddleware(capability_headers))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)
+    app.set_error_serializer(_error_serializer)
 
     # OAuth well-known endpoint (must be before RPC routes)
     if _validated_oauth_metadata is not None:
