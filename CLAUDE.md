@@ -40,12 +40,13 @@ Verify "ty" type checking too.
 
 The full process before committing code is
 
-1. Run mypy and resolve all errors
-2. Run ty and resolve all errors
-3. Run pytest for all tests
-4. Run ruff format on all files
+1. Run `uv run ruff format .` on all files
+2. Run `uv run ruff check .` and resolve all errors
+3. Run `uv run mypy vgi_rpc/` and resolve all errors
+4. Run `uv run ty check vgi_rpc/` and resolve all errors
+5. Run `uv run pytest` for all tests
 
-Then you can commit.
+**Always reformat before pushing.** CI runs lint before tests — unformatted code fails the pipeline immediately and wastes time.
 
 ## Architecture
 
