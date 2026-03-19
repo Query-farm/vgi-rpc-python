@@ -416,10 +416,7 @@ def http_connect[P](
         client = httpx.Client(base_url=base_url, follow_redirects=True)
 
     # Auto-detect prefix from _SyncTestClient when not explicitly provided
-    if prefix is None:
-        url_prefix = getattr(client, "prefix", "")
-    else:
-        url_prefix = prefix
+    url_prefix = getattr(client, "prefix", "") if prefix is None else prefix
     try:
         yield cast(
             P,

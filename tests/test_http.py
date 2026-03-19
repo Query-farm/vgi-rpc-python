@@ -78,9 +78,7 @@ _BASE_URL = "http://test"
 def client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
     """Create a sync Falcon test client with proper cleanup, tested with both empty and /vgi prefix."""
     prefix: str = request.param
-    c = make_sync_client(
-        RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), signing_key=b"test-key", prefix=prefix
-    )
+    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), signing_key=b"test-key", prefix=prefix)
     yield c
     c.close()
 
