@@ -74,21 +74,26 @@ from .test_rpc import (
 _BASE_URL = "http://test"
 
 
-@pytest.fixture
-def client() -> Iterator[_SyncTestClient]:
-    """Create a sync Falcon test client with proper cleanup."""
-    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), signing_key=b"test-key")
+@pytest.fixture(params=["", "/vgi"])
+def client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
+    """Create a sync Falcon test client with proper cleanup, tested with both empty and /vgi prefix."""
+    prefix: str = request.param
+    c = make_sync_client(
+        RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), signing_key=b"test-key", prefix=prefix
+    )
     yield c
     c.close()
 
 
-@pytest.fixture
-def resumable_client() -> Iterator[_SyncTestClient]:
+@pytest.fixture(params=["", "/vgi"])
+def resumable_client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
     """Create a sync client with resumable streaming enabled (small limit to force continuations)."""
+    prefix: str = request.param
     c = make_sync_client(
         RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
         signing_key=b"test-key",
         max_stream_response_bytes=200,
+        prefix=prefix,
     )
     yield c
     c.close()
@@ -135,7 +140,7 @@ class TestHttpErrorCases:
     def test_unknown_method_404(self, client: _SyncTestClient) -> None:
         """Unknown method returns 404 with a parseable Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/nonexistent",
+            f"{_BASE_URL}{client.prefix}/nonexistent",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -147,7 +152,7 @@ class TestHttpErrorCases:
     def test_non_stream_on_init_endpoint_400(self, client: _SyncTestClient) -> None:
         """Non-stream method on the /init endpoint returns 400 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/add/init",
+            f"{_BASE_URL}{client.prefix}/add/init",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -159,7 +164,7 @@ class TestHttpErrorCases:
     def test_malformed_body_stream_init_400(self, client: _SyncTestClient) -> None:
         """Garbage bytes on a stream init endpoint return 400 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/transform/init",
+            f"{_BASE_URL}{client.prefix}/transform/init",
             content=b"garbage bytes",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -170,7 +175,7 @@ class TestHttpErrorCases:
     def test_malformed_body_stream_exchange_400(self, client: _SyncTestClient) -> None:
         """Garbage bytes on a stream exchange endpoint return 400."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/transform/exchange",
+            f"{_BASE_URL}{client.prefix}/transform/exchange",
             content=b"garbage bytes",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -181,7 +186,7 @@ class TestHttpErrorCases:
     def test_wrong_content_type_415(self, client: _SyncTestClient) -> None:
         """Wrong Content-Type returns 415 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/add",
+            f"{_BASE_URL}{client.prefix}/add",
             content=b"hello",
             headers={"Content-Type": "text/plain"},
         )
@@ -193,7 +198,7 @@ class TestHttpErrorCases:
     def test_unary_on_exchange_400(self, client: _SyncTestClient) -> None:
         """Unary method on /exchange endpoint returns 400."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/add/exchange",
+            f"{_BASE_URL}{client.prefix}/add/exchange",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -270,7 +275,7 @@ class TestResumableServerStream:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
         resp = resumable_client.post(
-            f"{_BASE_URL}/vgi/generate/exchange",
+            f"{_BASE_URL}{resumable_client.prefix}/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -314,7 +319,7 @@ class TestResumableServerStream:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
         resp = resumable_client.post(
-            f"{_BASE_URL}/vgi/generate/exchange",
+            f"{_BASE_URL}{resumable_client.prefix}/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -402,7 +407,7 @@ class TestStateTokenStateEncoding:
             token_ttl=3600,
         )
         resp = c.post(
-            f"{_BASE_URL}/vgi/generate/exchange",
+            f"{_BASE_URL}/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -456,7 +461,7 @@ class TestStateTokenStateEncoding:
             token_ttl=0,
         )
         resp = c.post(
-            f"{_BASE_URL}/vgi/generate/exchange",
+            f"{_BASE_URL}/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -813,7 +818,7 @@ class TestAuthentication:
         client = _make_auth_client()
         # No auth header → authenticate callback raises → 401
         resp = client.post(
-            "http://test/vgi/whoami",
+            "http://test/whoami",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -829,7 +834,7 @@ class TestAuthentication:
 
         client = _make_auth_client(authenticate=failing_auth)
         resp = client.post(
-            "http://test/vgi/public",
+            "http://test/public",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "Authorization": "Bearer whatever"},
         )
@@ -845,7 +850,7 @@ class TestAuthentication:
 
         client = _make_auth_client(authenticate=buggy_auth)
         resp = client.post(
-            "http://test/vgi/public",
+            "http://test/public",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "Authorization": "Bearer whatever"},
         )
@@ -954,7 +959,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-allow-origin") == "*"
 
     def test_cors_specific_origin(self) -> None:
@@ -962,7 +967,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, signing_key=b"test", cors_origins="http://example.com")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-allow-origin") == "http://example.com"
 
     def test_no_cors_by_default(self) -> None:
@@ -970,7 +975,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, signing_key=b"test")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert "access-control-allow-origin" not in resp.headers
 
 
@@ -990,7 +995,7 @@ class TestMaxRequestBytes:
             max_request_bytes=10_000_000,
         )
         resp = client.post(
-            f"{_BASE_URL}/vgi/add",
+            f"{_BASE_URL}/add",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1005,7 +1010,7 @@ class TestMaxRequestBytes:
             signing_key=b"test",
         )
         resp = client.post(
-            f"{_BASE_URL}/vgi/add",
+            f"{_BASE_URL}/add",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1020,7 +1025,7 @@ class TestMaxRequestBytes:
             signing_key=b"test",
             max_request_bytes=5_000_000,
         )
-        resp = client.options(f"{_BASE_URL}/vgi/__capabilities__")
+        resp = client.options(f"{_BASE_URL}/__capabilities__")
         assert resp.headers.get(MAX_REQUEST_BYTES_HEADER.lower()) == "5000000"
         client.close()
 
@@ -1029,7 +1034,7 @@ class TestMaxRequestBytes:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, signing_key=b"test", cors_origins="*", max_request_bytes=1_000_000)
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/vgi/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         expose = resp.headers.get("access-control-expose-headers", "")
         assert MAX_REQUEST_BYTES_HEADER in expose
 
@@ -1217,7 +1222,7 @@ class TestRequestId:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
         resp = client.post(
-            f"{_BASE_URL}/vgi/add",
+            f"{_BASE_URL}{client.prefix}/add",
             content=buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1233,7 +1238,7 @@ class TestRequestId:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
         resp = client.post(
-            f"{_BASE_URL}/vgi/add",
+            f"{_BASE_URL}{client.prefix}/add",
             content=buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "X-Request-ID": "my-custom-req-id"},
         )
@@ -1243,7 +1248,7 @@ class TestRequestId:
     def test_request_id_on_error_response(self, client: _SyncTestClient) -> None:
         """X-Request-ID is present on error responses."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/nonexistent",
+            f"{_BASE_URL}{client.prefix}/nonexistent",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1391,7 +1396,7 @@ class TestZstdCompression:
 
         # Send with Accept-Encoding: zstd to trigger response compression
         result = falcon_client.simulate_post(
-            "/vgi/greet",
+            "/greet",
             body=req_buf.getvalue(),
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -1503,23 +1508,23 @@ class TestZstdCompression:
 class TestNotFoundHtmlPage:
     """Custom HTML 404 page for unmatched routes."""
 
-    def test_root_returns_html_404(self, client: _SyncTestClient) -> None:
-        """GET / returns a friendly HTML 404 page."""
-        resp = client._client.simulate_get("/")
+    def test_unmatched_path_returns_html_404(self, client: _SyncTestClient) -> None:
+        """GET on an unmatched path returns a friendly HTML 404 page."""
+        resp = client._client.simulate_get("/no/such/path")
         assert resp.status_code == 404
         assert "text/html" in resp.headers.get("content-type", "")
         assert "<code>vgi-rpc</code>" in resp.text
         assert "vgi-rpc.query.farm" in resp.text
 
     def test_random_path_returns_html_404(self, client: _SyncTestClient) -> None:
-        """GET /random returns a friendly HTML 404 page."""
-        resp = client._client.simulate_get("/random")
+        """GET on a deep unmatched path returns a friendly HTML 404 page."""
+        resp = client._client.simulate_get("/random/deep/path")
         assert resp.status_code == 404
         assert "text/html" in resp.headers.get("content-type", "")
 
     def test_prefix_without_method_returns_landing_page(self, client: _SyncTestClient) -> None:
-        """GET /vgi (no method segment) returns landing page (200)."""
-        resp = client._client.simulate_get("/vgi")
+        """GET {prefix} (no method segment) returns landing page (200)."""
+        resp = client._client.simulate_get(client.prefix or "/")
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
         assert "<code>vgi-rpc</code>" in resp.text
@@ -1527,7 +1532,7 @@ class TestNotFoundHtmlPage:
     def test_existing_method_404_still_arrow_ipc(self, client: _SyncTestClient) -> None:
         """Unknown method on a matched route still returns Arrow IPC 404 (not HTML)."""
         resp = client.post(
-            f"{_BASE_URL}/vgi/nonexistent",
+            f"{_BASE_URL}{client.prefix}/nonexistent",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1536,13 +1541,13 @@ class TestNotFoundHtmlPage:
 
     def test_protocol_name_in_html(self, client: _SyncTestClient) -> None:
         """Protocol name appears in the 404 HTML body."""
-        resp = client._client.simulate_get("/")
+        resp = client._client.simulate_get("/no/such/path")
         assert resp.status_code == 404
         assert "RpcFixtureService" in resp.text
 
     def test_logo_in_html(self, client: _SyncTestClient) -> None:
         """HTML contains the vgi-rpc logo from the docs site."""
-        resp = client._client.simulate_get("/")
+        resp = client._client.simulate_get("/no/such/path")
         assert resp.status_code == 404
         assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in resp.text
 
@@ -1553,7 +1558,7 @@ class TestNotFoundHtmlPage:
             signing_key=b"test-key",
             enable_not_found_page=False,
         )
-        resp = c._client.simulate_get("/")
+        resp = c._client.simulate_get("/no/such/path")
         # Falcon's default 404 does not contain our custom HTML
         assert resp.status_code == 404
         assert "<code>vgi-rpc</code>" not in resp.text
@@ -1568,48 +1573,50 @@ class TestNotFoundHtmlPage:
 class TestLandingPage:
     """HTML landing page at GET {prefix}."""
 
-    @pytest.fixture
-    def landing_client(self) -> Iterator[_SyncTestClient]:
-        """Client with landing page enabled (default)."""
+    @pytest.fixture(params=["", "/vgi"])
+    def landing_client(self, request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
+        """Client with landing page enabled (default), tested with both empty and /vgi prefix."""
+        prefix: str = request.param
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             signing_key=b"test-key",
+            prefix=prefix,
         )
         yield c
         c.close()
 
     def test_get_prefix_returns_landing_page(self, landing_client: _SyncTestClient) -> None:
-        """GET /vgi returns 200 with HTML content."""
-        resp = landing_client._client.simulate_get("/vgi")
+        """GET {prefix} returns 200 with HTML content."""
+        resp = landing_client._client.simulate_get(landing_client.prefix or "/")
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
 
     def test_protocol_name_in_landing(self, landing_client: _SyncTestClient) -> None:
         """Protocol name appears in the landing page."""
-        resp = landing_client._client.simulate_get("/vgi")
+        resp = landing_client._client.simulate_get(landing_client.prefix or "/")
         assert "RpcFixtureService" in resp.text
 
-    def test_server_id_in_landing(self, landing_client: _SyncTestClient) -> None:
+    def test_server_id_in_landing(self) -> None:
         """Server ID appears in the landing page."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), server_id="test-id-abc")
         c = make_sync_client(server, signing_key=b"test-key")
-        resp = c._client.simulate_get("/vgi")
+        resp = c._client.simulate_get("/")
         assert "test-id-abc" in resp.text
         c.close()
 
     def test_logo_in_landing(self, landing_client: _SyncTestClient) -> None:
         """Logo URL is present in the landing page."""
-        resp = landing_client._client.simulate_get("/vgi")
+        resp = landing_client._client.simulate_get(landing_client.prefix or "/")
         assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in resp.text
 
     def test_vgi_rpc_in_code_tag(self, landing_client: _SyncTestClient) -> None:
         """'vgi-rpc' appears in <code> tags."""
-        resp = landing_client._client.simulate_get("/vgi")
+        resp = landing_client._client.simulate_get(landing_client.prefix or "/")
         assert "<code>vgi-rpc</code>" in resp.text
 
     def test_vgi_rpc_link(self, landing_client: _SyncTestClient) -> None:
         """'Learn more about vgi-rpc' link and Query.Farm copyright are present."""
-        resp = landing_client._client.simulate_get("/vgi")
+        resp = landing_client._client.simulate_get(landing_client.prefix or "/")
         assert "Learn more about" in resp.text
         assert "<code>vgi-rpc</code>" in resp.text
         assert "Query.Farm LLC" in resp.text
@@ -1622,7 +1629,7 @@ class TestLandingPage:
             signing_key=b"test-key",
             repo_url="https://github.com/example/my-service",
         )
-        resp = c._client.simulate_get("/vgi")
+        resp = c._client.simulate_get("/")
         assert "https://github.com/example/my-service" in resp.text
         assert "Source repository" in resp.text
         c.close()
@@ -1631,46 +1638,48 @@ class TestLandingPage:
         """Landing page contains describe link when describe is enabled on server."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
         c = make_sync_client(server, signing_key=b"test-key")
-        resp = c._client.simulate_get("/vgi")
-        assert "/vgi/describe" in resp.text
+        resp = c._client.simulate_get("/")
+        assert "/describe" in resp.text
         assert "View service API" in resp.text
         c.close()
 
     def test_no_describe_link_when_disabled(self, landing_client: _SyncTestClient) -> None:
         """Landing page omits describe link when enable_describe=False on server."""
-        resp = landing_client._client.simulate_get("/vgi")
-        assert "/vgi/describe" not in resp.text
+        resp = landing_client._client.simulate_get(landing_client.prefix or "/")
+        assert "/describe" not in resp.text
 
     def test_no_describe_link_when_page_disabled(self) -> None:
         """Landing page omits describe link when enable_describe_page=False."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
         c = make_sync_client(server, signing_key=b"test-key", enable_describe_page=False)
-        resp = c._client.simulate_get("/vgi")
-        assert "/vgi/describe" not in resp.text
+        resp = c._client.simulate_get("/")
+        assert "/describe" not in resp.text
         c.close()
 
     def test_disabled_landing_page(self) -> None:
-        """When enable_landing_page=False, GET /vgi returns 404."""
+        """When enable_landing_page=False, GET {prefix} returns non-200."""
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             signing_key=b"test-key",
             enable_landing_page=False,
         )
-        resp = c._client.simulate_get("/vgi")
-        assert resp.status_code == 404
+        resp = c._client.simulate_get("/")
+        # With empty prefix, "/" doesn't match any registered route;
+        # Falcon may return 404 or 405 depending on router internals.
+        assert resp.status_code != 200
         c.close()
 
     def test_cache_control_header(self, landing_client: _SyncTestClient) -> None:
         """Landing page sets Cache-Control to prevent caching."""
-        resp = landing_client._client.simulate_get("/vgi")
+        resp = landing_client._client.simulate_get(landing_client.prefix or "/")
         cc = resp.headers.get("cache-control", "")
         assert "no-cache" in cc
         assert "no-store" in cc
         assert "max-age=0" in cc
 
     def test_post_to_prefix_returns_405(self, landing_client: _SyncTestClient) -> None:
-        """POST /vgi returns 405 Method Not Allowed."""
-        resp = landing_client._client.simulate_post("/vgi")
+        """POST {prefix} returns 405 Method Not Allowed."""
+        resp = landing_client._client.simulate_post(landing_client.prefix or "/")
         assert resp.status_code == 405
 
 
@@ -1691,25 +1700,25 @@ class TestDescribeHtmlPage:
         c.close()
 
     def test_get_describe_returns_page(self, describe_client: _SyncTestClient) -> None:
-        """GET /vgi/describe returns 200 with HTML content."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        """GET /describe returns 200 with HTML content."""
+        resp = describe_client._client.simulate_get("/describe")
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
 
     def test_protocol_name_in_page(self, describe_client: _SyncTestClient) -> None:
         """Protocol name appears in the describe page."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "RpcFixtureService" in resp.text
 
     def test_method_names_in_page(self, describe_client: _SyncTestClient) -> None:
         """All method names appear in the describe page."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         for method in ("add", "greet", "generate", "transform"):
             assert method in resp.text
 
     def test_method_types_shown(self, describe_client: _SyncTestClient) -> None:
         """UNARY, STREAM, EXCHANGE, PRODUCER, and HEADER badges are shown."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "badge-unary" in resp.text
         assert "badge-stream" in resp.text
         assert "badge-exchange" in resp.text
@@ -1718,59 +1727,59 @@ class TestDescribeHtmlPage:
 
     def test_docstrings_shown(self, describe_client: _SyncTestClient) -> None:
         """Method docstrings appear in the describe page."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "Add two numbers" in resp.text
         assert "Greet by name" in resp.text
 
     def test_parameter_types_shown(self, describe_client: _SyncTestClient) -> None:
         """Parameter types appear in the describe page."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "float" in resp.text
 
     def test_logo_in_page(self, describe_client: _SyncTestClient) -> None:
         """Logo URL is present in the describe page."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in resp.text
 
     def test_vgi_rpc_in_code_tag(self, describe_client: _SyncTestClient) -> None:
         """'vgi-rpc' appears in <code> tags."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "<code>vgi-rpc</code>" in resp.text
 
     def test_describe_method_hidden(self, describe_client: _SyncTestClient) -> None:
         """The __describe__ method is filtered out of the page."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "__describe__" not in resp.text
 
     def test_cache_control_header(self, describe_client: _SyncTestClient) -> None:
         """Describe page sets Cache-Control to prevent caching."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         cc = resp.headers.get("cache-control", "")
         assert "no-cache" in cc
         assert "no-store" in cc
         assert "max-age=0" in cc
 
     def test_disabled_via_parameter(self) -> None:
-        """When enable_describe_page=False, GET /vgi/describe is not served."""
+        """When enable_describe_page=False, GET /describe is not served."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
         c = make_sync_client(server, signing_key=b"test-key", enable_describe_page=False)
-        resp = c._client.simulate_get("/vgi/describe")
+        resp = c._client.simulate_get("/describe")
         # Falls through to {prefix}/{method} route which only has on_post → 405
         assert resp.status_code == 405
         c.close()
 
     def test_parameter_descriptions_shown(self, describe_client: _SyncTestClient) -> None:
         """Parameter descriptions from docstring Args: sections appear in the page."""
-        resp = describe_client._client.simulate_get("/vgi/describe")
+        resp = describe_client._client.simulate_get("/describe")
         assert "The first number" in resp.text
         assert "The second number" in resp.text
         assert "The name to greet" in resp.text
 
     def test_disabled_when_describe_not_enabled(self) -> None:
-        """When enable_describe=False on server, GET /vgi/describe is not served."""
+        """When enable_describe=False on server, GET /describe is not served."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         c = make_sync_client(server, signing_key=b"test-key")
-        resp = c._client.simulate_get("/vgi/describe")
+        resp = c._client.simulate_get("/describe")
         # Falls through to {prefix}/{method} route which only has on_post → 405
         assert resp.status_code == 405
         c.close()

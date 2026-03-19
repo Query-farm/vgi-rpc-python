@@ -126,7 +126,7 @@ class _CliConfig:
     url: str | None = None
     cmd: str | None = None
     unix: str | None = None
-    prefix: str = "/vgi"
+    prefix: str = ""
     format: OutputFormat = OutputFormat.auto
     output: str | None = None
     verbose: bool = False
@@ -203,7 +203,7 @@ def _main(
     url: Annotated[str | None, typer.Option("--url", "-u", help="HTTP base URL")] = None,
     cmd: Annotated[str | None, typer.Option("--cmd", "-c", help="Subprocess command")] = None,
     unix: Annotated[str | None, typer.Option("--unix", help="Unix domain socket path")] = None,
-    prefix: Annotated[str, typer.Option("--prefix", "-p", help="URL path prefix")] = "/vgi",
+    prefix: Annotated[str, typer.Option("--prefix", "-p", help="URL path prefix")] = "",
     fmt: Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format")] = OutputFormat.auto,
     output: Annotated[str | None, typer.Option("--output", "-o", help="Output file path (default: stdout)")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show server log messages on stderr")] = False,

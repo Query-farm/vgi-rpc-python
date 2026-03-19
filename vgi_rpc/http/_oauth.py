@@ -166,7 +166,7 @@ class _OAuthResourceMetadataResource:
         resp.set_header("Cache-Control", "public, max-age=60")
 
 
-def _build_www_authenticate(metadata: OAuthResourceMetadata, prefix: str = "/vgi") -> str:
+def _build_www_authenticate(metadata: OAuthResourceMetadata, prefix: str = "") -> str:
     """Build a ``WWW-Authenticate`` header value per RFC 9728 Section 5.1.
 
     Uses the origin from ``metadata.resource`` combined with *prefix* to

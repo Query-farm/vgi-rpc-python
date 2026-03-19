@@ -1979,7 +1979,7 @@ class _CapabilitiesMiddleware:
 def make_wsgi_app(
     server: RpcServer,
     *,
-    prefix: str = "/vgi",
+    prefix: str = "",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
     max_stream_response_time: float | None = None,
@@ -2002,7 +2002,7 @@ def make_wsgi_app(
 
     Args:
         server: The RpcServer instance to serve.
-        prefix: URL prefix for all RPC endpoints (default ``/vgi``).
+        prefix: URL prefix for all RPC endpoints (default ``""`` — root).
         signing_key: HMAC key for signing state tokens.  When ``None``
             (the default), a random 32-byte key is generated **per process**.
             This means state tokens issued by one worker are invalid in
@@ -2186,7 +2186,7 @@ def make_wsgi_app(
 
         well_known = _OAuthResourceMetadataResource(_validated_oauth_metadata)
         app.add_route("/.well-known/oauth-protected-resource", well_known)
-        if prefix != "/":
+        if prefix and prefix != "/":
             app.add_route(f"/.well-known/oauth-protected-resource{prefix}", well_known)
 
     app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
@@ -2204,7 +2204,7 @@ def make_wsgi_app(
     if enable_landing_page:
         describe_path = f"{prefix}/describe" if describe_page_active else None
         landing_body = _build_landing_html(prefix, server.protocol_name, server.server_id, describe_path, repo_url)
-        app.add_route(prefix, _LandingPageResource(landing_body))
+        app.add_route(prefix or "/", _LandingPageResource(landing_body))
 
     if enable_not_found_page:
         app.add_sink(_make_not_found_sink(prefix, server.protocol_name))
@@ -2267,5 +2267,5 @@ def serve_http(
 
     app = make_wsgi_app(server)
     print(f"PORT:{port}", flush=True)
-    print(f"Serving on http://{host}:{port}/vgi", file=sys.stderr, flush=True)
+    print(f"Serving on http://{host}:{port}/", file=sys.stderr, flush=True)
     _waitress.serve(app, host=host, port=port, _quiet=True)

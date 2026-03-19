@@ -161,7 +161,7 @@ class TestOAuthResourceMetadata:
     def test_well_known_path_variant(self) -> None:
         """GET /.well-known/oauth-protected-resource/vgi works with prefix."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA)
+        client = make_sync_client(server, signing_key=b"k", prefix="/vgi", oauth_resource_metadata=_METADATA)
         resp = client.get("/.well-known/oauth-protected-resource/vgi")
         assert resp.status_code == 200
         body = json.loads(resp.content)
@@ -233,7 +233,7 @@ class TestOAuthResourceMetadata:
         )
         # POST without auth should get 401 with WWW-Authenticate
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -253,7 +253,7 @@ class TestOAuthResourceMetadata:
             authenticate=auth_fn,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -343,7 +343,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA_WITH_CLIENT_ID,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -363,7 +363,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -428,7 +428,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -448,7 +448,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -503,7 +503,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA_WITH_ID_TOKEN,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -523,7 +523,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -590,7 +590,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -610,7 +610,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -679,7 +679,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -699,7 +699,7 @@ class TestOAuthResourceMetadata:
             oauth_resource_metadata=_METADATA,
         )
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -744,7 +744,7 @@ class TestOAuthResourceMetadata:
         )
         # Step 1: Make an unauthenticated request, get 401
         resp = client.post(
-            "/vgi/echo",
+            "/echo",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )

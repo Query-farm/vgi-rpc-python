@@ -49,15 +49,17 @@ class _SyncTestResponse:
 class _SyncTestClient:
     """Sync HTTP client that calls a Falcon WSGI app directly via falcon.testing.TestClient."""
 
-    __slots__ = ("_client", "_default_headers")
+    __slots__ = ("_client", "_default_headers", "prefix")
 
     def __init__(
         self,
         app: falcon.App[falcon.Request, falcon.Response],
         default_headers: dict[str, str] | None = None,
+        prefix: str = "",
     ) -> None:
         self._client = falcon.testing.TestClient(app)
         self._default_headers: dict[str, str] = default_headers or {}
+        self.prefix = prefix
 
     def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
         """Send a synchronous POST using the Falcon test client."""
@@ -88,7 +90,7 @@ class _SyncTestClient:
 def make_sync_client(
     server: RpcServer,
     *,
-    prefix: str = "/vgi",
+    prefix: str = "",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
@@ -112,7 +114,7 @@ def make_sync_client(
 
     Args:
         server: The RpcServer to test.
-        prefix: URL prefix for RPC endpoints (default ``/vgi``).
+        prefix: URL prefix for RPC endpoints (default ``""`` — root).
         signing_key: HMAC key for signing state tokens (see
             ``make_wsgi_app`` for details).
         max_stream_response_bytes: See ``make_wsgi_app``.
@@ -154,4 +156,4 @@ def make_sync_client(
         repo_url=repo_url,
         oauth_resource_metadata=oauth_resource_metadata,
     )
-    return _SyncTestClient(app, default_headers=default_headers)
+    return _SyncTestClient(app, default_headers=default_headers, prefix=prefix)

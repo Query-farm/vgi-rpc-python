@@ -109,34 +109,34 @@ class TestGarbagePayloads:
 
     def test_empty_body(self, client: _SyncTestClient) -> None:
         """Empty request body returns 400."""
-        status, _ = _post(client, "/vgi/add", b"")
+        status, _ = _post(client, "/add", b"")
         assert status == 400
 
     def test_single_null_byte(self, client: _SyncTestClient) -> None:
         """Single null byte is not valid IPC."""
-        status, _ = _post(client, "/vgi/add", b"\x00")
+        status, _ = _post(client, "/add", b"\x00")
         assert status == 400
 
     def test_random_garbage(self, client: _SyncTestClient) -> None:
         """Random bytes are not valid IPC."""
-        status, _ = _post(client, "/vgi/add", b"this is not arrow ipc data at all")
+        status, _ = _post(client, "/add", b"this is not arrow ipc data at all")
         assert status == 400
 
     def test_truncated_ipc(self, client: _SyncTestClient) -> None:
         """Truncated IPC stream (cut mid-schema) returns 400."""
         valid = _craft_valid_add()
         truncated = valid[: len(valid) // 2]
-        status, _ = _post(client, "/vgi/add", truncated)
+        status, _ = _post(client, "/add", truncated)
         assert status == 400
 
     def test_json_body(self, client: _SyncTestClient) -> None:
         """JSON body is not valid IPC even with correct Content-Type."""
-        status, _ = _post(client, "/vgi/add", b'{"a": 1, "b": 2}')
+        status, _ = _post(client, "/add", b'{"a": 1, "b": 2}')
         assert status == 400
 
     def test_very_large_garbage(self, client: _SyncTestClient) -> None:
         """Large garbage payload doesn't crash the server."""
-        status, _ = _post(client, "/vgi/add", b"X" * 100_000)
+        status, _ = _post(client, "/add", b"X" * 100_000)
         assert status == 400
 
 
@@ -153,7 +153,7 @@ class TestBadMethodNames:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=schema)
         body = _craft_request("", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         # IPC metadata says "" but URL says "add" — method name mismatch
         assert status == 400
         err = _extract_error(content)
@@ -161,38 +161,38 @@ class TestBadMethodNames:
 
     def test_unknown_method_url(self, client: _SyncTestClient) -> None:
         """Non-existent method in URL returns 404."""
-        status, content = _post(client, "/vgi/nonexistent", _craft_valid_add())
+        status, content = _post(client, "/nonexistent", _craft_valid_add())
         assert status == 404
         err = _extract_error(content)
         assert "nonexistent" in err.error_message
 
     def test_path_traversal_attempt(self, client: _SyncTestClient) -> None:
         """Path traversal in method name is treated as unknown method."""
-        status, _ = _post(client, "/vgi/../../etc/passwd", _craft_valid_add())
+        status, _ = _post(client, "/../../etc/passwd", _craft_valid_add())
         assert status in (400, 404)
 
     def test_very_long_method_name(self, client: _SyncTestClient) -> None:
         """Very long method name doesn't crash or hang."""
         long_name = "a" * 10_000
-        status, _ = _post(client, f"/vgi/{long_name}", _craft_valid_add())
+        status, _ = _post(client, f"/{long_name}", _craft_valid_add())
         assert status == 404
 
     def test_method_with_null_bytes(self, client: _SyncTestClient) -> None:
         """Method name with null bytes in URL is handled."""
-        status, _ = _post(client, "/vgi/add%00extra", _craft_valid_add())
+        status, _ = _post(client, "/add%00extra", _craft_valid_add())
         # Falcon may treat this as a different path
         assert status in (400, 404)
 
     def test_method_with_unicode(self, client: _SyncTestClient) -> None:
         """Unicode method name is treated as unknown."""
-        status, _ = _post(client, "/vgi/\u2603snowman", _craft_valid_add())
+        status, _ = _post(client, "/\u2603snowman", _craft_valid_add())
         assert status == 404
 
     def test_method_with_slashes(self, client: _SyncTestClient) -> None:
         """Slashes in method name are handled by routing."""
-        status, _ = _post(client, "/vgi/add/extra/path", _craft_valid_add())
-        # Falcon routes: /vgi/{method}, /vgi/{method}/init, /vgi/{method}/exchange
-        # /vgi/add/extra/path won't match any route
+        status, _ = _post(client, "/add/extra/path", _craft_valid_add())
+        # Falcon routes: /{method}, /{method}/init, /{method}/exchange
+        # /add/extra/path won't match any route
         assert status in (400, 404)
 
 
@@ -206,24 +206,24 @@ class TestBadContentType:
 
     def test_text_plain(self, client: _SyncTestClient) -> None:
         """text/plain is rejected."""
-        status, content = _post(client, "/vgi/add", _craft_valid_add(), content_type="text/plain")
+        status, content = _post(client, "/add", _craft_valid_add(), content_type="text/plain")
         assert status == 415
         err = _extract_error(content)
         assert "Content-Type" in err.error_message
 
     def test_application_json(self, client: _SyncTestClient) -> None:
         """application/json is rejected."""
-        status, _ = _post(client, "/vgi/add", b'{"a":1}', content_type="application/json")
+        status, _ = _post(client, "/add", b'{"a":1}', content_type="application/json")
         assert status == 415
 
     def test_empty_content_type(self, client: _SyncTestClient) -> None:
         """Empty Content-Type header is rejected."""
-        status, _ = _post(client, "/vgi/add", _craft_valid_add(), content_type="")
+        status, _ = _post(client, "/add", _craft_valid_add(), content_type="")
         assert status == 415
 
     def test_almost_correct_content_type(self, client: _SyncTestClient) -> None:
         """Slightly wrong Content-Type (missing 'stream') is rejected."""
-        status, _ = _post(client, "/vgi/add", _craft_valid_add(), content_type="application/vnd.apache.arrow")
+        status, _ = _post(client, "/add", _craft_valid_add(), content_type="application/vnd.apache.arrow")
         assert status == 415
 
 
@@ -237,17 +237,17 @@ class TestWrongHttpMethod:
 
     def test_get_on_rpc_endpoint(self, client: _SyncTestClient) -> None:
         """GET on an RPC endpoint returns 405."""
-        resp = client._client.simulate_get("/vgi/add")
+        resp = client._client.simulate_get("/add")
         assert resp.status_code == 405
 
     def test_put_on_rpc_endpoint(self, client: _SyncTestClient) -> None:
         """PUT on an RPC endpoint returns 405."""
-        resp = client._client.simulate_put("/vgi/add", body=b"")
+        resp = client._client.simulate_put("/add", body=b"")
         assert resp.status_code == 405
 
     def test_delete_on_rpc_endpoint(self, client: _SyncTestClient) -> None:
         """DELETE on an RPC endpoint returns 405."""
-        resp = client._client.simulate_delete("/vgi/add")
+        resp = client._client.simulate_delete("/add")
         assert resp.status_code == 405
 
 
@@ -264,7 +264,7 @@ class TestBadMetadata:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=schema)
         body = _craft_request("add", schema, batch, include_method=False)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert err is not None
@@ -274,7 +274,7 @@ class TestBadMetadata:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=schema)
         body = _craft_request("add", schema, batch, include_version=False)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert err is not None
@@ -284,7 +284,7 @@ class TestBadMetadata:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=schema)
         body = _craft_request("add", schema, batch, version=b"999")
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert "version" in err.error_message.lower() or "Version" in err.error_message
@@ -294,7 +294,7 @@ class TestBadMetadata:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=schema)
         body = _craft_request("add", schema, batch, include_method=False, include_version=False)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert err is not None
@@ -313,7 +313,7 @@ class TestSchemaMismatch:
         schema = pa.schema([pa.field("x", pa.float64()), pa.field("y", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"x": [1.0], "y": [2.0]}, schema=schema)
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         # The server reads whatever columns are in the batch as kwargs.
         # "x" and "y" aren't "a" and "b" — the method call will fail with TypeError.
         assert status == 400
@@ -325,7 +325,7 @@ class TestSchemaMismatch:
         schema = pa.schema([pa.field("a", pa.utf8()), pa.field("b", pa.utf8())])
         batch = pa.RecordBatch.from_pydict({"a": ["one"], "b": ["two"]}, schema=schema)
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         # Method runs with wrong types; result serialization fails with ArrowInvalid.
         assert status == 400
         err = _extract_error(content)
@@ -342,7 +342,7 @@ class TestSchemaMismatch:
         )
         batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0], "c": [3.0]}, schema=schema)
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         # Extra param 'c' will be passed as kwarg — method doesn't accept it
         assert status == 400
         err = _extract_error(content)
@@ -353,7 +353,7 @@ class TestSchemaMismatch:
         schema = pa.schema([pa.field("a", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"a": [1.0]}, schema=schema)
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert err is not None
@@ -363,7 +363,7 @@ class TestSchemaMismatch:
         schema = pa.schema([])
         batch = pa.RecordBatch.from_pydict({}, schema=schema)
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert err is not None
@@ -382,7 +382,7 @@ class TestBadRowCounts:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         batch = empty_batch(schema)
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert "row" in err.error_message.lower()
@@ -392,7 +392,7 @@ class TestBadRowCounts:
         schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}, schema=schema)
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert "1 row" in err.error_message or "row" in err.error_message.lower()
@@ -405,7 +405,7 @@ class TestBadRowCounts:
             schema=schema,
         )
         body = _craft_request("add", schema, batch)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 400
         err = _extract_error(content)
         assert "row" in err.error_message.lower()
@@ -420,11 +420,11 @@ class TestEndpointRouting:
     """Tests for wrong endpoint/method-type combinations."""
 
     def test_stream_method_on_unary_endpoint(self, client: _SyncTestClient) -> None:
-        """Stream method on the /vgi/{method} endpoint returns 400."""
+        """Stream method on the /{method} endpoint returns 400."""
         schema = pa.schema([pa.field("factor", pa.float64())])
         batch = pa.RecordBatch.from_pydict({"factor": [2.0]}, schema=schema)
         body = _craft_request("transform", schema, batch)
-        status, content = _post(client, "/vgi/transform", body)
+        status, content = _post(client, "/transform", body)
         assert status == 400
         err = _extract_error(content)
         assert "stream" in err.error_message.lower()
@@ -432,7 +432,7 @@ class TestEndpointRouting:
     def test_unary_method_on_init_endpoint(self, client: _SyncTestClient) -> None:
         """Unary method on /init endpoint returns 400."""
         body = _craft_valid_add()
-        status, content = _post(client, "/vgi/add/init", body)
+        status, content = _post(client, "/add/init", body)
         assert status == 400
         err = _extract_error(content)
         assert "not a stream" in err.error_message
@@ -440,7 +440,7 @@ class TestEndpointRouting:
     def test_unary_method_on_exchange_endpoint(self, client: _SyncTestClient) -> None:
         """Unary method on /exchange endpoint returns 400."""
         body = _craft_valid_add()
-        status, content = _post(client, "/vgi/add/exchange", body)
+        status, content = _post(client, "/add/exchange", body)
         assert status == 400
         err = _extract_error(content)
         assert "does not support /exchange" in err.error_message
@@ -448,33 +448,33 @@ class TestEndpointRouting:
     def test_unknown_method_on_init_endpoint(self, client: _SyncTestClient) -> None:
         """Unknown method on /init endpoint returns 404."""
         body = _craft_valid_add()
-        status, _content = _post(client, "/vgi/nonexistent/init", body)
+        status, _content = _post(client, "/nonexistent/init", body)
         assert status == 404
 
     def test_unknown_method_on_exchange_endpoint(self, client: _SyncTestClient) -> None:
         """Unknown method on /exchange endpoint returns 404."""
         body = _craft_valid_add()
-        status, _content = _post(client, "/vgi/nonexistent/exchange", body)
+        status, _content = _post(client, "/nonexistent/exchange", body)
         assert status == 404
 
     def test_garbage_on_stream_init(self, client: _SyncTestClient) -> None:
         """Garbage bytes on stream init returns 400."""
-        status, _ = _post(client, "/vgi/transform/init", b"not ipc")
+        status, _ = _post(client, "/transform/init", b"not ipc")
         assert status == 400
 
     def test_garbage_on_exchange(self, client: _SyncTestClient) -> None:
         """Garbage bytes on exchange returns 400."""
-        status, _ = _post(client, "/vgi/transform/exchange", b"not ipc")
+        status, _ = _post(client, "/transform/exchange", b"not ipc")
         assert status == 400
 
     def test_empty_body_on_stream_init(self, client: _SyncTestClient) -> None:
         """Empty body on stream init returns 400."""
-        status, _ = _post(client, "/vgi/transform/init", b"")
+        status, _ = _post(client, "/transform/init", b"")
         assert status == 400
 
     def test_empty_body_on_exchange(self, client: _SyncTestClient) -> None:
         """Empty body on exchange returns 400."""
-        status, _ = _post(client, "/vgi/transform/exchange", b"")
+        status, _ = _post(client, "/transform/exchange", b"")
         assert status == 400
 
 
@@ -501,13 +501,13 @@ class TestStateTokenTampering:
     def test_empty_token(self, client: _SyncTestClient) -> None:
         """Empty bytes as state token."""
         body = self._make_exchange_request(b"")
-        status, _content = _post(client, "/vgi/transform/exchange", body)
+        status, _content = _post(client, "/transform/exchange", body)
         assert status == 400
 
     def test_short_token(self, client: _SyncTestClient) -> None:
         """Token shorter than minimum length."""
         body = self._make_exchange_request(b"\x00" * 10)
-        status, _content = _post(client, "/vgi/transform/exchange", body)
+        status, _content = _post(client, "/transform/exchange", body)
         assert status == 400
 
     def test_random_token(self, client: _SyncTestClient) -> None:
@@ -515,13 +515,13 @@ class TestStateTokenTampering:
         import os
 
         body = self._make_exchange_request(os.urandom(100))
-        status, _content = _post(client, "/vgi/transform/exchange", body)
+        status, _content = _post(client, "/transform/exchange", body)
         assert status == 400
 
     def test_all_zeros_token(self, client: _SyncTestClient) -> None:
         """All-zero token."""
         body = self._make_exchange_request(b"\x00" * 100)
-        status, _content = _post(client, "/vgi/transform/exchange", body)
+        status, _content = _post(client, "/transform/exchange", body)
         assert status == 400
 
     def test_no_state_token_in_metadata(self, client: _SyncTestClient) -> None:
@@ -531,7 +531,7 @@ class TestStateTokenTampering:
         buf = BytesIO()
         with ipc.new_stream(buf, schema) as writer:
             writer.write_batch(batch)
-        status, _content = _post(client, "/vgi/transform/exchange", buf.getvalue())
+        status, _content = _post(client, "/transform/exchange", buf.getvalue())
         assert status == 400
 
 
@@ -546,10 +546,10 @@ class TestServerRecovery:
     def test_good_after_garbage(self, client: _SyncTestClient) -> None:
         """Server works normally after receiving garbage."""
         # Send garbage
-        _post(client, "/vgi/add", b"garbage")
+        _post(client, "/add", b"garbage")
         # Send a valid request
         body = _craft_valid_add(a=3.0, b=4.0)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 200
         reader = ipc.open_stream(BytesIO(content))
         batch = reader.read_next_batch()
@@ -558,9 +558,9 @@ class TestServerRecovery:
 
     def test_good_after_wrong_content_type(self, client: _SyncTestClient) -> None:
         """Server works after wrong Content-Type."""
-        _post(client, "/vgi/add", b"hello", content_type="text/plain")
+        _post(client, "/add", b"hello", content_type="text/plain")
         body = _craft_valid_add(a=10.0, b=20.0)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 200
         reader = ipc.open_stream(BytesIO(content))
         batch = reader.read_next_batch()
@@ -571,10 +571,10 @@ class TestServerRecovery:
         schema = pa.schema([pa.field("x", pa.utf8())])
         batch = pa.RecordBatch.from_pydict({"x": ["bad"]}, schema=schema)
         body = _craft_request("add", schema, batch)
-        _post(client, "/vgi/add", body)
+        _post(client, "/add", body)
         # Now send a valid request
         body = _craft_valid_add(a=5.0, b=5.0)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 200
         reader = ipc.open_stream(BytesIO(content))
         batch = reader.read_next_batch()
@@ -590,10 +590,10 @@ class TestServerRecovery:
         buf = BytesIO()
         with ipc.new_stream(buf, schema) as writer:
             writer.write_batch(batch, custom_metadata=cm)
-        _post(client, "/vgi/transform/exchange", buf.getvalue())
+        _post(client, "/transform/exchange", buf.getvalue())
         # Now valid request
         body = _craft_valid_add(a=7.0, b=8.0)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 200
         reader = ipc.open_stream(BytesIO(content))
         batch = reader.read_next_batch()
@@ -602,14 +602,14 @@ class TestServerRecovery:
     def test_multiple_bad_then_good(self, client: _SyncTestClient) -> None:
         """Server survives a barrage of bad requests then handles a good one."""
         # Various bad requests
-        _post(client, "/vgi/add", b"")
-        _post(client, "/vgi/add", b"\x00" * 1000)
-        _post(client, "/vgi/nonexistent", _craft_valid_add())
-        _post(client, "/vgi/add", _craft_valid_add(), content_type="text/html")
-        _post(client, "/vgi/add/init", _craft_valid_add())
+        _post(client, "/add", b"")
+        _post(client, "/add", b"\x00" * 1000)
+        _post(client, "/nonexistent", _craft_valid_add())
+        _post(client, "/add", _craft_valid_add(), content_type="text/html")
+        _post(client, "/add/init", _craft_valid_add())
         # Valid request succeeds
         body = _craft_valid_add(a=100.0, b=200.0)
-        status, content = _post(client, "/vgi/add", body)
+        status, content = _post(client, "/add", body)
         assert status == 200
         reader = ipc.open_stream(BytesIO(content))
         batch = reader.read_next_batch()

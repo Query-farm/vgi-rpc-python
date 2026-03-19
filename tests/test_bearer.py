@@ -292,7 +292,7 @@ class TestChainAuthenticate:
         )
         # The HTTP layer should return 401
         resp = client.post(
-            "/vgi/whoami",
+            "/whoami",
             content=b"garbage",
             headers={"Content-Type": "application/octet-stream"},
         )

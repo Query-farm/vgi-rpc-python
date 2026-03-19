@@ -370,7 +370,7 @@ def http_connect[P](
     protocol: type[P],
     base_url: str | None = None,
     *,
-    prefix: str = "/vgi",
+    prefix: str | None = None,
     on_log: Callable[[Message], None] | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
     external_location: ExternalLocationConfig | None = None,
@@ -386,7 +386,9 @@ def http_connect[P](
             Required when *client* is ``None``; ignored when a pre-built
             *client* is provided.  The internally-created client follows
             redirects transparently.
-        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        prefix: URL prefix matching the server's prefix.  When ``None``
+            (the default), auto-detected from a ``_SyncTestClient``'s
+            ``.prefix`` attribute, or ``""`` for other clients.
         on_log: Optional callback for log messages from the server.
         client: Optional HTTP client — ``httpx.Client`` for production,
             or a ``_SyncTestClient`` from ``make_sync_client()`` for testing.
@@ -413,7 +415,11 @@ def http_connect[P](
             raise ValueError("base_url is required when client is not provided")
         client = httpx.Client(base_url=base_url, follow_redirects=True)
 
-    url_prefix = prefix
+    # Auto-detect prefix from _SyncTestClient when not explicitly provided
+    if prefix is None:
+        url_prefix = getattr(client, "prefix", "")
+    else:
+        url_prefix = prefix
     try:
         yield cast(
             P,
@@ -436,7 +442,7 @@ def http_connect[P](
 def http_introspect(
     base_url: str | None = None,
     *,
-    prefix: str = "/vgi",
+    prefix: str | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
@@ -446,7 +452,8 @@ def http_introspect(
     Args:
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
             Required when *client* is ``None``.
-        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        prefix: URL prefix matching the server's prefix.  ``None``
+            auto-detects from ``_SyncTestClient``.
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
         ipc_validation: Validation level for incoming IPC batches.
         retry: Optional retry configuration for transient HTTP failures.
@@ -467,6 +474,8 @@ def http_introspect(
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
         client = httpx.Client(base_url=base_url, follow_redirects=True)
+    if prefix is None:
+        prefix = getattr(client, "prefix", "")
 
     try:
         # Build a minimal request: empty params with __describe__ method name
@@ -783,7 +792,7 @@ class HttpServerCapabilities:
 def http_capabilities(
     base_url: str | None = None,
     *,
-    prefix: str = "/vgi",
+    prefix: str | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
 ) -> HttpServerCapabilities:
@@ -796,7 +805,8 @@ def http_capabilities(
     Args:
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
             Required when *client* is ``None``.
-        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        prefix: URL prefix matching the server's prefix.  ``None``
+            auto-detects from ``_SyncTestClient``.
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
         retry: Optional retry configuration for transient HTTP failures.
 
@@ -812,6 +822,8 @@ def http_capabilities(
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
         client = httpx.Client(base_url=base_url, follow_redirects=True)
+    if prefix is None:
+        prefix = getattr(client, "prefix", "")
 
     try:
         url = f"{prefix}/__capabilities__"
@@ -847,7 +859,7 @@ def request_upload_urls(
     base_url: str | None = None,
     *,
     count: int = 1,
-    prefix: str = "/vgi",
+    prefix: str | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
 ) -> list[UploadUrl]:
@@ -860,7 +872,8 @@ def request_upload_urls(
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
             Required when *client* is ``None``.
         count: Number of upload URLs to request (default 1, max 100).
-        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        prefix: URL prefix matching the server's prefix.  ``None``
+            auto-detects from ``_SyncTestClient``.
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
         retry: Optional retry configuration for transient HTTP failures.
 
@@ -878,6 +891,8 @@ def request_upload_urls(
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
         client = httpx.Client(base_url=base_url, follow_redirects=True)
+    if prefix is None:
+        prefix = getattr(client, "prefix", "")
 
     try:
         # Build request IPC with standard wire protocol metadata
@@ -982,7 +997,7 @@ class OAuthResourceMetadataResponse:
 def http_oauth_metadata(
     base_url: str | None = None,
     *,
-    prefix: str = "/vgi",
+    prefix: str | None = None,
     client: httpx.Client | _SyncTestClient | None = None,
 ) -> OAuthResourceMetadataResponse | None:
     """Discover OAuth Protected Resource Metadata (RFC 9728).
@@ -993,7 +1008,8 @@ def http_oauth_metadata(
     Args:
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
             Required when *client* is ``None``.
-        prefix: URL prefix matching the server's prefix (default ``/vgi``).
+        prefix: URL prefix matching the server's prefix.  ``None``
+            auto-detects from ``_SyncTestClient``.
             Must match the ``prefix`` passed to ``make_wsgi_app()`` on the
             server side — a mismatch will result in a 404 (``None`` return).
         client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
@@ -1012,6 +1028,8 @@ def http_oauth_metadata(
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
         client = httpx.Client(base_url=base_url, follow_redirects=True)
+    if prefix is None:
+        prefix = getattr(client, "prefix", "")
 
     try:
         url = f"/.well-known/oauth-protected-resource{prefix}"

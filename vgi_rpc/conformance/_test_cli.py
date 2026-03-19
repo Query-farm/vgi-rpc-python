@@ -292,7 +292,7 @@ def _build_parser() -> argparse.ArgumentParser:
     transport_excl.add_argument("--cmd", "-c", metavar="CMD", help="Subprocess command to test (pipe transport)")
     transport_excl.add_argument("--url", "-u", metavar="URL", help="HTTP base URL to test")
     transport_excl.add_argument("--unix", metavar="PATH", help="Unix domain socket path to test")
-    transport_group.add_argument("--prefix", default="/vgi", help="URL path prefix (default: /vgi)")
+    transport_group.add_argument("--prefix", default="", help="URL path prefix (default: none)")
     transport_group.add_argument(
         "--shm",
         type=int,
