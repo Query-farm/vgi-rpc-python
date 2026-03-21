@@ -254,11 +254,129 @@ class TestCrossImplDescribe:
 
 
 # ---------------------------------------------------------------------------
-# TypeScript gap
+# TypeScript HTML pages (subprocess HTTP server)
 # ---------------------------------------------------------------------------
 
 
-class TestTypeScriptHtmlGap:
-    def test_no_html_pages(self) -> None:
-        """TypeScript implementation has no HTML pages — document this gap."""
-        pytest.skip("TypeScript has no HTML pages (feature gap)")
+def _start_ts_http() -> tuple[subprocess.Popen, int] | None:
+    """Start the TypeScript conformance worker in HTTP mode. Returns (process, port) or None."""
+    proc = subprocess.Popen(
+        ["bun", "run", "examples/conformance-http.ts"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=TS_REPO,
+    )
+    assert proc.stdout is not None
+    line = proc.stdout.readline().decode().strip()
+    if not line.startswith("PORT:"):
+        proc.terminate()
+        return None
+    port = int(line.split(":", 1)[1])
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            httpx.get(f"http://127.0.0.1:{port}/", timeout=1.0)
+            break
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            time.sleep(0.1)
+
+    return proc, port
+
+
+@pytest.fixture(scope="module")
+def ts_http():
+    """Start TypeScript HTTP server, yield base_url, stop on teardown."""
+    result = _start_ts_http()
+    if result is None:
+        pytest.skip("TypeScript conformance worker not available")
+    proc, port = result
+    yield f"http://127.0.0.1:{port}"
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+class TestTsLandingPage:
+    def test_status_200(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/", timeout=5)
+        assert r.status_code == 200
+
+    def test_content_type_html(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/", timeout=5)
+        assert "text/html" in r.headers.get("content-type", "")
+
+    def test_contains_vgi_rpc(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/", timeout=5)
+        assert "vgi-rpc" in r.text.lower() or "vgi_rpc" in r.text.lower()
+
+    def test_contains_logo(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/", timeout=5)
+        assert "logo" in r.text.lower() or ".png" in r.text
+
+
+class TestTsDescribePage:
+    def test_status_200(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/describe", timeout=5)
+        assert r.status_code == 200
+
+    def test_content_type_html(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/describe", timeout=5)
+        assert "text/html" in r.headers.get("content-type", "")
+
+    def test_contains_method_names(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/describe", timeout=5)
+        methods = extract_method_names(r.text)
+        assert "echo_string" in methods
+        assert "echo_int" in methods
+
+    def test_contains_badges(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/describe", timeout=5)
+        badges = extract_badges(r.text)
+        assert "unary" in badges
+
+
+class TestTs404Page:
+    def test_status_404(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/nonexistent", timeout=5)
+        assert r.status_code == 404
+
+    def test_content_type_html(self, ts_http: str) -> None:
+        r = httpx.get(f"{ts_http}/nonexistent", timeout=5)
+        assert "text/html" in r.headers.get("content-type", "")
+
+
+# ---------------------------------------------------------------------------
+# Cross-implementation comparison (all three)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossImplAllDescribe:
+    def test_all_three_same_methods(self, python_client, go_http: str, ts_http: str) -> None:
+        """Python, Go, and TypeScript describe pages list the same methods."""
+        py_methods = extract_method_names(python_client.simulate_get("/describe").text)
+        go_methods = extract_method_names(httpx.get(f"{go_http}/describe", timeout=5).text)
+        ts_methods = extract_method_names(httpx.get(f"{ts_http}/describe", timeout=5).text)
+
+        assert len(py_methods) > 10
+        assert len(go_methods) > 10
+        assert len(ts_methods) > 10
+
+        # All three should list the same methods
+        common = py_methods & go_methods & ts_methods
+        assert len(common) > 10, f"Only {len(common)} methods common to all three"
+
+        all_methods = py_methods | go_methods | ts_methods
+        for lang, methods in [("python", py_methods), ("go", go_methods), ("typescript", ts_methods)]:
+            missing = all_methods - methods
+            assert not missing, f"{lang} missing methods: {missing}"
+
+    def test_all_three_have_badges(self, python_client, go_http: str, ts_http: str) -> None:
+        """All three implementations use unary and stream badges."""
+        for label, html in [
+            ("python", python_client.simulate_get("/describe").text),
+            ("go", httpx.get(f"{go_http}/describe", timeout=5).text),
+            ("typescript", httpx.get(f"{ts_http}/describe", timeout=5).text),
+        ]:
+            badges = extract_badges(html)
+            assert "unary" in badges, f"{label} missing 'unary' badge"
+            assert "stream" in badges, f"{label} missing 'stream' badge"
