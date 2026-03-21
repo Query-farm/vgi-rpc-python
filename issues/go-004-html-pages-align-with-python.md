@@ -1,5 +1,6 @@
 # Go: Align HTML describe page with Python reference
 
+**Status:** RESOLVED — commit `6eae8bc` in vgi-rpc-go
 **Repo:** ~/Development/vgi-rpc-go
 **Priority:** Consistency — HTML pages should match the Python reference implementation
 
