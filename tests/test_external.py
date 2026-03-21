@@ -40,6 +40,7 @@ from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import (
     LOCATION_FETCH_MS_KEY,
     LOCATION_KEY,
+    LOCATION_SHA256_KEY,
     LOCATION_SOURCE_KEY,
     LOG_LEVEL_KEY,
     encode_metadata,
@@ -790,6 +791,179 @@ class TestMaybeExternalizeBatch:
         assert resolved.num_rows == 100
         assert resolved_cm is not None
         assert resolved_cm.get(b"user.key") == b"user.value"
+
+
+# ===========================================================================
+# Unit tests — SHA-256 checksum
+# ===========================================================================
+
+
+class TestSHA256Checksum:
+    """Tests for SHA-256 checksum on pointer batches."""
+
+    def test_sha256_present_on_externalize_batch(self) -> None:
+        """Pointer batch from maybe_externalize_batch has SHA-256 metadata."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
+
+        batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
+        result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+
+        assert result_batch.num_rows == 0
+        assert result_cm is not None
+        sha256_val = result_cm.get(LOCATION_SHA256_KEY)
+        assert sha256_val is not None
+        sha256_str = sha256_val.decode() if isinstance(sha256_val, bytes) else sha256_val
+        assert len(sha256_str) == 64  # hex-encoded SHA-256
+
+    def test_sha256_present_on_externalize_collector(self) -> None:
+        """Pointer batch from maybe_externalize_collector has SHA-256 metadata."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
+
+        out = OutputCollector(_SCHEMA)
+        out.emit_pydict({"value": list(range(100))})
+
+        result = maybe_externalize_collector(out, config)
+        assert len(result) == 1
+        _batch, cm = result[0]
+        assert cm is not None
+        sha256_val = cm.get(LOCATION_SHA256_KEY)
+        assert sha256_val is not None
+        sha256_str = sha256_val.decode() if isinstance(sha256_val, bytes) else sha256_val
+        assert len(sha256_str) == 64
+
+    def test_sha256_matches_raw_ipc_bytes(self) -> None:
+        """SHA-256 in metadata matches hash of raw IPC bytes (pre-compression)."""
+        import hashlib
+
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
+
+        batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
+        _result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+
+        assert result_cm is not None
+        sha256_val = result_cm.get(LOCATION_SHA256_KEY)
+        assert sha256_val is not None
+        expected_hex = sha256_val.decode() if isinstance(sha256_val, bytes) else sha256_val
+
+        # Uploaded data is raw IPC (no compression configured)
+        uploaded_bytes = next(iter(storage.data.values()))
+        actual_hex = hashlib.sha256(uploaded_bytes).hexdigest()
+        assert actual_hex == expected_hex
+
+    def test_sha256_verified_on_fetch(self) -> None:
+        """Resolution succeeds when SHA-256 matches."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
+
+        batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
+        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(ext_batch, ext_cm, config)
+
+        assert resolved.num_rows == 100
+
+    def test_sha256_mismatch_raises(self) -> None:
+        """Resolution fails when SHA-256 does not match."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
+
+        batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
+        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+
+        # Tamper with the SHA-256 in the metadata
+        assert ext_cm is not None
+        location_val = ext_cm.get(LOCATION_KEY)
+        assert location_val is not None
+        tampered_cm = pa.KeyValueMetadata(
+            {
+                LOCATION_KEY: location_val,
+                LOCATION_SHA256_KEY: b"0" * 64,
+            }
+        )
+
+        with (
+            _mock_aio(storage),
+            pytest.raises(RuntimeError, match="SHA-256 checksum mismatch"),
+        ):
+            resolve_external_location(ext_batch, tampered_cm, config)
+
+    def test_sha256_absent_skips_verification(self) -> None:
+        """Old pointer batches without SHA-256 metadata resolve successfully."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
+
+        # Create IPC data and a pointer batch WITHOUT SHA-256
+        data_batch = pa.RecordBatch.from_pydict({"value": [42]}, schema=_SCHEMA)
+        ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
+        url = "https://mock.storage/no-sha"
+        storage.data[url] = ipc_bytes
+
+        pointer, cm = make_external_location_batch(_SCHEMA, url)  # no sha256 param
+        assert cm.get(LOCATION_SHA256_KEY) is None
+
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(pointer, cm, config)
+
+        assert resolved.num_rows == 1
+        assert resolved.column("value")[0].as_py() == 42
+
+    def test_sha256_roundtrip_with_compression(self) -> None:
+        """SHA-256 checksum works correctly with zstd compression."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(
+            storage=storage,
+            externalize_threshold_bytes=10,
+            compression=Compression(),
+            max_retries=0,
+        )
+
+        batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
+        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+
+        assert ext_cm is not None
+        assert ext_cm.get(LOCATION_SHA256_KEY) is not None
+
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(ext_batch, ext_cm, config)
+
+        assert resolved.num_rows == 100
+        assert resolved.column("value")[0].as_py() == 0
+        assert resolved.column("value")[99].as_py() == 99
+
+    def test_sha256_with_compression_is_pre_compression(self) -> None:
+        """SHA-256 is of raw IPC bytes, not compressed bytes."""
+        import hashlib
+
+        storage = MockStorage()
+        config = ExternalLocationConfig(
+            storage=storage,
+            externalize_threshold_bytes=10,
+            compression=Compression(),
+        )
+
+        batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
+        _result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+
+        assert result_cm is not None
+        sha256_hex = result_cm.get(LOCATION_SHA256_KEY)
+        assert sha256_hex is not None
+        sha256_str = sha256_hex.decode() if isinstance(sha256_hex, bytes) else sha256_hex
+
+        # Uploaded data is compressed — SHA-256 should NOT match compressed bytes
+        uploaded_compressed = next(iter(storage.data.values()))
+        compressed_hash = hashlib.sha256(uploaded_compressed).hexdigest()
+        assert sha256_str != compressed_hash, "SHA-256 should be of raw IPC, not compressed bytes"
+
+        # Decompress and verify SHA-256 matches the raw IPC
+        import zstandard
+
+        raw_ipc = zstandard.ZstdDecompressor().decompress(uploaded_compressed)
+        raw_hash = hashlib.sha256(raw_ipc).hexdigest()
+        assert sha256_str == raw_hash
 
 
 # ===========================================================================
