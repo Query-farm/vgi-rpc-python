@@ -55,6 +55,36 @@ def extract_badges(html: str) -> set[str]:
     return badges
 
 
+def extract_method_badges(html: str) -> dict[str, list[str]]:
+    """Extract per-method badge lists from a describe page HTML."""
+    cards: dict[str, list[str]] = {}
+    for m in re.finditer(r'class="method-name">([^<]+)</span>(.*?)</div>', html, re.DOTALL):
+        method = m.group(1).strip()
+        badges = sorted(b.lower() for b in re.findall(r'badge[^>]*>([^<]+)<', m.group(2)))
+        cards[method] = badges
+    return cards
+
+
+def extract_table_columns(html: str) -> list[str]:
+    """Extract unique table column headers from HTML."""
+    headers = re.findall(r'<th>([^<]+)</th>', html)
+    return list(dict.fromkeys(headers))
+
+
+def extract_params_for_method(html: str, method_name: str) -> list[str] | None:
+    """Extract parameter table cells for a specific method."""
+    idx = html.find(f">{method_name}<")
+    if idx < 0:
+        return None
+    table_start = html.find("<table>", idx)
+    table_end = html.find("</table>", table_start)
+    if table_start < 0 or table_end < 0:
+        return None
+    table = html[table_start:table_end]
+    rows = re.findall(r"<td[^>]*>(.*?)</td>", table, re.DOTALL)
+    return [r.strip() for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Python HTML pages (in-process via Falcon test client)
 # ---------------------------------------------------------------------------
@@ -361,10 +391,6 @@ class TestCrossImplAllDescribe:
         assert len(go_methods) > 10
         assert len(ts_methods) > 10
 
-        # All three should list the same methods
-        common = py_methods & go_methods & ts_methods
-        assert len(common) > 10, f"Only {len(common)} methods common to all three"
-
         all_methods = py_methods | go_methods | ts_methods
         for lang, methods in [("python", py_methods), ("go", go_methods), ("typescript", ts_methods)]:
             missing = all_methods - methods
@@ -380,3 +406,59 @@ class TestCrossImplAllDescribe:
             badges = extract_badges(html)
             assert "unary" in badges, f"{label} missing 'unary' badge"
             assert "stream" in badges, f"{label} missing 'stream' badge"
+
+
+class TestContentParity:
+    """Deep content comparison against the Python reference implementation."""
+
+    def test_ts_badges_match_python(self, python_client, ts_http: str) -> None:
+        """TypeScript per-method badges should match Python exactly."""
+        py_badges = extract_method_badges(python_client.simulate_get("/describe").text)
+        ts_badges = extract_method_badges(httpx.get(f"{ts_http}/describe", timeout=5).text)
+
+        common = set(py_badges) & set(ts_badges)
+        assert len(common) > 40, f"Only {len(common)} methods in common"
+
+        diffs = []
+        for m in sorted(common):
+            if py_badges[m] != ts_badges[m]:
+                diffs.append(f"  {m}: python={py_badges[m]} ts={ts_badges[m]}")
+        assert not diffs, f"Badge differences:\n" + "\n".join(diffs)
+
+    def test_ts_columns_match_python(self, python_client, ts_http: str) -> None:
+        """TypeScript table columns should match Python (Name, Type, Default, Description)."""
+        py_cols = extract_table_columns(python_client.simulate_get("/describe").text)
+        ts_cols = extract_table_columns(httpx.get(f"{ts_http}/describe", timeout=5).text)
+        assert py_cols == ts_cols, f"Column mismatch: python={py_cols} ts={ts_cols}"
+
+    def test_ts_params_echo_string(self, python_client, ts_http: str) -> None:
+        """TypeScript echo_string params should match Python."""
+        py_p = extract_params_for_method(python_client.simulate_get("/describe").text, "echo_string")
+        ts_p = extract_params_for_method(httpx.get(f"{ts_http}/describe", timeout=5).text, "echo_string")
+        assert py_p == ts_p, f"echo_string params differ:\n  python={py_p}\n  ts={ts_p}"
+
+    def test_ts_params_add_floats(self, python_client, ts_http: str) -> None:
+        """TypeScript add_floats params should match Python (float types)."""
+        py_p = extract_params_for_method(python_client.simulate_get("/describe").text, "add_floats")
+        ts_p = extract_params_for_method(httpx.get(f"{ts_http}/describe", timeout=5).text, "add_floats")
+        assert py_p == ts_p, f"add_floats params differ:\n  python={py_p}\n  ts={ts_p}"
+
+    @pytest.mark.xfail(reason="Go uses producer/exchange badges and 3-column tables — not yet aligned with Python")
+    def test_go_badges_match_python(self, python_client, go_http: str) -> None:
+        """Go per-method badges should match Python exactly."""
+        py_badges = extract_method_badges(python_client.simulate_get("/describe").text)
+        go_badges = extract_method_badges(httpx.get(f"{go_http}/describe", timeout=5).text)
+
+        common = set(py_badges) & set(go_badges)
+        diffs = []
+        for m in sorted(common):
+            if py_badges[m] != go_badges[m]:
+                diffs.append(f"  {m}: python={py_badges[m]} go={go_badges[m]}")
+        assert not diffs, f"Badge differences:\n" + "\n".join(diffs)
+
+    @pytest.mark.xfail(reason="Go uses 3 columns (no Description) — not yet aligned with Python")
+    def test_go_columns_match_python(self, python_client, go_http: str) -> None:
+        """Go table columns should match Python (Name, Type, Default, Description)."""
+        py_cols = extract_table_columns(python_client.simulate_get("/describe").text)
+        go_cols = extract_table_columns(httpx.get(f"{go_http}/describe", timeout=5).text)
+        assert py_cols == go_cols, f"Column mismatch: python={py_cols} go={go_cols}"
