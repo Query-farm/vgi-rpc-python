@@ -18,6 +18,7 @@ __all__ = [
     "DESCRIBE_VERSION_KEY",
     "LOCATION_FETCH_MS_KEY",
     "LOCATION_KEY",
+    "LOCATION_SHA256_KEY",
     "LOCATION_SOURCE_KEY",
     "LOG_EXTRA_KEY",
     "LOG_LEVEL_KEY",
@@ -57,6 +58,7 @@ SERVER_ID_KEY = b"vgi_rpc.server_id"
 REQUEST_ID_KEY = b"vgi_rpc.request_id"
 
 LOCATION_KEY = b"vgi_rpc.location"
+LOCATION_SHA256_KEY = b"vgi_rpc.location.sha256"
 LOCATION_FETCH_MS_KEY = b"vgi_rpc.location.fetch_ms"
 LOCATION_SOURCE_KEY = b"vgi_rpc.location.source"
 

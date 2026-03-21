@@ -65,6 +65,7 @@ starting point for most workloads.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable
@@ -81,6 +82,7 @@ from vgi_rpc.log import Message
 from vgi_rpc.metadata import (
     LOCATION_FETCH_MS_KEY,
     LOCATION_KEY,
+    LOCATION_SHA256_KEY,
     LOCATION_SOURCE_KEY,
     LOG_LEVEL_KEY,
     merge_metadata,
@@ -378,23 +380,31 @@ def is_external_location_batch(batch: pa.RecordBatch, custom_metadata: pa.KeyVal
 def make_external_location_batch(
     schema: pa.Schema,
     url: str,
+    sha256: str | None = None,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
     """Create a zero-row pointer batch for an externalized location.
 
     Args:
         schema: The schema the pointer batch should conform to.
         url: The URL where the actual data resides.
+        sha256: Optional hex-encoded SHA-256 of the stored bytes
+            (post-compression).  Included as ``vgi_rpc.location.sha256``
+            metadata so consumers can verify data integrity on fetch.
 
     Returns:
         A ``(batch, custom_metadata)`` tuple where *batch* is zero-row
-        and *custom_metadata* contains ``vgi_rpc.location``.
+        and *custom_metadata* contains ``vgi_rpc.location`` (and
+        optionally ``vgi_rpc.location.sha256``).
 
     """
     batch = pa.RecordBatch.from_arrays(
         [pa.array([], type=f.type) for f in schema],
         schema=schema,
     )
-    custom_metadata = pa.KeyValueMetadata({LOCATION_KEY: url.encode()})
+    meta: dict[bytes, bytes] = {LOCATION_KEY: url.encode()}
+    if sha256 is not None:
+        meta[LOCATION_SHA256_KEY] = sha256.encode()
+    custom_metadata = pa.KeyValueMetadata(meta)
     return batch, custom_metadata
 
 
@@ -478,13 +488,19 @@ def resolve_external_location(
 
     t0 = time.monotonic()
     try:
+        # Extract expected SHA-256 from pointer metadata (optional — backward compatible)
+        expected_sha256: str | None = None
+        sha256_bytes = custom_metadata.get(LOCATION_SHA256_KEY)
+        if sha256_bytes is not None:
+            expected_sha256 = sha256_bytes.decode() if isinstance(sha256_bytes, bytes) else str(sha256_bytes)
+
         retryer = Retrying(
             stop=stop_after_attempt(max_retries + 1),
             wait=wait_fixed(config.retry_delay_seconds),
             retry=retry_if_exception_type(retry_types),
             reraise=True,
         )
-        result = retryer(_fetch_and_resolve, batch.schema, url, config, on_log, ipc_validation)
+        result = retryer(_fetch_and_resolve, batch.schema, url, config, on_log, ipc_validation, expected_sha256)
         elapsed_ms = (time.monotonic() - t0) * 1000
         if span is not None:
             span.set_attribute("fetch_duration_ms", elapsed_ms)
@@ -513,6 +529,7 @@ def _fetch_and_resolve(
     config: ExternalLocationConfig,
     on_log: _OnLog,
     ipc_validation: IpcValidation = IpcValidation.FULL,
+    expected_sha256: str | None = None,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Fetch URL and extract the data batch from the IPC stream."""
     from vgi_rpc.rpc import _dispatch_log_or_error
@@ -520,6 +537,12 @@ def _fetch_and_resolve(
     t0 = time.monotonic()
     data = fetch_url(url, config.fetch_config)
     elapsed_ms = (time.monotonic() - t0) * 1000
+
+    # Verify SHA-256 if present (data is already decompressed = raw IPC bytes)
+    if expected_sha256 is not None:
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(f"SHA-256 checksum mismatch for {url}: expected {expected_sha256}, got {actual_sha256}")
 
     reader = ValidatedReader(ipc.open_stream(BytesIO(data)), ipc_validation)
     data_batches: list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]] = []
@@ -617,6 +640,9 @@ def maybe_externalize_collector(
     ipc_bytes = buf.getvalue()
     original_bytes: int | None = None
 
+    # Compute SHA-256 of the raw IPC bytes (pre-compression) for end-to-end verification
+    data_sha256 = hashlib.sha256(ipc_bytes).hexdigest()
+
     content_encoding: str | None = None
     if config.compression is not None:
         import zstandard
@@ -629,14 +655,15 @@ def maybe_externalize_collector(
         ipc_bytes, out.output_schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
     )
     _logger.debug(
-        "Batch externalized: %s (%d bytes, compressed=%s)",
+        "Batch externalized: %s (%d bytes, compressed=%s, sha256=%s)",
         url,
         len(ipc_bytes),
         content_encoding is not None,
+        data_sha256,
         extra={"url": url, "size_bytes": len(ipc_bytes), "compressed": content_encoding is not None},
     )
 
-    pointer_batch, pointer_cm = make_external_location_batch(out.output_schema, url)
+    pointer_batch, pointer_cm = make_external_location_batch(out.output_schema, url, sha256=data_sha256)
     return [(pointer_batch, pointer_cm)]
 
 
@@ -686,6 +713,9 @@ def maybe_externalize_batch(
     ipc_bytes = buf.getvalue()
     original_bytes: int | None = None
 
+    # Compute SHA-256 of the raw IPC bytes (pre-compression) for end-to-end verification
+    data_sha256 = hashlib.sha256(ipc_bytes).hexdigest()
+
     content_encoding: str | None = None
     if config.compression is not None:
         import zstandard
@@ -698,11 +728,12 @@ def maybe_externalize_batch(
         ipc_bytes, batch.schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
     )
     _logger.debug(
-        "Batch externalized: %s (%d bytes, compressed=%s)",
+        "Batch externalized: %s (%d bytes, compressed=%s, sha256=%s)",
         url,
         len(ipc_bytes),
         content_encoding is not None,
+        data_sha256,
         extra={"url": url, "size_bytes": len(ipc_bytes), "compressed": content_encoding is not None},
     )
 
-    return make_external_location_batch(batch.schema, url)
+    return make_external_location_batch(batch.schema, url, sha256=data_sha256)
