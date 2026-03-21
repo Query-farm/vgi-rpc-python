@@ -1,5 +1,6 @@
 # Go: HTTP conformance tests broken — URL prefix mismatch + catch-all 404 handler
 
+**Status:** RESOLVED — commit `fae61f2` in vgi-rpc-go
 **Repo:** ~/Development/vgi-rpc-go
 **Severity:** All HTTP transport conformance tests fail (pipe/subprocess/unix all pass)
 **Introduced by:** commit `85caef7` — "Add HTML landing page, API describe page, and 404 page"
