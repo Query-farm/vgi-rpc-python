@@ -3,7 +3,7 @@ PYTHON_REPO  := $(REPOS)/vgi-rpc
 GO_REPO      := $(REPOS)/vgi-rpc-go
 TS_REPO      := $(REPOS)/vgi-rpc-typescript
 
-.PHONY: status test-all test-python test-go test-ts describe
+.PHONY: status test-all test-python test-go test-ts describe test-otel test-html test-cross
 
 status:
 	@echo "=== Python ==="
@@ -23,6 +23,16 @@ status:
 
 describe:
 	uv run python describe_diff.py
+
+test-otel:
+	@echo "=== OTel Consistency ==="
+	uv run pytest test_otel_consistency.py -v --timeout=60
+
+test-html:
+	@echo "=== HTML Pages ==="
+	uv run pytest test_html_pages.py -v --timeout=30
+
+test-cross: test-otel test-html
 
 test-all: test-python test-go test-ts
 
