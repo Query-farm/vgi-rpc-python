@@ -443,7 +443,6 @@ class TestContentParity:
         ts_p = extract_params_for_method(httpx.get(f"{ts_http}/describe", timeout=5).text, "add_floats")
         assert py_p == ts_p, f"add_floats params differ:\n  python={py_p}\n  ts={ts_p}"
 
-    @pytest.mark.xfail(reason="Go uses producer/exchange badges and 3-column tables — not yet aligned with Python")
     def test_go_badges_match_python(self, python_client, go_http: str) -> None:
         """Go per-method badges should match Python exactly."""
         py_badges = extract_method_badges(python_client.simulate_get("/describe").text)
@@ -456,7 +455,6 @@ class TestContentParity:
                 diffs.append(f"  {m}: python={py_badges[m]} go={go_badges[m]}")
         assert not diffs, f"Badge differences:\n" + "\n".join(diffs)
 
-    @pytest.mark.xfail(reason="Go uses 3 columns (no Description) — not yet aligned with Python")
     def test_go_columns_match_python(self, python_client, go_http: str) -> None:
         """Go table columns should match Python (Name, Type, Default, Description)."""
         py_cols = extract_table_columns(python_client.simulate_get("/describe").text)
