@@ -1,5 +1,6 @@
 # TypeScript: Missing OpenTelemetry instrumentation
 
+**Status:** RESOLVED — commit `49ed27d` in vgi-rpc-typescript
 **Repo:** ~/Development/vgi-rpc-typescript
 **Priority:** Feature gap — Python and Go both have OpenTelemetry support
 

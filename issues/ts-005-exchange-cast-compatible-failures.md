@@ -1,5 +1,6 @@
 # TypeScript: exchange_cast_compatible tests fail on pipe/subprocess
 
+**Status:** RESOLVED — was stale state, 850/850 pass now
 **Repo:** ~/Development/vgi-rpc-typescript
 **Severity:** 4 conformance tests fail (846/850 pass)
 
