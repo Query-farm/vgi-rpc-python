@@ -1,5 +1,6 @@
 # TypeScript: Upgrade __describe__ schema from v2 to v3
 
+**Status:** RESOLVED — commit `bc408d7` in vgi-rpc-typescript
 **Repo:** ~/Development/vgi-rpc-typescript
 **Reference:** Python commit `d8c9984` — added is_exchange and param_docs_json fields
 
