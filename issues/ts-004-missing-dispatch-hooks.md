@@ -1,5 +1,6 @@
 # TypeScript: Missing dispatch hooks for observability
 
+**Status:** RESOLVED — commit `e6bc16a` in vgi-rpc-typescript
 **Repo:** ~/Development/vgi-rpc-typescript
 **Priority:** Feature gap — Python and Go both have dispatch hooks
 
