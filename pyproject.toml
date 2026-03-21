@@ -1,0 +1,7 @@
+[project]
+name = "vgi-rpc-sync"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "vgi-rpc>=0.1.27",
+]
