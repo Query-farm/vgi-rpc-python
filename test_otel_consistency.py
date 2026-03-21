@@ -380,18 +380,17 @@ class TestErrorSpans:
             assert spans, f"Go: no span for {method}"
             assert not spans[-1].status_ok, f"Go: {method} should have error status"
 
-    @pytest.mark.xfail(reason="TS HTTP handler doesn't pass errors to dispatch hook")
     def test_ts_error_status(self, ts_spans: list[NormalizedSpan]) -> None:
         for method in ["raise_value_error", "raise_runtime_error", "raise_type_error"]:
             spans = [s for s in ts_spans if s.method == method]
             assert spans, f"TS: no span for {method}"
             assert not spans[-1].status_ok, f"TS: {method} should have error status"
 
-    def test_error_type_attr_python_go(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan],
+    def test_error_type_attr_all(
+        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
     ) -> None:
-        """Python and Go error spans should have error_type attribute."""
-        for spans, lang in [(python_spans, "python"), (go_spans, "go")]:
+        """All error spans should have error_type attribute."""
+        for spans, lang in [(python_spans, "python"), (go_spans, "go"), (ts_spans, "typescript")]:
             for method in ["raise_value_error", "raise_runtime_error", "raise_type_error"]:
                 matching = [s for s in spans if s.method == method]
                 for s in matching:
