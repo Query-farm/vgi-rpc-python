@@ -1,5 +1,6 @@
 # Go: Upgrade __describe__ schema from v2 to v3
 
+**Status:** RESOLVED — commit `1ee87f1` in vgi-rpc-go
 **Repo:** ~/Development/vgi-rpc-go
 **Reference:** Python commit `d8c9984` — added is_exchange and param_docs_json fields
 
