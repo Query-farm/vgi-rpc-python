@@ -1,5 +1,6 @@
 # TypeScript: node-http conformance transport returns 404
 
+**Status:** RESOLVED — was a stale bundle; clean rebuild fixes it
 **Repo:** ~/Development/vgi-rpc-typescript
 **Severity:** node-http transport conformance tests fail with 404 HTML responses
 
