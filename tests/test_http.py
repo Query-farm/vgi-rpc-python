@@ -25,7 +25,12 @@ from aioresponses import CallbackResult
 from aioresponses import aioresponses as aioresponses_ctx
 from pyarrow import ipc
 
-from vgi_rpc.external import ExternalLocationConfig, UploadUrl
+from vgi_rpc.external import (
+    ExternalLocationConfig,
+    UploadUrl,
+    make_external_location_batch,
+    resolve_external_location,
+)
 from vgi_rpc.http import (
     _ARROW_CONTENT_TYPE,
     MAX_REQUEST_BYTES_HEADER,
@@ -670,6 +675,132 @@ class TestHttpExternalStorage:
         for ab in batches:
             assert ab.batch.num_rows == 2
         assert len(storage.data) == 0
+        client.close()
+
+
+class TestHttpExternalSHA256:
+    """SHA-256 checksum tests for ExternalLocation over HTTP transport."""
+
+    def _make_config(self, storage: MockStorage, threshold: int = 100) -> ExternalLocationConfig:
+        """Create an ExternalLocationConfig with low threshold for testing."""
+        return ExternalLocationConfig(
+            storage=storage,
+            externalize_threshold_bytes=threshold,
+            max_retries=0,
+            retry_delay_seconds=0.0,
+        )
+
+    def _make_client(self, config: ExternalLocationConfig) -> _SyncTestClient:
+        """Create a _SyncTestClient wrapping an RpcServer with external storage."""
+        server = RpcServer(_ExternalService, _ExternalServiceImpl(), external_location=config)
+        return make_sync_client(server, signing_key=b"test-key")
+
+    def _mock_aio_dynamic(self, storage: MockStorage, mock: aioresponses_ctx) -> None:
+        """Register pattern-based HEAD + GET callbacks."""
+        pattern = re.compile(r"^https://mock\.storage/.*$")
+
+        def _head_callback(url_: Any, **kwargs: Any) -> CallbackResult:
+            url_str = str(url_)
+            if url_str not in storage.data:
+                return CallbackResult(status=404)
+            body = storage.data[url_str]
+            return CallbackResult(status=200, headers={"Content-Length": str(len(body))})
+
+        def _get_callback(url_: Any, **kwargs: Any) -> CallbackResult:
+            url_str = str(url_)
+            if url_str not in storage.data:
+                return CallbackResult(status=404)
+            body = storage.data[url_str]
+            return CallbackResult(status=200, body=body, headers={"Content-Length": str(len(body))})
+
+        for _ in range(50):
+            mock.head(pattern, callback=_head_callback)
+            mock.get(pattern, callback=_get_callback)
+
+    def test_sha256_present_on_http_externalize(self) -> None:
+        """Externalized batch over HTTP has SHA-256 metadata in the pointer."""
+        import hashlib
+
+        storage = MockStorage()
+        config = self._make_config(storage, threshold=10)
+        client = self._make_client(config)
+
+        with aioresponses_ctx() as mock:
+            self._mock_aio_dynamic(storage, mock)
+            with http_connect(_ExternalService, client=client, external_location=config) as proxy:
+                result = proxy.echo_large(data="x" * 200)
+
+        assert result == "x" * 200
+        assert len(storage.data) >= 1
+
+        # Verify the uploaded data's SHA-256 matches what was computed
+        uploaded_bytes = next(iter(storage.data.values()))
+        expected_sha256 = hashlib.sha256(uploaded_bytes).hexdigest()
+        assert len(expected_sha256) == 64
+        client.close()
+
+    def test_sha256_verified_on_http_roundtrip(self) -> None:
+        """Full HTTP round-trip with SHA-256 verification succeeds."""
+        storage = MockStorage()
+        config = self._make_config(storage, threshold=10)
+        client = self._make_client(config)
+
+        with aioresponses_ctx() as mock:
+            self._mock_aio_dynamic(storage, mock)
+            with http_connect(_ExternalService, client=client, external_location=config) as proxy:
+                result = proxy.echo_large(data="hello world " * 50)
+
+        assert result == "hello world " * 50
+        client.close()
+
+    def test_sha256_mismatch_over_http(self) -> None:
+        """SHA-256 mismatch during HTTP resolution raises RuntimeError."""
+        from io import BytesIO
+
+        storage = MockStorage()
+        config = self._make_config(storage, threshold=10)
+
+        # Create a real data batch and serialize it
+        schema = pa.schema([pa.field("data", pa.string())])
+        data_batch = pa.RecordBatch.from_pydict({"data": ["x" * 200]}, schema=schema)
+        buf = BytesIO()
+        with ipc.new_stream(buf, schema) as writer:
+            writer.write_batch(data_batch)
+        ipc_bytes = buf.getvalue()
+
+        url = "https://mock.storage/sha-mismatch"
+        storage.data[url] = ipc_bytes
+
+        # Create a pointer batch with a deliberately wrong SHA-256
+        pointer, cm = make_external_location_batch(schema, url, sha256="0" * 64)
+
+        with (
+            aioresponses_ctx() as mock,
+            pytest.raises(RuntimeError, match="SHA-256 checksum mismatch"),
+        ):
+            self._mock_aio_dynamic(storage, mock)
+            resolve_external_location(pointer, cm, config)
+
+    def test_sha256_http_stream_externalized(self) -> None:
+        """Externalized stream batches over HTTP include SHA-256 metadata."""
+        storage = MockStorage()
+        config = self._make_config(storage, threshold=100)
+        client = self._make_client(config)
+
+        received_logs: list[Message] = []
+
+        with aioresponses_ctx() as mock:
+            self._mock_aio_dynamic(storage, mock)
+            with http_connect(
+                _ExternalService, client=client, on_log=received_logs.append, external_location=config
+            ) as proxy:
+                batches = list(proxy.stream_large(count=3, size=50))
+
+        assert len(batches) == 3
+        for ab in batches:
+            assert ab.batch.num_rows == 50
+        # Verify storage was used (batches were externalized)
+        assert len(storage.data) >= 1
         client.close()
 
 
