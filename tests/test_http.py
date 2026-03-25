@@ -1074,6 +1074,21 @@ class TestAuthentication:
         assert result == "anonymous"
         client.close()
 
+    def test_cors_preflight_bypasses_auth(self) -> None:
+        """OPTIONS preflight must not be rejected by auth middleware."""
+        server = RpcServer(_AuthService, _AuthServiceImpl())
+        app = make_wsgi_app(
+            server,
+            signing_key=b"test",
+            cors_origins="*",
+            authenticate=_test_authenticate,
+        )
+        tc = falcon.testing.TestClient(app)
+        # Simulate a CORS preflight — no Authorization header
+        resp = tc.simulate_options("/whoami", headers={"Origin": "http://example.com"})
+        assert resp.status != "401 Unauthorized"
+        assert resp.headers.get("access-control-allow-origin") == "*"
+
 
 # ---------------------------------------------------------------------------
 # Tests: CORS

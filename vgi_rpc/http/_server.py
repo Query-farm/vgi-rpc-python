@@ -1822,10 +1822,12 @@ class _AuthMiddleware:
         The 401 response is plain text (not Arrow IPC) because at this
         stage no method has been resolved and the output schema is unknown.
 
-        Well-known paths (``/.well-known/``) are exempt from authentication
-        so that clients can discover OAuth metadata before authenticating.
+        CORS preflight ``OPTIONS`` requests and well-known paths
+        (``/.well-known/``) are exempt from authentication so that browsers
+        can complete the preflight handshake without credentials and clients
+        can discover OAuth metadata before authenticating.
         """
-        if req.path.startswith("/.well-known/"):
+        if req.method == "OPTIONS" or req.path.startswith("/.well-known/"):
             return
         try:
             auth = self._authenticate(req)
