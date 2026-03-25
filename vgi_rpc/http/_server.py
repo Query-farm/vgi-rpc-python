@@ -2132,7 +2132,9 @@ def make_wsgi_app(
     if otel_config is not None:
         middleware.append(_OtelFalconMiddleware())
 
-    cors_expose: list[str] = []
+    # Always expose auth and request-id headers; capability headers are
+    # appended conditionally below.
+    cors_expose: list[str] = ["WWW-Authenticate", _REQUEST_ID_HEADER]
 
     # Build capability headers
     capability_headers: dict[str, str] = {}
@@ -2162,9 +2164,10 @@ def make_wsgi_app(
         www_authenticate = _build_www_authenticate(_validated_oauth_metadata, prefix)
 
     if cors_origins is not None:
-        cors_kwargs: dict[str, Any] = {"allow_origins": cors_origins}
-        if cors_expose:
-            cors_kwargs["expose_headers"] = cors_expose
+        cors_kwargs: dict[str, Any] = {
+            "allow_origins": cors_origins,
+            "expose_headers": cors_expose,
+        }
         middleware.append(falcon.CORSMiddleware(**cors_kwargs))
     if authenticate is not None:
         on_auth_failure: Callable[[str | None, str], None] | None = None
