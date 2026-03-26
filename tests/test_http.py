@@ -1114,8 +1114,8 @@ class TestCors:
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-allow-origin") == "http://example.com"
 
-    def test_cors_exposes_www_authenticate_and_request_id(self) -> None:
-        """CORS always exposes WWW-Authenticate and X-Request-ID headers."""
+    def test_cors_exposes_standard_headers(self) -> None:
+        """CORS always exposes WWW-Authenticate, X-Request-ID, and X-VGI-Content-Encoding."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
@@ -1123,6 +1123,7 @@ class TestCors:
         expose = resp.headers.get("access-control-expose-headers", "")
         assert "WWW-Authenticate" in expose
         assert "X-Request-ID" in expose
+        assert "X-VGI-Content-Encoding" in expose
 
     def test_no_cors_by_default(self) -> None:
         """Without cors_origins, no CORS headers are added."""

@@ -2134,7 +2134,7 @@ def make_wsgi_app(
 
     # Always expose auth and request-id headers; capability headers are
     # appended conditionally below.
-    cors_expose: list[str] = ["WWW-Authenticate", _REQUEST_ID_HEADER]
+    cors_expose: list[str] = ["WWW-Authenticate", _REQUEST_ID_HEADER, "X-VGI-Content-Encoding"]
 
     # Build capability headers
     capability_headers: dict[str, str] = {}
