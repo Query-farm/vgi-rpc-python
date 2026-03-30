@@ -1133,6 +1133,38 @@ class TestCors:
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert "access-control-allow-origin" not in resp.headers
 
+    def test_cors_max_age_default(self) -> None:
+        """OPTIONS responses include Access-Control-Max-Age: 7200 by default."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        assert resp.headers.get("access-control-max-age") == "7200"
+
+    def test_cors_max_age_custom(self) -> None:
+        """cors_max_age overrides the default value."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*", cors_max_age=3600)
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        assert resp.headers.get("access-control-max-age") == "3600"
+
+    def test_cors_max_age_none_omits_header(self) -> None:
+        """cors_max_age=None omits the Access-Control-Max-Age header."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*", cors_max_age=None)
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        assert "access-control-max-age" not in resp.headers
+
+    def test_cors_max_age_not_on_post(self) -> None:
+        """Access-Control-Max-Age is only set on OPTIONS, not regular requests."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_get("/", headers={"Origin": "http://example.com"})
+        assert "access-control-max-age" not in resp.headers
+
 
 # ---------------------------------------------------------------------------
 # Tests: Max request bytes header

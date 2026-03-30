@@ -1958,6 +1958,26 @@ class _CompressionMiddleware:
             resp.set_header("Content-Encoding", "zstd")
 
 
+class _CorsMaxAgeMiddleware:
+    """Falcon middleware that sets ``Access-Control-Max-Age`` on OPTIONS responses."""
+
+    __slots__ = ("_max_age",)
+
+    def __init__(self, max_age: int) -> None:
+        self._max_age = str(max_age)
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
+    ) -> None:
+        """Set Access-Control-Max-Age on preflight OPTIONS responses."""
+        if req.method == "OPTIONS":
+            resp.set_header("Access-Control-Max-Age", self._max_age)
+
+
 class _CapabilitiesMiddleware:
     """Falcon middleware that sets capability headers on every response."""
 
@@ -1988,6 +2008,7 @@ def make_wsgi_app(
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     cors_origins: str | Iterable[str] | None = None,
+    cors_max_age: int | None = 7200,
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
@@ -2040,6 +2061,10 @@ def make_wsgi_app(
             disables CORS headers.  Uses Falcon's built-in
             ``CORSMiddleware`` which also handles preflight OPTIONS
             requests automatically.
+        cors_max_age: Value for the ``Access-Control-Max-Age`` header on
+            preflight OPTIONS responses, in seconds.  ``7200`` (2 hours)
+            by default.  ``None`` omits the header.  Only effective when
+            ``cors_origins`` is set.
         upload_url_provider: Optional provider for generating pre-signed
             upload URLs.  When set, the ``__upload_url__/init`` endpoint
             is enabled and ``VGI-Upload-URL-Support: true`` is advertised
@@ -2169,6 +2194,8 @@ def make_wsgi_app(
             "expose_headers": cors_expose,
         }
         middleware.append(falcon.CORSMiddleware(**cors_kwargs))
+        if cors_max_age is not None:
+            middleware.append(_CorsMaxAgeMiddleware(cors_max_age))
     if authenticate is not None:
         on_auth_failure: Callable[[str | None, str], None] | None = None
         if otel_config is not None:

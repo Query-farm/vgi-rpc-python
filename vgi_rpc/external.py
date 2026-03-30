@@ -387,8 +387,8 @@ def make_external_location_batch(
     Args:
         schema: The schema the pointer batch should conform to.
         url: The URL where the actual data resides.
-        sha256: Optional hex-encoded SHA-256 of the stored bytes
-            (post-compression).  Included as ``vgi_rpc.location.sha256``
+        sha256: Optional hex-encoded SHA-256 of the raw IPC bytes
+            (pre-compression).  Included as ``vgi_rpc.location.sha256``
             metadata so consumers can verify data integrity on fetch.
 
     Returns:
@@ -651,16 +651,23 @@ def maybe_externalize_collector(
         ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
         content_encoding = config.compression.algorithm
 
+    raw_size = original_bytes if original_bytes is not None else len(ipc_bytes)
     url = _traced_upload(
         ipc_bytes, out.output_schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
     )
     _logger.debug(
-        "Batch externalized: %s (%d bytes, compressed=%s, sha256=%s)",
+        "Batch externalized: %s (%d bytes raw, %d bytes uploaded, compressed=%s, sha256=%s)",
         url,
+        raw_size,
         len(ipc_bytes),
         content_encoding is not None,
         data_sha256,
-        extra={"url": url, "size_bytes": len(ipc_bytes), "compressed": content_encoding is not None},
+        extra={
+            "url": url,
+            "raw_size_bytes": raw_size,
+            "uploaded_size_bytes": len(ipc_bytes),
+            "compressed": content_encoding is not None,
+        },
     )
 
     pointer_batch, pointer_cm = make_external_location_batch(out.output_schema, url, sha256=data_sha256)
@@ -724,16 +731,23 @@ def maybe_externalize_batch(
         ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
         content_encoding = config.compression.algorithm
 
+    raw_size = original_bytes if original_bytes is not None else len(ipc_bytes)
     url = _traced_upload(
         ipc_bytes, batch.schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
     )
     _logger.debug(
-        "Batch externalized: %s (%d bytes, compressed=%s, sha256=%s)",
+        "Batch externalized: %s (%d bytes raw, %d bytes uploaded, compressed=%s, sha256=%s)",
         url,
+        raw_size,
         len(ipc_bytes),
         content_encoding is not None,
         data_sha256,
-        extra={"url": url, "size_bytes": len(ipc_bytes), "compressed": content_encoding is not None},
+        extra={
+            "url": url,
+            "raw_size_bytes": raw_size,
+            "uploaded_size_bytes": len(ipc_bytes),
+            "compressed": content_encoding is not None,
+        },
     )
 
     return make_external_location_batch(batch.schema, url, sha256=data_sha256)
