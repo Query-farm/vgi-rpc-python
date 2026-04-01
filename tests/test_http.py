@@ -211,6 +211,83 @@ class TestHttpErrorCases:
         assert "does not support /exchange" in err.error_message
 
 
+class TestServerErrorHeader:
+    """Server errors return HTTP 200 with X-VGI-RPC-Error header instead of 500."""
+
+    def test_unary_server_error_returns_200_with_error_header(self, client: _SyncTestClient) -> None:
+        """Unary method that raises returns 200 with X-VGI-RPC-Error: true."""
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        req_buf = BytesIO()
+        md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"fail_unary", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
+
+        resp = client.post(
+            f"{_BASE_URL}{client.prefix}/fail_unary",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("x-vgi-rpc-error") == "true"
+        err = _extract_rpc_error(resp)
+        assert err.error_type == "ValueError"
+        assert "unary boom" in err.error_message
+
+    def test_stream_init_server_error_returns_200_with_error_header(self, client: _SyncTestClient) -> None:
+        """Stream init that raises returns 200 with X-VGI-RPC-Error: true."""
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        req_buf = BytesIO()
+        md = pa.KeyValueMetadata(
+            {RPC_METHOD_KEY: b"fail_stream_init_with_header", REQUEST_VERSION_KEY: REQUEST_VERSION}
+        )
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
+
+        resp = client.post(
+            f"{_BASE_URL}{client.prefix}/fail_stream_init_with_header/init",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("x-vgi-rpc-error") == "true"
+        err = _extract_rpc_error(resp)
+        assert err.error_type == "ValueError"
+        assert "init boom with header" in err.error_message
+
+    def test_stream_exchange_server_error_returns_200_with_error_header(self, client: _SyncTestClient) -> None:
+        """Exchange that raises returns 200 with X-VGI-RPC-Error: true (via http_connect)."""
+        with (
+            pytest.raises(RpcError, match="bidi boom") as exc_info,
+            http_connect(RpcFixtureService, client=client) as proxy,
+        ):
+                session = proxy.fail_bidi_mid(factor=2.0)
+                assert isinstance(session, HttpStreamSession)
+                schema = pa.schema([pa.field("value", pa.float64())])
+                batch = pa.RecordBatch.from_pydict({"value": [1.0]}, schema=schema)
+                ab = AnnotatedBatch(batch=batch)
+                # First exchange succeeds
+                session.exchange(ab)
+                # Second exchange triggers the error
+                session.exchange(ab)
+        assert exc_info.value.error_type == "RuntimeError"
+
+    def test_400_errors_do_not_get_error_header(self, client: _SyncTestClient) -> None:
+        """Client errors (400) still return 400 without X-VGI-RPC-Error header."""
+        resp = client.post(
+            f"{_BASE_URL}{client.prefix}/add/init",
+            content=b"",
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 400
+        assert resp.headers.get("x-vgi-rpc-error") is None
+
+
 # ---------------------------------------------------------------------------
 # Tests: Resumable producer stream over HTTP
 # ---------------------------------------------------------------------------
@@ -1124,6 +1201,7 @@ class TestCors:
         assert "WWW-Authenticate" in expose
         assert "X-Request-ID" in expose
         assert "X-VGI-Content-Encoding" in expose
+        assert "X-VGI-RPC-Error" in expose
 
     def test_no_cors_by_default(self) -> None:
         """Without cors_origins, no CORS headers are added."""

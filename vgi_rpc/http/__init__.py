@@ -48,6 +48,7 @@ from vgi_rpc.http._common import (
     _ARROW_CONTENT_TYPE,
     MAX_REQUEST_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
+    RPC_ERROR_HEADER,
     UPLOAD_URL_HEADER,
     _RpcHttpError,
 )
@@ -63,6 +64,8 @@ from vgi_rpc.http._testing import (
 
 with contextlib.suppress(ImportError):
     from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http._oauth_pkce import make_cookie_authenticate  # noqa: F401
 with contextlib.suppress(ImportError):
     from vgi_rpc.http._mtls import (  # noqa: F401
         mtls_authenticate,
@@ -81,6 +84,7 @@ __all__ = [
     "MAX_REQUEST_BYTES_HEADER",
     "MAX_UPLOAD_BYTES_HEADER",
     "OAuthResourceMetadata",
+    "RPC_ERROR_HEADER",
     "OAuthResourceMetadataResponse",
     "UPLOAD_URL_HEADER",
     "_ARROW_CONTENT_TYPE",
@@ -109,5 +113,7 @@ __all__ = [
 
 if "jwt_authenticate" in dir():
     __all__.append("jwt_authenticate")
+if "make_cookie_authenticate" in dir():
+    __all__.append("make_cookie_authenticate")
 if "mtls_authenticate" in dir():
     __all__.extend(["mtls_authenticate", "mtls_authenticate_fingerprint", "mtls_authenticate_subject"])

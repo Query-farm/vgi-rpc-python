@@ -88,6 +88,7 @@ from ._common import (
     _UPLOAD_URL_SCHEMA,
     MAX_REQUEST_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
+    RPC_ERROR_HEADER,
     UPLOAD_URL_HEADER,
     _compress_body,
     _decompress_body,
@@ -139,6 +140,25 @@ def _error_response_stream(
     return buf
 
 
+def _set_http_status(resp: falcon.Response, status_code: HTTPStatus) -> None:
+    """Set HTTP status, translating 500 to 200 with error header.
+
+    Server errors are sent as HTTP 200 with ``X-VGI-RPC-Error: true``
+    so clients that discard response bodies on 5xx still receive the
+    Arrow IPC error metadata.
+
+    Args:
+        resp: Falcon response object.
+        status_code: Intended HTTP status code.
+
+    """
+    if status_code == HTTPStatus.INTERNAL_SERVER_ERROR:
+        resp.status = "200"
+        resp.set_header(RPC_ERROR_HEADER, "true")
+    else:
+        resp.status = str(status_code.value)
+
+
 def _set_error_response(
     resp: falcon.Response,
     exc: BaseException,
@@ -150,7 +170,7 @@ def _set_error_response(
     """Set a Falcon response to an Arrow IPC error stream."""
     resp.content_type = _ARROW_CONTENT_TYPE
     resp.stream = _error_response_stream(exc, schema, server_id=server_id)
-    resp.status = str(status_code.value)
+    _set_http_status(resp, status_code)
 
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1132,7 @@ _ERROR_PAGE_STYLE = """\
   .detail {{ margin-top: 12px; padding: 12px 16px; background: #f0ece0;
              border-radius: 6px; font-size: 0.9em; color: #6b6b5a; }}
   footer {{ margin-top: 48px; padding: 20px 0; border-top: 1px solid #f0ece0;
-            color: #6b6b5a; font-size: 0.85em; }}
+            color: #6b6b5a; font-size: 0.85em; line-height: 1.8; }}
   footer a {{ color: #2d5016; font-weight: 600; }}
   footer a:hover {{ color: #4a7c23; }}
 </style>"""
@@ -1283,7 +1303,7 @@ _LANDING_HTML_TEMPLATE = (
   .links a.primary {{ background: #2d5016; color: #fff; border-color: #2d5016; }}
   .links a.primary:hover {{ background: #4a7c23; border-color: #4a7c23; }}
   footer {{ margin-top: 48px; padding: 20px 0; border-top: 1px solid #f0ece0;
-            color: #6b6b5a; font-size: 0.85em; }}
+            color: #6b6b5a; font-size: 0.85em; line-height: 1.8; }}
   footer a {{ color: #2d5016; font-weight: 600; }}
   footer a:hover {{ color: #4a7c23; }}
 </style>
@@ -1579,7 +1599,7 @@ class _RpcResource:
             result_stream, http_status = self._app._unary_sync(method, info, _get_request_stream(req))
             resp.content_type = _ARROW_CONTENT_TYPE
             resp.stream = result_stream
-            resp.status = str(http_status.value)
+            _set_http_status(resp, http_status)
         except _RpcHttpError as e:
             _set_error_response(
                 resp,
@@ -1727,7 +1747,7 @@ class _UploadUrlResource:
         resp_buf.seek(0)
         resp.content_type = _ARROW_CONTENT_TYPE
         resp.stream = resp_buf
-        resp.status = str(http_status.value)
+        _set_http_status(resp, http_status)
 
 
 _REQUEST_ID_HEADER = "X-Request-ID"
@@ -1799,17 +1819,19 @@ class _AuthMiddleware:
     silently swallowed as 401s.
     """
 
-    __slots__ = ("_authenticate", "_on_auth_failure", "_www_authenticate")
+    __slots__ = ("_authenticate", "_on_auth_failure", "_www_authenticate", "_exempt_prefixes")
 
     def __init__(
         self,
         authenticate: Callable[[falcon.Request], AuthContext],
         www_authenticate: str | None = None,
         on_auth_failure: Callable[[str | None, str], None] | None = None,
+        exempt_prefixes: tuple[str, ...] = (),
     ) -> None:
         self._authenticate = authenticate
         self._www_authenticate = www_authenticate
         self._on_auth_failure = on_auth_failure
+        self._exempt_prefixes = exempt_prefixes
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Authenticate the request and populate the transport contextvar.
@@ -1829,6 +1851,9 @@ class _AuthMiddleware:
         """
         if req.method == "OPTIONS" or req.path.startswith("/.well-known/"):
             return
+        for _pfx in self._exempt_prefixes:
+            if req.path.startswith(_pfx):
+                return
         try:
             auth = self._authenticate(req)
         except (ValueError, PermissionError) as exc:
@@ -2159,7 +2184,7 @@ def make_wsgi_app(
 
     # Always expose auth and request-id headers; capability headers are
     # appended conditionally below.
-    cors_expose: list[str] = ["WWW-Authenticate", _REQUEST_ID_HEADER, "X-VGI-Content-Encoding"]
+    cors_expose: list[str] = ["WWW-Authenticate", _REQUEST_ID_HEADER, "X-VGI-Content-Encoding", RPC_ERROR_HEADER]
 
     # Build capability headers
     capability_headers: dict[str, str] = {}
@@ -2196,6 +2221,53 @@ def make_wsgi_app(
         middleware.append(falcon.CORSMiddleware(**cors_kwargs))
         if cors_max_age is not None:
             middleware.append(_CorsMaxAgeMiddleware(cors_max_age))
+    # OAuth PKCE browser flow — only when authenticate + OAuth metadata + client_id
+    _pkce_active = False
+    _pkce_user_info_html: str | None = None
+    _exempt_prefixes: tuple[str, ...] = ()
+    if (
+        authenticate is not None
+        and _validated_oauth_metadata is not None
+        and _validated_oauth_metadata.client_id is not None
+    ):
+        from urllib.parse import urlparse as _urlparse
+
+        from vgi_rpc.http._bearer import chain_authenticate
+        from vgi_rpc.http._oauth_pkce import (
+            _OAuthCallbackResource,
+            _OAuthLogoutResource,
+            _OAuthPkceMiddleware,
+            _create_oidc_discovery,
+            _derive_session_key,
+            build_user_info_html,
+            make_cookie_authenticate,
+        )
+
+        _pkce_issuer = _validated_oauth_metadata.authorization_servers[0]
+        _pkce_oidc_discovery = _create_oidc_discovery(_pkce_issuer)
+        _pkce_session_key = _derive_session_key(signing_key)
+        _pkce_resource_parsed = _urlparse(_validated_oauth_metadata.resource)
+        _pkce_secure = _pkce_resource_parsed.scheme == "https"
+        _pkce_redirect_uri = f"{_pkce_resource_parsed.scheme}://{_pkce_resource_parsed.netloc}{prefix}/_oauth/callback"
+
+        if not _pkce_secure and _pkce_resource_parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+            _logger.warning(
+                "OAuth PKCE is configured without HTTPS (%s) — cookies will not be Secure. "
+                "This is acceptable for local development but not for production.",
+                _validated_oauth_metadata.resource,
+            )
+
+        # Wrap authenticate to also accept tokens from a cookie
+        _pkce_cookie_auth = make_cookie_authenticate(authenticate)
+        authenticate = chain_authenticate(authenticate, _pkce_cookie_auth)
+
+        _pkce_client_id: str = _validated_oauth_metadata.client_id
+        _pkce_client_secret = _validated_oauth_metadata.client_secret
+        _pkce_use_id_token = _validated_oauth_metadata.use_id_token_as_bearer
+        _exempt_prefixes = (f"{prefix}/_oauth/",)
+        _pkce_active = True
+        _pkce_user_info_html = build_user_info_html(prefix)
+
     if authenticate is not None:
         on_auth_failure: Callable[[str | None, str], None] | None = None
         if otel_config is not None:
@@ -2205,8 +2277,24 @@ def make_wsgi_app(
             assert isinstance(otel_config, _OtelCfg)  # validated above
             on_auth_failure = make_auth_failure_counter(otel_config, server.protocol_name)
         middleware.append(
-            _AuthMiddleware(authenticate, www_authenticate=www_authenticate, on_auth_failure=on_auth_failure)
+            _AuthMiddleware(
+                authenticate,
+                www_authenticate=www_authenticate,
+                on_auth_failure=on_auth_failure,
+                exempt_prefixes=_exempt_prefixes,
+            )
         )
+        if _pkce_active:
+            middleware.append(
+                _OAuthPkceMiddleware(
+                    session_key=_pkce_session_key,
+                    oidc_discovery=_pkce_oidc_discovery,
+                    client_id=_pkce_client_id,
+                    prefix=prefix,
+                    secure_cookie=_pkce_secure,
+                    redirect_uri=_pkce_redirect_uri,
+                )
+            )
     if capability_headers:
         middleware.append(_CapabilitiesMiddleware(capability_headers))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)
@@ -2227,15 +2315,37 @@ def make_wsgi_app(
     if upload_url_provider is not None:
         app.add_route(f"{prefix}/__upload_url__/init", _UploadUrlResource(app_handler))
 
+    # OAuth PKCE callback and logout routes (must be before not-found sink)
+    if _pkce_active:
+        app.add_route(
+            f"{prefix}/_oauth/callback",
+            _OAuthCallbackResource(
+                session_key=_pkce_session_key,
+                oidc_discovery=_pkce_oidc_discovery,
+                client_id=_pkce_client_id,
+                client_secret=_pkce_client_secret,
+                use_id_token=_pkce_use_id_token,
+                prefix=prefix,
+                secure_cookie=_pkce_secure,
+                redirect_uri=_pkce_redirect_uri,
+            ),
+        )
+        app.add_route(f"{prefix}/_oauth/logout", _OAuthLogoutResource(prefix, _pkce_secure))
+
     # Describe page — GET {prefix}/describe (requires both flags and server support)
     describe_page_active = enable_describe_page and server.describe_enabled
     if describe_page_active:
-        app.add_route(f"{prefix}/describe", _DescribePageResource(_build_describe_html(server, prefix, repo_url)))
+        describe_html = _build_describe_html(server, prefix, repo_url)
+        if _pkce_user_info_html:
+            describe_html = describe_html.replace(b"</body>", _pkce_user_info_html.encode() + b"\n</body>")
+        app.add_route(f"{prefix}/describe", _DescribePageResource(describe_html))
 
     # Landing page — GET {prefix}
     if enable_landing_page:
         describe_path = f"{prefix}/describe" if describe_page_active else None
         landing_body = _build_landing_html(prefix, server.protocol_name, server.server_id, describe_path, repo_url)
+        if _pkce_user_info_html:
+            landing_body = landing_body.replace(b"</body>", _pkce_user_info_html.encode() + b"\n</body>")
         app.add_route(prefix or "/", _LandingPageResource(landing_body))
 
     if enable_not_found_page:

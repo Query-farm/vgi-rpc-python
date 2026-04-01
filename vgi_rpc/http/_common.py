@@ -14,6 +14,7 @@ from vgi_rpc.rpc import _EMPTY_SCHEMA
 
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes"
+RPC_ERROR_HEADER = "X-VGI-RPC-Error"
 UPLOAD_URL_HEADER = "VGI-Upload-URL-Support"
 MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes"
 
