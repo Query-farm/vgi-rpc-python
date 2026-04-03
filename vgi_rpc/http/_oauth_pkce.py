@@ -719,7 +719,7 @@ class _OAuthPkceMiddleware:
         )
 
         # Build authorization URL
-        params = {
+        params: dict[str, str] = {
             "response_type": "code",
             "client_id": self._client_id,
             "redirect_uri": self._redirect_uri,
@@ -728,6 +728,12 @@ class _OAuthPkceMiddleware:
             "state": state_nonce,
             "scope": self._scope,
         }
+        # When redirecting to an external frontend, request offline access so
+        # Google returns a refresh_token. DuckDB WASM needs this to silently
+        # refresh expired id_tokens without user interaction.
+        if return_to:
+            params["access_type"] = "offline"
+            params["prompt"] = "consent"
         auth_url = f"{authorization_endpoint}?{urlencode(params)}"
 
         logger.debug("OAuth PKCE redirect to %s (original: %s)", authorization_endpoint, original_url)
