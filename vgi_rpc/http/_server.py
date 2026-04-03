@@ -1819,7 +1819,7 @@ class _AuthMiddleware:
     silently swallowed as 401s.
     """
 
-    __slots__ = ("_authenticate", "_on_auth_failure", "_www_authenticate", "_exempt_prefixes")
+    __slots__ = ("_authenticate", "_exempt_prefixes", "_on_auth_failure", "_www_authenticate")
 
     def __init__(
         self,
@@ -2234,11 +2234,11 @@ def make_wsgi_app(
 
         from vgi_rpc.http._bearer import chain_authenticate
         from vgi_rpc.http._oauth_pkce import (
+            _create_oidc_discovery,
+            _derive_session_key,
             _OAuthCallbackResource,
             _OAuthLogoutResource,
             _OAuthPkceMiddleware,
-            _create_oidc_discovery,
-            _derive_session_key,
             build_user_info_html,
             make_cookie_authenticate,
         )

@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 _SESSION_COOKIE_NAME = "_vgi_oauth_session"
 _AUTH_COOKIE_NAME = "_vgi_auth"
-_SESSION_COOKIE_VERSION = 3  # distinct from _TOKEN_VERSION=2 in _server.py
+_SESSION_COOKIE_VERSION = 4  # v4 adds return_to field for external frontends
 _SESSION_MAX_AGE = 600  # 10 minutes
 _AUTH_COOKIE_DEFAULT_MAX_AGE = 3600  # 1 hour fallback
 _MAX_ORIGINAL_URL_LEN = 2048
@@ -91,12 +91,13 @@ def _pack_oauth_cookie(
     original_url: str,
     session_key: bytes,
     created_at: int | None = None,
+    return_to: str = "",
 ) -> str:
     """Pack PKCE session data into a signed, base64-encoded cookie value.
 
     Wire format::
 
-        [1 byte:  version=3           (uint8)]
+        [1 byte:  version=4           (uint8)]
         [8 bytes: created_at          (uint64 LE, seconds since epoch)]
         [2 bytes: cv_len              (uint16 LE)]
         [cv_len bytes: code_verifier  (UTF-8)]
@@ -104,6 +105,8 @@ def _pack_oauth_cookie(
         [state_len bytes: state_nonce (UTF-8)]
         [2 bytes: url_len             (uint16 LE)]
         [url_len bytes: original_url  (UTF-8)]
+        [2 bytes: rt_len              (uint16 LE)]
+        [rt_len bytes: return_to      (UTF-8)]
         [32 bytes: HMAC-SHA256(session_key, all above)]
 
     """
@@ -112,6 +115,7 @@ def _pack_oauth_cookie(
     cv_bytes = code_verifier.encode("utf-8")
     state_bytes = state_nonce.encode("utf-8")
     url_bytes = original_url.encode("utf-8")
+    rt_bytes = return_to.encode("utf-8")
     payload = (
         struct.pack("B", _SESSION_COOKIE_VERSION)
         + struct.pack("<Q", created_at)
@@ -121,6 +125,8 @@ def _pack_oauth_cookie(
         + state_bytes
         + struct.pack("<H", len(url_bytes))
         + url_bytes
+        + struct.pack("<H", len(rt_bytes))
+        + rt_bytes
     )
     mac = hmac.new(session_key, payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(payload + mac).decode("ascii")
@@ -130,11 +136,11 @@ def _unpack_oauth_cookie(
     cookie_value: str,
     session_key: bytes,
     max_age: int = _SESSION_MAX_AGE,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Unpack and verify a signed OAuth session cookie.
 
     Returns:
-        ``(code_verifier, state_nonce, original_url)``
+        ``(code_verifier, state_nonce, original_url, return_to)``
 
     Raises:
         ValueError: On tampered, expired, or malformed cookies.
@@ -145,8 +151,8 @@ def _unpack_oauth_cookie(
     except Exception as exc:
         raise ValueError("Malformed session cookie") from exc
 
-    # Minimum: version(1) + timestamp(8) + 3 x length(2) + HMAC(32) = 47
-    if len(raw) < 47:
+    # Minimum: version(1) + timestamp(8) + 4 x length(2) + HMAC(32) = 49
+    if len(raw) < 49:
         raise ValueError("Session cookie too short")
 
     # Verify HMAC before inspecting payload
@@ -181,8 +187,13 @@ def _unpack_oauth_cookie(
     url_len = struct.unpack_from("<H", payload, pos)[0]
     pos += 2
     original_url = payload[pos : pos + url_len].decode("utf-8")
+    pos += url_len
 
-    return code_verifier, state_nonce, original_url
+    rt_len = struct.unpack_from("<H", payload, pos)[0]
+    pos += 2
+    return_to = payload[pos : pos + rt_len].decode("utf-8")
+
+    return code_verifier, state_nonce, original_url, return_to
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +321,18 @@ def _validate_original_url(url: str, prefix: str) -> str:
     return url
 
 
+def _validate_return_to(url: str) -> str:
+    """Validate an external return-to URL. Returns empty string if invalid."""
+    if not url or len(url) > 2048:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return ""
+    if not parsed.netloc:
+        return ""
+    return url
+
+
 # ---------------------------------------------------------------------------
 # Error HTML page
 # ---------------------------------------------------------------------------
@@ -365,15 +388,15 @@ class _OAuthCallbackResource:
     """
 
     __slots__ = (
-        "_session_key",
-        "_oidc_discovery",
         "_client_id",
         "_client_secret",
-        "_use_id_token",
-        "_prefix",
-        "_secure_cookie",
         "_cookie_path",
+        "_oidc_discovery",
+        "_prefix",
         "_redirect_uri",
+        "_secure_cookie",
+        "_session_key",
+        "_use_id_token",
     )
 
     def __init__(
@@ -441,7 +464,9 @@ class _OAuthCallbackResource:
             return
 
         try:
-            code_verifier, expected_state, original_url = _unpack_oauth_cookie(session_cookie, self._session_key)
+            code_verifier, expected_state, original_url, return_to = _unpack_oauth_cookie(
+                session_cookie, self._session_key
+            )
         except ValueError as exc:
             logger.warning("OAuth session cookie invalid: %s", exc)
             resp.status = "400 Bad Request"
@@ -503,7 +528,30 @@ class _OAuthCallbackResource:
 
         logger.info("OAuth PKCE authentication successful")
 
-        # Redirect to original page with cookies
+        # External frontend: redirect with token in URL fragment (no cookie needed)
+        if return_to:
+            separator = "#" if "#" not in return_to else "&"
+            redirect_url = f"{return_to}{separator}token={token}"
+            logger.info("OAuth redirecting to external frontend: %s", return_to.split("?")[0])
+            resp.status = "302 Found"
+            resp.set_header("Location", redirect_url)
+            resp.set_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            resp.content_type = "text/html; charset=utf-8"
+            resp.data = None
+            resp.text = None
+            # Clear session cookie (path must match where it was set)
+            resp.set_cookie(
+                _SESSION_COOKIE_NAME,
+                "",
+                max_age=0,
+                path=f"{self._prefix}/_oauth/",
+                secure=self._secure_cookie,
+                http_only=True,
+                same_site="Lax",
+            )
+            return
+
+        # Same-origin: redirect to original page with cookies
         original_url = _validate_original_url(original_url, self._prefix)
         resp.status = "302 Found"
         resp.set_header("Location", original_url)
@@ -545,7 +593,7 @@ class _OAuthLogoutResource:
     Clears the auth cookie and redirects to the landing page.
     """
 
-    __slots__ = ("_prefix", "_secure_cookie", "_cookie_path")
+    __slots__ = ("_cookie_path", "_prefix", "_secure_cookie")
 
     def __init__(self, prefix: str, secure_cookie: bool) -> None:
         self._prefix = prefix
@@ -579,13 +627,13 @@ class _OAuthPkceMiddleware:
     """
 
     __slots__ = (
-        "_session_key",
-        "_oidc_discovery",
         "_client_id",
+        "_oidc_discovery",
         "_prefix",
-        "_secure_cookie",
         "_redirect_uri",
         "_scope",
+        "_secure_cookie",
+        "_session_key",
     )
 
     def __init__(
@@ -651,8 +699,13 @@ class _OAuthPkceMiddleware:
             original_url = f"{original_url}?{req.query_string}"
         original_url = _validate_original_url(original_url, self._prefix)
 
+        # Check for external frontend return URL
+        return_to = _validate_return_to(req.get_param("_vgi_return_to") or "")
+
         # Pack session cookie
-        cookie_value = _pack_oauth_cookie(code_verifier, state_nonce, original_url, self._session_key)
+        cookie_value = _pack_oauth_cookie(
+            code_verifier, state_nonce, original_url, self._session_key, return_to=return_to
+        )
 
         # Build authorization URL
         params = {

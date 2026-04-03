@@ -23,9 +23,7 @@ from vgi_rpc.http import OAuthResourceMetadata
 from vgi_rpc.http._oauth_pkce import (
     _AUTH_COOKIE_NAME,
     _SESSION_COOKIE_NAME,
-    _SESSION_COOKIE_VERSION,
     _derive_session_key,
-    _exchange_code_for_token,
     _generate_code_challenge,
     _generate_code_verifier,
     _generate_state_nonce,
@@ -180,10 +178,23 @@ class TestSignedSessionCookie:
         state = "test-state"
         url = "/vgi/"
         cookie = _pack_oauth_cookie(cv, state, url, self.session_key)
-        got_cv, got_state, got_url = _unpack_oauth_cookie(cookie, self.session_key)
+        got_cv, got_state, got_url, got_rt = _unpack_oauth_cookie(cookie, self.session_key)
         assert got_cv == cv
         assert got_state == state
         assert got_url == url
+        assert got_rt == ""
+
+    def test_roundtrip_with_return_to(self) -> None:
+        cv = "test-code-verifier"
+        state = "test-state"
+        url = "/vgi/"
+        rt = "http://localhost:4321/?service=https://example.com"
+        cookie = _pack_oauth_cookie(cv, state, url, self.session_key, return_to=rt)
+        got_cv, got_state, got_url, got_rt = _unpack_oauth_cookie(cookie, self.session_key)
+        assert got_cv == cv
+        assert got_state == state
+        assert got_url == url
+        assert got_rt == rt
 
     def test_tampered_rejected(self) -> None:
         cookie = _pack_oauth_cookie("cv", "st", "/", self.session_key)

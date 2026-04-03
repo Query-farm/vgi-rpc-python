@@ -266,15 +266,15 @@ class TestServerErrorHeader:
             pytest.raises(RpcError, match="bidi boom") as exc_info,
             http_connect(RpcFixtureService, client=client) as proxy,
         ):
-                session = proxy.fail_bidi_mid(factor=2.0)
-                assert isinstance(session, HttpStreamSession)
-                schema = pa.schema([pa.field("value", pa.float64())])
-                batch = pa.RecordBatch.from_pydict({"value": [1.0]}, schema=schema)
-                ab = AnnotatedBatch(batch=batch)
-                # First exchange succeeds
-                session.exchange(ab)
-                # Second exchange triggers the error
-                session.exchange(ab)
+            session = proxy.fail_bidi_mid(factor=2.0)
+            assert isinstance(session, HttpStreamSession)
+            schema = pa.schema([pa.field("value", pa.float64())])
+            batch = pa.RecordBatch.from_pydict({"value": [1.0]}, schema=schema)
+            ab = AnnotatedBatch(batch=batch)
+            # First exchange succeeds
+            session.exchange(ab)
+            # Second exchange triggers the error
+            session.exchange(ab)
         assert exc_info.value.error_type == "RuntimeError"
 
     def test_400_errors_do_not_get_error_header(self, client: _SyncTestClient) -> None:
