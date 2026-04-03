@@ -619,8 +619,7 @@ class _OAuthLogoutResource:
 
 
 class _OAuthPkceMiddleware:
-    """Falcon middleware that intercepts 401s on browser GETs and redirects
-    to the OAuth authorization endpoint with PKCE.
+    """Falcon middleware that intercepts 401s on browser GETs and redirects to OAuth.
 
     Only activates when the response is 401, the request is GET, and the
     Accept header contains ``text/html``.

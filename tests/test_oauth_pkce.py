@@ -139,27 +139,33 @@ _METADATA_NO_CLIENT_ID = OAuthResourceMetadata(
 
 
 class TestPkceHelpers:
+    """Test PKCE code verifier, challenge, and state nonce generation."""
+
     def test_code_verifier_length(self) -> None:
+        """Generated code verifier has valid RFC 7636 length."""
         cv = _generate_code_verifier()
         assert 43 <= len(cv) <= 128
 
     def test_code_verifier_charset(self) -> None:
+        """Generated code verifier uses only URL-safe characters."""
         import re
 
         cv = _generate_code_verifier()
         assert re.fullmatch(r"[A-Za-z0-9_-]+", cv)
 
     def test_code_verifier_uniqueness(self) -> None:
+        """Each generated code verifier is unique."""
         verifiers = {_generate_code_verifier() for _ in range(100)}
         assert len(verifiers) == 100
 
     def test_code_challenge_s256(self) -> None:
-        # RFC 7636 Appendix B test vector
+        """S256 challenge matches RFC 7636 Appendix B test vector."""
         cv = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
         expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         assert _generate_code_challenge(cv) == expected
 
     def test_state_nonce_uniqueness(self) -> None:
+        """Each generated state nonce is unique."""
         nonces = {_generate_state_nonce() for _ in range(100)}
         assert len(nonces) == 100
 
@@ -170,10 +176,14 @@ class TestPkceHelpers:
 
 
 class TestSignedSessionCookie:
+    """Test signed OAuth session cookie pack/unpack and tamper detection."""
+
     def setup_method(self) -> None:
+        """Derive session key for each test."""
         self.session_key = _derive_session_key(_SIGNING_KEY)
 
     def test_roundtrip(self) -> None:
+        """Pack and unpack preserves all fields with empty return_to."""
         cv = "test-code-verifier"
         state = "test-state"
         url = "/vgi/"
@@ -185,6 +195,7 @@ class TestSignedSessionCookie:
         assert got_rt == ""
 
     def test_roundtrip_with_return_to(self) -> None:
+        """Pack and unpack preserves return_to URL."""
         cv = "test-code-verifier"
         state = "test-state"
         url = "/vgi/"
@@ -197,6 +208,7 @@ class TestSignedSessionCookie:
         assert got_rt == rt
 
     def test_tampered_rejected(self) -> None:
+        """Tampered cookie bytes are rejected by HMAC verification."""
         cookie = _pack_oauth_cookie("cv", "st", "/", self.session_key)
         # Flip a bit
         raw = base64.urlsafe_b64decode(cookie)
@@ -206,18 +218,21 @@ class TestSignedSessionCookie:
             _unpack_oauth_cookie(tampered_cookie, self.session_key)
 
     def test_expired_rejected(self) -> None:
+        """Expired cookies are rejected based on max_age."""
         old_time = int(time.time()) - 700  # 700s ago, max_age=600
         cookie = _pack_oauth_cookie("cv", "st", "/", self.session_key, created_at=old_time)
         with pytest.raises(ValueError, match="expired"):
             _unpack_oauth_cookie(cookie, self.session_key, max_age=600)
 
     def test_wrong_key_rejected(self) -> None:
+        """Cookie signed with a different key is rejected."""
         cookie = _pack_oauth_cookie("cv", "st", "/", self.session_key)
         wrong_key = _derive_session_key(b"wrong-key-wrong-key-wrong-key!!")
         with pytest.raises(ValueError, match="signature mismatch"):
             _unpack_oauth_cookie(cookie, wrong_key)
 
     def test_truncated_rejected(self) -> None:
+        """Truncated cookie data is rejected as too short."""
         with pytest.raises(ValueError, match="too short"):
             _unpack_oauth_cookie("dG9vc2hvcnQ=", self.session_key)
 
@@ -241,24 +256,32 @@ class TestSignedSessionCookie:
 
 
 class TestValidateOriginalUrl:
+    """Test original URL validation for redirect safety."""
+
     def test_relative_url_passes(self) -> None:
+        """Relative URL within prefix is accepted."""
         assert _validate_original_url("/vgi/", "/vgi") == "/vgi/"
 
     def test_with_query_string(self) -> None:
+        """URL with query string is preserved."""
         assert _validate_original_url("/vgi/?foo=bar", "/vgi") == "/vgi/?foo=bar"
 
     def test_absolute_url_rejected(self) -> None:
+        """Absolute URL is rejected as potential open redirect."""
         assert _validate_original_url("https://evil.com/steal", "/vgi") == "/vgi"
 
     def test_wrong_prefix_rejected(self) -> None:
+        """URL outside expected prefix falls back to prefix root."""
         assert _validate_original_url("/other/path", "/vgi") == "/vgi"
 
     def test_long_url_truncated(self) -> None:
+        """URLs exceeding max length are truncated."""
         long_url = "/vgi/" + "a" * 3000
         result = _validate_original_url(long_url, "/vgi")
         assert len(result) <= 2048
 
     def test_empty_prefix(self) -> None:
+        """Empty prefix allows any relative URL."""
         assert _validate_original_url("/anything", "") == "/anything"
 
 
@@ -282,7 +305,10 @@ def _make_request(
 
 
 class TestCookieAuthenticate:
+    """Test cookie-based authentication fallback via make_cookie_authenticate."""
+
     def setup_method(self) -> None:
+        """Generate RSA keys and create local authenticator."""
         self.priv, self.pub = _make_rsa_key()
         self.inner = _make_local_auth(self.pub)
 
@@ -346,7 +372,7 @@ class TestCookieAuthenticate:
 
 
 def _make_test_app(
-    authenticate: Callable | None = None,
+    authenticate: Callable[..., AuthContext] | None = None,
     oauth_metadata: OAuthResourceMetadata | None = None,
     prefix: str = "/vgi",
 ) -> falcon.testing.TestClient:
@@ -378,12 +404,13 @@ class TestPkceRedirect:
     """Test that browser GETs get redirected to OAuth when unauthenticated."""
 
     def setup_method(self) -> None:
+        """Generate RSA keys and create local authenticator."""
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_browser_get_redirects(self, mock_client_cls) -> None:
-        """Unauthenticated browser GET → 302 to authorization endpoint."""
+    def test_browser_get_redirects(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
+        """Unauthenticated browser GET -> 302 to authorization endpoint."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -409,8 +436,8 @@ class TestPkceRedirect:
         assert _SESSION_COOKIE_NAME in result.cookies
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_non_browser_get_gets_401(self, mock_client_cls) -> None:
-        """Non-browser GET (no text/html Accept) → 401, no redirect."""
+    def test_non_browser_get_gets_401(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
+        """Non-browser GET (no text/html Accept) -> 401, no redirect."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -424,8 +451,8 @@ class TestPkceRedirect:
         assert result.status_code == 401
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_post_gets_401(self, mock_client_cls) -> None:
-        """POST requests → 401, no redirect even with text/html Accept."""
+    def test_post_gets_401(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
+        """POST requests -> 401, no redirect even with text/html Accept."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -436,11 +463,11 @@ class TestPkceRedirect:
 
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_post("/vgi/echo", headers={"Accept": "text/html"})
-        # POST to RPC endpoint without auth → 401 (not redirected)
+        # POST to RPC endpoint without auth -> 401 (not redirected)
         assert result.status_code == 401
 
     def test_authenticated_browser_get_succeeds(self) -> None:
-        """Browser GET with valid cookie → 200 (page served)."""
+        """Browser GET with valid cookie -> 200 (page served)."""
         token = _mint_jwt(self.priv)
 
         # Need to mock OIDC discovery since make_wsgi_app with PKCE creates the discovery callable
@@ -470,16 +497,21 @@ class TestPkceRedirect:
 
 
 class TestOAuthCallback:
+    """Test OAuth callback endpoint handling."""
+
     def setup_method(self) -> None:
+        """Generate RSA keys and derive session key."""
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
         self.session_key = _derive_session_key(_SIGNING_KEY)
 
     def _make_session_cookie(self, state: str = "test-state", url: str = "/vgi/") -> str:
+        """Create a signed session cookie for testing."""
         return _pack_oauth_cookie("test-verifier", state, url, self.session_key)
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_missing_code_returns_400(self, mock_client_cls) -> None:
+    def test_missing_code_returns_400(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
+        """Missing authorization code in callback returns 400."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -493,7 +525,8 @@ class TestOAuthCallback:
         assert result.status_code == 400
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_google_error_returns_400(self, mock_client_cls) -> None:
+    def test_google_error_returns_400(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
+        """Authorization server error in callback returns 400 with message."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -511,7 +544,8 @@ class TestOAuthCallback:
         assert b"authorization server returned an error" in result.content
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_state_mismatch_returns_400(self, mock_client_cls) -> None:
+    def test_state_mismatch_returns_400(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
+        """State parameter mismatch (CSRF) returns 400."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -532,7 +566,8 @@ class TestOAuthCallback:
 
     @patch("vgi_rpc.http._oauth_pkce._exchange_code_for_token")
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_successful_callback_redirects_with_cookie(self, mock_client_cls, mock_exchange) -> None:
+    def test_successful_callback_redirects_with_cookie(self, mock_client_cls, mock_exchange) -> None:  # type: ignore[no-untyped-def]
+        """Successful code exchange redirects with auth cookie set."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -564,12 +599,16 @@ class TestOAuthCallback:
 
 
 class TestOAuthLogout:
+    """Test OAuth logout endpoint clears cookies and redirects."""
+
     def setup_method(self) -> None:
+        """Generate RSA keys and create local authenticator."""
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_logout_clears_cookie_and_redirects(self, mock_client_cls) -> None:
+    def test_logout_clears_cookie_and_redirects(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
+        """Logout clears auth cookie and redirects to prefix root."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
         )()
@@ -590,26 +629,29 @@ class TestOAuthLogout:
 
 
 class TestNonOAuthAuthSchemes:
+    """Test that PKCE does not interfere with non-OAuth auth schemes."""
+
     def setup_method(self) -> None:
+        """Generate RSA keys and create local authenticator."""
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
     def test_bearer_only_no_redirect(self) -> None:
-        """Auth without oauth_resource_metadata → plain 401, no redirect."""
+        """Auth without oauth_resource_metadata -> plain 401, no redirect."""
         client = _make_test_app(authenticate=self.auth, oauth_metadata=None)
         result = client.simulate_get("/vgi", headers={"Accept": "text/html"})
         assert result.status_code == 401
         assert "location" not in result.headers
 
     def test_metadata_without_client_id_no_redirect(self) -> None:
-        """OAuth metadata without client_id → plain 401, no redirect."""
+        """OAuth metadata without client_id -> plain 401, no redirect."""
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_NO_CLIENT_ID)
         result = client.simulate_get("/vgi", headers={"Accept": "text/html"})
         assert result.status_code == 401
         assert "location" not in result.headers
 
     def test_no_auth_pages_public(self) -> None:
-        """No authenticate → pages are public."""
+        """No authenticate -> pages are public."""
         client = _make_test_app(authenticate=None, oauth_metadata=None)
         result = client.simulate_get("/vgi", headers={"Accept": "text/html"})
         assert result.status_code == 200
@@ -621,12 +663,15 @@ class TestNonOAuthAuthSchemes:
 
 
 class TestUserInfoInjection:
+    """Test user info JS injection on landing pages when PKCE is active."""
+
     def setup_method(self) -> None:
+        """Generate RSA keys and create local authenticator."""
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
     @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
-    def test_landing_page_has_user_info_script(self, mock_client_cls) -> None:
+    def test_landing_page_has_user_info_script(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """When PKCE is active, landing page includes user-info JS."""
         mock_resp = type(
             "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
