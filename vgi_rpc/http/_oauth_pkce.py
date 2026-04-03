@@ -28,6 +28,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable
+from urllib.parse import quote as _urlquote
 from urllib.parse import urlencode, urlparse
 
 import falcon
@@ -248,11 +249,11 @@ def _exchange_code_for_token(
     client_id: str,
     client_secret: str | None,
     use_id_token: bool,
-) -> tuple[str, int]:
+) -> tuple[str, int, str | None]:
     """Exchange an authorization code for a token.
 
     Returns:
-        ``(token, max_age_seconds)``
+        ``(token, max_age_seconds, refresh_token_or_none)``
 
     Raises:
         ValueError: On token exchange failure.
@@ -276,6 +277,8 @@ def _exchange_code_for_token(
     except Exception as exc:
         raise ValueError(f"Token exchange failed: {exc}") from exc
 
+    refresh_token = body.get("refresh_token")
+
     if use_id_token:
         token = body.get("id_token")
         if not token:
@@ -291,16 +294,16 @@ def _exchange_code_for_token(
                 exp = claims.get("exp")
                 if exp is not None:
                     max_age = max(int(exp) - int(time.time()), 60)
-                    return token, max_age
+                    return token, max_age, refresh_token
         except Exception:
             pass
-        return token, _AUTH_COOKIE_DEFAULT_MAX_AGE
+        return token, _AUTH_COOKIE_DEFAULT_MAX_AGE, refresh_token
     else:
         token = body.get("access_token")
         if not token:
             raise ValueError("Token response missing access_token")
         expires_in = body.get("expires_in", _AUTH_COOKIE_DEFAULT_MAX_AGE)
-        return token, int(expires_in)
+        return token, int(expires_in), refresh_token
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +509,7 @@ class _OAuthCallbackResource:
 
         # Exchange code for token
         try:
-            token, max_age = _exchange_code_for_token(
+            token, max_age, refresh_token = _exchange_code_for_token(
                 token_endpoint=token_endpoint,
                 code=code,
                 redirect_uri=self._redirect_uri,
@@ -528,10 +531,19 @@ class _OAuthCallbackResource:
 
         logger.info("OAuth PKCE authentication successful")
 
-        # External frontend: redirect with token in URL fragment (no cookie needed)
+        # External frontend: redirect with token + OAuth metadata in URL fragment
         if return_to:
             separator = "#" if "#" not in return_to else "&"
-            redirect_url = f"{return_to}{separator}token={token}"
+            fragment_params = [f"token={token}"]
+            if refresh_token:
+                fragment_params.append(f"refresh_token={_urlquote(refresh_token)}")
+            fragment_params.append(f"token_endpoint={_urlquote(token_endpoint)}")
+            fragment_params.append(f"client_id={_urlquote(self._client_id)}")
+            if self._client_secret:
+                fragment_params.append(f"client_secret={_urlquote(self._client_secret)}")
+            if self._use_id_token:
+                fragment_params.append("use_id_token=true")
+            redirect_url = f"{return_to}{separator}{'&'.join(fragment_params)}"
             logger.info("OAuth redirecting to external frontend: %s", return_to.split("?")[0])
             resp.status = "302 Found"
             resp.set_header("Location", redirect_url)

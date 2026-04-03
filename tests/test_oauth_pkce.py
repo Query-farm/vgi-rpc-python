@@ -577,7 +577,7 @@ class TestOAuthCallback:
         mock_client_cls.return_value = mock_client
 
         token = _mint_jwt(self.priv)
-        mock_exchange.return_value = (token, 3600)
+        mock_exchange.return_value = (token, 3600, None)
 
         state = "test-state-123"
         cookie = self._make_session_cookie(state=state, url="/vgi/describe")
