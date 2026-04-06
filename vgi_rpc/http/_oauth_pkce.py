@@ -324,8 +324,22 @@ def _validate_original_url(url: str, prefix: str) -> str:
     return url
 
 
-def _validate_return_to(url: str) -> str:
-    """Validate an external return-to URL. Returns empty string if invalid."""
+def _is_localhost(hostname: str) -> bool:
+    """Check if a hostname is localhost (any port)."""
+    return hostname in ("localhost", "127.0.0.1", "[::1]")
+
+
+# Default origins allowed for _vgi_return_to redirects.
+_DEFAULT_ALLOWED_RETURN_ORIGINS: frozenset[str] = frozenset(("https://cupola.query-farm.services",))
+
+
+def _validate_return_to(url: str, allowed_origins: frozenset[str] = frozenset()) -> str:
+    """Validate an external return-to URL against an origin allowlist.
+
+    Returns the URL if it matches an allowed origin or is localhost,
+    otherwise returns empty string.  Only the scheme and host (ignoring
+    port for localhost) are checked — any path is permitted.
+    """
     if not url or len(url) > 2048:
         return ""
     parsed = urlparse(url)
@@ -333,7 +347,20 @@ def _validate_return_to(url: str) -> str:
         return ""
     if not parsed.netloc:
         return ""
-    return url
+    # localhost with any port is always allowed
+    hostname = parsed.hostname or ""
+    if _is_localhost(hostname) and parsed.scheme == "http":
+        return url
+    # Check against allowlist (scheme + host, ignoring path)
+    origin = f"{parsed.scheme}://{parsed.hostname}"
+    if origin in allowed_origins:
+        return url
+    # Also try with explicit port
+    if parsed.port:
+        origin_with_port = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+        if origin_with_port in allowed_origins:
+            return url
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +665,7 @@ class _OAuthPkceMiddleware:
     """
 
     __slots__ = (
+        "_allowed_return_origins",
         "_client_id",
         "_oidc_discovery",
         "_prefix",
@@ -656,6 +684,7 @@ class _OAuthPkceMiddleware:
         secure_cookie: bool,
         redirect_uri: str,
         scope: str = "openid email",
+        allowed_return_origins: frozenset[str] | None = None,
     ) -> None:
         self._session_key = session_key
         self._oidc_discovery = oidc_discovery
@@ -664,6 +693,39 @@ class _OAuthPkceMiddleware:
         self._secure_cookie = secure_cookie
         self._redirect_uri = redirect_uri
         self._scope = scope
+        self._allowed_return_origins = (
+            allowed_return_origins if allowed_return_origins is not None else _DEFAULT_ALLOWED_RETURN_ORIGINS
+        )
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """If the user is already authenticated and has _vgi_return_to, redirect immediately.
+
+        This relies on _AuthMiddleware running first (Falcon processes
+        process_request in middleware list order).  If the cookie token is
+        expired or invalid, _AuthMiddleware raises 401 *before* we get here,
+        so we only redirect when the token is genuinely valid.
+        """
+        if req.method != "GET":
+            return
+        return_to = _validate_return_to(req.get_param("_vgi_return_to") or "", self._allowed_return_origins)
+        if not return_to:
+            return
+        # Check for existing auth token in cookie
+        token = req.cookies.get(_AUTH_COOKIE_NAME)
+        if not token:
+            return  # Not authenticated — let normal flow handle it
+        # Already authenticated with a return_to — redirect back with the token
+        separator = "#" if "#" not in return_to else "&"
+        fragment_params = [f"token={token}"]
+        redirect_url = f"{return_to}{separator}{'&'.join(fragment_params)}"
+        logger.info("OAuth already authenticated, redirecting to external frontend: %s", return_to.split("?")[0])
+        raise falcon.HTTPStatus(
+            "302 Found",
+            headers={
+                "Location": redirect_url,
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+            },
+        )
 
     def process_response(
         self,
@@ -711,7 +773,7 @@ class _OAuthPkceMiddleware:
         original_url = _validate_original_url(original_url, self._prefix)
 
         # Check for external frontend return URL
-        return_to = _validate_return_to(req.get_param("_vgi_return_to") or "")
+        return_to = _validate_return_to(req.get_param("_vgi_return_to") or "", self._allowed_return_origins)
 
         # Pack session cookie
         cookie_value = _pack_oauth_cookie(
