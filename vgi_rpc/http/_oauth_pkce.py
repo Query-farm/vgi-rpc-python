@@ -36,6 +36,8 @@ import httpx
 
 from vgi_rpc.rpc import AuthContext
 
+from ._common import _ERROR_PAGE_STYLE, _FONT_IMPORTS, _VGI_LOGO_HTML
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -69,6 +71,24 @@ def _generate_code_challenge(code_verifier: str) -> str:
 def _generate_state_nonce() -> str:
     """Generate a random state nonce for CSRF protection."""
     return secrets.token_urlsafe(24)
+
+
+def _is_jwt_expired(token: str) -> bool:
+    """Check whether a JWT's exp claim is in the past. Returns False if not a JWT or can't decode."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return False
+        # Add padding for base64url
+        payload_b64 = parts[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp")
+        if exp is None:
+            return False
+        return int(time.time()) >= int(exp)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -367,30 +387,33 @@ def _validate_return_to(url: str, allowed_origins: frozenset[str] = frozenset())
 # Error HTML page
 # ---------------------------------------------------------------------------
 
-_OAUTH_ERROR_HTML = """\
+_OAUTH_ERROR_HTML = (
+    """\
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Authentication Error</title>
-<style>
-  body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 600px;
-         margin: 0 auto; padding: 60px 20px; color: #2c2c1e; text-align: center;
-         background: #faf8f0; }}
-  h1 {{ color: #8b0000; }}
-  .detail {{ background: #f0ece0; padding: 12px 20px; border-radius: 6px;
-             font-family: monospace; margin: 20px 0; text-align: left; }}
-  a {{ color: #2d5016; }}
-</style>
+<title>Authentication Error &mdash; vgi-rpc</title>
+"""
+    + _FONT_IMPORTS
+    + _ERROR_PAGE_STYLE
+    + """
 </head>
 <body>
+"""
+    + _VGI_LOGO_HTML
+    + """
 <h1>Authentication Error</h1>
 <p>{message}</p>
 {detail}
 <p><a href="{retry_url}">Try again</a></p>
+<footer>
+  Powered by <a href="https://vgi-rpc.query.farm"><code>vgi-rpc</code></a>
+</footer>
 </body>
 </html>"""
+)
 
 
 def _oauth_error_page(message: str, detail: str | None, retry_url: str) -> bytes:
@@ -700,10 +723,9 @@ class _OAuthPkceMiddleware:
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """If the user is already authenticated and has _vgi_return_to, redirect immediately.
 
-        This relies on _AuthMiddleware running first (Falcon processes
-        process_request in middleware list order).  If the cookie token is
-        expired or invalid, _AuthMiddleware raises 401 *before* we get here,
-        so we only redirect when the token is genuinely valid.
+        The landing page path is exempt from _AuthMiddleware, so we must
+        check the JWT exp claim ourselves to avoid redirecting with an
+        expired token (which would cause an infinite redirect loop).
         """
         if req.method != "GET":
             return
@@ -714,6 +736,9 @@ class _OAuthPkceMiddleware:
         token = req.cookies.get(_AUTH_COOKIE_NAME)
         if not token:
             return  # Not authenticated — let normal flow handle it
+        # Don't redirect with an expired token — let the OAuth flow run again
+        if _is_jwt_expired(token):
+            return
         # Already authenticated with a return_to — redirect back with the token
         separator = "#" if "#" not in return_to else "&"
         fragment_params = [f"token={token}"]

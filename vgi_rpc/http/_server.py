@@ -83,6 +83,8 @@ from vgi_rpc.utils import ValidatedReader, empty_batch
 
 from ._common import (
     _ARROW_CONTENT_TYPE,
+    _ERROR_PAGE_STYLE,
+    _FONT_IMPORTS,
     _MAX_UPLOAD_URL_COUNT,
     _UPLOAD_URL_METHOD,
     _UPLOAD_URL_SCHEMA,
@@ -1102,40 +1104,8 @@ class _HttpRpcApp:
 
 
 # ---------------------------------------------------------------------------
-# Shared HTML styles for error and landing pages
-# ---------------------------------------------------------------------------
-
-_FONT_IMPORTS = (
-    '<link rel="preconnect" href="https://fonts.googleapis.com">'
-    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">'  # noqa: E501
-)
-
-# ---------------------------------------------------------------------------
 # 404 sink for unmatched routes
 # ---------------------------------------------------------------------------
-
-_ERROR_PAGE_STYLE = """\
-<style>
-  body {{ font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 600px;
-         margin: 0 auto; padding: 60px 20px 0; color: #2c2c1e; text-align: center;
-         background: #faf8f0; }}
-  .logo {{ margin-bottom: 24px; }}
-  .logo img {{ width: 120px; height: 120px; border-radius: 50%;
-               box-shadow: 0 4px 24px rgba(0,0,0,0.12); }}
-  h1 {{ color: #2d5016; margin-bottom: 8px; font-weight: 700; }}
-  code {{ font-family: 'JetBrains Mono', monospace; background: #f0ece0;
-          padding: 2px 6px; border-radius: 3px; font-size: 0.9em; color: #2c2c1e; }}
-  a {{ color: #2d5016; text-decoration: none; }}
-  a:hover {{ color: #4a7c23; }}
-  p {{ line-height: 1.7; color: #6b6b5a; }}
-  .detail {{ margin-top: 12px; padding: 12px 16px; background: #f0ece0;
-             border-radius: 6px; font-size: 0.9em; color: #6b6b5a; }}
-  footer {{ margin-top: 48px; padding: 20px 0; border-top: 1px solid #f0ece0;
-            color: #6b6b5a; font-size: 0.85em; line-height: 1.8; }}
-  footer a {{ color: #2d5016; font-weight: 600; }}
-  footer a:hover {{ color: #4a7c23; }}
-</style>"""
 
 _NOT_FOUND_HTML_TEMPLATE = (
     """\
