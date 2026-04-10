@@ -2234,6 +2234,11 @@ def make_wsgi_app(
         _pkce_client_id: str = _validated_oauth_metadata.client_id
         _pkce_client_secret = _validated_oauth_metadata.client_secret
         _pkce_use_id_token = _validated_oauth_metadata.use_id_token_as_bearer
+        _pkce_scope = (
+            " ".join(_validated_oauth_metadata.scopes_supported)
+            if _validated_oauth_metadata.scopes_supported
+            else "openid email"
+        )
         _exempt_prefixes = (f"{prefix}/_oauth/",)
         _pkce_active = True
         _pkce_user_info_html = build_user_info_html(prefix)
@@ -2263,6 +2268,7 @@ def make_wsgi_app(
                     prefix=prefix,
                     secure_cookie=_pkce_secure,
                     redirect_uri=_pkce_redirect_uri,
+                    scope=_pkce_scope,
                 )
             )
     if capability_headers:
