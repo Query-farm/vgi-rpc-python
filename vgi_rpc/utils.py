@@ -504,6 +504,10 @@ def _infer_arrow_type(python_type: object) -> pa.DataType:
             return pa.list_(element_type)
         return pa.list_(pa.string())
 
+    # Types serialized as binary (IPC bytes)
+    if python_type is pa.RecordBatch or python_type is pa.Schema:
+        return pa.binary()
+
     # Simple type mappings
     type_map: dict[type, pa.DataType] = {
         str: pa.string(),
