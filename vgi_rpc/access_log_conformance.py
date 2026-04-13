@@ -66,9 +66,9 @@ def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
         status = str(entry.get("status", ""))
 
         # --- Always required ---
-        for field in _ALWAYS_REQUIRED:
-            if field not in entry:
-                violations.append(Violation(i, method, field, "required on all entries"))
+        violations.extend(
+            Violation(i, method, field, "required on all entries") for field in _ALWAYS_REQUIRED if field not in entry
+        )
 
         # --- request_data on dispatch methods ---
         if (method in _REQUEST_DATA_METHODS or _is_catalog_method(method)) and not entry.get("request_data"):

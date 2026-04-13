@@ -236,6 +236,7 @@ class RpcServer:
             implementation: Object implementing all methods from *protocol*.
             external_location: Optional ExternalLocation configuration.
             server_id: Optional server identifier; auto-generated if ``None``.
+            server_version: Version string included in access log entries.
             enable_describe: When ``True``, the server handles ``__describe__``
                 requests returning machine-readable method metadata.
             ipc_validation: Validation level for incoming IPC batches.

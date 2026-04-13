@@ -243,9 +243,7 @@ def _pack_state_token(
     return base64.b64encode(payload + mac)
 
 
-def _unpack_state_token(
-    token: bytes, signing_key: bytes, token_ttl: int = 0
-) -> tuple[bytes, bytes, bytes, str]:
+def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) -> tuple[bytes, bytes, bytes, str]:
     """Unpack and verify a signed state token.
 
     Args:
