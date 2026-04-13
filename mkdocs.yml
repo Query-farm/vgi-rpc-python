@@ -131,9 +131,9 @@ nav:
   - Guides:
     - Examples: examples.md
     - Hosting: hosting.md
-  - Operations:
     - Access Log: access-log.md
     - Conformance Testing: cross-language-conformance.md
-  - Benchmarks: benchmarks.md
-  - Comparison: comparison.md
-  - Contributing: contributing.md
+  - Reference:
+    - Benchmarks: benchmarks.md
+    - Comparison: comparison.md
+    - Contributing: contributing.md
