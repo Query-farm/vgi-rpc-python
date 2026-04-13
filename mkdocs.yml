@@ -133,7 +133,7 @@ nav:
     - Hosting: hosting.md
     - Access Log: access-log.md
     - Conformance Testing: cross-language-conformance.md
-  - Reference:
+  - About:
     - Benchmarks: benchmarks.md
     - Comparison: comparison.md
     - Contributing: contributing.md
