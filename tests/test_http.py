@@ -377,9 +377,9 @@ class TestResumableServerStream:
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
-        # Build a structurally valid v2 token with a wrong version byte
+        # Build a structurally valid v3 token with a wrong version byte
         bad_version = 99
-        state_bytes = schema_bytes = input_bytes = b""
+        state_bytes = schema_bytes = input_bytes = stream_id_bytes = b""
         payload = (
             struct.pack("B", bad_version)
             + struct.pack("<Q", int(time.time()))
@@ -389,6 +389,8 @@ class TestResumableServerStream:
             + schema_bytes
             + struct.pack("<I", len(input_bytes))
             + input_bytes
+            + struct.pack("<I", len(stream_id_bytes))
+            + stream_id_bytes
         )
         mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
         token = base64.b64encode(payload + mac)
@@ -459,9 +461,9 @@ class TestStateTokenStateEncoding:
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
-        # Build a valid v2 token with a timestamp 2 hours in the past
+        # Build a valid v3 token with a timestamp 2 hours in the past
         old_time = int(time.time()) - 7200
-        state_bytes = schema_bytes = input_bytes = b""
+        state_bytes = schema_bytes = input_bytes = stream_id_bytes = b""
         payload = (
             struct.pack("B", _TOKEN_VERSION)
             + struct.pack("<Q", old_time)
@@ -471,6 +473,8 @@ class TestStateTokenStateEncoding:
             + schema_bytes
             + struct.pack("<I", len(input_bytes))
             + input_bytes
+            + struct.pack("<I", len(stream_id_bytes))
+            + stream_id_bytes
         )
         mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
         token = base64.b64encode(payload + mac)
@@ -511,11 +515,12 @@ class TestStateTokenStateEncoding:
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
-        # Build a valid v2 token with a very old timestamp
+        # Build a valid v3 token with a very old timestamp
         old_time = int(time.time()) - 86400  # 24 hours ago
         state_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
         schema_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
         input_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
+        stream_id_bytes = b""
         payload = (
             struct.pack("B", _TOKEN_VERSION)
             + struct.pack("<Q", old_time)
@@ -525,6 +530,8 @@ class TestStateTokenStateEncoding:
             + schema_bytes
             + struct.pack("<I", len(input_bytes))
             + input_bytes
+            + struct.pack("<I", len(stream_id_bytes))
+            + stream_id_bytes
         )
         mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
         token = base64.b64encode(payload + mac)
@@ -575,10 +582,11 @@ class TestStateTokenStateEncoding:
         # Verify it's valid UTF-8
         token.decode("utf-8")
 
-        s, sch, inp = _unpack_state_token(token, key)
+        s, sch, inp, sid = _unpack_state_token(token, key)
         assert s == state
         assert sch == schema
         assert inp == input_schema
+        assert sid == ""
 
 
 # ---------------------------------------------------------------------------
