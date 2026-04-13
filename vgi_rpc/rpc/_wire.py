@@ -42,6 +42,7 @@ from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
     RpcError,
     VersionError,
+    _current_request_batch,
     _current_request_id,
     _current_request_metadata,
     _current_trace_headers,
@@ -283,6 +284,9 @@ def _read_request(
     reader = ValidatedReader(ipc.open_stream(reader_stream), ipc_validation)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
     _current_request_metadata.set(custom_metadata)
+    # Stash the raw request batch bytes for access log enrichment.
+    # Cost is bounded by the request batch size (one row of parameters), not data batch size.
+    _current_request_batch.set(batch.serialize().to_pybytes())
     _record_input(batch)
     if wire_request_logger.isEnabledFor(logging.DEBUG):
         wire_request_logger.debug(

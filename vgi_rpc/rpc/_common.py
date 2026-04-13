@@ -220,6 +220,14 @@ _current_request_id: ContextVar[str] = ContextVar("vgi_rpc_request_id", default=
 # for dynamic SHM segment attachment without changing _read_request()'s return type.
 _current_request_metadata: ContextVar[pa.KeyValueMetadata | None] = ContextVar("vgi_rpc_request_metadata", default=None)
 
+# Raw request batch bytes — set by _read_request() before deserialization,
+# included in the access log as base64 for full call-parameter capture.
+_current_request_batch: ContextVar[bytes | None] = ContextVar("vgi_rpc_request_batch", default=None)
+
+# Stream correlation ID — set by _serve_stream() / HTTP init path,
+# carried in the HTTP state token for exchange/produce correlation.
+_current_stream_id: ContextVar[str] = ContextVar("vgi_rpc_stream_id", default="")
+
 
 # ---------------------------------------------------------------------------
 # MethodType enum

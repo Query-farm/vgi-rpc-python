@@ -21,6 +21,7 @@ import os
 import struct
 import time
 import types as _types
+import uuid
 import warnings
 from collections.abc import Callable, Iterable, Mapping
 from http import HTTPStatus
@@ -75,6 +76,8 @@ from vgi_rpc.rpc._common import (
     CallStatistics,
     HookToken,
     _current_call_stats,
+    _current_request_batch,
+    _current_stream_id,
     _DispatchHook,
     _record_input,
     _record_output,
@@ -181,10 +184,10 @@ def _set_error_response(
 
 _HMAC_LEN = 32  # SHA-256 digest size
 _HEADER_LEN = 4  # uint32 LE prefix for each segment
-_TOKEN_VERSION = 2  # bump when the token wire format changes
+_TOKEN_VERSION = 3  # bump when the token wire format changes (v3: added stream_id)
 _TOKEN_VERSION_LEN = 1  # single byte
 _TIMESTAMP_LEN = 8  # uint64 LE, seconds since epoch
-_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _TIMESTAMP_LEN + _HEADER_LEN * 3 + _HMAC_LEN
+_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _TIMESTAMP_LEN + _HEADER_LEN * 4 + _HMAC_LEN
 
 
 def _pack_state_token(
@@ -193,12 +196,13 @@ def _pack_state_token(
     input_schema_bytes: bytes,
     signing_key: bytes,
     created_at: int,
+    stream_id: str = "",
 ) -> bytes:
-    """Pack state, output schema, and input schema bytes into a signed token.
+    """Pack state, output schema, input schema, and stream_id into a signed token.
 
-    Wire format (v2)::
+    Wire format (v3)::
 
-        [1 byte:  version=2          (uint8)]
+        [1 byte:  version=3          (uint8)]
         [8 bytes: created_at         (uint64 LE, seconds since epoch)]
         [4 bytes: state_len          (uint32 LE)]
         [state_len bytes: state_bytes]
@@ -206,6 +210,8 @@ def _pack_state_token(
         [schema_len bytes: schema_bytes]
         [4 bytes: input_schema_len   (uint32 LE)]
         [input_schema_len bytes: input_schema_bytes]
+        [4 bytes: stream_id_len      (uint32 LE)]
+        [stream_id_len bytes: stream_id_bytes (UTF-8)]
         [32 bytes: HMAC-SHA256(key, all above)]
 
     Args:
@@ -214,11 +220,13 @@ def _pack_state_token(
         input_schema_bytes: Serialized input ``pa.Schema``.
         signing_key: HMAC signing key.
         created_at: Token creation time as seconds since epoch.
+        stream_id: Stream correlation ID (hex UUID).
 
     Returns:
         The opaque signed token, base64-encoded for UTF-8 safe metadata.
 
     """
+    stream_id_bytes = stream_id.encode()
     payload = (
         struct.pack("B", _TOKEN_VERSION)
         + struct.pack("<Q", created_at)
@@ -228,12 +236,16 @@ def _pack_state_token(
         + schema_bytes
         + struct.pack("<I", len(input_schema_bytes))
         + input_schema_bytes
+        + struct.pack("<I", len(stream_id_bytes))
+        + stream_id_bytes
     )
     mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
     return base64.b64encode(payload + mac)
 
 
-def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) -> tuple[bytes, bytes, bytes]:
+def _unpack_state_token(
+    token: bytes, signing_key: bytes, token_ttl: int = 0
+) -> tuple[bytes, bytes, bytes, str]:
     """Unpack and verify a signed state token.
 
     Args:
@@ -243,7 +255,7 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
             checking.
 
     Returns:
-        ``(state_bytes, schema_bytes, input_schema_bytes)``
+        ``(state_bytes, schema_bytes, input_schema_bytes, stream_id)``
 
     Raises:
         _RpcHttpError: On malformed, tampered, or expired tokens (HTTP 400).
@@ -275,7 +287,8 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
     segments_start = _TOKEN_VERSION_LEN + _TIMESTAMP_LEN
     state_bytes, pos = _read_segment(token, segments_start)
     schema_bytes, pos = _read_segment(token, pos)
-    input_schema_bytes, payload_end = _read_segment(token, pos)
+    input_schema_bytes, pos = _read_segment(token, pos)
+    stream_id_bytes, payload_end = _read_segment(token, pos)
 
     if payload_end + _HMAC_LEN != len(token):
         raise _RpcHttpError(
@@ -310,7 +323,7 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
-    return state_bytes, schema_bytes, input_schema_bytes
+    return state_bytes, schema_bytes, input_schema_bytes, stream_id_bytes.decode()
 
 
 # Type alias: a single concrete class or an ordered tuple for unions.
@@ -520,6 +533,7 @@ class _HttpRpcApp:
                     "ok",
                     http_status=HTTPStatus.OK.value,
                     stats=stats,
+                    server_version=self._server.server_version,
                 )
                 return resp_buf, HTTPStatus.OK
 
@@ -585,6 +599,8 @@ class _HttpRpcApp:
                     error_type,
                     http_status=http_status.value,
                     stats=stats,
+                    server_version=self._server.server_version,
+                    error_message=str(_hook_exc)[:500] if _hook_exc is not None else "",
                 )
                 if hook is not None:
                     try:
@@ -644,6 +660,8 @@ class _HttpRpcApp:
             http_status = HTTPStatus.OK
             status: Literal["ok", "error"] = "ok"
             error_type = ""
+            error_message = ""
+            _response_state_bytes: bytes | None = None
             hook: _DispatchHook | None = self._server._dispatch_hook
             hook_token_init: HookToken = None
             if hook is not None:
@@ -653,6 +671,7 @@ class _HttpRpcApp:
                     _logger.debug("Dispatch hook start failed", exc_info=True)
                     hook = None
             _hook_exc: BaseException | None = None
+            _current_stream_id.set(uuid.uuid4().hex)
             try:
                 try:
                     result: Stream[StreamState, Any] = getattr(self._server.implementation, method_name)(**kwargs)
@@ -660,12 +679,14 @@ class _HttpRpcApp:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                    error_message = str(exc)[:500]
                     http_status = HTTPStatus.BAD_REQUEST
                     raise _RpcHttpError(exc, status_code=http_status) from exc
                 except Exception as exc:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                    error_message = str(exc)[:500]
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                     raise _RpcHttpError(exc, status_code=http_status) from exc
 
@@ -678,7 +699,7 @@ class _HttpRpcApp:
                         _write_stream_header(
                             resp_buf, result.header, self._server.external_config, sink=sink, method_name=method_name
                         )
-                    produce_buf, produce_error_type = self._produce_stream_response(
+                    produce_buf, produce_error_type, produce_error_msg = self._produce_stream_response(
                         result.output_schema,
                         result.state,
                         result.input_schema,
@@ -692,6 +713,7 @@ class _HttpRpcApp:
                     if produce_error_type is not None:
                         status = "error"
                         error_type = produce_error_type
+                        error_message = produce_error_msg
                     return resp_buf
                 else:
                     # Exchange stream — return state token
@@ -702,10 +724,16 @@ class _HttpRpcApp:
 
                         # Pack state + output schema + input schema into a signed token
                         state_bytes = _serialize_state_bytes(state, state_info)
+                        _response_state_bytes = state_bytes
                         schema_bytes = output_schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
                         token = _pack_state_token(
-                            state_bytes, schema_bytes, input_schema_bytes, self._signing_key, int(time.time())
+                            state_bytes,
+                            schema_bytes,
+                            input_schema_bytes,
+                            self._signing_key,
+                            int(time.time()),
+                            stream_id=_current_stream_id.get(),
                         )
 
                         # Write response: header (if declared) + log batches + zero-row batch with token in metadata
@@ -728,6 +756,7 @@ class _HttpRpcApp:
                         _hook_exc = exc
                         status = "error"
                         error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                        error_message = str(exc)[:500]
                         http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                         raise _RpcHttpError(exc, status_code=http_status) from exc
 
@@ -747,6 +776,9 @@ class _HttpRpcApp:
                     error_type,
                     http_status=http_status.value,
                     stats=stats,
+                    server_version=self._server.server_version,
+                    error_message=error_message,
+                    response_state=_response_state_bytes,
                 )
                 if hook is not None:
                     try:
@@ -829,8 +861,9 @@ class _HttpRpcApp:
                         _logger.debug("Dispatch hook start failed", exc_info=True)
                         hook = None
                 _hook_exc: BaseException | None = None
+                produce_error_msg = ""
                 try:
-                    resp_buf, produce_error_type = self._produce_stream_response(
+                    resp_buf, produce_error_type, produce_error_msg = self._produce_stream_response(
                         output_schema,
                         state_obj,
                         input_schema,
@@ -852,8 +885,11 @@ class _HttpRpcApp:
                         duration_ms,
                         status,
                         error_type,
+                        error_message=produce_error_msg,
                         http_status=http_status.value,
                         stats=stats,
+                        server_version=self._server.server_version,
+                        request_state=token if isinstance(token, bytes) else token.encode() if token else None,
                     )
                     if hook is not None and info is not None:
                         try:
@@ -888,6 +924,7 @@ class _HttpRpcApp:
                         _logger.debug("Dispatch hook start failed", exc_info=True)
                         hook_e = None
                 _hook_exc_e: BaseException | None = None
+                _response_state_bytes: bytes | None = None
                 try:
                     # Strip state token from metadata visible to process()
                     user_cm = strip_keys(resolved_cm, STATE_KEY)
@@ -909,10 +946,16 @@ class _HttpRpcApp:
 
                     # Repack updated state with same schemas into new signed token
                     updated_state_bytes = _serialize_state_bytes(state_obj, state_info)
+                    _response_state_bytes = updated_state_bytes
                     schema_bytes = output_schema.serialize().to_pybytes()
                     input_schema_bytes_upd = input_schema.serialize().to_pybytes()
                     updated_token = _pack_state_token(
-                        updated_state_bytes, schema_bytes, input_schema_bytes_upd, self._signing_key, int(time.time())
+                        updated_state_bytes,
+                        schema_bytes,
+                        input_schema_bytes_upd,
+                        self._signing_key,
+                        int(time.time()),
+                        stream_id=_current_stream_id.get(),
                     )
                     out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
 
@@ -940,6 +983,10 @@ class _HttpRpcApp:
                         error_type_str,
                         http_status=http_status.value,
                         stats=stats,
+                        server_version=self._server.server_version,
+                        error_message=str(_hook_exc_e)[:500] if _hook_exc_e is not None else "",
+                        request_state=token if isinstance(token, bytes) else token.encode() if token else None,
+                        response_state=_response_state_bytes,
                     )
                     if hook_e is not None and info is not None:
                         try:
@@ -962,7 +1009,7 @@ class _HttpRpcApp:
         method_name: str,
         auth: AuthContext | None = None,
         transport_metadata: Mapping[str, str] | None = None,
-    ) -> tuple[BytesIO, str | None]:
+    ) -> tuple[BytesIO, str | None, str]:
         """Run the produce loop for a producer stream, with optional size-based continuation.
 
         Args:
@@ -975,8 +1022,9 @@ class _HttpRpcApp:
             transport_metadata: Transport metadata; falls back to contextvar when ``None``.
 
         Returns:
-            A ``(BytesIO, error_type)`` tuple — the IPC response stream and the
-            exception class name on produce-loop failure (``None`` on success).
+            A ``(BytesIO, error_type, error_message)`` tuple — the IPC response
+            stream, the exception class name on failure (``None`` on success),
+            and the error message (empty on success).
 
         """
         if auth is None or transport_metadata is None:
@@ -990,6 +1038,7 @@ class _HttpRpcApp:
         max_bytes = self._max_stream_response_bytes
         max_time = self._max_stream_response_time
         produce_error_type: str | None = None
+        produce_error_message: str = ""
         with ipc.new_stream(resp_buf, schema) as writer:
             if sink is not None:
                 sink.flush_contents(writer, schema)
@@ -1037,7 +1086,12 @@ class _HttpRpcApp:
                         schema_bytes = schema.serialize().to_pybytes()
                         input_schema_bytes = input_schema.serialize().to_pybytes()
                         token = _pack_state_token(
-                            state_bytes, schema_bytes, input_schema_bytes, self._signing_key, int(time.time())
+                            state_bytes,
+                            schema_bytes,
+                            input_schema_bytes,
+                            self._signing_key,
+                            int(time.time()),
+                            stream_id=_current_stream_id.get(),
                         )
                         state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
                         continuation_batch = empty_batch(schema)
@@ -1046,9 +1100,10 @@ class _HttpRpcApp:
                         break
             except Exception as exc:
                 produce_error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                produce_error_message = str(exc)[:500]
                 _write_error_batch(writer, schema, exc, server_id=server_id)
         resp_buf.seek(0)
-        return resp_buf, produce_error_type
+        return resp_buf, produce_error_type, produce_error_message
 
     def _unpack_and_recover_state(
         self,
@@ -1072,7 +1127,11 @@ class _HttpRpcApp:
                 deserialization, or signature verification failure.
 
         """
-        state_bytes, schema_bytes, input_schema_bytes = _unpack_state_token(token, self._signing_key, self._token_ttl)
+        state_bytes, schema_bytes, input_schema_bytes, stream_id = _unpack_state_token(
+            token, self._signing_key, self._token_ttl
+        )
+        if stream_id:
+            _current_stream_id.set(stream_id)
 
         try:
             output_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
@@ -1680,6 +1739,7 @@ class _UploadUrlResource:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        _upload_exc: BaseException | None = None
         try:
             with ipc.new_stream(resp_buf, _UPLOAD_URL_SCHEMA) as writer:
                 sink.flush_contents(writer, _UPLOAD_URL_SCHEMA)
@@ -1695,6 +1755,7 @@ class _UploadUrlResource:
                     )
                     writer.write_batch(result_batch)
                 except Exception as exc:
+                    _upload_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, _UPLOAD_URL_METHOD, server_id, exc)
                     _write_error_batch(writer, _UPLOAD_URL_SCHEMA, exc, server_id=server_id)
@@ -1712,6 +1773,8 @@ class _UploadUrlResource:
                 status,
                 error_type,
                 http_status=http_status.value,
+                server_version=self._app._server.server_version,
+                error_message=str(_upload_exc)[:500] if _upload_exc is not None else "",
             )
 
         resp_buf.seek(0)
@@ -1774,6 +1837,35 @@ class _RequestIdMiddleware:
         token = getattr(req.context, "request_id_token", None)
         if token is not None:
             _current_request_id.reset(token)
+
+
+class _AccessLogContextMiddleware:
+    """Falcon middleware that resets access-log contextvars between requests.
+
+    Prevents cross-request leakage of ``_current_request_batch`` and
+    ``_current_stream_id`` when threads are reused by WSGI thread-pool
+    servers (waitress, gunicorn).
+    """
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Clear access-log contextvars at the start of each request."""
+        req.context._rb_token = _current_request_batch.set(None)
+        req.context._sid_token = _current_stream_id.set("")
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
+    ) -> None:
+        """Reset access-log contextvars to their pre-request state."""
+        token = getattr(req.context, "_rb_token", None)
+        if token is not None:
+            _current_request_batch.reset(token)
+        token = getattr(req.context, "_sid_token", None)
+        if token is not None:
+            _current_stream_id.reset(token)
 
 
 class _AuthMiddleware:
@@ -2141,7 +2233,7 @@ def make_wsgi_app(
         max_upload_bytes,
         token_ttl,
     )
-    middleware: list[Any] = [_DrainRequestMiddleware(), _RequestIdMiddleware()]
+    middleware: list[Any] = [_DrainRequestMiddleware(), _RequestIdMiddleware(), _AccessLogContextMiddleware()]
 
     # Compression middleware decompresses request bodies and compresses
     # responses — must come before auth so handlers read plaintext bodies.

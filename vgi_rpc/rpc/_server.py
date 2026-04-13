@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import inspect
 import logging
@@ -29,8 +30,10 @@ from vgi_rpc.rpc._common import (
     VersionError,
     _access_logger,
     _current_call_stats,
+    _current_request_batch,
     _current_request_id,
     _current_request_metadata,
+    _current_stream_id,
     _DispatchHook,
     _generate_request_id,
     _get_auth_and_metadata,
@@ -102,8 +105,12 @@ def _emit_access_log(
     duration_ms: float,
     status: Literal["ok", "error"],
     error_type: str = "",
+    error_message: str = "",
     http_status: int | None = None,
     stats: CallStatistics | None = None,
+    server_version: str = "",
+    request_state: bytes | None = None,
+    response_state: bytes | None = None,
 ) -> None:
     """Emit a structured access log record for a completed RPC call."""
     if not _access_logger.isEnabledFor(logging.INFO):
@@ -116,16 +123,37 @@ def _emit_access_log(
             "method_type": method_type,
             "principal": auth.principal or "",
             "auth_domain": auth.domain or "",
+            "authenticated": auth.authenticated,
             "remote_addr": transport_metadata.get("remote_addr", ""),
             "duration_ms": round(duration_ms, 2),
             "status": status,
             "error_type": error_type,
         }
+        if error_message:
+            extra["error_message"] = error_message
+        if server_version:
+            extra["server_version"] = server_version
         request_id = _current_request_id.get()
         if request_id:
             extra["request_id"] = request_id
         if http_status is not None:
             extra["http_status"] = http_status
+        # Raw request batch bytes (set by _read_request for unary/stream-init)
+        request_data = _current_request_batch.get()
+        if request_data is not None:
+            extra["request_data"] = base64.b64encode(request_data).decode()
+        # Stream correlation ID
+        stream_id = _current_stream_id.get()
+        if stream_id:
+            extra["stream_id"] = stream_id
+        # Auth claims
+        if auth.claims:
+            extra["claims"] = dict(auth.claims)
+        # State tokens (HTTP transport only)
+        if request_state is not None:
+            extra["request_state"] = base64.b64encode(request_state).decode()
+        if response_state is not None:
+            extra["response_state"] = base64.b64encode(response_state).decode()
         if stats is not None:
             extra["input_batches"] = stats.input_batches
             extra["output_batches"] = stats.output_batches
@@ -187,6 +215,7 @@ class RpcServer:
         "_methods",
         "_protocol",
         "_server_id",
+        "_server_version",
     )
 
     def __init__(
@@ -196,6 +225,7 @@ class RpcServer:
         *,
         external_location: ExternalLocationConfig | None = None,
         server_id: str | None = None,
+        server_version: str = "",
         enable_describe: bool = False,
         ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> None:
@@ -214,6 +244,7 @@ class RpcServer:
         """
         self._protocol = protocol
         self._impl = implementation
+        self._server_version = server_version
         self._ipc_validation = ipc_validation
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
@@ -288,6 +319,11 @@ class RpcServer:
         return self._protocol.__name__
 
     @property
+    def server_version(self) -> str:
+        """Version string passed at construction (empty if not set)."""
+        return self._server_version
+
+    @property
     def ctx_methods(self) -> frozenset[str]:
         """Method names whose implementations accept a ctx parameter."""
         return self._ctx_methods
@@ -341,6 +377,8 @@ class RpcServer:
         stats = CallStatistics()
         stats_token = _current_call_stats.set(stats)
         md_token = _current_request_metadata.set(None)
+        rb_token = _current_request_batch.set(None)
+        sid_token = _current_stream_id.set("")
         dynamic_shm: ShmSegment | None = None
         try:
             try:
@@ -388,6 +426,8 @@ class RpcServer:
             if dynamic_shm is not None:
                 with contextlib.suppress(BufferError):
                     dynamic_shm.close()
+            _current_stream_id.reset(sid_token)
+            _current_request_batch.reset(rb_token)
             _current_request_metadata.reset(md_token)
             _current_call_stats.reset(stats_token)
             _current_request_id.reset(token)
@@ -434,6 +474,7 @@ class RpcServer:
                 0.0,
                 "ok",
                 stats=stats,
+                server_version=self._server_version,
             )
             return
 
@@ -443,6 +484,7 @@ class RpcServer:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        error_message = ""
         hook = self._dispatch_hook
         hook_token: HookToken = None
         if hook is not None:
@@ -462,6 +504,7 @@ class RpcServer:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    error_message = str(exc)[:500]
                     _write_error_batch(writer, schema, exc, server_id=self._server_id)
                     return
                 _write_result_batch(writer, info.result_schema, result, self._external_config, shm=shm)
@@ -477,7 +520,9 @@ class RpcServer:
                 duration_ms,
                 status,
                 error_type,
+                error_message=error_message,
                 stats=stats,
+                server_version=self._server_version,
             )
             if hook is not None:
                 try:
@@ -494,11 +539,13 @@ class RpcServer:
         stats: CallStatistics | None = None,
         shm: ShmSegment | None = None,
     ) -> None:
+        _current_stream_id.set(uuid.uuid4().hex)
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
         protocol_name = self.protocol_name
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        error_message = ""
         hook = self._dispatch_hook
         hook_token: HookToken = None
         if hook is not None:
@@ -517,6 +564,7 @@ class RpcServer:
             _hook_exc = exc
             status = "error"
             error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+            error_message = str(exc)[:500]
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
@@ -533,7 +581,9 @@ class RpcServer:
                     duration_ms,
                     status,
                     error_type,
+                    error_message=error_message,
                     stats=stats,
+                    server_version=self._server_version,
                 )
                 if hook is not None:
                     try:
@@ -619,6 +669,7 @@ class RpcServer:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    error_message = str(exc)[:500]
                     with contextlib.suppress(BrokenPipeError, OSError):
                         _write_error_batch(output_writer, output_schema, exc, server_id=self._server_id)
         finally:
@@ -633,7 +684,9 @@ class RpcServer:
                 duration_ms,
                 status,
                 error_type,
+                error_message=error_message,
                 stats=stats,
+                server_version=self._server_version,
             )
             if hook is not None:
                 try:
