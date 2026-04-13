@@ -1,8 +1,3 @@
----
-hide:
-  - navigation
----
-
 # Comparison with Other Frameworks
 
 An honest comparison of Python RPC frameworks. Every framework makes trade-offs — this page helps you pick the right one for your use case.

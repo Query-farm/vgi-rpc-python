@@ -1,7 +1,5 @@
 ---
 description: "Deploy vgi-rpc services on AWS Lambda, Google Cloud Run, Cloudflare Workers, Azure Functions, Fly.io, and Railway — with external storage for large payloads."
-hide:
-  - navigation
 ---
 
 # Hosting & Deployment

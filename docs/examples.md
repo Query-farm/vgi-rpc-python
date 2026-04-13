@@ -1,7 +1,5 @@
 ---
 description: "Runnable vgi-rpc examples — hello world, streaming, HTTP transport, authentication, introspection, shared memory, and testing patterns."
-hide:
-  - navigation
 ---
 
 # Examples

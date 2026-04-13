@@ -1,8 +1,3 @@
----
-hide:
-  - navigation
----
-
 # Benchmarks
 
 Performance benchmarks measured with [pytest-benchmark](https://pytest-benchmark.readthedocs.io/) on a single machine (Apple Silicon). All times are **median** values across multiple iterations.
