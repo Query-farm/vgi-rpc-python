@@ -128,10 +128,12 @@ nav:
     - Logging: api/logging.md
     - OpenTelemetry: api/otel.md
     - CLI: api/cli.md
-  - Access Log: access-log.md
-  - Conformance: cross-language-conformance.md
-  - Examples: examples.md
-  - Hosting: hosting.md
+  - Guides:
+    - Examples: examples.md
+    - Hosting: hosting.md
+  - Operations:
+    - Access Log: access-log.md
+    - Conformance Testing: cross-language-conformance.md
   - Benchmarks: benchmarks.md
   - Comparison: comparison.md
   - Contributing: contributing.md
