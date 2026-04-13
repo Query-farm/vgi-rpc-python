@@ -85,12 +85,13 @@ def _mint_jwt(
 def _make_local_auth(
     public_key: dict[str, object],
     *,
-    issuer: str = "https://auth.example.com",
+    issuer: str | tuple[str, ...] = "https://auth.example.com",
     audience: str | tuple[str, ...] = "https://api.example.com/vgi",
     principal_claim: str = "sub",
     domain: str = "jwt",
 ) -> Callable[[falcon.Request], AuthContext]:
     """Create a local JWT authenticate callback (no JWKS endpoint needed)."""
+    issuers = (issuer,) if isinstance(issuer, str) else issuer
     audiences = (audience,) if isinstance(audience, str) else audience
 
     def authenticate(req: falcon.Request) -> AuthContext:
@@ -103,7 +104,7 @@ def _make_local_auth(
                 raw_token,
                 public_key,
                 claims_options={
-                    "iss": {"essential": True, "value": issuer},
+                    "iss": {"essential": True, "values": list(issuers)},
                     "aud": {"essential": True, "values": list(audiences)},
                 },
             )
@@ -816,6 +817,37 @@ class TestJwtAuthenticate:
         with pytest.raises(ValueError):
             auth_fn(req)
 
+    def test_multiple_issuers_first_matches(self) -> None:
+        """A JWT matching the first of multiple issuers is accepted."""
+        priv, pub = _make_rsa_key()
+        iss1 = "https://auth.example.com"
+        iss2 = "https://auth2.example.com"
+        token = _mint_jwt(priv, iss=iss1)
+        auth_fn = _make_local_auth(pub, issuer=(iss1, iss2))
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        auth = auth_fn(req)
+        assert auth.authenticated is True
+
+    def test_multiple_issuers_second_matches(self) -> None:
+        """A JWT matching the second of multiple issuers is accepted."""
+        priv, pub = _make_rsa_key()
+        iss1 = "https://auth.example.com"
+        iss2 = "https://auth2.example.com"
+        token = _mint_jwt(priv, iss=iss2)
+        auth_fn = _make_local_auth(pub, issuer=(iss1, iss2))
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        auth = auth_fn(req)
+        assert auth.authenticated is True
+
+    def test_multiple_issuers_none_match(self) -> None:
+        """A JWT with an unrecognized issuer is rejected."""
+        priv, pub = _make_rsa_key()
+        token = _mint_jwt(priv, iss="https://wrong.example.com")
+        auth_fn = _make_local_auth(pub, issuer=("https://a.example.com", "https://b.example.com"))
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        with pytest.raises(ValueError):
+            auth_fn(req)
+
     def test_missing_bearer_raises_value_error(self) -> None:
         """Missing Authorization header raises ValueError."""
         _priv, pub = _make_rsa_key()
@@ -909,3 +941,30 @@ class TestJwtAuthenticate:
                 audience=(),
                 jwks_uri="https://auth.example.com/.well-known/jwks.json",
             )
+
+    def test_empty_issuer_tuple_raises(self) -> None:
+        """Passing an empty issuer tuple raises ValueError eagerly."""
+        with pytest.raises(ValueError, match="issuer must not be empty"):
+            jwt_authenticate(
+                issuer=(),
+                audience="https://api.example.com/vgi",
+                jwks_uri="https://auth.example.com/.well-known/jwks.json",
+            )
+
+    def test_jwt_authenticate_factory_multiple_issuers(self) -> None:
+        """jwt_authenticate() accepts a tuple of issuers."""
+        auth_fn = jwt_authenticate(
+            issuer=("https://auth.example.com", "https://auth2.example.com"),
+            audience="https://api.example.com/vgi",
+            jwks_uri="https://auth.example.com/.well-known/jwks.json",
+        )
+        assert callable(auth_fn)
+
+    def test_single_issuer_string_still_works(self) -> None:
+        """Passing issuer as a plain string still works (backwards compat)."""
+        priv, pub = _make_rsa_key()
+        token = _mint_jwt(priv)
+        auth_fn = _make_local_auth(pub, issuer="https://auth.example.com")
+        req = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {token}"})
+        auth = auth_fn(req)
+        assert auth.authenticated is True

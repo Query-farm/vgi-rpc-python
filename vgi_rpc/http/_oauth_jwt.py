@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def jwt_authenticate(
     *,
-    issuer: str,
+    issuer: str | tuple[str, ...],
     audience: str | tuple[str, ...],
     jwks_uri: str | None = None,
     claims_options: Mapping[str, Any] | None = None,
@@ -47,7 +47,11 @@ def jwt_authenticate(
     Keys are cached in-process with automatic refresh on unknown ``kid``.
 
     Args:
-        issuer: Expected ``iss`` claim in the JWT.
+        issuer: Expected ``iss`` claim(s) in the JWT.  A single string
+            or a tuple of strings.  When multiple issuers are given, a
+            token matching **any** of them is accepted.  When multiple
+            issuers are provided and ``jwks_uri`` is not set, the first
+            issuer is used for OIDC discovery.
         audience: Expected ``aud`` claim(s) in the JWT.  A single string
             or a tuple of strings.  When multiple audiences are given, a
             token matching **any** of them is accepted.
@@ -71,6 +75,12 @@ def jwt_authenticate(
     # Authlib's KeySet type is not exported in public stubs; alias to contain Any.
     type _KeySet = Any
 
+    issuers = (issuer,) if isinstance(issuer, str) else issuer
+    if not issuers:
+        raise ValueError("issuer must not be empty")
+    # Use the first issuer for OIDC discovery when jwks_uri is not provided.
+    discovery_issuer = issuers[0]
+
     resolved_jwks_uri = jwks_uri
     lock = threading.Lock()
     key_set: _KeySet = None
@@ -79,7 +89,7 @@ def jwt_authenticate(
         nonlocal resolved_jwks_uri, key_set
         if resolved_jwks_uri is None:
             with httpx.Client() as client:
-                oidc_resp = client.get(f"{issuer.rstrip('/')}/.well-known/openid-configuration")
+                oidc_resp = client.get(f"{discovery_issuer.rstrip('/')}/.well-known/openid-configuration")
                 oidc_resp.raise_for_status()
                 resolved_jwks_uri = oidc_resp.json()["jwks_uri"]
 
@@ -102,7 +112,7 @@ def jwt_authenticate(
         raise ValueError("audience must not be empty")
 
     base_claims_options: dict[str, Any] = {
-        "iss": {"essential": True, "value": issuer},
+        "iss": {"essential": True, "values": list(issuers)},
         "aud": {"essential": True, "values": list(audiences)},
     }
     if claims_options:
@@ -117,12 +127,12 @@ def jwt_authenticate(
             token_iss = raw_claims.get("iss")
             logger.warning(
                 "JWT validation failed: %s\n"
-                "  expected iss: %s\n"
+                "  expected iss (any of): %s\n"
                 "  token   iss: %s\n"
                 "  expected aud (any of): %s\n"
                 "  token   aud: %s",
                 exc,
-                issuer,
+                list(issuers),
                 token_iss,
                 list(audiences),
                 token_aud,
