@@ -2056,3 +2056,76 @@ class TestDescribeHtmlPage:
         # Falls through to {prefix}/{method} route which only has on_post → 405
         assert resp.status_code == 405
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# Health endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestHealthEndpoint:
+    """Health check endpoint at GET {prefix}/health."""
+
+    @pytest.fixture(params=["", "/vgi"])
+    def health_client(self, request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
+        """Client with health endpoint enabled (default), tested with both empty and /vgi prefix."""
+        prefix: str = request.param
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            prefix=prefix,
+        )
+        yield c
+        c.close()
+
+    def test_health_returns_200_json(self, health_client: _SyncTestClient) -> None:
+        """GET {prefix}/health returns 200 with JSON status body."""
+        resp = health_client._client.simulate_get(f"{health_client.prefix}/health")
+        assert resp.status_code == 200
+        assert "application/json" in resp.headers.get("content-type", "")
+        body = resp.json
+        assert body["status"] == "ok"
+        assert isinstance(body["server_id"], str)
+        assert len(body["server_id"]) > 0
+        assert body["protocol"] == "RpcFixtureService"
+
+    def test_health_bypasses_auth(self) -> None:
+        """Health endpoint is accessible without authentication credentials."""
+        server = RpcServer(_AuthService, _AuthServiceImpl())
+        c = make_sync_client(
+            server,
+            signing_key=b"health-test-key",
+            authenticate=_test_authenticate,
+        )
+        # No Authorization header — would normally get 401, but health is exempt
+        resp = c._client.simulate_get("/health")
+        assert resp.status_code == 200
+        body = resp.json
+        assert body["status"] == "ok"
+        c.close()
+
+    def test_health_disabled(self) -> None:
+        """When enable_health_endpoint=False, GET /health is not served."""
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            enable_health_endpoint=False,
+        )
+        resp = c._client.simulate_get("/health")
+        # Falls through to {prefix}/{method} route which only has on_post → 405
+        assert resp.status_code == 405
+        c.close()
+
+    def test_health_server_id_matches(self) -> None:
+        """Health response server_id matches the RpcServer's server_id."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), server_id="abcdef123456")
+        c = make_sync_client(server, signing_key=b"test-key")
+        resp = c._client.simulate_get("/health")
+        body = resp.json
+        assert body["server_id"] == "abcdef123456"
+        c.close()
+
+    def test_health_post_returns_405(self, health_client: _SyncTestClient) -> None:
+        """POST to {prefix}/health returns 405 Method Not Allowed."""
+        resp = health_client._client.simulate_post(f"{health_client.prefix}/health")
+        assert resp.status_code == 405

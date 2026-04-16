@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import html as _html
 import importlib.metadata
+import json
 import logging
 import os
 import struct
@@ -1607,6 +1608,28 @@ class _DescribePageResource:
         resp.data = self._body
 
 
+class _HealthResource:
+    """Falcon resource for the health check at ``GET {prefix}/health``.
+
+    Returns a lightweight JSON response with the server status, ID, and
+    protocol name.  The response body is pre-serialized at construction
+    time so the handler is allocation-free.
+    """
+
+    __slots__ = ("_body",)
+
+    def __init__(self, server_id: str, protocol_name: str) -> None:
+        self._body = json.dumps(
+            {"status": "ok", "server_id": server_id, "protocol": protocol_name},
+            separators=(",", ":"),
+        ).encode()
+
+    def on_get(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Return the health check JSON response."""
+        resp.content_type = falcon.MEDIA_JSON
+        resp.data = self._body
+
+
 class _RpcResource:
     """Falcon resource for unary calls: ``POST {prefix}/{method}``."""
 
@@ -2103,6 +2126,7 @@ def make_wsgi_app(
     enable_not_found_page: bool = True,
     enable_landing_page: bool = True,
     enable_describe_page: bool = True,
+    enable_health_endpoint: bool = True,
     repo_url: str | None = None,
     oauth_resource_metadata: OAuthResourceMetadata | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
@@ -2184,6 +2208,10 @@ def make_wsgi_app(
             an HTML page listing all methods, parameters, and types.  The
             path ``{prefix}/describe`` is reserved when active — an RPC
             method named ``describe`` would need the page disabled.
+        enable_health_endpoint: When ``True`` (the default),
+            ``GET {prefix}/health`` returns a JSON health check response
+            with the server's status, ID, and protocol name.  The endpoint
+            bypasses authentication.  Set to ``False`` to disable.
         repo_url: Optional URL to the service's source repository (e.g. a
             GitHub URL).  When provided, a "Source repository" link appears
             on the landing page and describe page.
@@ -2284,7 +2312,9 @@ def make_wsgi_app(
     # OAuth PKCE browser flow — only when authenticate + OAuth metadata + client_id
     _pkce_active = False
     _pkce_user_info_html: str | None = None
-    _exempt_prefixes: tuple[str, ...] = ()
+    _exempt_prefixes_list: list[str] = []
+    if enable_health_endpoint:
+        _exempt_prefixes_list.append(f"{prefix}/health")
     if (
         authenticate is not None
         and _validated_oauth_metadata is not None
@@ -2329,7 +2359,7 @@ def make_wsgi_app(
             if _validated_oauth_metadata.scopes_supported
             else "openid email"
         )
-        _exempt_prefixes = (f"{prefix}/_oauth/",)
+        _exempt_prefixes_list.append(f"{prefix}/_oauth/")
         _pkce_active = True
         _pkce_user_info_html = build_user_info_html(prefix)
 
@@ -2346,7 +2376,7 @@ def make_wsgi_app(
                 authenticate,
                 www_authenticate=www_authenticate,
                 on_auth_failure=on_auth_failure,
-                exempt_prefixes=_exempt_prefixes,
+                exempt_prefixes=tuple(_exempt_prefixes_list),
             )
         )
         if _pkce_active:
@@ -2405,6 +2435,10 @@ def make_wsgi_app(
         if _pkce_user_info_html:
             describe_html = describe_html.replace(b"</body>", _pkce_user_info_html.encode() + b"\n</body>")
         app.add_route(f"{prefix}/describe", _DescribePageResource(describe_html))
+
+    # Health endpoint — GET {prefix}/health
+    if enable_health_endpoint:
+        app.add_route(f"{prefix}/health", _HealthResource(server.server_id, server.protocol_name))
 
     # Landing page — GET {prefix}
     if enable_landing_page:

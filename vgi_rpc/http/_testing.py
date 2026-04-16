@@ -105,6 +105,7 @@ def make_sync_client(
     enable_not_found_page: bool = True,
     enable_landing_page: bool = True,
     enable_describe_page: bool = True,
+    enable_health_endpoint: bool = True,
     repo_url: str | None = None,
     oauth_resource_metadata: OAuthResourceMetadata | None = None,
 ) -> _SyncTestClient:
@@ -130,6 +131,7 @@ def make_sync_client(
         enable_not_found_page: See ``make_wsgi_app``.
         enable_landing_page: See ``make_wsgi_app``.
         enable_describe_page: See ``make_wsgi_app``.
+        enable_health_endpoint: See ``make_wsgi_app``.
         repo_url: See ``make_wsgi_app``.
         oauth_resource_metadata: See ``make_wsgi_app``.
 
@@ -153,6 +155,7 @@ def make_sync_client(
         enable_not_found_page=enable_not_found_page,
         enable_landing_page=enable_landing_page,
         enable_describe_page=enable_describe_page,
+        enable_health_endpoint=enable_health_endpoint,
         repo_url=repo_url,
         oauth_resource_metadata=oauth_resource_metadata,
     )
