@@ -41,7 +41,7 @@ from vgi_rpc.external import (
     resolve_external_location,
 )
 from vgi_rpc.introspect import MethodDescription, parse_describe_batch
-from vgi_rpc.metadata import STATE_KEY, strip_keys
+from vgi_rpc.metadata import CANCEL_KEY, STATE_KEY, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     _TICK_BATCH,
@@ -833,14 +833,57 @@ class _HttpRpcApp:
 
             is_producer = input_schema == _EMPTY_SCHEMA
 
+            cancel_flag = custom_metadata is not None and custom_metadata.get(CANCEL_KEY) is not None
+
             # Record input batch for stats — skip tick batches on producer
-            # continuations (zero-row, empty-schema protocol artifacts).
-            if not is_producer:
+            # continuations (zero-row, empty-schema protocol artifacts) and
+            # skip cancel batches (zero-row, protocol artifacts).
+            if not is_producer and not cancel_flag:
                 _record_input(input_batch)
 
             # Resolve method info for hook (may be None for unknown methods, but
             # _stream_exchange_sync is only reached for known stream methods)
             info = self._server.methods.get(method_name)
+
+            if cancel_flag:
+                server_id = self._server.server_id
+                protocol_name = self._server.protocol_name
+                auth, transport_metadata = _get_auth_and_metadata()
+                start = time.monotonic()
+                cancel_sink = _ClientLogSink(server_id=server_id)
+                cancel_ctx = CallContext(
+                    auth=auth,
+                    emit_client_log=cancel_sink,
+                    transport_metadata=transport_metadata,
+                    server_id=server_id,
+                    method_name=method_name,
+                    protocol_name=protocol_name,
+                )
+                try:
+                    state_obj.on_cancel(cancel_ctx)
+                except Exception:
+                    _logger.debug("on_cancel hook failed", exc_info=True)
+                resp_buf = BytesIO()
+                with ipc.new_stream(resp_buf, output_schema):
+                    pass
+                duration_ms = (time.monotonic() - start) * 1000
+                _emit_access_log(
+                    protocol_name,
+                    method_name,
+                    "stream",
+                    server_id,
+                    auth,
+                    transport_metadata,
+                    duration_ms,
+                    "ok",
+                    http_status=HTTPStatus.OK.value,
+                    stats=stats,
+                    server_version=self._server.server_version,
+                    request_state=token if isinstance(token, bytes) else token.encode() if token else None,
+                    cancelled=True,
+                )
+                resp_buf.seek(0)
+                return resp_buf
 
             if is_producer:
                 # Producer continuation

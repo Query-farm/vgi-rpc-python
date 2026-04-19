@@ -292,6 +292,64 @@ class FailOnExchangeNState(ExchangeState):
 
 
 # ---------------------------------------------------------------------------
+# Cancellation observability
+# ---------------------------------------------------------------------------
+
+
+class _CancelProbe:
+    """Process-wide counters observed by cancel conformance tests.
+
+    Module-level so observation works identically across pipe, subprocess,
+    and HTTP transports: counters live in the *server* process, and are
+    read back over the wire via ``cancel_probe_counters``.
+    """
+
+    produce_calls: int = 0
+    exchange_calls: int = 0
+    on_cancel_calls: int = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        """Zero all counters."""
+        cls.produce_calls = 0
+        cls.exchange_calls = 0
+        cls.on_cancel_calls = 0
+
+
+@dataclass
+class CancellableProducerState(ProducerState):
+    """Infinite producer that records cancel observations in ``_CancelProbe``."""
+
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit one ``{index, value}`` row per tick without ever finishing."""
+        _CancelProbe.produce_calls += 1
+        out.emit_pydict({"index": [self.current], "value": [self.current * 10]})
+        self.current += 1
+
+    def on_cancel(self, ctx: CallContext) -> None:
+        """Bump the on_cancel counter so tests can observe the hook firing."""
+        _CancelProbe.on_cancel_calls += 1
+
+
+@dataclass
+class CancellableExchangeState(ExchangeState):
+    """Echo exchange that records cancel observations in ``_CancelProbe``."""
+
+    _placeholder: int = 0
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Echo the input batch unchanged and bump the exchange counter."""
+        _CancelProbe.exchange_calls += 1
+        out.emit(input.batch)
+
+    def on_cancel(self, ctx: CallContext) -> None:
+        """Bump the on_cancel counter so tests can observe the hook firing."""
+        _CancelProbe.on_cancel_calls += 1
+
+
+# ---------------------------------------------------------------------------
 # Rich multi-type stream header
 # ---------------------------------------------------------------------------
 

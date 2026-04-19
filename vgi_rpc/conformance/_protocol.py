@@ -266,6 +266,26 @@ class ConformanceService(Protocol):
         ...
 
     # ------------------------------------------------------------------
+    # Cancellation
+    # ------------------------------------------------------------------
+
+    def cancellable_producer(self) -> Stream[StreamState]:
+        """Produce one batch per tick forever — designed to be cancelled by the client."""
+        ...
+
+    def cancellable_exchange(self) -> Stream[StreamState]:
+        """Echo each input batch — designed to be cancelled by the client."""
+        ...
+
+    def cancel_probe_counters(self) -> list[int]:
+        """Return ``[produce_calls, exchange_calls, on_cancel_calls]`` observed on the server."""
+        ...
+
+    def reset_cancel_probe(self) -> None:
+        """Reset all cancel-probe counters to zero on the server."""
+        ...
+
+    # ------------------------------------------------------------------
     # Dynamic Streams With Rich Multi-Type Headers
     # ------------------------------------------------------------------
 

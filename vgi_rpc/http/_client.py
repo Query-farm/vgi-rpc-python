@@ -31,7 +31,7 @@ from vgi_rpc.external import (
     resolve_external_location,
 )
 from vgi_rpc.log import Message
-from vgi_rpc.metadata import STATE_KEY, merge_metadata, strip_keys
+from vgi_rpc.metadata import CANCEL_KEY, STATE_KEY, merge_metadata, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     AnnotatedBatch,
@@ -350,6 +350,42 @@ class HttpStreamSession:
 
     def close(self) -> None:
         """Close the session (no-op for HTTP — stateless)."""
+
+    def cancel(self) -> None:
+        """Signal the server to discard stream state and stop processing.
+
+        Sends a ``POST {prefix}/{method}/exchange`` carrying ``vgi_rpc.cancel``
+        metadata alongside the current state token. The server invokes
+        ``state.on_cancel(ctx)`` (if defined) and releases the state.
+
+        Idempotent and best-effort: network failures are swallowed. After
+        ``cancel()``, the session is marked finished; further ``exchange()``
+        or iteration raises ``RpcError``.
+        """
+        if self._finished or self._state_bytes is None:
+            self._finished = True
+            self._state_bytes = None
+            return
+        token = self._state_bytes
+        self._finished = True
+        self._state_bytes = None
+        if wire_http_logger.isEnabledFor(logging.DEBUG):
+            wire_http_logger.debug("HTTP stream cancel: method=%s", self._method)
+        req_buf = BytesIO()
+        cancel_md = pa.KeyValueMetadata({STATE_KEY: token, CANCEL_KEY: b"1"})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=cancel_md)
+        try:
+            resp = self._client.post(
+                f"{self._url_prefix}/{self._method}/exchange",
+                content=self._prepare_body(req_buf.getvalue()),
+                headers=self._build_headers(),
+            )
+        except Exception:
+            return
+        with contextlib.suppress(Exception):
+            reader = _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
+            _drain_stream(reader)
 
     def __enter__(self) -> HttpStreamSession:
         """Enter the context."""

@@ -18,7 +18,7 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.external import ExternalLocationConfig, resolve_external_location
-from vgi_rpc.metadata import SHM_SEGMENT_NAME_KEY, SHM_SEGMENT_SIZE_KEY
+from vgi_rpc.metadata import CANCEL_KEY, SHM_SEGMENT_NAME_KEY, SHM_SEGMENT_SIZE_KEY
 from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
     AuthContext,
@@ -41,6 +41,7 @@ from vgi_rpc.rpc._common import (
     _record_input,
     _record_output,
 )
+from vgi_rpc.rpc._debug import wire_stream_logger
 from vgi_rpc.rpc._transport import RpcTransport, ShmPipeTransport
 from vgi_rpc.rpc._types import (
     AnnotatedBatch,
@@ -111,6 +112,7 @@ def _emit_access_log(
     server_version: str = "",
     request_state: bytes | None = None,
     response_state: bytes | None = None,
+    cancelled: bool = False,
 ) -> None:
     """Emit a structured access log record for a completed RPC call."""
     if not _access_logger.isEnabledFor(logging.INFO):
@@ -129,6 +131,8 @@ def _emit_access_log(
             "status": status,
             "error_type": error_type,
         }
+        if cancelled:
+            extra["cancelled"] = True
         if error_message:
             extra["error_message"] = error_message
         if server_version:
@@ -595,6 +599,7 @@ class RpcServer:
         output_schema = result.output_schema
         input_schema = result.input_schema
         state = result.state
+        cancelled = False
 
         # Write header IPC stream before the main output stream
         if info.header_type is not None:
@@ -614,6 +619,24 @@ class RpcServer:
                         try:
                             input_batch, custom_metadata = input_reader.read_next_batch_with_custom_metadata()
                         except StopIteration:
+                            break
+
+                        if custom_metadata is not None and custom_metadata.get(CANCEL_KEY) is not None:
+                            if wire_stream_logger.isEnabledFor(logging.DEBUG):
+                                wire_stream_logger.debug("Stream cancel received: method=%s", info.name)
+                            cancelled = True
+                            cancel_ctx = CallContext(
+                                auth=auth,
+                                emit_client_log=sink,
+                                transport_metadata=transport_md,
+                                server_id=self._server_id,
+                                method_name=info.name,
+                                protocol_name=protocol_name,
+                            )
+                            try:
+                                state.on_cancel(cancel_ctx)
+                            except Exception:
+                                _logger.debug("on_cancel hook failed", exc_info=True)
                             break
 
                         # Record input batch for stats — skip tick batches on
@@ -688,6 +711,7 @@ class RpcServer:
                 error_message=error_message,
                 stats=stats,
                 server_version=self._server_version,
+                cancelled=cancelled,
             )
             if hook is not None:
                 try:

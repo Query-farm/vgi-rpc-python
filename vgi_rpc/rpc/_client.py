@@ -17,13 +17,14 @@ from pyarrow import ipc
 
 from vgi_rpc.external import ExternalLocationConfig, maybe_externalize_batch
 from vgi_rpc.log import Message
+from vgi_rpc.metadata import CANCEL_KEY
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
 from vgi_rpc.rpc._debug import fmt_batch, wire_request_logger, wire_stream_logger, wire_transport_logger
 from vgi_rpc.rpc._transport import RpcTransport
 from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, rpc_methods
 from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_stream_header, _read_unary_response, _send_request
 from vgi_rpc.shm import ShmSegment, maybe_write_to_shm
-from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader
+from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch
 
 # Exceptions that indicate the transport peer has disconnected or the IPC
 # data is truncated/corrupt.  Caught on the client side and wrapped into
@@ -47,6 +48,7 @@ class StreamSession:
         "_closed",
         "_external_config",
         "_header",
+        "_input_schema",
         "_input_writer",
         "_ipc_validation",
         "_on_log",
@@ -72,6 +74,7 @@ class StreamSession:
         self._reader_stream = reader_stream
         self._on_log = on_log
         self._input_writer: ipc.RecordBatchStreamWriter | None = None
+        self._input_schema: pa.Schema | None = None
         self._output_reader: ValidatedReader | None = None
         self._closed = False
         self._external_config = external_config
@@ -118,6 +121,7 @@ class StreamSession:
         first_write = self._input_writer is None
         if self._input_writer is None:
             self._input_writer = ipc.new_stream(self._writer_stream, batch_to_write.schema)
+            self._input_schema = batch_to_write.schema
         if wire_stream_logger.isEnabledFor(logging.DEBUG):
             wire_stream_logger.debug(
                 "Stream write input: %s, first_write=%s",
@@ -147,9 +151,12 @@ class StreamSession:
 
         Raises:
             StopIteration: When the stream has finished.
-            RpcError: On server-side errors or transport failures.
+            RpcError: On server-side errors or transport failures,
+                or when the session has already been closed/cancelled.
 
         """
+        if self._closed:
+            raise RpcError("ProtocolError", "Stream has been closed or cancelled", "")
         if wire_stream_logger.isEnabledFor(logging.DEBUG):
             wire_stream_logger.debug("Stream exchange: sending input")
         try:
@@ -175,9 +182,12 @@ class StreamSession:
 
         Raises:
             StopIteration: When the producer stream has finished.
-            RpcError: On server-side errors or transport failures.
+            RpcError: On server-side errors or transport failures,
+                or when the session has already been closed/cancelled.
 
         """
+        if self._closed:
+            raise RpcError("ProtocolError", "Stream has been closed or cancelled", "")
         if wire_stream_logger.isEnabledFor(logging.DEBUG):
             wire_stream_logger.debug("Stream tick")
         try:
@@ -222,6 +232,44 @@ class StreamSession:
         else:
             with ipc.new_stream(self._writer_stream, _EMPTY_SCHEMA):
                 pass
+        if self._output_reader is None:
+            try:
+                self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)
+            except (pa.ArrowInvalid, OSError, StopIteration):
+                return
+        _MAX_DRAIN = 10_000
+        with contextlib.suppress(StopIteration, RpcError, pa.ArrowInvalid, OSError):
+            for _ in range(_MAX_DRAIN):
+                _read_batch_with_log_check(self._output_reader, self._on_log, self._external_config, shm=self._shm)
+
+    def cancel(self) -> None:
+        """Signal the server to stop processing and discard pending work.
+
+        Sends a zero-row batch carrying ``vgi_rpc.cancel`` custom metadata;
+        the server breaks out of the stream loop without invoking
+        ``state.process()`` and (optionally) runs ``state.on_cancel(ctx)``.
+
+        Idempotent: safe to call more than once or after ``close()``.
+        Best-effort — transport errors are swallowed. After ``cancel()``,
+        subsequent ``exchange()`` / ``tick()`` calls will fail because
+        the session is marked closed.
+        """
+        if self._closed:
+            return
+        if wire_stream_logger.isEnabledFor(logging.DEBUG):
+            wire_stream_logger.debug("Stream cancel")
+        self._closed = True
+        cancel_md = pa.KeyValueMetadata({CANCEL_KEY: b"1"})
+        try:
+            if self._input_writer is None:
+                with ipc.new_stream(self._writer_stream, _EMPTY_SCHEMA) as writer:
+                    writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=cancel_md)
+            else:
+                schema = self._input_schema if self._input_schema is not None else _EMPTY_SCHEMA
+                self._input_writer.write_batch(empty_batch(schema), custom_metadata=cancel_md)
+                self._input_writer.close()
+        except _TRANSPORT_ERRORS:
+            return
         if self._output_reader is None:
             try:
                 self._output_reader = ValidatedReader(ipc.open_stream(self._reader_stream), self._ipc_validation)

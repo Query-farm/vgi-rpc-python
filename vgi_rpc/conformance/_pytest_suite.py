@@ -971,6 +971,87 @@ class TestErrorRecovery:
 
 
 # ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+
+class TestCancel:
+    """Test client-initiated stream cancellation via ``cancel()``."""
+
+    def test_cancel_producer_mid_stream(self, conformance_conn: ConnFactory) -> None:
+        """Cancelling a producer mid-stream fires on_cancel() on the server."""
+        with conformance_conn() as proxy:
+            proxy.reset_cancel_probe()
+            session = proxy.cancellable_producer()
+            it = iter(session)
+            for _ in range(3):
+                next(it)
+            session.cancel()
+            produce_calls, _, on_cancel_calls = proxy.cancel_probe_counters()
+            assert on_cancel_calls == 1
+            assert produce_calls >= 3
+            assert proxy.echo_int(value=42) == 42
+
+    def test_cancel_exchange_after_n(self, conformance_conn: ConnFactory) -> None:
+        """Cancelling after N exchanges stops further processing and fires on_cancel()."""
+        with conformance_conn() as proxy:
+            proxy.reset_cancel_probe()
+            session = proxy.cancellable_exchange()
+            session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
+            session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
+            session.cancel()
+            _, exchange_calls, on_cancel_calls = proxy.cancel_probe_counters()
+            assert exchange_calls == 2
+            assert on_cancel_calls == 1
+
+    def test_cancel_before_any_exchange(self, conformance_conn: ConnFactory) -> None:
+        """Cancelling before any exchange leaves the transport usable."""
+        with conformance_conn() as proxy:
+            proxy.reset_cancel_probe()
+            session = proxy.cancellable_exchange()
+            session.cancel()
+            _, exchange_calls, _ = proxy.cancel_probe_counters()
+            assert exchange_calls == 0
+            assert proxy.echo_int(value=1) == 1
+
+    def test_cancel_idempotent(self, conformance_conn: ConnFactory) -> None:
+        """cancel(), cancel() and close()+cancel() and cancel()+close() are all safe."""
+        with conformance_conn() as proxy:
+            proxy.reset_cancel_probe()
+            s1 = proxy.cancellable_exchange()
+            s1.cancel()
+            s1.cancel()
+            s2 = proxy.cancellable_exchange()
+            s2.close()
+            s2.cancel()
+            s3 = proxy.cancellable_exchange()
+            s3.cancel()
+            s3.close()
+            _, _, on_cancel_calls = proxy.cancel_probe_counters()
+            # HTTP cancel POSTs only when a state token is live; tolerate both counts.
+            assert on_cancel_calls in (2, 3)
+
+    def test_exchange_after_cancel_raises(self, conformance_conn: ConnFactory) -> None:
+        """Using an exchange session after cancel() raises ProtocolError."""
+        with conformance_conn() as proxy:
+            session = proxy.cancellable_exchange()
+            session.cancel()
+            with pytest.raises(RpcError, match="ProtocolError"):
+                session.exchange(AnnotatedBatch.from_pydict({"value": [99.0]}))
+
+    def test_transport_reusable_after_cancel(self, conformance_conn: ConnFactory) -> None:
+        """After mid-stream cancel, subsequent RPC calls succeed."""
+        with conformance_conn() as proxy:
+            session = proxy.cancellable_producer()
+            it = iter(session)
+            for _ in range(2):
+                next(it)
+            session.cancel()
+            assert len(list(proxy.produce_n(count=3))) == 3
+            assert proxy.echo_string(value="ok") == "ok"
+
+
+# ---------------------------------------------------------------------------
 # Introspection
 # ---------------------------------------------------------------------------
 
@@ -1003,7 +1084,7 @@ class TestDescribeConformance:
 
     def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
-        assert len(service_description.methods) == 48
+        assert len(service_description.methods) == 52
         assert service_description.protocol_name == "ConformanceService"
         echo_str = service_description.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

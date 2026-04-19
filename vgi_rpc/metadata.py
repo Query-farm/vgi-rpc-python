@@ -15,6 +15,7 @@ from __future__ import annotations
 import pyarrow as pa
 
 __all__ = [
+    "CANCEL_KEY",
     "DESCRIBE_VERSION_KEY",
     "LOCATION_FETCH_MS_KEY",
     "LOCATION_KEY",
@@ -48,6 +49,10 @@ __all__ = [
 
 RPC_METHOD_KEY = b"vgi_rpc.method"
 STATE_KEY = b"vgi_rpc.stream_state#b64"
+# Client-initiated stream cancellation. When present on an input batch,
+# the server skips process()/produce() and ends the stream cleanly
+# (invoking the state's optional on_cancel hook before breaking).
+CANCEL_KEY = b"vgi_rpc.cancel"
 LOG_LEVEL_KEY = b"vgi_rpc.log_level"
 LOG_MESSAGE_KEY = b"vgi_rpc.log_message"
 LOG_EXTRA_KEY = b"vgi_rpc.log_extra"

@@ -222,6 +222,52 @@ class EmptyStreamState(StreamState):
         out.finish()
 
 
+class _CancelProbe:
+    """Shared counters observed from in-process pipe tests (thread-local server)."""
+
+    produce_calls: int = 0
+    exchange_calls: int = 0
+    on_cancel_calls: int = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset all counters to zero."""
+        cls.produce_calls = 0
+        cls.exchange_calls = 0
+        cls.on_cancel_calls = 0
+
+
+@dataclass
+class CancellableProducerState(ProducerState):
+    """Producer that counts produce() and on_cancel() invocations into _CancelProbe."""
+
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Produce one batch per tick; never self-terminates."""
+        _CancelProbe.produce_calls += 1
+        out.emit_pydict({"i": [self.current]})
+        self.current += 1
+
+    def on_cancel(self, ctx: CallContext) -> None:
+        """Record the cancel callback."""
+        _CancelProbe.on_cancel_calls += 1
+
+
+@dataclass
+class CancellableExchangeState(ExchangeState):
+    """Exchange stream that counts exchange() and on_cancel() invocations."""
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Echo the input batch back."""
+        _CancelProbe.exchange_calls += 1
+        out.emit(input.batch)
+
+    def on_cancel(self, ctx: CallContext) -> None:
+        """Record the cancel callback."""
+        _CancelProbe.on_cancel_calls += 1
+
+
 # ---------------------------------------------------------------------------
 # Test fixtures: Protocol + Implementation
 # ---------------------------------------------------------------------------
@@ -345,6 +391,14 @@ class RpcFixtureService(Protocol):
         """Generate batches with a stream header and init log."""
         ...
 
+    def cancellable_producer(self) -> Stream[ProducerState]:
+        """Run a never-terminating producer; exercised by cancel() tests."""
+        ...
+
+    def cancellable_exchange(self) -> Stream[ExchangeState]:
+        """Run an exchange stream used by cancel() tests."""
+        ...
+
 
 class RpcFixtureServiceImpl:
     """Implementation of RpcFixtureService."""
@@ -463,6 +517,20 @@ class RpcFixtureServiceImpl:
         header = StreamHeader(total_count=count, label="logged")
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
         return Stream(output_schema=schema, state=GenerateWithHeaderState(count=count), header=header)
+
+    def cancellable_producer(self) -> Stream[CancellableProducerState]:
+        """Run a never-terminating producer; exercised by cancel() tests."""
+        schema = pa.schema([pa.field("i", pa.int64())])
+        return Stream(output_schema=schema, state=CancellableProducerState())
+
+    def cancellable_exchange(self) -> Stream[CancellableExchangeState]:
+        """Run an exchange stream used by cancel() tests."""
+        schema = pa.schema([pa.field("value", pa.int64())])
+        return Stream(
+            output_schema=schema,
+            state=CancellableExchangeState(),
+            input_schema=schema,
+        )
 
 
 # ---------------------------------------------------------------------------

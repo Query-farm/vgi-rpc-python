@@ -277,6 +277,20 @@ class StreamState(ArrowSerializableDataclass, abc.ABC):
 
         """
 
+    def on_cancel(self, ctx: CallContext) -> None:
+        """Handle client-initiated stream cancellation.
+
+        Invoked by the server when the client calls ``cancel()`` on the
+        stream session. Default is a no-op. Override in subclasses to
+        release resources (GPU buffers, upstream connections, open files).
+        The stream has already been torn down by the time this fires; no
+        further output batches may be emitted.
+
+        Args:
+            ctx: The call context for the cancelled stream.
+
+        """
+
     @abc.abstractmethod
     def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Process an input batch and emit output into the collector."""
@@ -422,6 +436,16 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
 
     def close(self) -> None:
         """Close the stream (client-side stub).
+
+        Raises:
+            NotImplementedError: Always — this is a server-side type.
+                Use ``StreamSession`` on the client.
+
+        """
+        raise NotImplementedError
+
+    def cancel(self) -> None:
+        """Cancel the stream (client-side stub).
 
         Raises:
             NotImplementedError: Always — this is a server-side type.

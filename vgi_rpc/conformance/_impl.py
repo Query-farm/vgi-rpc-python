@@ -24,6 +24,8 @@ from ._types import (
     AccumulatingExchangeState,
     AllTypes,
     BoundingBox,
+    CancellableExchangeState,
+    CancellableProducerState,
     ConformanceHeader,
     CounterState,
     DynamicProducerState,
@@ -40,6 +42,7 @@ from ._types import (
     SingleProducerState,
     Status,
     ZeroColumnExchangeState,
+    _CancelProbe,
     build_dynamic_schema,
     build_rich_header,
 )
@@ -332,6 +335,30 @@ class ConformanceServiceImpl:
             input_schema=_SCALE_INPUT_SCHEMA,
             header=header,
         )
+
+    # ------------------------------------------------------------------
+    # Cancellation
+    # ------------------------------------------------------------------
+
+    def cancellable_producer(self) -> Stream[CancellableProducerState]:
+        """Build an infinite producer used by cancel() conformance tests."""
+        return Stream(output_schema=_COUNTER_SCHEMA, state=CancellableProducerState())
+
+    def cancellable_exchange(self) -> Stream[CancellableExchangeState]:
+        """Build an echo exchange used by cancel() conformance tests."""
+        return Stream(
+            output_schema=_SCALE_OUTPUT_SCHEMA,
+            state=CancellableExchangeState(),
+            input_schema=_SCALE_INPUT_SCHEMA,
+        )
+
+    def cancel_probe_counters(self) -> list[int]:
+        """Return the current ``[produce_calls, exchange_calls, on_cancel_calls]`` counters."""
+        return [_CancelProbe.produce_calls, _CancelProbe.exchange_calls, _CancelProbe.on_cancel_calls]
+
+    def reset_cancel_probe(self) -> None:
+        """Zero all cancel-probe counters."""
+        _CancelProbe.reset()
 
     # ------------------------------------------------------------------
     # Dynamic Streams With Rich Multi-Type Headers

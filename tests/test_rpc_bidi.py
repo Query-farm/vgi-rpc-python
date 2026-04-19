@@ -353,8 +353,8 @@ class TestStreamSessionLifecycle:
             session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
             session.close()
             assert isinstance(session, StreamSession)
-            # After close, the input writer is closed. Trying to exchange should fail.
-            with pytest.raises(RpcError, match="TransportError"):
+            # After close, the session is marked closed and exchange is rejected.
+            with pytest.raises(RpcError, match="ProtocolError"):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
 
 
