@@ -51,6 +51,7 @@ from vgi_rpc.rpc import (
     AuthContext,
     CallContext,
     OutputCollector,
+    ProducerState,
     RpcError,
     RpcServer,
     Stream,
@@ -2129,3 +2130,424 @@ class TestHealthEndpoint:
         """POST to {prefix}/health returns 405 Method Not Allowed."""
         resp = health_client._client.simulate_post(f"{health_client.prefix}/health")
         assert resp.status_code == 405
+
+
+# ---------------------------------------------------------------------------
+# Tests: HTTP cookies
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StreamCookieState(ProducerState):
+    """Producer state whose ``produce`` tries to set a cookie — which must fail."""
+
+    count: int
+    i: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Attempt to set a cookie from inside a streaming method."""
+        ctx.set_cookie("leak", "no")
+        out.emit_pydict({"i": [self.i]})
+        self.i += 1
+        if self.i >= self.count:
+            out.finish()
+
+
+class _CookieService(Protocol):
+    """RPC protocol used to exercise cookie read/write behavior."""
+
+    def whoami_cookie(self) -> str: ...
+    def set_sid(self, value: str, max_age: int) -> str: ...
+    def set_sid_secure(self, value: str, max_age: int) -> str: ...
+    def set_many(self) -> str: ...
+    def delete_sid(self) -> str: ...
+    def fail_after_set(self) -> str: ...
+    def set_on_path(self) -> str: ...
+    def stream_sets_cookie(self, count: int) -> Stream[StreamState]: ...
+
+
+class _CookieServiceImpl:
+    """Implementation used by cookie tests."""
+
+    def whoami_cookie(self, ctx: CallContext) -> str:
+        """Return the ``sid`` cookie value, or empty string if absent."""
+        return ctx.cookies.get("sid", "")
+
+    def set_sid(self, value: str, max_age: int, ctx: CallContext) -> str:
+        """Queue a Set-Cookie for ``sid`` — non-secure so httpx stores it on http:// URLs."""
+        ctx.set_cookie(
+            "sid",
+            value,
+            max_age=max_age,
+            http_only=True,
+            secure=False,
+            same_site="Lax",
+            path="/",
+        )
+        return "set"
+
+    def set_sid_secure(self, value: str, max_age: int, ctx: CallContext) -> str:
+        """Queue a Set-Cookie for ``sid`` with ``secure=True`` to exercise header emission."""
+        ctx.set_cookie(
+            "sid",
+            value,
+            max_age=max_age,
+            http_only=True,
+            secure=True,
+            same_site="Lax",
+            path="/",
+        )
+        return "set"
+
+    def set_many(self, ctx: CallContext) -> str:
+        """Set two separate cookies in one call."""
+        ctx.set_cookie("a", "1", path="/")
+        ctx.set_cookie("b", "2", path="/")
+        return "many"
+
+    def delete_sid(self, ctx: CallContext) -> str:
+        """Queue a deletion for ``sid``."""
+        ctx.delete_cookie("sid", path="/")
+        return "deleted"
+
+    def fail_after_set(self, ctx: CallContext) -> str:
+        """Set a cookie then raise; the cookie must still appear on the error response."""
+        ctx.set_cookie("on_error", "yes", max_age=60, path="/")
+        raise ValueError("boom after cookie")
+
+    def set_on_path(self, ctx: CallContext) -> str:
+        """Set a cookie scoped to a narrower path than the request."""
+        ctx.set_cookie("scoped", "only-admin", path="/admin/", http_only=True)
+        return "set"
+
+    def stream_sets_cookie(self, count: int) -> Stream[_StreamCookieState]:
+        """Build a producer stream whose ``produce`` attempts to set a cookie."""
+        schema = pa.schema([pa.field("i", pa.int64())])
+        return Stream(output_schema=schema, state=_StreamCookieState(count=count))
+
+
+def _build_unary_request(method: str) -> bytes:
+    """Build an Arrow IPC request for a zero-arg unary method."""
+    from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+    from vgi_rpc.rpc import _EMPTY_SCHEMA
+    from vgi_rpc.utils import empty_batch
+
+    buf = BytesIO()
+    md = pa.KeyValueMetadata({RPC_METHOD_KEY: method.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION})
+    with ipc.new_stream(buf, _EMPTY_SCHEMA) as writer:
+        writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
+    return buf.getvalue()
+
+
+def _cookie_app() -> falcon.App[falcon.Request, falcon.Response]:
+    """Build a Falcon WSGI app exposing ``_CookieService``."""
+    return make_wsgi_app(RpcServer(_CookieService, _CookieServiceImpl()), signing_key=b"test-key")
+
+
+class TestCookiesServerSide:
+    """Server-side cookie behavior verified at the Falcon/WSGI layer."""
+
+    def test_ctx_cookies_received(self) -> None:
+        """ctx.cookies surfaces the request's Cookie header values."""
+        client = make_sync_client(
+            RpcServer(_CookieService, _CookieServiceImpl()),
+            signing_key=b"test-key",
+            default_headers={"Cookie": "sid=abc"},
+        )
+        with http_connect(_CookieService, client=client) as proxy:
+            assert proxy.whoami_cookie() == "abc"
+        client.close()
+
+    def test_ctx_cookies_empty_when_absent(self) -> None:
+        """With no Cookie header, ctx.cookies is an empty mapping."""
+        client = make_sync_client(
+            RpcServer(_CookieService, _CookieServiceImpl()),
+            signing_key=b"test-key",
+        )
+        with http_connect(_CookieService, client=client) as proxy:
+            assert proxy.whoami_cookie() == ""
+        client.close()
+
+    def test_set_cookie_emits_header(self) -> None:
+        """ctx.set_cookie emits Set-Cookie with the expected attributes."""
+        tc = falcon.testing.TestClient(_cookie_app())
+        fields: list[pa.Field[Any]] = [pa.field("value", pa.utf8()), pa.field("max_age", pa.int64())]
+        schema = pa.schema(fields)
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+
+        md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"set_sid_secure", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        buf = BytesIO()
+        batch = pa.RecordBatch.from_pydict({"value": ["xyz"], "max_age": [60]}, schema=schema)
+        with ipc.new_stream(buf, schema) as writer:
+            writer.write_batch(batch, custom_metadata=md)
+
+        r = tc.simulate_post(
+            "/set_sid_secure",
+            body=buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert r.status_code == 200
+        sid = r.cookies["sid"]
+        assert sid.value == "xyz"
+        assert sid.max_age == 60
+        assert sid.secure is True
+        assert sid.http_only is True
+        assert sid.same_site == "Lax"
+        assert sid.path == "/"
+
+    def test_delete_cookie_emits_expiry(self) -> None:
+        """ctx.delete_cookie emits a Set-Cookie with zero/past expiry."""
+        tc = falcon.testing.TestClient(_cookie_app())
+        r = tc.simulate_post(
+            "/delete_sid",
+            body=_build_unary_request("delete_sid"),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert r.status_code == 200
+        sid = r.cookies["sid"]
+        # Falcon's unset_cookie emits an empty value with past expires.
+        assert sid.value == ""
+        assert sid.path == "/"
+
+    def test_set_cookie_applied_on_error_path(self) -> None:
+        """Cookies queued before an exception are still emitted on the error response."""
+        tc = falcon.testing.TestClient(_cookie_app())
+        r = tc.simulate_post(
+            "/fail_after_set",
+            body=_build_unary_request("fail_after_set"),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        # Server errors surface as 200 + X-VGI-RPC-Error: true
+        assert r.status_code == 200
+        assert r.headers.get("x-vgi-rpc-error") == "true"
+        on_error = r.cookies["on_error"]
+        assert on_error.value == "yes"
+        assert on_error.max_age == 60
+
+    def test_multiple_set_cookies_emit_multiple_headers(self) -> None:
+        """Two ctx.set_cookie calls produce two distinct Set-Cookie headers."""
+        tc = falcon.testing.TestClient(_cookie_app())
+        r = tc.simulate_post(
+            "/set_many",
+            body=_build_unary_request("set_many"),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert r.status_code == 200
+        assert r.cookies["a"].value == "1"
+        assert r.cookies["b"].value == "2"
+
+    def test_set_cookie_in_stream_raises_rpc_error(self) -> None:
+        """Calling ctx.set_cookie from a streaming method surfaces as an RpcError."""
+        client = make_sync_client(
+            RpcServer(_CookieService, _CookieServiceImpl()),
+            signing_key=b"test-key",
+        )
+        with http_connect(_CookieService, client=client) as proxy, pytest.raises(RpcError) as exc_info:
+            list(proxy.stream_sets_cookie(count=2))
+        assert exc_info.value.error_type == "RuntimeError"
+        assert "unary" in exc_info.value.error_message.lower()
+        client.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Cookie conformance via real httpx.Client (end-to-end)
+# ---------------------------------------------------------------------------
+
+
+def _make_httpx_wsgi_client(app: falcon.App[falcon.Request, falcon.Response]) -> Any:
+    """Build an httpx.Client that dispatches to a WSGI app in-process.
+
+    Gives tests the full httpx pipeline (including the cookie jar) without
+    spawning a real HTTP server.
+    """
+    import httpx
+
+    return httpx.Client(transport=httpx.WSGITransport(app=cast("Any", app)), base_url=_BASE_URL)
+
+
+class TestCookieClientConformance:
+    """End-to-end cookie behavior via httpx.Client + WSGITransport.
+
+    ``_SyncTestClient`` does not maintain a cookie jar, so these tests use
+    a real ``httpx.Client`` wired to the WSGI app in-process to validate
+    that ``Set-Cookie`` from the server is persisted by the client and
+    echoed back on the next request.
+    """
+
+    def test_client_persists_cookie_across_calls(self) -> None:
+        """Server sets a cookie on call A; the client echoes it on call B."""
+        app = _cookie_app()
+        client = _make_httpx_wsgi_client(app)
+        try:
+            with http_connect(_CookieService, client=client, prefix="") as proxy:
+                proxy.set_sid(value="persisted", max_age=600)
+                assert proxy.whoami_cookie() == "persisted"
+        finally:
+            client.close()
+
+    def test_client_respects_cookie_path_scope(self) -> None:
+        """Cookies scoped to a path the next request doesn't hit are not sent back."""
+        app = _cookie_app()
+        client = _make_httpx_wsgi_client(app)
+        try:
+            with http_connect(_CookieService, client=client, prefix="") as proxy:
+                proxy.set_on_path()
+                # whoami_cookie is at / (not /admin/), so the scoped cookie must not leak
+                assert proxy.whoami_cookie() == ""
+        finally:
+            client.close()
+
+    def test_client_respects_max_age_expiry(self) -> None:
+        """max_age=0 from delete_cookie clears the client jar; next call sees no cookie."""
+        app = _cookie_app()
+        client = _make_httpx_wsgi_client(app)
+        try:
+            with http_connect(_CookieService, client=client, prefix="") as proxy:
+                proxy.set_sid(value="will-be-deleted", max_age=600)
+                assert proxy.whoami_cookie() == "will-be-deleted"
+                proxy.delete_sid()
+                assert proxy.whoami_cookie() == ""
+        finally:
+            client.close()
+
+    def test_client_caller_supplied_jar(self) -> None:
+        """Caller pre-seeded cookies reach the server on the first call."""
+        app = _cookie_app()
+        client = _make_httpx_wsgi_client(app)
+        client.cookies["sid"] = "pre-seeded"
+        try:
+            with http_connect(_CookieService, client=client, prefix="") as proxy:
+                assert proxy.whoami_cookie() == "pre-seeded"
+        finally:
+            client.close()
+
+    def test_new_http_connect_context_has_fresh_jar(self) -> None:
+        """Separate http_connect contexts do not share cookie state."""
+        app = _cookie_app()
+        client_a = _make_httpx_wsgi_client(app)
+        try:
+            with http_connect(_CookieService, client=client_a, prefix="") as proxy:
+                proxy.set_sid(value="only-in-a", max_age=600)
+                assert proxy.whoami_cookie() == "only-in-a"
+        finally:
+            client_a.close()
+
+        client_b = _make_httpx_wsgi_client(app)
+        try:
+            with http_connect(_CookieService, client=client_b, prefix="") as proxy:
+                assert proxy.whoami_cookie() == ""
+        finally:
+            client_b.close()
+
+    def test_collector_contextvar_resets_between_calls(self) -> None:
+        """After a unary call's collector is drained, a streaming call still rejects set_cookie."""
+        app = _cookie_app()
+        client = _make_httpx_wsgi_client(app)
+        try:
+            with http_connect(_CookieService, client=client, prefix="") as proxy:
+                proxy.set_sid(value="live", max_age=60)
+                with pytest.raises(RpcError) as exc_info:
+                    list(proxy.stream_sets_cookie(count=1))
+            assert exc_info.value.error_type == "RuntimeError"
+            assert "unary" in exc_info.value.error_message.lower()
+        finally:
+            client.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Cookie behavior on non-HTTP transports
+# ---------------------------------------------------------------------------
+
+
+class TestCookiesNonHttp:
+    """Cookies are an HTTP concept; non-HTTP transports see an empty mapping."""
+
+    def test_cookies_empty_on_pipe(self) -> None:
+        """Over an in-process pipe transport, ctx.cookies is always empty."""
+        from vgi_rpc.rpc import serve_pipe
+
+        with serve_pipe(_CookieService, _CookieServiceImpl()) as proxy:
+            assert proxy.whoami_cookie() == ""
+
+    def test_set_cookie_raises_on_pipe(self) -> None:
+        """set_cookie() raises RuntimeError over non-HTTP transports (surfaced as RpcError)."""
+        from vgi_rpc.rpc import serve_pipe
+
+        with serve_pipe(_CookieService, _CookieServiceImpl()) as proxy, pytest.raises(RpcError) as exc_info:
+            proxy.set_sid(value="nope", max_age=60)
+        assert exc_info.value.error_type == "RuntimeError"
+        assert "unary" in exc_info.value.error_message.lower()
+
+    def test_delete_cookie_raises_on_pipe(self) -> None:
+        """delete_cookie() raises RuntimeError over non-HTTP transports."""
+        from vgi_rpc.rpc import serve_pipe
+
+        with serve_pipe(_CookieService, _CookieServiceImpl()) as proxy, pytest.raises(RpcError) as exc_info:
+            proxy.delete_sid()
+        assert exc_info.value.error_type == "RuntimeError"
+        assert "unary" in exc_info.value.error_message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Cookie round-trip over a real waitress HTTP server
+# ---------------------------------------------------------------------------
+
+
+class TestCookiesRealServer:
+    """End-to-end cookie round-trip over a real HTTP server (belt-and-braces)."""
+
+    def test_cookies_round_trip_over_waitress(self) -> None:
+        """Set a cookie, then read it back, over a real waitress HTTP server on localhost."""
+        import socket
+        import threading
+        import time
+
+        import httpx
+
+        try:
+            import waitress
+        except ImportError:
+            pytest.skip("waitress not installed")
+
+        app = make_wsgi_app(RpcServer(_CookieService, _CookieServiceImpl()), signing_key=b"test-key")
+
+        # Pick a free port, then hand it to waitress.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = int(s.getsockname()[1])
+
+        server = waitress.create_server(app, host="127.0.0.1", port=port)
+
+        def _run() -> None:
+            # server.close() races the asyncore loop and raises a harmless
+            # "Bad file descriptor" on shutdown — swallow it so it doesn't
+            # surface as a pytest unhandled-thread-exception warning.
+            import contextlib as _contextlib
+
+            with _contextlib.suppress(OSError):
+                server.run()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        try:
+            # Wait for the server to accept connections.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                try:
+                    httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout):
+                    time.sleep(0.05)
+            else:
+                pytest.fail("Real server did not accept connections within 5s")
+
+            base_url = f"http://127.0.0.1:{port}"
+            client = httpx.Client(base_url=base_url)
+            try:
+                with http_connect(_CookieService, client=client, prefix="") as proxy:
+                    proxy.set_sid(value="waitressed", max_age=60)
+                    assert proxy.whoami_cookie() == "waitressed"
+            finally:
+                client.close()
+        finally:
+            server.close()

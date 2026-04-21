@@ -74,10 +74,13 @@ from vgi_rpc.rpc import (
     _write_stream_header,
 )
 from vgi_rpc.rpc._common import (
+    _ANONYMOUS,
     CallStatistics,
+    CookieSpec,
     HookToken,
     _current_call_stats,
     _current_request_batch,
+    _current_response_cookies,
     _current_stream_id,
     _DispatchHook,
     _record_input,
@@ -1673,6 +1676,26 @@ class _HealthResource:
         resp.data = self._body
 
 
+def _apply_cookies_to_response(resp: falcon.Response, cookies: list[CookieSpec]) -> None:
+    """Apply queued ``CookieSpec`` entries to the Falcon response."""
+    for c in cookies:
+        if c.delete:
+            resp.unset_cookie(c.name, path=c.path, domain=c.domain)
+        else:
+            resp.set_cookie(
+                c.name,
+                c.value,
+                expires=c.expires,
+                max_age=c.max_age,
+                domain=c.domain,
+                path=c.path,
+                secure=c.secure,
+                http_only=c.http_only,
+                same_site=c.same_site,
+                partitioned=c.partitioned,
+            )
+
+
 class _RpcResource:
     """Falcon resource for unary calls: ``POST {prefix}/{method}``."""
 
@@ -1681,26 +1704,32 @@ class _RpcResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle unary and __describe__ RPC calls."""
+        cookies: list[CookieSpec] = []
+        cookie_token = _current_response_cookies.set(cookies)
         try:
-            info = self._app._resolve_method(req, method)
-            if info.method_type == MethodType.STREAM:
-                raise _RpcHttpError(
-                    TypeError(f"Stream method '{method}' requires /init and /exchange endpoints"),
-                    status_code=HTTPStatus.BAD_REQUEST,
-                )
+            try:
+                info = self._app._resolve_method(req, method)
+                if info.method_type == MethodType.STREAM:
+                    raise _RpcHttpError(
+                        TypeError(f"Stream method '{method}' requires /init and /exchange endpoints"),
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
 
-            result_stream, http_status = self._app._unary_sync(method, info, _get_request_stream(req))
-            resp.content_type = _ARROW_CONTENT_TYPE
-            resp.stream = result_stream
-            _set_http_status(resp, http_status)
-        except _RpcHttpError as e:
-            _set_error_response(
-                resp,
-                e.cause,
-                status_code=e.status_code,
-                schema=e.schema,
-                server_id=self._app._server.server_id,
-            )
+                result_stream, http_status = self._app._unary_sync(method, info, _get_request_stream(req))
+                resp.content_type = _ARROW_CONTENT_TYPE
+                resp.stream = result_stream
+                _set_http_status(resp, http_status)
+            except _RpcHttpError as e:
+                _set_error_response(
+                    resp,
+                    e.cause,
+                    status_code=e.status_code,
+                    schema=e.schema,
+                    server_id=self._app._server.server_id,
+                )
+            _apply_cookies_to_response(resp, cookies)
+        finally:
+            _current_response_cookies.reset(cookie_token)
 
 
 class _StreamInitResource:
@@ -1932,12 +1961,27 @@ class _AccessLogContextMiddleware:
             _current_stream_id.reset(token)
 
 
-class _AuthMiddleware:
-    """Falcon middleware that runs an ``authenticate`` callback on each request.
+def _build_transport_metadata(req: falcon.Request) -> dict[str, Any]:
+    """Extract per-request HTTP transport metadata (remote_addr, user_agent, cookies)."""
+    md: dict[str, Any] = {}
+    if req.remote_addr:
+        md["remote_addr"] = req.remote_addr
+    ua = req.user_agent
+    if ua:
+        md["user_agent"] = ua
+    if req.cookies:
+        md["cookies"] = _types.MappingProxyType(dict(req.cookies))
+    return md
 
-    On success, sets a ``_TransportContext`` in ``_current_transport`` for
-    the duration of the request so that ``CallContext`` picks up the real
-    ``AuthContext`` and transport metadata.
+
+class _AuthMiddleware:
+    """Falcon middleware: populates transport metadata and optionally authenticates.
+
+    Always populates ``_TransportContext`` in ``_current_transport`` for
+    the duration of the request so that ``CallContext`` picks up transport
+    metadata (``remote_addr``, ``user_agent``, ``cookies``).  When an
+    ``authenticate`` callback is provided, also populates ``AuthContext``
+    on the same transport context.
 
     The ``authenticate`` callback is expected to raise ``ValueError`` (bad
     credentials) or ``PermissionError`` (forbidden) on failure.  Other
@@ -1949,7 +1993,7 @@ class _AuthMiddleware:
 
     def __init__(
         self,
-        authenticate: Callable[[falcon.Request], AuthContext],
+        authenticate: Callable[[falcon.Request], AuthContext] | None,
         www_authenticate: str | None = None,
         on_auth_failure: Callable[[str | None, str], None] | None = None,
         exempt_prefixes: tuple[str, ...] = (),
@@ -1960,26 +2004,29 @@ class _AuthMiddleware:
         self._exempt_prefixes = exempt_prefixes
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
-        """Authenticate the request and populate the transport contextvar.
+        """Authenticate (if configured) and populate the transport contextvar.
 
-        Only ``ValueError`` and ``PermissionError`` are caught and mapped to
-        HTTP 401.  Other exceptions propagate as 500 so that bugs in the
-        authenticate callback surface loudly rather than masquerading as
-        auth failures.
-
-        The 401 response is plain text (not Arrow IPC) because at this
-        stage no method has been resolved and the output schema is unknown.
+        Only ``ValueError`` and ``PermissionError`` from the ``authenticate``
+        callback are caught and mapped to HTTP 401.  Other exceptions
+        propagate as 500 so that bugs surface loudly rather than masquerade
+        as auth failures.
 
         CORS preflight ``OPTIONS`` requests and well-known paths
         (``/.well-known/``) are exempt from authentication so that browsers
-        can complete the preflight handshake without credentials and clients
-        can discover OAuth metadata before authenticating.
+        can complete the preflight handshake without credentials and
+        clients can discover OAuth metadata before authenticating.  Exempt
+        paths still get transport metadata populated.
         """
-        if req.method == "OPTIONS" or req.path.startswith("/.well-known/"):
+        transport_metadata = _build_transport_metadata(req)
+        exempt = (
+            req.method == "OPTIONS"
+            or req.path.startswith("/.well-known/")
+            or any(req.path.startswith(pfx) for pfx in self._exempt_prefixes)
+        )
+        if self._authenticate is None or exempt:
+            tc = _TransportContext(auth=_ANONYMOUS, transport_metadata=transport_metadata)
+            req.context.transport_token = _current_transport.set(tc)
             return
-        for _pfx in self._exempt_prefixes:
-            if req.path.startswith(_pfx):
-                return
         try:
             auth = self._authenticate(req)
         except (ValueError, PermissionError) as exc:
@@ -1997,12 +2044,6 @@ class _AuthMiddleware:
                 self._on_auth_failure(req.remote_addr, type(exc).__name__)
             challenges = [self._www_authenticate] if self._www_authenticate else None
             raise falcon.HTTPUnauthorized(description=str(exc), challenges=challenges) from exc
-        transport_metadata: dict[str, str] = {}
-        if req.remote_addr:
-            transport_metadata["remote_addr"] = req.remote_addr
-        ua = req.user_agent
-        if ua:
-            transport_metadata["user_agent"] = ua
         tc = _TransportContext(auth=auth, transport_metadata=transport_metadata)
         req.context.transport_token = _current_transport.set(tc)
 
@@ -2406,34 +2447,33 @@ def make_wsgi_app(
         _pkce_active = True
         _pkce_user_info_html = build_user_info_html(prefix)
 
-    if authenticate is not None:
-        on_auth_failure: Callable[[str | None, str], None] | None = None
-        if otel_config is not None:
-            from vgi_rpc.otel import OtelConfig as _OtelCfg
-            from vgi_rpc.otel import make_auth_failure_counter
+    on_auth_failure: Callable[[str | None, str], None] | None = None
+    if authenticate is not None and otel_config is not None:
+        from vgi_rpc.otel import OtelConfig as _OtelCfg
+        from vgi_rpc.otel import make_auth_failure_counter
 
-            assert isinstance(otel_config, _OtelCfg)  # validated above
-            on_auth_failure = make_auth_failure_counter(otel_config, server.protocol_name)
+        assert isinstance(otel_config, _OtelCfg)  # validated above
+        on_auth_failure = make_auth_failure_counter(otel_config, server.protocol_name)
+    middleware.append(
+        _AuthMiddleware(
+            authenticate,
+            www_authenticate=www_authenticate,
+            on_auth_failure=on_auth_failure,
+            exempt_prefixes=tuple(_exempt_prefixes_list),
+        )
+    )
+    if authenticate is not None and _pkce_active:
         middleware.append(
-            _AuthMiddleware(
-                authenticate,
-                www_authenticate=www_authenticate,
-                on_auth_failure=on_auth_failure,
-                exempt_prefixes=tuple(_exempt_prefixes_list),
+            _OAuthPkceMiddleware(
+                session_key=_pkce_session_key,
+                oidc_discovery=_pkce_oidc_discovery,
+                client_id=_pkce_client_id,
+                prefix=prefix,
+                secure_cookie=_pkce_secure,
+                redirect_uri=_pkce_redirect_uri,
+                scope=_pkce_scope,
             )
         )
-        if _pkce_active:
-            middleware.append(
-                _OAuthPkceMiddleware(
-                    session_key=_pkce_session_key,
-                    oidc_discovery=_pkce_oidc_discovery,
-                    client_id=_pkce_client_id,
-                    prefix=prefix,
-                    secure_cookie=_pkce_secure,
-                    redirect_uri=_pkce_redirect_uri,
-                    scope=_pkce_scope,
-                )
-            )
     if capability_headers:
         middleware.append(_CapabilitiesMiddleware(capability_headers))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)

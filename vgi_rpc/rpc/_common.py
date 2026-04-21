@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable, Mapping, MutableMapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
@@ -78,6 +79,7 @@ class AuthContext:
 
 _ANONYMOUS: Final[AuthContext] = AuthContext(domain=None, authenticated=False)
 _EMPTY_TRANSPORT_METADATA: Final[Mapping[str, Any]] = MappingProxyType({})
+_EMPTY_COOKIES: Final[Mapping[str, str]] = MappingProxyType({})
 
 
 def _format_claim_value(value: object) -> str | int | float | bool | None:
@@ -184,6 +186,122 @@ class CallContext:
         """Emit a client-directed log message (convenience wrapper)."""
         self.emit_client_log(Message(level, message, **extra))
 
+    @property
+    def cookies(self) -> Mapping[str, str]:
+        """Cookies from the incoming HTTP request.
+
+        Returns a read-only mapping of cookie name to value.  Empty for
+        non-HTTP transports (pipe, subprocess, shared memory) because
+        those transports have no concept of HTTP cookies.
+        """
+        cookies = self.transport_metadata.get("cookies")
+        if cookies is None:
+            return _EMPTY_COOKIES
+        return cast("Mapping[str, str]", cookies)
+
+    def set_cookie(
+        self,
+        name: str,
+        value: str,
+        *,
+        expires: datetime | None = None,
+        max_age: int | None = None,
+        domain: str | None = None,
+        path: str | None = None,
+        secure: bool | None = None,
+        http_only: bool = True,
+        same_site: str | None = None,
+        partitioned: bool = False,
+    ) -> None:
+        """Queue a ``Set-Cookie`` header for the HTTP response.
+
+        Only valid inside a unary RPC method served over HTTP.  Streaming
+        responses are chunked with state carried in Arrow metadata and
+        cannot cleanly attach a single ``Set-Cookie``.
+
+        Args:
+            name: Cookie name.
+            value: Cookie value.
+            expires: Absolute expiry time.  Mutually useful with ``max_age``.
+            max_age: Seconds until expiry.  ``0`` deletes the cookie.
+            domain: ``Domain`` attribute.
+            path: ``Path`` attribute.
+            secure: ``Secure`` attribute.  ``None`` lets the transport decide.
+            http_only: ``HttpOnly`` attribute.  Defaults to ``True``.
+            same_site: ``SameSite`` attribute (``"Strict"``, ``"Lax"``, ``"None"``).
+            partitioned: ``Partitioned`` attribute (CHIPS).
+
+        Raises:
+            RuntimeError: If the call is not a unary HTTP request.
+
+        """
+        sink = _current_response_cookies.get()
+        if sink is None:
+            raise RuntimeError(
+                "set_cookie() is only supported inside unary RPC methods served over HTTP",
+            )
+        sink.append(
+            CookieSpec(
+                name=name,
+                value=value,
+                expires=expires,
+                max_age=max_age,
+                domain=domain,
+                path=path,
+                secure=secure,
+                http_only=http_only,
+                same_site=same_site,
+                partitioned=partitioned,
+            )
+        )
+
+    def delete_cookie(
+        self,
+        name: str,
+        *,
+        path: str | None = None,
+        domain: str | None = None,
+    ) -> None:
+        """Queue a cookie deletion on the HTTP response.
+
+        Args:
+            name: Cookie name to unset.
+            path: ``Path`` attribute of the cookie to match.
+            domain: ``Domain`` attribute of the cookie to match.
+
+        Raises:
+            RuntimeError: If the call is not a unary HTTP request.
+
+        """
+        sink = _current_response_cookies.get()
+        if sink is None:
+            raise RuntimeError(
+                "delete_cookie() is only supported inside unary RPC methods served over HTTP",
+            )
+        sink.append(CookieSpec(name=name, delete=True, path=path, domain=domain))
+
+
+@dataclass(frozen=True)
+class CookieSpec:
+    """Queued cookie mutation to apply to an HTTP response.
+
+    Created by :meth:`CallContext.set_cookie` / :meth:`CallContext.delete_cookie`
+    and consumed by the HTTP transport after method dispatch completes.
+    Internal — callers interact only through the ``CallContext`` helpers.
+    """
+
+    name: str
+    value: str = ""
+    delete: bool = False
+    expires: datetime | None = None
+    max_age: int | None = None
+    domain: str | None = None
+    path: str | None = None
+    secure: bool | None = None
+    http_only: bool = True
+    same_site: str | None = None
+    partitioned: bool = False
+
 
 @dataclass(frozen=True)
 class _TransportContext:
@@ -194,6 +312,12 @@ class _TransportContext:
 
 
 _current_transport: ContextVar[_TransportContext | None] = ContextVar("vgi_rpc_transport", default=None)
+
+# Per-request sink for outgoing HTTP response cookies.  Installed by the
+# HTTP unary resource before dispatch and drained after.  ``None`` on
+# non-unary or non-HTTP code paths — ``CallContext.set_cookie`` raises
+# in that case.
+_current_response_cookies: ContextVar[list[CookieSpec] | None] = ContextVar("vgi_rpc_response_cookies", default=None)
 
 
 def _get_auth_and_metadata() -> tuple[AuthContext, Mapping[str, Any]]:
