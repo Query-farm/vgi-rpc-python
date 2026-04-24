@@ -19,7 +19,7 @@ import falcon.testing
 from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, RpcServer
 
-from ._server import make_wsgi_app
+from .server import make_wsgi_app
 
 if TYPE_CHECKING:
     from vgi_rpc.http._oauth import OAuthResourceMetadata

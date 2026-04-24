@@ -1192,7 +1192,7 @@ class TestRunServerArgParsing:
             called_with.append((server, host, port))
 
         monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)
-        monkeypatch.setattr("vgi_rpc.http._server.serve_http", fake_serve_http)
+        monkeypatch.setattr("vgi_rpc.http.server._serve.serve_http", fake_serve_http)
 
         class P(Protocol):
             """Protocol."""
@@ -1221,7 +1221,7 @@ class TestRunServerArgParsing:
             called_with.append((server, host, port))
 
         monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)
-        monkeypatch.setattr("vgi_rpc.http._server.serve_http", fake_serve_http)
+        monkeypatch.setattr("vgi_rpc.http.server._serve.serve_http", fake_serve_http)
 
         class P(Protocol):
             """Protocol."""
@@ -1303,7 +1303,7 @@ class TestServeHttp:
         from unittest.mock import MagicMock
 
         mock_waitress = MagicMock()
-        monkeypatch.setattr("vgi_rpc.http._server._waitress", mock_waitress, raising=False)
+        monkeypatch.setattr("vgi_rpc.http.server._serve._waitress", mock_waitress, raising=False)
 
         # We need to prevent the real import inside serve_http —
         # monkeypatch the import to return our mock
@@ -1328,7 +1328,7 @@ class TestServeHttp:
 
         server = RpcServer(P, Impl())
         # Reload to pick up the mocked waitress
-        import vgi_rpc.http._server as _srv_mod
+        import vgi_rpc.http.server._serve as _srv_mod
 
         importlib.reload(_srv_mod)
 
@@ -1354,7 +1354,7 @@ class TestServeHttp:
         fake_mod.serve = lambda *a, **kw: None  # type: ignore[attr-defined]
         monkeypatch.setitem(_sys.modules, "waitress", fake_mod)
 
-        import vgi_rpc.http._server as _srv_mod
+        import vgi_rpc.http.server._serve as _srv_mod
 
         importlib.reload(_srv_mod)
 

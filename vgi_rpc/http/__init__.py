@@ -55,12 +55,12 @@ from vgi_rpc.http._common import (
 from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc
 from vgi_rpc.http._oauth import OAuthResourceMetadata
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
-from vgi_rpc.http._server import make_wsgi_app, serve_http
 from vgi_rpc.http._testing import (
     _SyncTestClient,
     _SyncTestResponse,
     make_sync_client,
 )
+from vgi_rpc.http.server import make_wsgi_app, serve_http
 
 with contextlib.suppress(ImportError):
     from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401

@@ -378,7 +378,7 @@ def _make_test_app(
 ) -> falcon.testing.TestClient:
     """Create a Falcon test client with optional PKCE wiring."""
     server = RpcServer(_EchoService, _EchoImpl(), enable_describe=True)
-    from vgi_rpc.http._server import make_wsgi_app
+    from vgi_rpc.http import make_wsgi_app
 
     app = make_wsgi_app(
         server,

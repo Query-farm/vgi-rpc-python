@@ -44,7 +44,7 @@ from vgi_rpc.http import (
     make_wsgi_app,
     request_upload_urls,
 )
-from vgi_rpc.http._server import _resolve_state_cls, _serialize_state_bytes
+from vgi_rpc.http.server._state_token import _resolve_state_cls, _serialize_state_bytes
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import (
     AnnotatedBatch,
@@ -457,7 +457,7 @@ class TestStateTokenStateEncoding:
 
         import pyarrow as pa
 
-        from vgi_rpc.http._server import _TOKEN_VERSION
+        from vgi_rpc.http.server._state_token import _TOKEN_VERSION
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
@@ -511,7 +511,7 @@ class TestStateTokenStateEncoding:
 
         import pyarrow as pa
 
-        from vgi_rpc.http._server import _TOKEN_VERSION
+        from vgi_rpc.http.server._state_token import _TOKEN_VERSION
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
@@ -563,7 +563,7 @@ class TestStateTokenStateEncoding:
 
     def test_pack_token_is_valid_utf8(self) -> None:
         """Packed state token is valid UTF-8 (base64-encoded)."""
-        from vgi_rpc.http._server import _pack_state_token
+        from vgi_rpc.http.server._state_token import _pack_state_token
 
         # Use bytes with high bytes that are invalid UTF-8 on their own
         token = _pack_state_token(b"\x00\xff\xfe", b"\x80\x81", b"\x90\x91", b"key", 0)
@@ -572,7 +572,7 @@ class TestStateTokenStateEncoding:
 
     def test_pack_unpack_roundtrip_with_base64(self) -> None:
         """Pack and unpack produce consistent results through base64 encoding."""
-        from vgi_rpc.http._server import _pack_state_token, _unpack_state_token
+        from vgi_rpc.http.server._state_token import _pack_state_token, _unpack_state_token
 
         state = b"test-state-data"
         schema = b"test-schema-data"
