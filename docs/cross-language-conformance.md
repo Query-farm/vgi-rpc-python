@@ -69,6 +69,18 @@ vgi-rpc-test --cmd "./my-worker" --log-level DEBUG --log-logger vgi_rpc.wire.req
 vgi-rpc-test --cmd "./my-worker" --log-level DEBUG --log-format json
 ```
 
+## Access Log Conformance
+
+Every conformant vgi-rpc worker MUST accept a `--access-log <path>` flag and write JSONL access-log records to that path. The CLI can validate them in the same run:
+
+```bash
+# Worker writes its access log to /tmp/worker.log; the CLI passes the
+# same path through to the worker and validates the file afterwards.
+vgi-rpc-test --cmd "./my-worker --access-log /tmp/worker.log" --access-log /tmp/worker.log
+```
+
+Validation is performed against [`access-log-spec.md`](access-log-spec.md) (machine-checkable form: [`vgi_rpc/access_log.schema.json`](../vgi_rpc/access_log.schema.json)). The CLI exit code reflects both suite success and access-log conformance.
+
 ## Exit Codes
 
 - `0` — all tests passed

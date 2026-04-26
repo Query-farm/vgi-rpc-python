@@ -336,10 +336,68 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"Per-test timeout in seconds; 0 to disable (default: {DEFAULT_TEST_TIMEOUT})",
     )
 
+    # Access log conformance
+    access_group = parser.add_argument_group("access log")
+    access_group.add_argument(
+        "--access-log",
+        metavar="PATH",
+        help=(
+            "After running the suite, validate the JSONL access log file at PATH "
+            "against vgi_rpc/access_log.schema.json. The worker is responsible for "
+            "writing this file (typically via its own --access-log flag)."
+        ),
+    )
+
     # Other
     parser.add_argument("--version", "-V", action="store_true", help="Show version and exit")
 
     return parser
+
+
+# ---------------------------------------------------------------------------
+# Access log validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_access_log(path: str) -> bool:
+    """Validate a JSONL access log file against the schema.
+
+    Args:
+        path: Path to a JSONL file written by the worker under test.
+
+    Returns:
+        True if every ``vgi_rpc.access`` entry in the file conforms,
+        False otherwise. Diagnostics are printed to stderr.
+
+    """
+    from pathlib import Path as _Path
+
+    from vgi_rpc.access_log_conformance import (
+        _filter_access_logs,
+        _parse_json_log_lines,
+        validate_access_logs,
+    )
+
+    file_path = _Path(path)
+    if not file_path.exists():
+        sys.stderr.write(f"--access-log: file not found: {path}\n")
+        return False
+
+    lines = file_path.read_text().splitlines()
+    entries = _filter_access_logs(_parse_json_log_lines(lines))
+    if not entries:
+        sys.stderr.write(f"--access-log: no vgi_rpc.access entries found in {path}\n")
+        return False
+
+    violations = validate_access_logs(entries)
+    if violations:
+        sys.stderr.write(f"--access-log: FAIL: {len(entries)} entries, {len(violations)} violations\n")
+        for v in violations:
+            sys.stderr.write(f"  entry {v.entry_index} (method={v.method}, path={v.path}): {v.message}\n")
+        return False
+
+    sys.stderr.write(f"--access-log: PASS: {len(entries)} entries validated\n")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -433,8 +491,13 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 print(output_text)
 
+            # Optional access-log conformance check
+            access_log_ok = True
+            if args.access_log:
+                access_log_ok = _validate_access_log(args.access_log)
+
             # Exit code
-            sys.exit(0 if suite.success else 1)
+            sys.exit(0 if suite.success and access_log_ok else 1)
 
     except SystemExit:
         raise

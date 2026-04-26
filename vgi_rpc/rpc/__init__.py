@@ -285,6 +285,9 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     - ``--host HOST`` — HTTP bind address (default ``127.0.0.1``).
     - ``--port PORT`` — HTTP port (default ``0``, auto-select).
     - ``--describe`` — Enable the ``__describe__`` introspection method.
+    - ``--access-log PATH`` — Append JSONL access log records to ``PATH``.
+      The cross-language conformance contract requires every worker to
+      accept this flag; see ``docs/access-log-spec.md``.
 
     Without ``--http`` the server runs over stdin/stdout pipes (the
     default, suitable for ``SubprocessTransport``).
@@ -307,7 +310,24 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     parser.add_argument(
         "--describe", action="store_true", default=False, help="Enable __describe__ introspection method"
     )
+    parser.add_argument(
+        "--access-log",
+        metavar="PATH",
+        default=None,
+        help="Append JSONL access log records to PATH (vgi_rpc.access logger at INFO).",
+    )
     args = parser.parse_args()
+
+    if args.access_log:
+        import logging as _logging
+
+        from vgi_rpc.logging_utils import VgiJsonFormatter
+
+        _handler = _logging.FileHandler(args.access_log, mode="a", encoding="utf-8")
+        _handler.setFormatter(VgiJsonFormatter())
+        _access = _logging.getLogger("vgi_rpc.access")
+        _access.setLevel(_logging.INFO)
+        _access.addHandler(_handler)
 
     if isinstance(protocol_or_server, RpcServer):
         if implementation is not None:

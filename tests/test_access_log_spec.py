@@ -12,7 +12,10 @@ from __future__ import annotations
 import io
 import json
 import logging
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import jsonschema
@@ -298,6 +301,39 @@ class TestCli:
         rc = conformance_main(["-"])
         assert rc == 1
         assert "FAIL" in capsys.readouterr().out
+
+
+class TestVgiRpcTestCli:
+    """End-to-end: drive the reference Python worker via vgi-rpc-test --access-log."""
+
+    def test_passes_against_reference_worker(self, tmp_path: Path) -> None:
+        """vgi-rpc-test --access-log validates the Python reference worker clean."""
+        log_path = tmp_path / "access.log"
+        cmd = f"{sys.executable} -m tests.serve_conformance_pipe --access-log {log_path}"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "vgi_rpc.conformance._test_cli",
+                "--cmd",
+                cmd,
+                "--access-log",
+                str(log_path),
+                "--filter",
+                "scalar*,void*",
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        # Suite + access-log validation must both succeed.
+        assert proc.returncode == 0, f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}"
+        assert "--access-log: PASS" in proc.stderr
+        # Confirm the worker actually wrote records.
+        assert log_path.exists()
+        assert log_path.read_text().count("\n") > 0
 
 
 def test_violation_dataclass_shape() -> None:
