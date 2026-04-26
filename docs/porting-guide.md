@@ -75,9 +75,9 @@ In order, smallest-blast-radius first:
 - **Python** (reference): this repository.
 - **Go**: [vgi-rpc-go](https://github.com/Query-farm/vgi-rpc-go) — uses Apache Arrow Go and a `DispatchHook` interface for observability. Schema-aligned via `vgirpc.AccessLogHook` and `--access-log <path>` on the conformance worker.
 
-### Known conformance gaps in current ports
+### Conformance status
 
-- **Go**: `stream_id` is generated per-dispatch rather than stable across the init/continuation records of a single stream call. The schema regex passes; the spec's "stable identifier across continuations" semantic does not yet hold. HTTP-specific fields (`http_status`, `request_state`, `response_state`) are also not yet plumbed. Tracked separately.
+- **Go**: fully aligned for pipe and HTTP transports. `stream_id` is stable across continuation records — HTTP threads it through the signed state token. `request_data`, `protocol`, `remote_addr` (HTTP), and `cancelled` are emitted. `http_status`, `request_state`, and `response_state` are still optional in the spec and not plumbed; pure-conformance gates pass without them.
 
 ## Gotchas
 
