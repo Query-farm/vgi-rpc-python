@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 
 __all__ = ["VgiJsonFormatter"]
 
@@ -44,6 +45,15 @@ class VgiJsonFormatter(logging.Formatter):
 
     Non-serializable values are coerced to strings via ``default=str``.
     """
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        """Format the record timestamp as RFC 3339 UTC with millisecond precision.
+
+        Per ``docs/access-log-spec.md`` every conformant emitter produces
+        timestamps in this exact shape so cross-language logs collate cleanly.
+        """
+        dt = datetime.fromtimestamp(record.created, tz=UTC)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
     def format(self, record: logging.LogRecord) -> str:
         """Format a log record as a single-line JSON string."""

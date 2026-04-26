@@ -18,7 +18,7 @@ Every record is a JSON object with these keys:
 
 | Key | Type | Required | Notes |
 |---|---|---|---|
-| `timestamp` | string | yes | ISO-8601 with timezone offset, second precision or finer. |
+| `timestamp` | string | yes | RFC 3339 UTC, millisecond precision. Exact pattern: `YYYY-MM-DDTHH:MM:SS.sssZ` (e.g. `2026-04-26T15:30:45.123Z`). |
 | `level` | string | yes | Always `"INFO"`. |
 | `logger` | string | yes | Always `"vgi_rpc.access"`. |
 | `message` | string | yes | Free-form summary, e.g. `"<protocol>.<method> ok"`. Not parsed by tooling — assertions go on structured fields. |
@@ -64,7 +64,7 @@ These fields appear when their condition is met and are absent (key not present)
 
 | Field | Type | Condition |
 |---|---|---|
-| `request_data` | string | Required on every `unary` record AND every stream `init` record. Absent on stream continuations. The value is base64 (RFC 4648, padding required) of the bytes returned by `pyarrow.RecordBatch.serialize()` on the request batch — that is, a self-contained Arrow IPC stream containing one schema message and one record batch message. Implementations in other languages MUST produce identical bytes (verifiable by round-tripping through `pyarrow.ipc.open_stream`). |
+| `request_data` | string | Required on every `unary` record AND every stream `init` record. Absent on stream continuations. The value is base64 (RFC 4648, padding required) of a self-contained Arrow IPC stream (one schema message followed by one record batch message). Round-trip equivalence — not byte equivalence — is the conformance test: the decoded bytes MUST decode through `pyarrow.ipc.open_stream(...)` to yield a `RecordBatch` whose schema and column data match the original request. The Python reference implementation uses `pyarrow.RecordBatch.serialize()`. Other-language implementations MAY use any encoding their Arrow library produces as long as the round-trip property holds. |
 
 ### 4.4 HTTP transport
 
