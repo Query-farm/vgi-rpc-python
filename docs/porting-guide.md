@@ -80,7 +80,7 @@ In order, smallest-blast-radius first:
 - **Go**: fully aligned for pipe and HTTP transports. `stream_id` is stable across continuation records — HTTP threads it through the signed state token. `request_data`, `protocol`, `remote_addr` (HTTP), and `cancelled` are emitted. `http_status`, `request_state`, and `response_state` are still optional in the spec and not plumbed; pure-conformance gates pass without them.
 - **TypeScript**: aligned for the stdio transport (120 access-log entries validate). HTTP transport (`examples/conformance-http.ts`) does not yet wire the access-log hook; stream_id stability across HTTP continuations is a follow-up.
 - **Java**: aligned for the stdio transport (120 access-log entries validate). HTTP transport does not yet wire the dispatch hook; stream_id stability across HTTP continuations is a follow-up — see `vgi-rpc-go` for the reference state-token plumbing.
-- **Rust**: existing `access_log.rs` predates the spec and is missing 6 schema-required top-level fields. Not yet aligned.
+- **Rust**: aligned for the stdio transport (120 access-log entries validate). HTTP transport does not yet wire the new DispatchInfo fields (remote_addr, request_data, stable stream_id via state-token round-trip) — see `vgi-rpc-go` for reference plumbing.
 
 ## Gotchas
 
