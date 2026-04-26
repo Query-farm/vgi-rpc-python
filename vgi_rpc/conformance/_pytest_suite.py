@@ -593,6 +593,36 @@ class TestUnaryErrors:
 
 
 # ---------------------------------------------------------------------------
+# Protocol-Level Errors (standardized across transports)
+# ---------------------------------------------------------------------------
+
+
+class TestProtocolErrors:
+    """Errors raised by the framework itself (not by user method bodies).
+
+    These behaviors must be identical across all transports so that callers
+    can rely on consistent error_type/message shape regardless of pipe vs
+    HTTP vs subprocess.
+    """
+
+    def test_unknown_method_raises_attribute_error(self, conformance_conn: ConnFactory) -> None:
+        """Calling a method not in the protocol raises AttributeError with a stable message."""
+        with (
+            conformance_conn() as proxy,
+            pytest.raises(AttributeError, match="has no RPC method 'definitely_not_a_method'"),
+        ):
+            proxy.definitely_not_a_method()
+
+    def test_none_for_required_param_raises_type_error(self, conformance_conn: ConnFactory) -> None:
+        """Passing None to a non-Optional parameter raises TypeError before any RPC happens."""
+        with (
+            conformance_conn() as proxy,
+            pytest.raises(TypeError, match="parameter 'message' is not optional but got None"),
+        ):
+            proxy.raise_value_error(message=None)
+
+
+# ---------------------------------------------------------------------------
 # Unary: Client-Directed Logging
 # ---------------------------------------------------------------------------
 
