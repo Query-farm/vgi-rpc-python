@@ -19,7 +19,8 @@ import time
 from typing import Protocol
 
 import falcon
-from authlib.jose import JsonWebKey, jwt
+from joserfc import jwt
+from joserfc.jwk import KeySet, RSAKey, import_key
 
 from vgi_rpc import AuthContext, CallContext, RpcServer
 from vgi_rpc.http import OAuthResourceMetadata, http_connect, http_oauth_metadata, jwt_authenticate, make_sync_client
@@ -69,10 +70,12 @@ class IdentityServiceImpl:
 def main() -> None:
     """Run the OAuth discovery example end-to-end."""
     # Generate a test RSA key pair
-    key = JsonWebKey.generate_key("RSA", 2048, is_private=True)
-    key_dict = key.as_dict(is_private=True)
+    key = RSAKey.generate_key(2048)
+    key_dict = key.as_dict(private=True)
     key_dict["kid"] = "test-key-1"
-    jwk_public = JsonWebKey.import_key(key_dict).as_dict()
+    priv_key = import_key(key_dict)
+    jwk_public = priv_key.as_dict(private=False)
+    jwk_public_set = KeySet.import_key_set({"keys": [jwk_public]})
 
     # Create a test JWT
     now = int(time.time())
@@ -86,8 +89,7 @@ def main() -> None:
         "name": "Alice Example",
         "scope": "read write",
     }
-    token_bytes: bytes = jwt.encode(header, payload, key_dict)
-    token = token_bytes.decode()
+    token = jwt.encode(header, payload, priv_key)
 
     # Build a JWKS-based authenticate callback.
     # In production, jwt_authenticate() fetches keys from a real JWKS endpoint.
@@ -98,20 +100,18 @@ def main() -> None:
         if not auth_header.startswith("Bearer "):
             raise ValueError("Missing or invalid Authorization header")
         raw_token = auth_header[7:]
-        claims = jwt.decode(
-            raw_token,
-            jwk_public,
-            claims_options={
-                "iss": {"essential": True, "value": "https://auth.example.com"},
-                "aud": {"essential": True, "value": "https://api.example.com/vgi"},
-            },
+        decoded = jwt.decode(raw_token, jwk_public_set)
+        registry = jwt.JWTClaimsRegistry(
+            iss={"essential": True, "value": "https://auth.example.com"},
+            aud={"essential": True, "value": "https://api.example.com/vgi"},
         )
-        claims.validate()
+        registry.validate(decoded.claims)
+        claims = dict(decoded.claims)
         return AuthContext(
             domain="jwt",
             authenticated=True,
             principal=str(claims.get("sub", "")),
-            claims=dict(claims),
+            claims=claims,
         )
 
     metadata = OAuthResourceMetadata(
@@ -142,7 +142,7 @@ def main() -> None:
         print(svc.whoami())
         print(svc.my_claims())
 
-    # Verify jwt_authenticate is importable (requires authlib)
+    # Verify jwt_authenticate is importable (requires joserfc)
     _auth_fn = jwt_authenticate(
         issuer="https://auth.example.com",
         audience="https://api.example.com/vgi",

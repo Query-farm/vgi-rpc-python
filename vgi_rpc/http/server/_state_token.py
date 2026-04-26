@@ -20,9 +20,36 @@ import types as _types
 from http import HTTPStatus
 from typing import get_args, get_origin, get_type_hints
 
-from vgi_rpc.rpc import MethodType, RpcServer, Stream, StreamState
+from vgi_rpc.rpc import AuthContext, MethodType, RpcServer, Stream, StreamState
 
 from .._common import _RpcHttpError
+
+
+def _derive_signing_key(signing_key: bytes, auth: AuthContext | None) -> bytes:
+    """Derive a per-principal signing key for stream state tokens.
+
+    Binds the effective HMAC key to the authenticated identity so a state
+    token issued to one user cannot be replayed by another user who has
+    obtained a copy of the opaque token. Unauthenticated requests share a
+    common ``anonymous`` derivation — there is no identity to cross, so
+    this preserves the pre-existing behavior for the pipe/anonymous path.
+
+    Args:
+        signing_key: The master HMAC key configured on the server.
+        auth: The authentication context for the current request.
+
+    Returns:
+        A 32-byte derived key specific to ``(domain, principal)``.
+
+    """
+    if auth is None or not auth.authenticated:
+        identity = b"\x00anonymous"
+    else:
+        domain = (auth.domain or "").encode()
+        principal = (auth.principal or "").encode()
+        identity = b"\x01" + domain + b"\x00" + principal
+    return hmac.new(signing_key, b"vgi_rpc.stream_state:" + identity, hashlib.sha256).digest()
+
 
 _HMAC_LEN = 32  # SHA-256 digest size
 _HEADER_LEN = 4  # uint32 LE prefix for each segment

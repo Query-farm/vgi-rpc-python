@@ -67,7 +67,7 @@ def _run_unary_sync(
     stats_token = _current_call_stats.set(stats)
     try:
         try:
-            ipc_method, kwargs = _read_request(stream, app._server.ipc_validation)
+            ipc_method, kwargs = _read_request(stream, app._server.ipc_validation, app._server.external_config)
             if ipc_method != method_name:
                 raise TypeError(
                     f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "

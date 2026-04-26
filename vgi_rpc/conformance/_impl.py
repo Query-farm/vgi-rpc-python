@@ -10,6 +10,9 @@ the appropriate Stream with state objects.
 
 from __future__ import annotations
 
+import datetime as _dt
+from decimal import Decimal
+
 import pyarrow as pa
 
 from vgi_rpc.log import Level
@@ -27,8 +30,11 @@ from ._types import (
     CancellableExchangeState,
     CancellableProducerState,
     ConformanceHeader,
+    ContainerWideTypes,
     CounterState,
+    DeepNested,
     DynamicProducerState,
+    EmbeddedArrow,
     EmptyProducerState,
     ErrorAfterNState,
     FailOnExchangeNState,
@@ -41,6 +47,7 @@ from ._types import (
     ScaleExchangeState,
     SingleProducerState,
     Status,
+    WideTypes,
     ZeroColumnExchangeState,
     _CancelProbe,
     build_dynamic_schema,
@@ -158,6 +165,90 @@ class ConformanceServiceImpl:
         return value
 
     # ------------------------------------------------------------------
+    # Unary: Wide Arrow Types
+    # ------------------------------------------------------------------
+
+    def echo_int8(self, value: int) -> int:
+        """Echo an int8 value."""
+        return value
+
+    def echo_int16(self, value: int) -> int:
+        """Echo an int16 value."""
+        return value
+
+    def echo_uint8(self, value: int) -> int:
+        """Echo a uint8 value."""
+        return value
+
+    def echo_uint16(self, value: int) -> int:
+        """Echo a uint16 value."""
+        return value
+
+    def echo_uint32(self, value: int) -> int:
+        """Echo a uint32 value."""
+        return value
+
+    def echo_uint64(self, value: int) -> int:
+        """Echo a uint64 value."""
+        return value
+
+    def echo_date(self, value: _dt.date) -> _dt.date:
+        """Echo a date value."""
+        return value
+
+    def echo_timestamp(self, value: _dt.datetime) -> _dt.datetime:
+        """Echo a naive timestamp."""
+        return value
+
+    def echo_timestamp_utc(self, value: _dt.datetime) -> _dt.datetime:
+        """Echo a UTC timestamp."""
+        return value
+
+    def echo_time(self, value: _dt.time) -> _dt.time:
+        """Echo a time-of-day value."""
+        return value
+
+    def echo_duration(self, value: _dt.timedelta) -> _dt.timedelta:
+        """Echo a duration."""
+        return value
+
+    def echo_decimal(self, value: Decimal) -> Decimal:
+        """Echo a decimal value."""
+        return value
+
+    def echo_large_string(self, value: str) -> str:
+        """Echo a large_string value."""
+        return value
+
+    def echo_large_binary(self, value: bytes) -> bytes:
+        """Echo a large_binary value."""
+        return value
+
+    def echo_fixed_binary(self, value: bytes) -> bytes:
+        """Echo a fixed_size_binary(8) value."""
+        return value
+
+    def echo_wide_types(self, data: WideTypes) -> WideTypes:
+        """Echo a WideTypes dataclass."""
+        return data
+
+    def echo_container_wide_types(self, data: ContainerWideTypes) -> ContainerWideTypes:
+        """Echo a ContainerWideTypes dataclass."""
+        return data
+
+    def echo_embedded_arrow(self, data: EmbeddedArrow) -> EmbeddedArrow:
+        """Echo an EmbeddedArrow dataclass."""
+        return data
+
+    def echo_deep_nested(self, data: DeepNested) -> DeepNested:
+        """Echo a DeepNested dataclass."""
+        return data
+
+    def echo_dict_encoded_string(self, value: str) -> str:
+        """Echo a dictionary-encoded string."""
+        return value
+
+    # ------------------------------------------------------------------
     # Unary: Multi-Param & Defaults
     # ------------------------------------------------------------------
 
@@ -211,6 +302,18 @@ class ConformanceServiceImpl:
         """Echo value, emitting an INFO log with extras."""
         if ctx:
             ctx.client_log(Level.INFO, f"info: {value}", source="conformance", detail=value)
+        return value
+
+    def echo_with_all_log_levels(self, value: str, ctx: CallContext | None = None) -> str:
+        """Emit one log at each non-EXCEPTION Level so clients can verify level round-trip.
+
+        ``Level.EXCEPTION`` is reserved on the wire — the framework raises
+        ``RpcError`` rather than delivering it as an in-band log — so it is
+        excluded here.
+        """
+        if ctx:
+            for level in (Level.TRACE, Level.DEBUG, Level.INFO, Level.WARN, Level.ERROR):
+                ctx.client_log(level, f"{level.value.lower()}: {value}")
         return value
 
     # ------------------------------------------------------------------
@@ -354,7 +457,8 @@ class ConformanceServiceImpl:
 
     def cancel_probe_counters(self) -> list[int]:
         """Return the current ``[produce_calls, exchange_calls, on_cancel_calls]`` counters."""
-        return [_CancelProbe.produce_calls, _CancelProbe.exchange_calls, _CancelProbe.on_cancel_calls]
+        produce, exchange, on_cancel = _CancelProbe.snapshot()
+        return [produce, exchange, on_cancel]
 
     def reset_cancel_probe(self) -> None:
         """Zero all cancel-probe counters."""

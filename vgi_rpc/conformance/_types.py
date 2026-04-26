@@ -9,7 +9,9 @@ service Protocol and implementation.
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Any, cast
 
@@ -83,6 +85,79 @@ class AllTypes(ArrowSerializableDataclass):
     annotated_float32: Annotated[float, ArrowType(pa.float32())]
     nested_list: list[list[int]]
     dict_str_str: dict[str, str]
+
+
+@dataclass(frozen=True)
+class WideTypes(ArrowSerializableDataclass):
+    """Exercises Arrow type widths and date/time/decimal mappings.
+
+    Distinct from :class:`AllTypes`, which focuses on Python container
+    shapes (list/dict/optional/nested dataclass).  This dataclass focuses
+    on the breadth of *Arrow* primitive types reachable from Python via
+    ``Annotated[T, ArrowType(pa.X())]``.
+    """
+
+    int8_field: Annotated[int, ArrowType(pa.int8())]
+    int16_field: Annotated[int, ArrowType(pa.int16())]
+    int32_field: Annotated[int, ArrowType(pa.int32())]
+    uint8_field: Annotated[int, ArrowType(pa.uint8())]
+    uint16_field: Annotated[int, ArrowType(pa.uint16())]
+    uint32_field: Annotated[int, ArrowType(pa.uint32())]
+    uint64_field: Annotated[int, ArrowType(pa.uint64())]
+    float32_field: Annotated[float, ArrowType(pa.float32())]
+    date_field: Annotated[_dt.date, ArrowType(pa.date32())]
+    timestamp_field: Annotated[_dt.datetime, ArrowType(pa.timestamp("us"))]
+    timestamp_utc_field: Annotated[_dt.datetime, ArrowType(pa.timestamp("us", tz="UTC"))]
+    time_field: Annotated[_dt.time, ArrowType(pa.time64("us"))]
+    duration_field: Annotated[_dt.timedelta, ArrowType(pa.duration("us"))]
+    decimal_field: Annotated[Decimal, ArrowType(pa.decimal128(20, 4))]
+    large_string_field: Annotated[str, ArrowType(pa.large_string())]
+    large_binary_field: Annotated[bytes, ArrowType(pa.large_binary())]
+    fixed_binary_field: Annotated[bytes, ArrowType(pa.binary(8))]
+
+
+@dataclass(frozen=True)
+class ContainerWideTypes(ArrowSerializableDataclass):
+    """Wide Arrow types nested inside containers (list/dict/optional).
+
+    Verifies that a port's type-inference machinery composes correctly:
+    Annotated wide types inside ``list[T]``, ``dict[K, V]`` and
+    ``T | None`` positions, plus a list with nullable elements.
+    """
+
+    list_decimal: Annotated[list[Decimal], ArrowType(pa.list_(pa.decimal128(20, 4)))]
+    list_date: Annotated[list[_dt.date], ArrowType(pa.list_(pa.date32()))]
+    list_timestamp: Annotated[list[_dt.datetime], ArrowType(pa.list_(pa.timestamp("us")))]
+    optional_date: Annotated[_dt.date | None, ArrowType(pa.date32())]
+    optional_decimal: Annotated[Decimal | None, ArrowType(pa.decimal128(20, 4))]
+    optional_timestamp: Annotated[_dt.datetime | None, ArrowType(pa.timestamp("us"))]
+    dict_str_decimal: Annotated[dict[str, Decimal], ArrowType(pa.map_(pa.string(), pa.decimal128(20, 4)))]
+    frozenset_int: frozenset[int]
+    list_optional_int: list[int | None]
+
+
+@dataclass(frozen=True)
+class DeepNested(ArrowSerializableDataclass):
+    """Deeply-nested and dictionary-encoded Arrow types.
+
+    Verifies multi-level container nesting with non-default element types,
+    optional containers, and direct use of dictionary encoding (which the
+    framework auto-applies to enums but is exposed here as a primary
+    field type for explicit coverage).
+    """
+
+    list_of_lists_decimal: Annotated[list[list[Decimal]], ArrowType(pa.list_(pa.list_(pa.decimal128(20, 4))))]
+    optional_list_date: Annotated[list[_dt.date] | None, ArrowType(pa.list_(pa.date32()))]
+    dict_encoded_string: Annotated[str, ArrowType(pa.dictionary(pa.int16(), pa.string()))]
+    list_of_dict_encoded: Annotated[list[str], ArrowType(pa.list_(pa.dictionary(pa.int16(), pa.string())))]
+
+
+@dataclass(frozen=True)
+class EmbeddedArrow(ArrowSerializableDataclass):
+    """Arrow ``RecordBatch`` and ``Schema`` carried as nested IPC binary."""
+
+    batch: pa.RecordBatch
+    schema: pa.Schema
 
 
 @dataclass(frozen=True)
@@ -302,6 +377,11 @@ class _CancelProbe:
     Module-level so observation works identically across pipe, subprocess,
     and HTTP transports: counters live in the *server* process, and are
     read back over the wire via ``cancel_probe_counters``.
+
+    When ``VGI_RPC_CONFORMANCE_PROBE_FILE`` is set in the environment, the
+    counters are stored in that file under an ``fcntl`` lock so multiple
+    server processes (e.g. the round-robin two-worker HTTP fixture) share
+    a single observable counter set.
     """
 
     produce_calls: int = 0
@@ -309,11 +389,75 @@ class _CancelProbe:
     on_cancel_calls: int = 0
 
     @classmethod
+    def _shared_path(cls) -> str | None:
+        import os
+
+        return os.environ.get("VGI_RPC_CONFORMANCE_PROBE_FILE") or None
+
+    @classmethod
+    def _bump(cls, field: str) -> None:
+        path = cls._shared_path()
+        if path is None:
+            setattr(cls, field, getattr(cls, field) + 1)
+            return
+        import fcntl
+        import json
+
+        with open(path, "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                raw = f.read()
+                data = json.loads(raw) if raw else {"produce_calls": 0, "exchange_calls": 0, "on_cancel_calls": 0}
+                data[field] = data.get(field, 0) + 1
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(data))
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    def snapshot(cls) -> tuple[int, int, int]:
+        """Return ``(produce, exchange, on_cancel)`` from the active store."""
+        path = cls._shared_path()
+        if path is None:
+            return cls.produce_calls, cls.exchange_calls, cls.on_cancel_calls
+        import fcntl
+        import json
+        import os
+
+        if not os.path.exists(path):
+            return 0, 0, 0
+        with open(path) as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                raw = f.read()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        if not raw:
+            return 0, 0, 0
+        data = json.loads(raw)
+        return data.get("produce_calls", 0), data.get("exchange_calls", 0), data.get("on_cancel_calls", 0)
+
+    @classmethod
     def reset(cls) -> None:
         """Zero all counters."""
         cls.produce_calls = 0
         cls.exchange_calls = 0
         cls.on_cancel_calls = 0
+        path = cls._shared_path()
+        if path is not None:
+            import fcntl
+            import json
+
+            with open(path, "w") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(json.dumps({"produce_calls": 0, "exchange_calls": 0, "on_cancel_calls": 0}))
+                    f.flush()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass
@@ -324,13 +468,13 @@ class CancellableProducerState(ProducerState):
 
     def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Emit one ``{index, value}`` row per tick without ever finishing."""
-        _CancelProbe.produce_calls += 1
+        _CancelProbe._bump("produce_calls")
         out.emit_pydict({"index": [self.current], "value": [self.current * 10]})
         self.current += 1
 
     def on_cancel(self, ctx: CallContext) -> None:
         """Bump the on_cancel counter so tests can observe the hook firing."""
-        _CancelProbe.on_cancel_calls += 1
+        _CancelProbe._bump("on_cancel_calls")
 
 
 @dataclass
@@ -341,12 +485,12 @@ class CancellableExchangeState(ExchangeState):
 
     def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Echo the input batch unchanged and bump the exchange counter."""
-        _CancelProbe.exchange_calls += 1
+        _CancelProbe._bump("exchange_calls")
         out.emit(input.batch)
 
     def on_cancel(self, ctx: CallContext) -> None:
         """Bump the on_cancel counter so tests can observe the hook firing."""
-        _CancelProbe.on_cancel_calls += 1
+        _CancelProbe._bump("on_cancel_calls")
 
 
 # ---------------------------------------------------------------------------

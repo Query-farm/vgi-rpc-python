@@ -267,12 +267,17 @@ def _write_result_batch(
 
 
 def _read_request(
-    reader_stream: IOBase, ipc_validation: IpcValidation = IpcValidation.FULL
+    reader_stream: IOBase,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
+    external_config: ExternalLocationConfig | None = None,
 ) -> tuple[str, dict[str, object]]:
     """Read a request IPC stream, return (method_name, kwargs).
 
     Extracts ``vgi_rpc.method`` and validates ``vgi_rpc.request_version``
-    from the batch's custom_metadata.
+    from the batch's custom_metadata.  When *external_config* is set and
+    the outer batch is a ``vgi_rpc.location`` pointer, the referenced
+    bytes are fetched and the inner batch's columns are used to extract
+    kwargs (the dispatch metadata always comes from the outer batch).
 
     Raises:
         RpcError: If ``vgi_rpc.method`` is missing or if the request
@@ -324,6 +329,12 @@ def _read_request(
             headers["tracestate"] = ts if isinstance(ts, str) else ts.decode()
         _current_trace_headers.set(headers)
     _drain_stream(reader)
+    # If the outer batch is an external-location pointer, fetch the
+    # referenced bytes and use the inner batch's columns for kwargs.
+    # Dispatch metadata (method name, request version, traceparent) is
+    # always taken from the outer batch above.
+    if external_config is not None:
+        batch, _ = resolve_external_location(batch, custom_metadata, external_config)
     if len(batch.schema) > 0 and batch.num_rows != 1:
         raise RpcError(
             "ProtocolError",

@@ -387,7 +387,7 @@ class RpcServer:
         dynamic_shm: ShmSegment | None = None
         try:
             try:
-                method_name, kwargs = _read_request(transport.reader, self._ipc_validation)
+                method_name, kwargs = _read_request(transport.reader, self._ipc_validation, self._external_config)
             except pa.ArrowInvalid as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
                     _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)

@@ -43,6 +43,43 @@ _logger = logging.getLogger("vgi_rpc.http")
 _REQUEST_ID_HEADER = "X-Request-ID"
 
 
+class _MaxRequestBytesMiddleware:
+    """Falcon middleware enforcing the advertised ``max_request_bytes`` cap.
+
+    Returns ``413 Payload Too Large`` for any RPC route whose request
+    body exceeds the configured limit.  Skipped for capability /
+    upload-URL routes whose bodies are intrinsically small and not
+    user-controlled.  This is the server-side enforcement counterpart
+    to the ``VGI-Max-Request-Bytes`` capability header — when the
+    client externalizes via ``__upload_url__/init`` instead of POSTing
+    inline, the request body shrinks to a pointer batch (small) and
+    sails through.
+    """
+
+    __slots__ = ("_exempt_prefixes", "_max_bytes")
+
+    def __init__(self, max_bytes: int, exempt_prefixes: tuple[str, ...]) -> None:
+        self._max_bytes = max_bytes
+        self._exempt_prefixes = exempt_prefixes
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Reject oversized inline request bodies with HTTP 413."""
+        path = req.path
+        for prefix in self._exempt_prefixes:
+            if path == prefix or path.startswith(prefix + "/"):
+                return
+        cl = req.content_length
+        if cl is not None and cl > self._max_bytes:
+            raise falcon.HTTPPayloadTooLarge(
+                title="Request body exceeds max_request_bytes",
+                description=(
+                    f"Request body of {cl} bytes exceeds the server's advertised "
+                    f"max_request_bytes={self._max_bytes}.  Use the upload-URL "
+                    f"flow (__upload_url__/init) to externalize large inputs."
+                ),
+            )
+
+
 class _DrainRequestMiddleware:
     """Falcon middleware that drains unconsumed request body data.
 
@@ -314,12 +351,20 @@ class _CorsMaxAgeMiddleware:
 
 
 class _CapabilitiesMiddleware:
-    """Falcon middleware that sets capability headers on every response."""
+    """Falcon middleware that sets capability headers on every response.
 
-    __slots__ = ("_headers",)
+    On OPTIONS responses (which clients use as the discovery target via
+    ``OPTIONS /health``), also sets ``Cache-Control: max-age=...`` so
+    well-behaved clients cache the values for the advertised TTL and
+    refresh on expiry.  Non-OPTIONS responses still carry the headers
+    (cheap) so clients picking them up from any response also work.
+    """
 
-    def __init__(self, headers: dict[str, str]) -> None:
+    __slots__ = ("_cache_max_age_seconds", "_headers")
+
+    def __init__(self, headers: dict[str, str], cache_max_age_seconds: int = 300) -> None:
         self._headers = headers
+        self._cache_max_age_seconds = cache_max_age_seconds
 
     def process_response(
         self,
@@ -328,6 +373,8 @@ class _CapabilitiesMiddleware:
         resource: object,
         req_succeeded: bool,
     ) -> None:
-        """Set capability headers on every response."""
+        """Set capability headers on every response, plus Cache-Control on OPTIONS."""
         for name, value in self._headers.items():
             resp.set_header(name, value)
+        if req.method == "OPTIONS":
+            resp.set_header("Cache-Control", f"public, max-age={self._cache_max_age_seconds}")

@@ -28,6 +28,8 @@ _SERVE_FIXTURE_UNIX = str(Path(__file__).parent / "serve_fixture_unix.py")
 _SERVE_FIXTURE_UNIX_THREADED = str(Path(__file__).parent / "serve_fixture_unix_threaded.py")
 _CONFORMANCE_PIPE = str(Path(__file__).parent / "serve_conformance_pipe.py")
 _CONFORMANCE_HTTP = str(Path(__file__).parent / "serve_conformance_http.py")
+_CONFORMANCE_HTTP_SHARED = str(Path(__file__).parent / "serve_conformance_http_shared.py")
+_CONFORMANCE_HTTP_AUTH = str(Path(__file__).parent / "serve_conformance_http_auth.py")
 _CONFORMANCE_UNIX = str(Path(__file__).parent / "serve_conformance_unix.py")
 _CONFORMANCE_UNIX_THREADED = str(Path(__file__).parent / "serve_conformance_unix_threaded.py")
 
@@ -322,6 +324,159 @@ def conformance_http_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_fake_storage() -> Iterator[str]:
+    """Spawn the in-process fake storage service for external-location tests.
+
+    Yields the base URL (e.g. ``http://127.0.0.1:<port>``).  The service
+    runs on a daemon thread inside the pytest process — no subprocess
+    needed because the storage state can be safely scoped to the pytest
+    process for reads/writes from the conformance worker subprocess.
+    """
+    from vgi_rpc.conformance.fake_storage import serve_in_thread
+
+    base_url, shutdown = serve_in_thread()
+    try:
+        yield base_url
+    finally:
+        shutdown()
+
+
+@pytest.fixture(scope="session")
+def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Spawn a conformance HTTP worker wired against the fake storage service.
+
+    Uses a small (4 KiB) ``externalize_threshold_bytes`` so tests can
+    deliberately trigger externalization without producing megabytes of
+    payload.
+    """
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            _CONFORMANCE_HTTP,
+            "--port",
+            str(port),
+            "--fake-storage",
+            conformance_fake_storage,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        actual_port = int(line.split(":", 1)[1])
+        _wait_for_http(actual_port)
+        yield actual_port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_externalize_always_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Spawn a conformance HTTP worker that externalizes EVERY non-empty batch.
+
+    Sets ``--externalize-threshold 1`` so every data-bearing batch (any
+    batch with > 0 rows) goes through the upload-URL flow.  Used as a
+    transport variant in ``conformance_conn`` so the entire conformance
+    suite double-checks that externalization is observationally
+    indistinguishable from inline transmission.
+
+    Zero-row batches (logs, EOS markers, void returns) are exempt from
+    externalization at the framework level — those still flow inline.
+    """
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            _CONFORMANCE_HTTP,
+            "--port",
+            str(port),
+            "--fake-storage",
+            conformance_fake_storage,
+            # Server externalizes EVERY non-empty response batch.
+            "--externalize-threshold",
+            "1",
+            # Keep the inline-request cap loose so normal client calls
+            # (whose bodies are typically a few hundred bytes) don't get
+            # 413-rejected — this variant exercises *response*-side
+            # externalization across the full method matrix.
+            "--max-request-bytes",
+            "1048576",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        actual_port = int(line.split(":", 1)[1])
+        _wait_for_http(actual_port)
+        yield actual_port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Spawn a conformance HTTP worker with the fake storage and zstd compression on."""
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            _CONFORMANCE_HTTP,
+            "--port",
+            str(port),
+            "--fake-storage",
+            conformance_fake_storage,
+            "--compression",
+            "zstd",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        actual_port = int(line.split(":", 1)[1])
+        _wait_for_http(actual_port)
+        yield actual_port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_auth_port() -> Iterator[int]:
+    """Spawn a conformance HTTP worker with a reject-all auth callback.
+
+    Used by the ``TestHealth`` conformance suite to verify ``GET /health``
+    is exempt from authentication: RPC endpoints on this server return
+    401, but the health probe must still succeed.
+    """
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, _CONFORMANCE_HTTP_AUTH, "--port", str(port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line == f"PORT:{port}", f"Expected PORT:{port}, got: {line!r}"
+        _wait_for_http(port)
+        yield port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def conformance_subprocess() -> Iterator[SubprocessTransport]:
     """Spawn a single conformance subprocess worker for the session."""
     transport = SubprocessTransport(_conformance_pipe_cmd())
@@ -334,6 +489,8 @@ def conformance_subprocess() -> Iterator[SubprocessTransport]:
         "pipe",
         "subprocess",
         "http",
+        "http_roundrobin",
+        "http_externalize_always",
         pytest.param("unix", marks=_SKIP_UNIX),
         pytest.param("unix_threaded", marks=_SKIP_UNIX),
     ]
@@ -370,7 +527,104 @@ def conformance_conn(
         elif request.param == "unix_threaded":
             path = request.getfixturevalue("conformance_unix_threaded_path")
             return unix_connect(ConformanceService, path, on_log=on_log)
+        elif request.param == "http_roundrobin":
+            ports: tuple[int, int] = request.getfixturevalue("conformance_http_two_servers")
+            client = _make_roundrobin_client(ports)
+            return http_connect(ConformanceService, client=client, on_log=on_log)
+        elif request.param == "http_externalize_always":
+            from vgi_rpc.external import ExternalLocationConfig
+
+            ext_port = request.getfixturevalue("conformance_http_externalize_always_port")
+            return http_connect(
+                ConformanceService,
+                f"http://127.0.0.1:{ext_port}",
+                on_log=on_log,
+                # Server uses http://127.0.0.1 download URLs from the
+                # in-process fake storage; disable the HTTPS-only validator.
+                external_location=ExternalLocationConfig(url_validator=None),
+            )
         else:
             return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
 
     return factory
+
+
+def _free_port() -> int:
+    """Return a free TCP port on localhost."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+@pytest.fixture(scope="session")
+def conformance_http_two_servers() -> Iterator[tuple[int, int]]:
+    """Spawn two conformance HTTP workers sharing one HMAC signing key.
+
+    Exercises the protocol's "state lives in the signed token" contract:
+    state tokens minted by either server must verify and resume on the
+    other.  Each server gets a distinct auto-generated ``server_id`` so
+    responses can reveal which backend handled each exchange.
+    """
+    import os
+    import tempfile
+
+    key_hex = os.urandom(32).hex()
+    port_a = _free_port()
+    port_b = _free_port()
+    probe_fd, probe_path = tempfile.mkstemp(prefix="vgi-rpc-cancel-probe-", suffix=".json")
+    os.close(probe_fd)
+    os.unlink(probe_path)
+    env = {**os.environ, "VGI_RPC_CONFORMANCE_PROBE_FILE": probe_path}
+
+    def _spawn(port: int) -> subprocess.Popen[bytes]:
+        proc = subprocess.Popen(
+            [sys.executable, _CONFORMANCE_HTTP_SHARED, "--port", str(port), "--key", key_hex],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line == f"PORT:{port}", f"Expected PORT:{port}, got: {line!r}"
+        _wait_for_http(port)
+        return proc
+
+    proc_a = _spawn(port_a)
+    proc_b = _spawn(port_b)
+    try:
+        yield (port_a, port_b)
+    finally:
+        for proc in (proc_a, proc_b):
+            proc.terminate()
+            proc.wait(timeout=5)
+        if os.path.exists(probe_path):
+            os.unlink(probe_path)
+
+
+def _make_roundrobin_client(ports: tuple[int, int]) -> httpx.Client:
+    """Build an ``httpx.Client`` that alternates between two ports per request."""
+    import itertools
+
+    counter = itertools.count()
+    lock = threading.Lock()
+
+    class _RoundRobinTransport(httpx.BaseTransport):
+        def __init__(self) -> None:
+            self._inner = httpx.HTTPTransport()
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            with lock:
+                idx = next(counter) % 2
+            port = ports[idx]
+            request.url = request.url.copy_with(host="127.0.0.1", port=port)
+            return self._inner.handle_request(request)
+
+        def close(self) -> None:
+            self._inner.close()
+
+    # base_url is required by httpx but the transport rewrites host:port on every request
+    return httpx.Client(
+        base_url=f"http://127.0.0.1:{ports[0]}", transport=_RoundRobinTransport(), follow_redirects=True
+    )

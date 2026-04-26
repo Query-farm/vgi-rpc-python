@@ -16,7 +16,8 @@ from urllib.parse import parse_qs, urlparse
 import falcon
 import falcon.testing
 import pytest
-from authlib.jose import JsonWebKey, jwt
+from joserfc import jwt
+from joserfc.jwk import KeySet, RSAKey, import_key
 
 from vgi_rpc import AuthContext, RpcServer
 from vgi_rpc.http import OAuthResourceMetadata
@@ -47,16 +48,16 @@ class _EchoImpl:
         return message
 
 
-def _make_rsa_key() -> tuple[dict[str, object], dict[str, object]]:
-    key = JsonWebKey.generate_key("RSA", 2048, is_private=True)
-    priv = key.as_dict(is_private=True)
+def _make_rsa_key() -> tuple[dict[str, str | list[str]], dict[str, str | list[str]]]:
+    key = RSAKey.generate_key(2048)
+    priv = key.as_dict(private=True)
     priv["kid"] = "test-kid"
-    pub = JsonWebKey.import_key(priv).as_dict()
+    pub = import_key(priv).as_dict(private=False)
     return priv, pub
 
 
 def _mint_jwt(
-    private_key: dict[str, object],
+    private_key: dict[str, str | list[str]],
     *,
     sub: str = "testuser",
     email: str = "test@example.com",
@@ -74,19 +75,19 @@ def _mint_jwt(
         "iat": now,
         "exp": now + exp_offset,
     }
-    token_bytes: bytes = jwt.encode(header, payload, private_key)
-    return token_bytes.decode()
+    return jwt.encode(header, payload, import_key(private_key))
 
 
 def _make_local_auth(
-    public_key: dict[str, object],
+    public_key: dict[str, str | list[str]],
     *,
     issuer: str = "https://auth.example.com",
     audience: str | tuple[str, ...] = "my-client-id",
 ) -> Callable[[falcon.Request], AuthContext]:
-    from authlib.jose.errors import JoseError
+    from joserfc.errors import JoseError
 
     audiences = (audience,) if isinstance(audience, str) else audience
+    key_set = KeySet.import_key_set({"keys": [public_key]})
 
     def authenticate(req: falcon.Request) -> AuthContext:
         auth_header = req.get_header("Authorization") or ""
@@ -94,22 +95,20 @@ def _make_local_auth(
             raise ValueError("Missing or invalid Authorization header")
         raw_token = auth_header[7:]
         try:
-            claims = jwt.decode(
-                raw_token,
-                public_key,
-                claims_options={
-                    "iss": {"essential": True, "value": issuer},
-                    "aud": {"essential": True, "values": list(audiences)},
-                },
+            decoded = jwt.decode(raw_token, key_set)
+            registry = jwt.JWTClaimsRegistry(
+                iss={"essential": True, "value": issuer},
+                aud={"essential": True, "values": list(audiences)},
             )
-            claims.validate()
+            registry.validate(decoded.claims)
         except JoseError as exc:
             raise ValueError(f"Invalid JWT: {exc}") from exc
+        claims = dict(decoded.claims)
         return AuthContext(
             domain="jwt",
             authenticated=True,
             principal=str(claims.get("sub", "")),
-            claims=dict(claims),
+            claims=claims,
         )
 
     return authenticate

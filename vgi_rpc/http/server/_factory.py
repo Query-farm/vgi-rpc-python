@@ -35,6 +35,7 @@ from ._middleware import (
     _CompressionMiddleware,
     _CorsMaxAgeMiddleware,
     _DrainRequestMiddleware,
+    _MaxRequestBytesMiddleware,
     _RequestIdMiddleware,
 )
 from ._pages import (
@@ -208,6 +209,20 @@ def make_wsgi_app(
         token_ttl,
     )
     middleware: list[Any] = [_DrainRequestMiddleware(), _RequestIdMiddleware(), _AccessLogContextMiddleware()]
+
+    # Enforce the advertised max_request_bytes cap server-side.  The
+    # __upload_url__/init route (and capability-discovery routes) are
+    # exempt because their payloads are intrinsically tiny.
+    if max_request_bytes is not None:
+        middleware.append(
+            _MaxRequestBytesMiddleware(
+                max_request_bytes,
+                exempt_prefixes=(
+                    f"{prefix}/__upload_url__",
+                    f"{prefix}/health",
+                ),
+            )
+        )
 
     # Compression middleware decompresses request bodies and compresses
     # responses — must come before auth so handlers read plaintext bodies.

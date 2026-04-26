@@ -10,10 +10,12 @@ pipe, subprocess, and HTTP transports.
 from __future__ import annotations
 
 import contextlib
+import datetime as _dt
 import math
 import os
 import threading
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 
 import pyarrow as pa
@@ -25,9 +27,13 @@ from vgi_rpc.conformance import (
     ConformanceHeader,
     ConformanceService,
     ConformanceServiceImpl,
+    ContainerWideTypes,
+    DeepNested,
+    EmbeddedArrow,
     Point,
     RichHeader,
     Status,
+    WideTypes,
     build_dynamic_schema,
     build_rich_header,
     run_describe_conformance,
@@ -312,6 +318,215 @@ class TestUnaryAnnotated:
 
 
 # ---------------------------------------------------------------------------
+# Unary: Wide Arrow Types (integer widths, dates, decimals, large/fixed binary)
+# ---------------------------------------------------------------------------
+
+
+class TestUnaryWideTypes:
+    """Echo methods covering Arrow primitive widths beyond int64/float64."""
+
+    def test_echo_int8(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            assert proxy.echo_int8(value=-128) == -128
+            assert proxy.echo_int8(value=127) == 127
+
+    def test_echo_int16(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            assert proxy.echo_int16(value=-32768) == -32768
+            assert proxy.echo_int16(value=32767) == 32767
+
+    def test_echo_uint8(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            assert proxy.echo_uint8(value=0) == 0
+            assert proxy.echo_uint8(value=255) == 255
+
+    def test_echo_uint16(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            assert proxy.echo_uint16(value=65535) == 65535
+
+    def test_echo_uint32(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            assert proxy.echo_uint32(value=4_294_967_295) == 4_294_967_295
+
+    def test_echo_uint64_above_int64_max(self, conformance_conn: ConnFactory) -> None:
+        """Values above ``int64`` max prove uint64 isn't being truncated to int64."""
+        with conformance_conn() as proxy:
+            big = 18_000_000_000_000_000_000
+            assert proxy.echo_uint64(value=big) == big
+
+    def test_echo_date(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            d = _dt.date(2026, 4, 25)
+            assert proxy.echo_date(value=d) == d
+
+    def test_echo_timestamp(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            t = _dt.datetime(2026, 4, 25, 12, 0, 0, 123456)
+            assert proxy.echo_timestamp(value=t) == t
+
+    def test_echo_timestamp_utc(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            t = _dt.datetime(2026, 4, 25, 12, 0, 0, 123456, tzinfo=_dt.UTC)
+            result = proxy.echo_timestamp_utc(value=t)
+            assert result == t
+            assert result.tzinfo is not None
+
+    def test_echo_time(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            t = _dt.time(12, 30, 45, 123456)
+            assert proxy.echo_time(value=t) == t
+
+    def test_echo_duration(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            d = _dt.timedelta(seconds=10, microseconds=500)
+            assert proxy.echo_duration(value=d) == d
+
+    def test_echo_decimal(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            v = Decimal("12345.6789")
+            assert proxy.echo_decimal(value=v) == v
+
+    def test_echo_decimal_negative(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            v = Decimal("-99999999999999.9999")
+            assert proxy.echo_decimal(value=v) == v
+
+    def test_echo_large_string(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            s = "wide" * 1000
+            assert proxy.echo_large_string(value=s) == s
+
+    def test_echo_large_binary(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            b = b"\x00\x01\x02\x03" * 1000
+            assert proxy.echo_large_binary(value=b) == b
+
+    def test_echo_fixed_binary(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            b = b"12345678"
+            assert proxy.echo_fixed_binary(value=b) == b
+
+    def test_echo_container_wide_types(self, conformance_conn: ConnFactory) -> None:
+        """Wide types nested in list/dict/optional positions round-trip."""
+        c = ContainerWideTypes(
+            list_decimal=[Decimal("1.0000"), Decimal("2.5000"), Decimal("-3.7500")],
+            list_date=[_dt.date(2026, 1, 1), _dt.date(2026, 4, 25)],
+            list_timestamp=[
+                _dt.datetime(2026, 1, 1, 0, 0, 0),
+                _dt.datetime(2026, 4, 25, 12, 0, 0, 123456),
+            ],
+            optional_date=None,
+            optional_decimal=Decimal("99.0000"),
+            optional_timestamp=None,
+            dict_str_decimal={"a": Decimal("1.5000"), "b": Decimal("2.5000")},
+            frozenset_int=frozenset([1, 2, 3]),
+            list_optional_int=[1, None, 3, None, 5],
+        )
+        with conformance_conn() as proxy:
+            result = proxy.echo_container_wide_types(data=c)
+            assert result == c
+            assert result.optional_date is None
+            assert result.optional_timestamp is None
+            assert None in result.list_optional_int
+
+    def test_echo_container_wide_types_all_present(self, conformance_conn: ConnFactory) -> None:
+        """Optional fields populated round-trip just as None ones do."""
+        c = ContainerWideTypes(
+            list_decimal=[Decimal("0.0001")],
+            list_date=[_dt.date(1970, 1, 1)],
+            list_timestamp=[_dt.datetime(1970, 1, 1, 0, 0, 0)],
+            optional_date=_dt.date(2026, 4, 25),
+            optional_decimal=Decimal("-12345.6789"),
+            optional_timestamp=_dt.datetime(2026, 4, 25, 12, 0, 0, 123456),
+            dict_str_decimal={},
+            frozenset_int=frozenset(),
+            list_optional_int=[],
+        )
+        with conformance_conn() as proxy:
+            assert proxy.echo_container_wide_types(data=c) == c
+
+    def test_echo_deep_nested(self, conformance_conn: ConnFactory) -> None:
+        """Multi-level nested containers and dictionary-encoded strings round-trip."""
+        d = DeepNested(
+            list_of_lists_decimal=[[Decimal("1.0000"), Decimal("2.0000")], [Decimal("3.5000")], []],
+            optional_list_date=[_dt.date(2026, 1, 1), _dt.date(2026, 4, 25)],
+            dict_encoded_string="hello",
+            list_of_dict_encoded=["a", "b", "a", "c", "a"],
+        )
+        with conformance_conn() as proxy:
+            assert proxy.echo_deep_nested(data=d) == d
+
+    def test_echo_deep_nested_empty_and_none(self, conformance_conn: ConnFactory) -> None:
+        """Empty inner lists and ``None`` optional list round-trip."""
+        d = DeepNested(
+            list_of_lists_decimal=[],
+            optional_list_date=None,
+            dict_encoded_string="",
+            list_of_dict_encoded=[],
+        )
+        with conformance_conn() as proxy:
+            result = proxy.echo_deep_nested(data=d)
+            assert result == d
+            assert result.optional_list_date is None
+            assert result.dict_encoded_string == ""
+
+    def test_echo_dict_encoded_string(self, conformance_conn: ConnFactory) -> None:
+        """Dictionary-encoded string column round-trips as a plain ``str``."""
+        with conformance_conn() as proxy:
+            assert proxy.echo_dict_encoded_string(value="hello") == "hello"
+            assert proxy.echo_dict_encoded_string(value="") == ""
+            assert proxy.echo_dict_encoded_string(value="🌍" * 100) == "🌍" * 100
+
+    def test_echo_large_string_empty(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            assert proxy.echo_large_string(value="") == ""
+
+    def test_echo_large_binary_empty(self, conformance_conn: ConnFactory) -> None:
+        with conformance_conn() as proxy:
+            assert proxy.echo_large_binary(value=b"") == b""
+
+    def test_echo_fixed_binary_zero_bytes(self, conformance_conn: ConnFactory) -> None:
+        """Fixed-size binary with all-zero bytes (a common boundary case)."""
+        with conformance_conn() as proxy:
+            assert proxy.echo_fixed_binary(value=b"\x00" * 8) == b"\x00" * 8
+
+    def test_echo_embedded_arrow(self, conformance_conn: ConnFactory) -> None:
+        """``pa.RecordBatch`` and ``pa.Schema`` fields round-trip via nested IPC binary."""
+        batch = pa.RecordBatch.from_pydict({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        fields: list[pa.Field[pa.DataType]] = [pa.field("x", pa.int32()), pa.field("y", pa.string())]
+        schema = pa.schema(fields)
+        e = EmbeddedArrow(batch=batch, schema=schema)
+        with conformance_conn() as proxy:
+            result = proxy.echo_embedded_arrow(data=e)
+            assert result.batch.equals(batch)
+            assert result.schema.equals(schema)
+
+    def test_echo_wide_types_dataclass(self, conformance_conn: ConnFactory) -> None:
+        """Round-trip every wide-type field via a single dataclass call."""
+        w = WideTypes(
+            int8_field=-12,
+            int16_field=-30000,
+            int32_field=2_000_000_000,
+            uint8_field=200,
+            uint16_field=60000,
+            uint32_field=4_000_000_000,
+            uint64_field=18_000_000_000_000_000_000,
+            float32_field=1.5,
+            date_field=_dt.date(2026, 4, 25),
+            timestamp_field=_dt.datetime(2026, 4, 25, 12, 0, 0, 123456),
+            timestamp_utc_field=_dt.datetime(2026, 4, 25, 12, 0, 0, 123456, tzinfo=_dt.UTC),
+            time_field=_dt.time(12, 30, 45, 123456),
+            duration_field=_dt.timedelta(seconds=10, microseconds=500),
+            decimal_field=Decimal("12345.6789"),
+            large_string_field="wide string",
+            large_binary_field=b"wide bytes",
+            fixed_binary_field=b"12345678",
+        )
+        with conformance_conn() as proxy:
+            assert proxy.echo_wide_types(data=w) == w
+
+
+# ---------------------------------------------------------------------------
 # Unary: Multi-Param & Defaults
 # ---------------------------------------------------------------------------
 
@@ -417,6 +632,23 @@ class TestUnaryLogging:
             assert logs[0].extra is not None
             assert logs[0].extra["source"] == "conformance"
             assert logs[0].extra["detail"] == "extra"
+
+    def test_echo_with_all_log_levels(self, conformance_conn: ConnFactory) -> None:
+        """Every non-EXCEPTION ``Level`` round-trips with its level value preserved.
+
+        Other tests cover DEBUG/INFO/WARN; this one closes the gap on
+        TRACE and ERROR — all five in one call so order is also asserted.
+        ``Level.EXCEPTION`` is reserved on the wire (raises ``RpcError``
+        client-side) and is therefore not deliverable as an in-band log.
+        """
+        logs: list[Message] = []
+        with conformance_conn(on_log=logs.append) as proxy:
+            result = proxy.echo_with_all_log_levels(value="lvl")
+            assert result == "lvl"
+        expected = [Level.TRACE, Level.DEBUG, Level.INFO, Level.WARN, Level.ERROR]
+        assert [m.level for m in logs] == expected
+        for msg, level in zip(logs, expected, strict=True):
+            assert msg.message == f"{level.value.lower()}: lvl"
 
 
 # ---------------------------------------------------------------------------
@@ -1050,6 +1282,256 @@ class TestCancel:
             assert len(list(proxy.produce_n(count=3))) == 3
             assert proxy.echo_string(value="ok") == "ok"
 
+    def test_cancel_can_be_issued(self, conformance_conn: ConnFactory) -> None:
+        """Smoke test: ``cancel()`` is accepted by every transport.
+
+        Minimal contract check that does not depend on the cancel-probe
+        counters: open a producer stream, pull one batch, call ``cancel()``,
+        and verify a follow-up unary RPC succeeds. Any transport that
+        cannot route the cancel notification fails here.
+        """
+        with conformance_conn() as proxy:
+            session = proxy.cancellable_producer()
+            it = iter(session)
+            next(it)
+            session.cancel()
+            assert proxy.echo_int(value=7) == 7
+
+
+# ---------------------------------------------------------------------------
+# External-location / large-batch externalization (HTTP-only)
+# ---------------------------------------------------------------------------
+
+
+class TestExternalLocation:
+    """End-to-end coverage of the external-location feature.
+
+    These tests run the conformance HTTP worker with a fake-storage
+    backend (``vgi_rpc.conformance.fake_storage``) so server-side batches
+    above the configured threshold are uploaded as zero-row pointer
+    batches with ``vgi_rpc.location`` metadata, and the client
+    transparently re-fetches the bytes.
+
+    Required runner fixtures:
+
+    * ``conformance_http_with_storage_port`` — port of an HTTP worker
+      wired against the fake storage with no compression.
+    * ``conformance_http_with_zstd_storage_port`` — same, but with zstd
+      compression enabled on externalized batches.
+    """
+
+    @staticmethod
+    def _client_external_config() -> object:
+        """Build an ``ExternalLocationConfig`` that allows http URLs."""
+        from vgi_rpc.external import ExternalLocationConfig
+
+        return ExternalLocationConfig(url_validator=None)
+
+    def test_small_payload_inline(self, conformance_http_with_storage_port: int) -> None:
+        """Below-threshold payloads round-trip inline (no externalization)."""
+        from vgi_rpc.http import http_connect
+
+        with http_connect(
+            ConformanceService,
+            f"http://127.0.0.1:{conformance_http_with_storage_port}",
+            external_location=self._client_external_config(),  # type: ignore[arg-type]
+        ) as proxy:
+            assert proxy.echo_string(value="small") == "small"
+
+    def test_large_payload_externalized(self, conformance_http_with_storage_port: int) -> None:
+        """Above-threshold response triggers externalization and transparent re-fetch."""
+        from vgi_rpc.http import http_connect
+
+        big = "x" * 32_000
+        with http_connect(
+            ConformanceService,
+            f"http://127.0.0.1:{conformance_http_with_storage_port}",
+            external_location=self._client_external_config(),  # type: ignore[arg-type]
+        ) as proxy:
+            assert proxy.echo_large_string(value=big) == big
+
+    def test_large_payload_externalized_with_zstd(self, conformance_http_with_zstd_storage_port: int) -> None:
+        """Externalized batches with zstd compression decompress on the client."""
+        from vgi_rpc.http import http_connect
+
+        big = ("vgi-rpc " * 8000).strip()
+        with http_connect(
+            ConformanceService,
+            f"http://127.0.0.1:{conformance_http_with_zstd_storage_port}",
+            external_location=self._client_external_config(),  # type: ignore[arg-type]
+        ) as proxy:
+            assert proxy.echo_large_string(value=big) == big
+
+    def test_capabilities_advertise_externalization(self, conformance_http_with_storage_port: int) -> None:
+        """The OPTIONS capabilities endpoint must advertise the externalization protocol.
+
+        When the server is wired with an ``upload_url_provider`` and a
+        ``max_request_bytes`` limit, ``http_capabilities()`` must report:
+        ``upload_url_support=True``, ``max_request_bytes`` matching the
+        worker's threshold, and a non-``None`` ``max_upload_bytes``.
+        Together these tell a client when to externalize an outgoing
+        batch and where the upload limit is.
+        """
+        from vgi_rpc.http import http_capabilities
+
+        caps = http_capabilities(f"http://127.0.0.1:{conformance_http_with_storage_port}")
+        assert caps.upload_url_support is True
+        assert caps.max_request_bytes is not None and caps.max_request_bytes > 0
+        assert caps.max_upload_bytes is not None and caps.max_upload_bytes > 0
+
+    def test_request_upload_urls_returns_pairs(
+        self,
+        conformance_http_with_storage_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """``request_upload_urls(count=N)`` returns N usable PUT/GET URL pairs.
+
+        Asserts both the protocol shape (count, ``upload_url`` /
+        ``download_url`` strings) and end-to-end usability: PUT to the
+        upload URL succeeds and GET on the download URL returns the same
+        bytes.  Also confirms that the upload registered against the
+        backing fake-storage service via its ``/_stats`` counter.
+        """
+        import httpx
+
+        from vgi_rpc.http import request_upload_urls
+
+        before = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        urls = request_upload_urls(f"http://127.0.0.1:{conformance_http_with_storage_port}", count=2)
+        assert len(urls) == 2
+        for u in urls:
+            assert u.upload_url and isinstance(u.upload_url, str)
+            assert u.download_url and isinstance(u.download_url, str)
+
+        payload = b"client-vended upload contents"
+        put_resp = httpx.put(urls[0].upload_url, content=payload, timeout=5.0)
+        assert put_resp.status_code == 204, f"PUT failed: {put_resp.status_code}"
+        get_resp = httpx.get(urls[0].download_url, timeout=5.0)
+        assert get_resp.status_code == 200
+        assert get_resp.content == payload
+
+        after = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        # Each request_upload_urls(count=2) call performs >=1 alloc per URL.
+        assert after >= before + 1
+
+    def test_externalization_uses_fake_storage(
+        self,
+        conformance_http_with_storage_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """Externalization actually deposits objects in the fake storage.
+
+        Exercises the upload-side proof: after a large-payload RPC, the
+        fake storage's ``/_stats`` endpoint must report at least one
+        stored object (proving the server invoked the storage backend
+        rather than inlining the response).
+        """
+        import httpx
+
+        from vgi_rpc.http import http_connect
+
+        before = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        big = "z" * 32_000
+        with http_connect(
+            ConformanceService,
+            f"http://127.0.0.1:{conformance_http_with_storage_port}",
+            external_location=self._client_external_config(),  # type: ignore[arg-type]
+        ) as proxy:
+            assert proxy.echo_large_string(value=big) == big
+        after = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        assert after > before, f"expected new objects in fake storage, before={before} after={after}"
+
+    def test_client_to_server_auto_externalization(
+        self,
+        conformance_http_with_storage_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """End-to-end: client externalizes a large *request* via server-vended URL.
+
+        The client sends a payload larger than the server's advertised
+        ``max_request_bytes``.  The framework should:
+
+        1. POST the inline body, get back ``413 Payload Too Large``.
+        2. Discover capabilities (``upload_url_support`` is True).
+        3. Call ``__upload_url__/init``, PUT the bytes to the vended URL.
+        4. Re-POST a pointer batch carrying ``vgi_rpc.location``.
+        5. Server resolves the pointer in ``_read_request`` (stage 1)
+           and dispatches with the reconstructed parameters.
+
+        Asserts the round-trip succeeds (proving 1-5 worked) and that
+        the fake-storage object count grew by at least 2 (client's
+        request upload + server's response upload).
+        """
+        import os
+
+        import httpx
+
+        from vgi_rpc.http import http_connect
+
+        before = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        # Use a high-entropy payload (hex-encoded random bytes) so wire
+        # compression can't shrink it under max_request_bytes.  Disable
+        # request compression on this connection so the *wire* body
+        # stays large enough to trip the server's 413 enforcement.
+        big = os.urandom(20_000).hex()  # 40 000 chars of pseudo-random hex
+        with http_connect(
+            ConformanceService,
+            f"http://127.0.0.1:{conformance_http_with_storage_port}",
+            external_location=self._client_external_config(),  # type: ignore[arg-type]
+            compression_level=None,
+        ) as proxy:
+            assert proxy.echo_large_string(value=big) == big
+        after = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        # At least 2 new objects: client's request upload + server's response upload.
+        assert after >= before + 2, f"expected ≥2 new objects (1 request + 1 response), before={before} after={after}"
+
+
+# ---------------------------------------------------------------------------
+# Health endpoint (HTTP-only)
+# ---------------------------------------------------------------------------
+
+
+class TestHealth:
+    """HTTP ``GET /health`` contract — every implementation MUST honor it.
+
+    These tests bypass the RPC proxy and hit the HTTP endpoint directly.
+    They depend on two session-scoped fixtures that each runner is
+    expected to provide:
+
+    * ``conformance_http_port`` — a normal (no-auth) HTTP conformance server.
+    * ``conformance_http_auth_port`` — an HTTP conformance server with a
+      reject-all ``authenticate`` callback installed; every RPC endpoint
+      returns 401, but ``GET /health`` must still return 200.
+    """
+
+    def test_health_endpoint_returns_ok(self, conformance_http_port: int) -> None:
+        """``GET /health`` returns 200 with JSON ``{status, server_id, protocol}``."""
+        import httpx
+
+        resp = httpx.get(f"http://127.0.0.1:{conformance_http_port}/health", timeout=5.0)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert isinstance(body["server_id"], str) and body["server_id"]
+        assert body["protocol"] == "ConformanceService"
+
+    def test_health_does_not_require_auth(self, conformance_http_auth_port: int) -> None:
+        """``GET /health`` must succeed even when every RPC endpoint requires auth.
+
+        Sanity-checks the auth-enforcing fixture by also asserting that an
+        unauthenticated unary RPC POST is rejected — otherwise the health
+        assertion would be a false positive.
+        """
+        import httpx
+
+        url = f"http://127.0.0.1:{conformance_http_auth_port}"
+        health = httpx.get(f"{url}/health", timeout=5.0)
+        assert health.status_code == 200, f"health must bypass auth, got {health.status_code}"
+        assert health.json()["status"] == "ok"
+
+        rpc = httpx.post(f"{url}/vgi/echo_int", content=b"", timeout=5.0)
+        assert rpc.status_code == 401, f"expected RPC endpoint to require auth, got {rpc.status_code}"
+
 
 # ---------------------------------------------------------------------------
 # Introspection
@@ -1084,7 +1566,7 @@ class TestDescribeConformance:
 
     def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
-        assert len(service_description.methods) == 52
+        assert len(service_description.methods) == 73
         assert service_description.protocol_name == "ConformanceService"
         echo_str = service_description.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

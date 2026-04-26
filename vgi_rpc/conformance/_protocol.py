@@ -11,6 +11,8 @@ exchange streams, headers, and introspection.
 
 from __future__ import annotations
 
+import datetime as _dt
+from decimal import Decimal
 from typing import Annotated, Protocol
 
 import pyarrow as pa
@@ -22,9 +24,13 @@ from ._types import (
     AllTypes,
     BoundingBox,
     ConformanceHeader,
+    ContainerWideTypes,
+    DeepNested,
+    EmbeddedArrow,
     Point,
     RichHeader,
     Status,
+    WideTypes,
 )
 
 
@@ -138,6 +144,111 @@ class ConformanceService(Protocol):
         ...
 
     # ------------------------------------------------------------------
+    # Unary: Wide Arrow Types
+    # ------------------------------------------------------------------
+
+    def echo_int8(self, value: Annotated[int, ArrowType(pa.int8())]) -> Annotated[int, ArrowType(pa.int8())]:
+        """Echo an int8 value."""
+        ...
+
+    def echo_int16(self, value: Annotated[int, ArrowType(pa.int16())]) -> Annotated[int, ArrowType(pa.int16())]:
+        """Echo an int16 value."""
+        ...
+
+    def echo_uint8(self, value: Annotated[int, ArrowType(pa.uint8())]) -> Annotated[int, ArrowType(pa.uint8())]:
+        """Echo a uint8 value."""
+        ...
+
+    def echo_uint16(self, value: Annotated[int, ArrowType(pa.uint16())]) -> Annotated[int, ArrowType(pa.uint16())]:
+        """Echo a uint16 value."""
+        ...
+
+    def echo_uint32(self, value: Annotated[int, ArrowType(pa.uint32())]) -> Annotated[int, ArrowType(pa.uint32())]:
+        """Echo a uint32 value."""
+        ...
+
+    def echo_uint64(self, value: Annotated[int, ArrowType(pa.uint64())]) -> Annotated[int, ArrowType(pa.uint64())]:
+        """Echo a uint64 value (exercises values above int64 max)."""
+        ...
+
+    def echo_date(
+        self, value: Annotated[_dt.date, ArrowType(pa.date32())]
+    ) -> Annotated[_dt.date, ArrowType(pa.date32())]:
+        """Echo a date32 value."""
+        ...
+
+    def echo_timestamp(
+        self, value: Annotated[_dt.datetime, ArrowType(pa.timestamp("us"))]
+    ) -> Annotated[_dt.datetime, ArrowType(pa.timestamp("us"))]:
+        """Echo a naive microsecond timestamp."""
+        ...
+
+    def echo_timestamp_utc(
+        self, value: Annotated[_dt.datetime, ArrowType(pa.timestamp("us", tz="UTC"))]
+    ) -> Annotated[_dt.datetime, ArrowType(pa.timestamp("us", tz="UTC"))]:
+        """Echo a UTC-tagged microsecond timestamp."""
+        ...
+
+    def echo_time(
+        self, value: Annotated[_dt.time, ArrowType(pa.time64("us"))]
+    ) -> Annotated[_dt.time, ArrowType(pa.time64("us"))]:
+        """Echo a microsecond time-of-day value."""
+        ...
+
+    def echo_duration(
+        self, value: Annotated[_dt.timedelta, ArrowType(pa.duration("us"))]
+    ) -> Annotated[_dt.timedelta, ArrowType(pa.duration("us"))]:
+        """Echo a microsecond duration."""
+        ...
+
+    def echo_decimal(
+        self, value: Annotated[Decimal, ArrowType(pa.decimal128(20, 4))]
+    ) -> Annotated[Decimal, ArrowType(pa.decimal128(20, 4))]:
+        """Echo a decimal128(20, 4) value."""
+        ...
+
+    def echo_large_string(
+        self, value: Annotated[str, ArrowType(pa.large_string())]
+    ) -> Annotated[str, ArrowType(pa.large_string())]:
+        """Echo a large_string value."""
+        ...
+
+    def echo_large_binary(
+        self, value: Annotated[bytes, ArrowType(pa.large_binary())]
+    ) -> Annotated[bytes, ArrowType(pa.large_binary())]:
+        """Echo a large_binary value."""
+        ...
+
+    def echo_fixed_binary(
+        self, value: Annotated[bytes, ArrowType(pa.binary(8))]
+    ) -> Annotated[bytes, ArrowType(pa.binary(8))]:
+        """Echo a fixed_size_binary(8) value."""
+        ...
+
+    def echo_wide_types(self, data: WideTypes) -> WideTypes:
+        """Round-trip every Arrow primitive width via a single dataclass."""
+        ...
+
+    def echo_container_wide_types(self, data: ContainerWideTypes) -> ContainerWideTypes:
+        """Round-trip wide Arrow types nested inside list/dict/optional."""
+        ...
+
+    def echo_embedded_arrow(self, data: EmbeddedArrow) -> EmbeddedArrow:
+        """Round-trip a ``pa.RecordBatch`` and ``pa.Schema`` carried as nested IPC."""
+        ...
+
+    def echo_deep_nested(self, data: DeepNested) -> DeepNested:
+        """Round-trip multi-level nested containers and dictionary-encoded strings."""
+        ...
+
+    def echo_dict_encoded_string(
+        self,
+        value: Annotated[str, ArrowType(pa.dictionary(pa.int16(), pa.string()))],
+    ) -> Annotated[str, ArrowType(pa.dictionary(pa.int16(), pa.string()))]:
+        """Echo a string carried as a dictionary-encoded Arrow column."""
+        ...
+
+    # ------------------------------------------------------------------
     # Unary: Multi-Param & Defaults
     # ------------------------------------------------------------------
 
@@ -183,6 +294,10 @@ class ConformanceService(Protocol):
 
     def echo_with_log_extras(self, value: str) -> str:
         """Echo value, emitting an INFO log with extra key-value pairs."""
+        ...
+
+    def echo_with_all_log_levels(self, value: str) -> str:
+        """Echo value, emitting one log at each of TRACE/DEBUG/INFO/WARN/ERROR/EXCEPTION."""
         ...
 
     # ------------------------------------------------------------------

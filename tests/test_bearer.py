@@ -11,7 +11,8 @@ from typing import Protocol
 import falcon
 import falcon.testing.helpers
 import pytest
-from authlib.jose import JsonWebKey, jwt
+from joserfc import jwt
+from joserfc.jwk import KeySet, RSAKey, import_key
 
 from vgi_rpc import AuthContext, CallContext, RpcServer
 from vgi_rpc.http import (
@@ -212,10 +213,12 @@ class TestChainAuthenticate:
     def test_jwt_plus_bearer_end_to_end(self) -> None:
         """Integration: chain JWT + bearer, both accepted for RPC calls."""
         # Set up JWT authenticator (local, no JWKS endpoint)
-        key = JsonWebKey.generate_key("RSA", 2048, is_private=True)
-        priv = key.as_dict(is_private=True)
+        key = RSAKey.generate_key(2048)
+        priv = key.as_dict(private=True)
         priv["kid"] = "test-kid"
-        pub = JsonWebKey.import_key(priv).as_dict()
+        priv_key = import_key(priv)
+        pub = priv_key.as_dict(private=False)
+        pub_key_set = KeySet.import_key_set({"keys": [pub]})
 
         now = int(time.time())
         header = {"alg": "RS256", "kid": "test-kid"}
@@ -226,28 +229,25 @@ class TestChainAuthenticate:
             "iat": now,
             "exp": now + 3600,
         }
-        token_bytes: bytes = jwt.encode(header, payload, priv)
-        jwt_token = token_bytes.decode()
+        jwt_token = jwt.encode(header, payload, priv_key)
 
         def jwt_auth(req: falcon.Request) -> AuthContext:
             auth_header = req.get_header("Authorization") or ""
             if not auth_header.startswith("Bearer "):
                 raise ValueError("Missing Authorization")
-            from authlib.jose.errors import JoseError
+            from joserfc.errors import JoseError
 
             try:
-                claims = jwt.decode(
-                    auth_header[7:],
-                    pub,
-                    claims_options={
-                        "iss": {"essential": True, "value": "https://auth.example.com"},
-                        "aud": {"essential": True, "value": "https://api.example.com/vgi"},
-                    },
+                decoded = jwt.decode(auth_header[7:], pub_key_set)
+                registry = jwt.JWTClaimsRegistry(
+                    iss={"essential": True, "value": "https://auth.example.com"},
+                    aud={"essential": True, "value": "https://api.example.com/vgi"},
                 )
-                claims.validate()
+                registry.validate(decoded.claims)
             except JoseError as exc:
                 raise ValueError(f"Invalid JWT: {exc}") from exc
-            return AuthContext(domain="jwt", authenticated=True, principal=str(claims["sub"]), claims=dict(claims))
+            claims = dict(decoded.claims)
+            return AuthContext(domain="jwt", authenticated=True, principal=str(claims["sub"]), claims=claims)
 
         # Set up bearer authenticator
         api_key_auth = bearer_authenticate_static(tokens={"api-key-123": _BOB})

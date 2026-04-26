@@ -1,13 +1,13 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""JWT authenticate factory using Authlib for vgi-rpc HTTP transport.
+"""JWT authenticate factory using joserfc for vgi-rpc HTTP transport.
 
 Provides ``jwt_authenticate()`` which creates a callback compatible with
 ``make_wsgi_app(authenticate=...)``.  Validates Bearer JWTs against a
 JWKS endpoint, with automatic key refresh on unknown ``kid``.
 
-Requires ``pip install vgi-rpc[oauth]`` (Authlib).
+Requires ``pip install vgi-rpc[oauth]`` (joserfc).
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ import falcon
 import httpx
 
 try:
-    from authlib.jose import JsonWebKey, jwt
-    from authlib.jose.errors import DecodeError, JoseError
+    from joserfc import jwt
+    from joserfc.errors import InvalidKeyIdError, JoseError
+    from joserfc.jwk import KeySet
 except ImportError as _exc:
-    raise ImportError("jwt_authenticate requires authlib: pip install vgi-rpc[oauth]") from _exc
+    raise ImportError("jwt_authenticate requires joserfc: pip install vgi-rpc[oauth]") from _exc
 
 from vgi_rpc.rpc import AuthContext
 
@@ -72,9 +73,6 @@ def jwt_authenticate(
             invalid, or fails validation.
 
     """
-    # Authlib's KeySet type is not exported in public stubs; alias to contain Any.
-    type _KeySet = Any
-
     issuers = (issuer,) if isinstance(issuer, str) else issuer
     if not issuers:
         raise ValueError("issuer must not be empty")
@@ -83,9 +81,9 @@ def jwt_authenticate(
 
     resolved_jwks_uri = jwks_uri
     lock = threading.Lock()
-    key_set: _KeySet = None
+    key_set: KeySet | None = None
 
-    def _fetch_jwks() -> _KeySet:
+    def _fetch_jwks() -> KeySet:
         nonlocal resolved_jwks_uri, key_set
         if resolved_jwks_uri is None:
             with httpx.Client() as client:
@@ -96,15 +94,17 @@ def jwt_authenticate(
         with httpx.Client() as client:
             resp = client.get(resolved_jwks_uri)
             resp.raise_for_status()
-            key_set = JsonWebKey.import_key_set(resp.json())
-        return key_set
+            new_key_set = KeySet.import_key_set(resp.json())
+        key_set = new_key_set
+        return new_key_set
 
-    def _get_key_set(force_refresh: bool = False) -> _KeySet:
+    def _get_key_set(force_refresh: bool = False) -> KeySet:
         nonlocal key_set
         if key_set is None or force_refresh:
             with lock:
                 if key_set is None or force_refresh:
                     return _fetch_jwks()
+        assert key_set is not None
         return key_set
 
     audiences = (audience,) if isinstance(audience, str) else audience
@@ -118,27 +118,29 @@ def jwt_authenticate(
     if claims_options:
         base_claims_options.update(claims_options)
 
-    def _log_claim_mismatch(token: str, keys: _KeySet, exc: JoseError) -> None:
+    def _log_claim_mismatch(claims: Mapping[str, Any] | None, exc: JoseError) -> None:
         """Log expected vs actual claims on JWT validation failure."""
-        try:
-            # Decode without validation to inspect the payload
-            raw_claims = jwt.decode(token, keys)
-            token_aud = raw_claims.get("aud")
-            token_iss = raw_claims.get("iss")
-            logger.warning(
-                "JWT validation failed: %s\n"
-                "  expected iss (any of): %s\n"
-                "  token   iss: %s\n"
-                "  expected aud (any of): %s\n"
-                "  token   aud: %s",
-                exc,
-                list(issuers),
-                token_iss,
-                list(audiences),
-                token_aud,
-            )
-        except Exception:
+        if claims is None:
             logger.warning("JWT validation failed: %s (could not decode token for diagnostics)", exc)
+            return
+        logger.warning(
+            "JWT validation failed: %s\n"
+            "  expected iss (any of): %s\n"
+            "  token   iss: %s\n"
+            "  expected aud (any of): %s\n"
+            "  token   aud: %s",
+            exc,
+            list(issuers),
+            claims.get("iss"),
+            list(audiences),
+            claims.get("aud"),
+        )
+
+    def _decode_and_validate(raw_token: str, keys: KeySet) -> dict[str, Any]:
+        decoded = jwt.decode(raw_token, keys)
+        registry = jwt.JWTClaimsRegistry(**base_claims_options)
+        registry.validate(decoded.claims)
+        return dict(decoded.claims)
 
     def authenticate(req: falcon.Request) -> AuthContext:
         auth_header = req.get_header("Authorization") or ""
@@ -149,20 +151,20 @@ def jwt_authenticate(
 
         keys = _get_key_set()
         try:
-            claims = jwt.decode(token, keys, claims_options=base_claims_options)
-            claims.validate()
-        except DecodeError:
-            # DecodeError likely means unknown kid — refresh JWKS and retry
+            claims = _decode_and_validate(token, keys)
+        except InvalidKeyIdError:
+            # Unknown kid — refresh JWKS and retry once
             keys = _get_key_set(force_refresh=True)
             try:
-                claims = jwt.decode(token, keys, claims_options=base_claims_options)
-                claims.validate()
+                claims = _decode_and_validate(token, keys)
             except JoseError as exc:
-                _log_claim_mismatch(token, keys, exc)
+                diag = _peek_claims(token)
+                _log_claim_mismatch(diag, exc)
                 raise ValueError(f"Invalid JWT: {exc}") from exc
         except JoseError as exc:
             # Expired tokens, bad claims, etc. — no point refreshing keys
-            _log_claim_mismatch(token, keys, exc)
+            diag = _peek_claims(token)
+            _log_claim_mismatch(diag, exc)
             raise ValueError(f"Invalid JWT: {exc}") from exc
 
         principal = str(claims.get(principal_claim, ""))
@@ -170,7 +172,27 @@ def jwt_authenticate(
             domain=domain,
             authenticated=True,
             principal=principal,
-            claims=dict(claims),
+            claims=claims,
         )
 
     return authenticate
+
+
+def _peek_claims(token: str) -> dict[str, Any] | None:
+    """Decode a JWT payload without signature verification for diagnostics."""
+    import base64
+    import json
+
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload_b64 = parts[1]
+        padding = "=" * (-len(payload_b64) % 4)
+        raw = base64.urlsafe_b64decode(payload_b64 + padding)
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    except Exception:
+        return None

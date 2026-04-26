@@ -7,9 +7,11 @@ import contextlib
 import logging
 
 from vgi_rpc.external import (
+    ClientExternalConfig,
     Compression,
     ExternalLocationConfig,
     ExternalStorage,
+    ServerExternalConfig,
     UploadUrl,
     UploadUrlProvider,
     https_only_validator,
@@ -166,10 +168,12 @@ __all__ = [
     "PoolMetrics",
     "WorkerPool",
     # ExternalLocation
+    "ClientExternalConfig",
     "Compression",
-    "ExternalLocationConfig",
+    "ExternalLocationConfig",  # alias for ServerExternalConfig
     "ExternalStorage",
     "FetchConfig",
+    "ServerExternalConfig",
     "https_only_validator",
     # Upload URLs
     "UploadUrl",

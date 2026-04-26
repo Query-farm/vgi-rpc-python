@@ -54,6 +54,7 @@ from vgi_rpc.utils import ValidatedReader, empty_batch
 
 from .._common import _RpcHttpError
 from ._state_token import (
+    _derive_signing_key,
     _pack_state_token,
     _resolve_state_cls,
     _serialize_state_bytes,
@@ -89,7 +90,7 @@ def _run_stream_init_sync(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
         try:
-            ipc_method, kwargs = _read_request(stream, app._server.ipc_validation)
+            ipc_method, kwargs = _read_request(stream, app._server.ipc_validation, app._server.external_config)
             if ipc_method != method_name:
                 raise TypeError(
                     f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
@@ -191,7 +192,7 @@ def _run_stream_init_sync(
                         state_bytes,
                         schema_bytes,
                         input_schema_bytes,
-                        app._signing_key,
+                        _derive_signing_key(app._signing_key, auth),
                         int(time.time()),
                         stream_id=_current_stream_id.get(),
                     )
@@ -294,8 +295,12 @@ def _run_stream_exchange_sync(
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        # Resolve auth up front: the state token is signed with a key derived
+        # from the caller's identity, so we need auth to verify it.
+        auth, transport_metadata = _get_auth_and_metadata()
+
         # Unpack and verify the signed token, recover state + schema + input_schema
-        state_obj, output_schema, input_schema = _unpack_and_recover_state(app, token, state_info)
+        state_obj, output_schema, input_schema = _unpack_and_recover_state(app, token, state_info, auth)
 
         is_producer = input_schema == _EMPTY_SCHEMA
 
@@ -462,7 +467,7 @@ def _run_stream_exchange_sync(
                     updated_state_bytes,
                     schema_bytes,
                     input_schema_bytes_upd,
-                    app._signing_key,
+                    _derive_signing_key(app._signing_key, auth),
                     int(time.time()),
                     stream_id=_current_stream_id.get(),
                 )
@@ -600,7 +605,7 @@ def _produce_stream_response(
                         state_bytes,
                         schema_bytes,
                         input_schema_bytes,
-                        app._signing_key,
+                        _derive_signing_key(app._signing_key, auth),
                         int(time.time()),
                         stream_id=_current_stream_id.get(),
                     )
@@ -621,6 +626,7 @@ def _unpack_and_recover_state(
     app: _HttpRpcApp,
     token: bytes,
     state_info: _StateInfo,
+    auth: AuthContext | None,
 ) -> tuple[StreamState, pa.Schema, pa.Schema]:
     """Unpack a signed state token and recover state, output schema, and input schema.
 
@@ -631,6 +637,9 @@ def _unpack_and_recover_state(
             concrete classes for union types.  When a tuple is provided, the
             concrete class is resolved from the numeric tag embedded in
             ``state_bytes``.
+        auth: Authenticated identity for the current request.  The token
+            signing key is derived from this identity so state tokens
+            cannot be replayed across users.
 
     Returns:
         Tuple of (state_object, output_schema, input_schema).
@@ -641,7 +650,7 @@ def _unpack_and_recover_state(
 
     """
     state_bytes, schema_bytes, input_schema_bytes, stream_id = _unpack_state_token(
-        token, app._signing_key, app._token_ttl
+        token, _derive_signing_key(app._signing_key, auth), app._token_ttl
     )
     if stream_id:
         _current_stream_id.set(stream_id)

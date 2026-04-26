@@ -393,7 +393,10 @@ class TestResumableServerStream:
             + struct.pack("<I", len(stream_id_bytes))
             + stream_id_bytes
         )
-        mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
+        from vgi_rpc.http.server._state_token import _derive_signing_key
+
+        derived_key = _derive_signing_key(b"test-key", None)
+        mac = hmac_mod.new(derived_key, payload, hashlib.sha256).digest()
         token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()
@@ -477,7 +480,10 @@ class TestStateTokenStateEncoding:
             + struct.pack("<I", len(stream_id_bytes))
             + stream_id_bytes
         )
-        mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
+        from vgi_rpc.http.server._state_token import _derive_signing_key
+
+        derived_key = _derive_signing_key(b"test-key", None)
+        mac = hmac_mod.new(derived_key, payload, hashlib.sha256).digest()
         token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()
@@ -534,7 +540,10 @@ class TestStateTokenStateEncoding:
             + struct.pack("<I", len(stream_id_bytes))
             + stream_id_bytes
         )
-        mac = hmac_mod.new(b"test-key", payload, hashlib.sha256).digest()
+        from vgi_rpc.http.server._state_token import _derive_signing_key
+
+        derived_key = _derive_signing_key(b"test-key", None)
+        mac = hmac_mod.new(derived_key, payload, hashlib.sha256).digest()
         token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()

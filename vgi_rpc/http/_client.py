@@ -27,11 +27,16 @@ from pyarrow import ipc
 from vgi_rpc.external import (
     ExternalLocationConfig,
     UploadUrl,
-    maybe_externalize_batch,
+    make_external_location_batch,
     resolve_external_location,
 )
 from vgi_rpc.log import Message
-from vgi_rpc.metadata import CANCEL_KEY, STATE_KEY, merge_metadata, strip_keys
+from vgi_rpc.metadata import (
+    CANCEL_KEY,
+    STATE_KEY,
+    merge_metadata,
+    strip_keys,
+)
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     AnnotatedBatch,
@@ -65,6 +70,74 @@ if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
 
     from ._testing import _SyncTestClient, _SyncTestResponse
+
+
+def _externalize_via_upload_url(
+    body: bytes,
+    *,
+    client: httpx.Client | _SyncTestClient,
+    url_prefix: str,
+    url_validator: Callable[[str], None] | None,
+    retry_config: HttpRetryConfig | None,
+    capabilities: HttpServerCapabilities,
+) -> bytes:
+    """Upload *body* to a server-vended URL and return a pointer-batch body.
+
+    Caller must have already verified ``capabilities.upload_url_support``;
+    this helper does no capability check.  Used from both the unary/init
+    path on ``_HttpProxy`` and the exchange path on ``HttpStreamSession``.
+    """
+    if not capabilities.upload_url_support:
+        raise RpcError(
+            "RequestTooLarge",
+            "Request exceeds max_request_bytes and the server does not advertise upload_url_support",
+            "",
+        )
+    if not isinstance(client, httpx.Client):
+        raise RpcError(
+            "ExternalUploadFailed",
+            "Auto-externalization requires an httpx.Client (the in-process test shim doesn't support PUT)",
+            "",
+        )
+    urls = request_upload_urls(client=client, prefix=url_prefix, count=1, retry=retry_config)
+    if not urls:
+        raise RpcError("ProtocolError", "Server returned no upload URLs", "")
+    upload_url = urls[0].upload_url
+    download_url = urls[0].download_url
+    if url_validator is not None:
+        url_validator(upload_url)
+        url_validator(download_url)
+    put_resp = client.put(upload_url, content=body, headers={"Content-Type": _ARROW_CONTENT_TYPE})
+    if not (200 <= put_resp.status_code < 300):
+        raise RpcError(
+            "ExternalUploadFailed",
+            f"PUT to upload URL failed: HTTP {put_resp.status_code}",
+            "",
+        )
+    return _build_pointer_request_body(body, download_url)
+
+
+def _build_pointer_request_body(original_body: bytes, location_url: str) -> bytes:
+    """Convert an inline IPC request body into an externalized pointer body.
+
+    Reads the original request batch (assumed to be a single IPC stream
+    with one batch carrying ``vgi_rpc.method`` / ``vgi_rpc.request_version``
+    in custom_metadata), then writes a new IPC stream containing a
+    zero-row pointer batch with the same schema and merged metadata
+    (original dispatch keys + ``vgi_rpc.location``).
+
+    The receiving server's ``_read_request`` honours the outer batch's
+    dispatch metadata for routing, then resolves the pointer to fetch
+    the inner batch for parameter extraction.
+    """
+    reader = ipc.open_stream(BytesIO(original_body))
+    batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+    pointer_batch, loc_md = make_external_location_batch(batch.schema, location_url)
+    merged = merge_metadata(custom_metadata, loc_md)
+    buf = BytesIO()
+    with ipc.new_stream(buf, batch.schema) as writer:
+        writer.write_batch(pointer_batch, custom_metadata=merged)
+    return buf.getvalue()
 
 
 def _open_response_stream(
@@ -126,6 +199,7 @@ class HttpStreamSession:
     """
 
     __slots__ = (
+        "_capabilities",
         "_client",
         "_compression_level",
         "_external_config",
@@ -172,6 +246,37 @@ class HttpStreamSession:
         self._header = header
         self._retry_config = retry_config
         self._compression_level = compression_level
+        self._capabilities: HttpServerCapabilities | None = None
+
+    def _maybe_externalize_request(self, body: bytes) -> bytes:
+        """Pre-emptively externalize *body* if cached caps say it's too large.
+
+        Mirrors ``_HttpProxy._maybe_externalize_request``: never probes
+        OPTIONS speculatively; the 413 fallback warms caps for future
+        pre-emption.
+        """
+        caps = self._capabilities
+        if caps is None:
+            return body
+        if caps.max_request_bytes is None or not caps.upload_url_support or len(body) <= caps.max_request_bytes:
+            return body
+        return self._externalize_request_body(body)
+
+    def _externalize_request_body(self, body: bytes) -> bytes:
+        """Externalize *body* via server-vended URL; warm the caps cache."""
+        if self._capabilities is None:
+            self._capabilities = http_capabilities(
+                client=self._client, prefix=self._url_prefix, retry=self._retry_config
+            )
+        validator = self._external_config.url_validator if self._external_config is not None else None
+        return _externalize_via_upload_url(
+            body,
+            client=self._client,
+            url_prefix=self._url_prefix,
+            url_validator=validator,
+            retry_config=self._retry_config,
+            capabilities=self._capabilities,
+        )
 
     @property
     def header(self) -> object | None:
@@ -231,16 +336,16 @@ class HttpStreamSession:
         batch_to_write = input_batch.batch
         cm_to_write = input_batch.custom_metadata
 
-        # Client-side externalization for large inputs
-        if self._external_config is not None:
-            batch_to_write, cm_to_write = maybe_externalize_batch(batch_to_write, cm_to_write, self._external_config)
-
-        # Write input batch with state in metadata
+        # Build the inline body first; auto-externalization (if needed)
+        # then operates on the serialized bytes via the server-vended
+        # upload-URL flow.  The state token is on the outer batch, so
+        # _build_pointer_request_body preserves it on the pointer.
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: self._state_bytes})
         merged = merge_metadata(cm_to_write, state_md)
         with ipc.new_stream(req_buf, batch_to_write.schema) as writer:
             writer.write_batch(batch_to_write, custom_metadata=merged)
+        body = self._maybe_externalize_request(req_buf.getvalue())
 
         if wire_http_logger.isEnabledFor(logging.DEBUG):
             wire_http_logger.debug(
@@ -253,9 +358,16 @@ class HttpStreamSession:
         # cause duplicate execution.  Only init/unary/continuation are retried.
         resp = self._client.post(
             f"{self._url_prefix}/{self._method}/exchange",
-            content=self._prepare_body(req_buf.getvalue()),
+            content=self._prepare_body(body),
             headers=self._build_headers(),
         )
+        if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
+            body = self._externalize_request_body(body)
+            resp = self._client.post(
+                f"{self._url_prefix}/{self._method}/exchange",
+                content=self._prepare_body(body),
+                headers=self._build_headers(),
+            )
         if wire_http_logger.isEnabledFor(logging.DEBUG):
             wire_http_logger.debug(
                 "HTTP stream exchange response: method=%s, status=%d, size=%d",
@@ -662,6 +774,61 @@ class _HttpProxy:
         self._ipc_validation = ipc_validation
         self._retry_config = retry_config
         self._compression_level = compression_level
+        # Capability cache populated lazily on first oversized request.
+        # ``None`` = not yet probed; missing fields = server didn't advertise.
+        self._capabilities: HttpServerCapabilities | None = None
+
+    def _get_capabilities(self) -> HttpServerCapabilities:
+        """Discover and cache the server's externalization capabilities.
+
+        Refreshes on first use and whenever the cached snapshot's
+        ``cache_expires_at`` (from the server's ``Cache-Control``) has
+        passed.  ``None`` expiry means cache forever for this proxy
+        instance — server restarts won't be picked up until the proxy
+        is recreated, which is the same trade-off the test fixtures use.
+        """
+        import time as _time
+
+        caps = self._capabilities
+        if caps is not None and (caps.cache_expires_at is None or _time.monotonic() < caps.cache_expires_at):
+            return caps
+        self._capabilities = http_capabilities(client=self._client, prefix=self._url_prefix, retry=self._retry_config)
+        return self._capabilities
+
+    def _maybe_externalize_request(self, body: bytes) -> bytes:
+        """Pre-emptively externalize *body* if cached capabilities say it's too large.
+
+        The first call on a fresh proxy returns *body* unchanged — we
+        don't probe OPTIONS just to check size; the 413 fallback in
+        each caller handles that case and warms ``_capabilities`` so
+        future calls can pre-empt the failed POST.
+        """
+        caps = self._capabilities
+        if caps is None:
+            return body
+        if caps.max_request_bytes is None or not caps.upload_url_support or len(body) <= caps.max_request_bytes:
+            return body
+        return self._externalize_request_body(body)
+
+    def _externalize_request_body(self, body: bytes) -> bytes:
+        """Unconditionally externalize *body* via server-vended upload URL.
+
+        Used as the 413 fallback path and (once ``_capabilities`` is
+        warm) the pre-flight optimisation in ``_maybe_externalize_request``.
+        Populates ``_capabilities`` as a side effect on first use so
+        subsequent oversize calls skip the failed POST.
+        """
+        if self._capabilities is None:
+            self._capabilities = self._get_capabilities()
+        validator = self._external_config.url_validator if self._external_config is not None else None
+        return _externalize_via_upload_url(
+            body,
+            client=self._client,
+            url_prefix=self._url_prefix,
+            url_validator=validator,
+            retry_config=self._retry_config,
+            capabilities=self._capabilities,
+        )
 
     def _build_headers(self) -> dict[str, str]:
         """Build HTTP headers, adding ``Content-Encoding`` and ``Accept-Encoding`` when compression is enabled."""
@@ -708,19 +875,34 @@ class _HttpProxy:
         build_headers = self._build_headers
         prepare_body = self._prepare_body
 
+        maybe_externalize = self._maybe_externalize_request
+        externalize = self._externalize_request_body
+
         def caller(**kwargs: object) -> object:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug("HTTP unary call: %s/%s", url_prefix, info.name)
             req_buf = BytesIO()
             _send_request(req_buf, info, kwargs)
+            body = maybe_externalize(req_buf.getvalue())
 
             resp = _post_with_retry(
                 client,
                 f"{url_prefix}/{info.name}",
-                content=prepare_body(req_buf.getvalue()),
+                content=prepare_body(body),
                 headers=build_headers(),
                 config=retry_cfg,
             )
+            # 413 fallback: server raised its-cap-changed-since-discovery
+            # error; externalize and retry once.
+            if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
+                body = externalize(body)
+                resp = _post_with_retry(
+                    client,
+                    f"{url_prefix}/{info.name}",
+                    content=prepare_body(body),
+                    headers=build_headers(),
+                    config=retry_cfg,
+                )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(
                     "HTTP unary response: method=%s, status=%d, size=%d",
@@ -745,20 +927,33 @@ class _HttpProxy:
         prepare_body = self._prepare_body
         compression_level = self._compression_level
 
+        maybe_externalize = self._maybe_externalize_request
+        externalize = self._externalize_request_body
+
         def caller(**kwargs: object) -> HttpStreamSession:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug("HTTP stream init: %s/%s/init", url_prefix, info.name)
             # Send init request
             req_buf = BytesIO()
             _send_request(req_buf, info, kwargs)
+            body = maybe_externalize(req_buf.getvalue())
 
             resp = _post_with_retry(
                 client,
                 f"{url_prefix}/{info.name}/init",
-                content=prepare_body(req_buf.getvalue()),
+                content=prepare_body(body),
                 headers=build_headers(),
                 config=retry_cfg,
             )
+            if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
+                body = externalize(body)
+                resp = _post_with_retry(
+                    client,
+                    f"{url_prefix}/{info.name}/init",
+                    content=prepare_body(body),
+                    headers=build_headers(),
+                    config=retry_cfg,
+                )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(
                     "HTTP stream init response: method=%s, status=%d, size=%d",
@@ -805,21 +1000,31 @@ class _HttpProxy:
 class HttpServerCapabilities:
     """Capabilities advertised by an HTTP RPC server.
 
+    Discovered via ``OPTIONS {prefix}/health`` (or any other route —
+    the headers are emitted on every response).  The server may include
+    a ``Cache-Control: max-age=N`` header on the OPTIONS response; the
+    client honours that and refreshes when ``cache_expires_at`` lapses.
+
     Attributes:
         max_request_bytes: Maximum request body size the server advertises,
-            or ``None`` if the server does not advertise a limit.
-            Advertisement only -- no server-side enforcement.
-        upload_url_support: Whether the server supports the
-            ``__upload_url__`` endpoint for client-side uploads.
+            or ``None`` if the server does not advertise a limit.  The
+            server returns ``413 Payload Too Large`` for inline bodies
+            above this; clients should externalize via the upload-URL
+            flow.
+        upload_url_support: Whether the server exposes
+            ``__upload_url__/init`` for client-vended pointer-batch uploads.
         max_upload_bytes: Maximum upload size the server advertises for
             client-vended URLs, or ``None`` if not advertised.
-            Advertisement only -- no server-side enforcement.
+        cache_expires_at: Monotonic timestamp (``time.monotonic()``) at
+            which this snapshot of the capabilities should be re-probed.
+            ``None`` means no expiry hint was given.
 
     """
 
     max_request_bytes: int | None = None
     upload_url_support: bool = False
     max_upload_bytes: int | None = None
+    cache_expires_at: float | None = None
 
 
 def http_capabilities(
@@ -829,11 +1034,15 @@ def http_capabilities(
     client: httpx.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
 ) -> HttpServerCapabilities:
-    """Discover server capabilities via an OPTIONS request.
+    """Discover server capabilities via ``OPTIONS {prefix}/health``.
 
-    Sends ``OPTIONS {prefix}/__capabilities__`` and reads capability
-    headers (``VGI-Max-Request-Bytes``, ``VGI-Upload-URL-Support``,
-    ``VGI-Max-Upload-Bytes``) from the response.
+    The capability headers (``VGI-Max-Request-Bytes``,
+    ``VGI-Upload-URL-Support``, ``VGI-Max-Upload-Bytes``) are emitted on
+    every response, but the dedicated discovery target is ``/health``
+    because it is mandatory in every implementation and exempt from
+    auth.  The server may include ``Cache-Control: max-age=N`` on the
+    OPTIONS response; if so the returned ``HttpServerCapabilities``
+    carries ``cache_expires_at`` so callers can refresh on expiry.
 
     Args:
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
@@ -850,6 +1059,8 @@ def http_capabilities(
         ValueError: If *base_url* is ``None`` and *client* is ``None``.
 
     """
+    import time as _time
+
     own_client = client is None
     if client is None:
         if base_url is None:
@@ -859,7 +1070,7 @@ def http_capabilities(
         prefix = getattr(client, "prefix", "")
 
     try:
-        url = f"{prefix}/__capabilities__"
+        url = f"{prefix}/health"
         resp = _options_with_retry(client, url, config=retry)
         headers = resp.headers
 
@@ -878,10 +1089,22 @@ def http_capabilities(
             with contextlib.suppress(ValueError):
                 max_upload = int(upload_bytes_raw)
 
+        # Honour Cache-Control: max-age=N for refresh scheduling.
+        cache_expires_at: float | None = None
+        cc = headers.get("Cache-Control") or headers.get("cache-control")
+        if cc:
+            for token in cc.split(","):
+                t = token.strip().lower()
+                if t.startswith("max-age="):
+                    with contextlib.suppress(ValueError):
+                        cache_expires_at = _time.monotonic() + float(t[len("max-age=") :])
+                    break
+
         return HttpServerCapabilities(
             max_request_bytes=max_req,
             upload_url_support=upload_support,
             max_upload_bytes=max_upload,
+            cache_expires_at=cache_expires_at,
         )
     finally:
         if own_client:

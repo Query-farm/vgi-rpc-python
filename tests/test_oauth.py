@@ -13,8 +13,9 @@ from typing import Protocol
 
 import falcon
 import pytest
-from authlib.jose import JsonWebKey, jwt
-from authlib.jose.errors import JoseError
+from joserfc import jwt
+from joserfc.errors import JoseError
+from joserfc.jwk import KeySet, RSAKey, import_key
 
 from vgi_rpc import AuthContext, CallContext, RpcServer
 from vgi_rpc.http import (
@@ -57,17 +58,17 @@ class _IdentityImpl:
         return f"{ctx.auth.principal}"
 
 
-def _make_rsa_key() -> tuple[dict[str, object], dict[str, object]]:
+def _make_rsa_key() -> tuple[dict[str, str | list[str]], dict[str, str | list[str]]]:
     """Generate an RSA key pair and return (private_dict, public_dict)."""
-    key = JsonWebKey.generate_key("RSA", 2048, is_private=True)
-    priv = key.as_dict(is_private=True)
+    key = RSAKey.generate_key(2048)
+    priv = key.as_dict(private=True)
     priv["kid"] = "test-kid"
-    pub = JsonWebKey.import_key(priv).as_dict()
+    pub = import_key(priv).as_dict(private=False)
     return priv, pub
 
 
 def _mint_jwt(
-    private_key: dict[str, object],
+    private_key: dict[str, str | list[str]],
     *,
     sub: str = "testuser",
     iss: str = "https://auth.example.com",
@@ -78,12 +79,11 @@ def _mint_jwt(
     now = int(time.time())
     header = {"alg": "RS256", "kid": private_key.get("kid", "test-kid")}
     payload = {"iss": iss, "aud": aud, "sub": sub, "iat": now, "exp": now + exp_offset}
-    token_bytes: bytes = jwt.encode(header, payload, private_key)
-    return token_bytes.decode()
+    return jwt.encode(header, payload, import_key(private_key))
 
 
 def _make_local_auth(
-    public_key: dict[str, object],
+    public_key: dict[str, str | list[str]],
     *,
     issuer: str | tuple[str, ...] = "https://auth.example.com",
     audience: str | tuple[str, ...] = "https://api.example.com/vgi",
@@ -93,6 +93,7 @@ def _make_local_auth(
     """Create a local JWT authenticate callback (no JWKS endpoint needed)."""
     issuers = (issuer,) if isinstance(issuer, str) else issuer
     audiences = (audience,) if isinstance(audience, str) else audience
+    key_set = KeySet.import_key_set({"keys": [public_key]})
 
     def authenticate(req: falcon.Request) -> AuthContext:
         auth_header = req.get_header("Authorization") or ""
@@ -100,22 +101,20 @@ def _make_local_auth(
             raise ValueError("Missing or invalid Authorization header")
         raw_token = auth_header[7:]
         try:
-            claims = jwt.decode(
-                raw_token,
-                public_key,
-                claims_options={
-                    "iss": {"essential": True, "values": list(issuers)},
-                    "aud": {"essential": True, "values": list(audiences)},
-                },
+            decoded = jwt.decode(raw_token, key_set)
+            registry = jwt.JWTClaimsRegistry(
+                iss={"essential": True, "values": list(issuers)},
+                aud={"essential": True, "values": list(audiences)},
             )
-            claims.validate()
+            registry.validate(decoded.claims)
         except JoseError as exc:
             raise ValueError(f"Invalid JWT: {exc}") from exc
+        claims = dict(decoded.claims)
         return AuthContext(
             domain=domain,
             authenticated=True,
             principal=str(claims.get(principal_claim, "")),
-            claims=dict(claims),
+            claims=claims,
         )
 
     return authenticate

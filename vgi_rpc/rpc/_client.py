@@ -15,7 +15,7 @@ from typing import Any, cast
 import pyarrow as pa
 from pyarrow import ipc
 
-from vgi_rpc.external import ExternalLocationConfig, maybe_externalize_batch
+from vgi_rpc.external import ExternalLocationConfig
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import CANCEL_KEY
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
@@ -112,11 +112,12 @@ class StreamSession:
         batch_to_write = input.batch
         cm_to_write = input.custom_metadata
 
-        # Client-side SHM for large inputs (preferred over external)
+        # Client-side SHM for large inputs (preferred path on pipe transports).
+        # Pipe transports never carry an HTTP request-size limit, so the
+        # server-vended upload-URL externalization (HTTP-only) does not apply
+        # here — pipes simply transmit batches inline, regardless of size.
         if self._shm is not None:
             batch_to_write, cm_to_write = maybe_write_to_shm(batch_to_write, cm_to_write, self._shm)
-        elif self._external_config is not None:
-            batch_to_write, cm_to_write = maybe_externalize_batch(batch_to_write, cm_to_write, self._external_config)
 
         first_write = self._input_writer is None
         if self._input_writer is None:

@@ -304,33 +304,32 @@ class Compression:
 
 
 @dataclass(frozen=True)
-class ExternalLocationConfig:
-    """Configuration for ExternalLocation batch support.
+class ServerExternalConfig:
+    """Server-side configuration for ExternalLocation batch support.
 
-    .. note:: **Trust boundary** — When resolution is enabled, the
-       client will fetch URLs embedded in server responses.  The
-       default ``url_validator`` (``https_only_validator``) rejects
-       non-HTTPS URLs, but callers should still only connect to
-       **trusted** RPC servers.
+    Owns the trust boundary: the server is the only party that decides
+    where externalized data goes (``storage``), what compression to
+    apply, and which inbound URLs are fetchable from the server side.
 
     Attributes:
-        storage: Storage backend for uploading externalized data.
-            Required for production (writing); not needed for
-            resolution-only (reading) scenarios.
-        externalize_threshold_bytes: Data batch buffer size above
-            which to externalize.  Uses
+        storage: Storage backend for uploading server-produced batches
+            that exceed ``externalize_threshold_bytes``.  Set to
+            ``None`` to disable server-to-client externalization.
+        externalize_threshold_bytes: Server-produced batch buffer size
+            above which to externalize.  Uses
             ``batch.get_total_buffer_size()`` as a fast O(1) estimate.
         max_retries: Number of fetch retries (total attempts =
-            ``max_retries + 1``, capped at 3).
+            ``max_retries + 1``, capped at 3) for resolving
+            client-vended pointer batches on the server side.
         retry_delay_seconds: Delay between retry attempts.
         fetch_config: Fetch configuration controlling parallelism,
-            timeouts, and size limits.  Defaults to sensible values.
+            timeouts, and size limits when the server resolves
+            externalized client inputs.  Defaults to sensible values.
         compression: Compression settings for externalized data.
             ``None`` disables compression (default).
-        url_validator: Callback invoked before fetching external
-            URLs.  Should raise ``ValueError`` to reject.  Defaults
-            to ``https_only_validator`` (HTTPS-only).  Set to
-            ``None`` to disable validation.
+        url_validator: Callback invoked before the server fetches an
+            externalized client input URL.  Should raise ``ValueError``
+            to reject.  Defaults to ``https_only_validator``.
 
     """
 
@@ -341,6 +340,42 @@ class ExternalLocationConfig:
     fetch_config: FetchConfig = field(default_factory=FetchConfig)
     compression: Compression | None = None
     url_validator: Callable[[str], None] | None = field(default=https_only_validator)
+
+
+@dataclass(frozen=True)
+class ClientExternalConfig:
+    """Client-side configuration for ExternalLocation batch support.
+
+    The client never owns storage — it relies on the server to vend
+    upload URLs (via ``__upload_url__/init``) and to embed pointer URLs
+    in its responses.  This config covers only the *fetch* side: how
+    aggressively to retry, how to validate URLs received from the
+    server, and the underlying HTTP fetch behaviour.
+
+    Attributes:
+        max_retries: Number of fetch retries (total attempts =
+            ``max_retries + 1``, capped at 3).
+        retry_delay_seconds: Delay between retry attempts.
+        fetch_config: Fetch configuration controlling parallelism,
+            timeouts, and size limits.  Defaults to sensible values.
+        url_validator: Callback invoked before fetching a server-
+            provided URL (download URL on responses, upload URL
+            vended via ``__upload_url__/init``).  Should raise
+            ``ValueError`` to reject.  Defaults to
+            ``https_only_validator``.
+
+    """
+
+    max_retries: int = field(default=2)
+    retry_delay_seconds: float = 0.5
+    fetch_config: FetchConfig = field(default_factory=FetchConfig)
+    url_validator: Callable[[str], None] | None = field(default=https_only_validator)
+
+
+# Deprecated alias retained until cross-language ports migrate.  All
+# new code should pick ServerExternalConfig or ClientExternalConfig
+# explicitly to make the trust boundary unforgeable.
+ExternalLocationConfig = ServerExternalConfig
 
 
 # ---------------------------------------------------------------------------
