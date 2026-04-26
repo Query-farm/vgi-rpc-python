@@ -1,8 +1,12 @@
-"""Access log conformance validator for VGI servers.
+"""Access log conformance validator for vgi-rpc servers.
 
-Reads JSON log lines from ``vgi_rpc.access``, applies per-method-type
-rules, and reports violations.  Language-agnostic — any VGI server
-implementation dumps its access logs, this tool checks them.
+Reads JSON log lines from any source (file or stdin) and validates each
+``vgi_rpc.access`` entry against ``access_log.schema.json``.  The schema
+is the source of truth; see ``docs/access-log-spec.md`` for the prose.
+
+This validator is language-agnostic: any vgi-rpc server implementation
+that emits records on the ``vgi_rpc.access`` channel can pipe its log
+through this tool to check conformance.
 
 Usage::
 
@@ -17,7 +21,12 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import resources
 from pathlib import Path
+from typing import Any
+
+import jsonschema
 
 
 @dataclass(frozen=True)
@@ -26,31 +35,21 @@ class Violation:
 
     entry_index: int
     method: str
-    field: str
-    rule: str
+    path: str
+    message: str
 
 
-# ---------------------------------------------------------------------------
-# Rules
-# ---------------------------------------------------------------------------
-
-# Fields required on every access log entry regardless of method.
-_ALWAYS_REQUIRED = ["server_version", "authenticated"]
-
-# Fields required on entries that carry request parameters.
-# These methods go through _read_request() which stashes the raw batch.
-_REQUEST_DATA_METHODS = {"bind", "init", "table_function_cardinality"}
-
-# Stream methods that must have a stream_id.
-_STREAM_METHODS = {"init"}
-
-
-def _is_catalog_method(method: str) -> bool:
-    return method.startswith("catalog_")
+@lru_cache(maxsize=1)
+def _load_schema() -> dict[str, Any]:
+    """Load the access log JSON Schema from the package."""
+    text = resources.files("vgi_rpc").joinpath("access_log.schema.json").read_text(encoding="utf-8")
+    schema: dict[str, Any] = json.loads(text)
+    jsonschema.Draft202012Validator.check_schema(schema)
+    return schema
 
 
 def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
-    """Validate a list of parsed access log entries against conformance rules.
+    """Validate parsed access log entries against the JSON Schema.
 
     Args:
         entries: Parsed JSON dicts from ``vgi_rpc.access`` log lines.
@@ -59,41 +58,13 @@ def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
         List of violations (empty if all entries conform).
 
     """
+    validator = jsonschema.Draft202012Validator(_load_schema())
     violations: list[Violation] = []
-
     for i, entry in enumerate(entries):
         method = str(entry.get("method", ""))
-        status = str(entry.get("status", ""))
-
-        # --- Always required ---
-        violations.extend(
-            Violation(i, method, field, "required on all entries") for field in _ALWAYS_REQUIRED if field not in entry
-        )
-
-        # --- request_data on dispatch methods ---
-        if (method in _REQUEST_DATA_METHODS or _is_catalog_method(method)) and not entry.get("request_data"):
-            violations.append(Violation(i, method, "request_data", "required on dispatch methods"))
-
-        # --- stream_id ---
-        if method in _STREAM_METHODS and not entry.get("stream_id"):
-            violations.append(Violation(i, method, "stream_id", "required on stream methods"))
-
-        # --- HTTP exchange/produce continuations ---
-        # These are stream method entries that lack request_data (not the init).
-        # They should have stream_id from the state token.
-        method_type = str(entry.get("method_type", ""))
-        if (
-            method_type == "stream"
-            and method not in _STREAM_METHODS
-            and not _is_catalog_method(method)
-            and not entry.get("stream_id")
-        ):
-            violations.append(Violation(i, method, "stream_id", "required on stream continuations (from state token)"))
-
-        # --- error_message on errors ---
-        if status == "error" and not entry.get("error_message"):
-            violations.append(Violation(i, method, "error_message", "required on error entries"))
-
+        for err in validator.iter_errors(entry):
+            path = "/".join(str(p) for p in err.absolute_path) or "<root>"
+            violations.append(Violation(i, method, path, err.message))
     return violations
 
 
@@ -105,16 +76,16 @@ def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
 def _parse_json_log_lines(source: list[str]) -> list[dict[str, object]]:
     """Parse JSON log lines, skipping non-JSON lines."""
     entries: list[dict[str, object]] = []
-    for line in source:
-        line = line.strip()
+    for raw in source:
+        line = raw.strip()
         if not line:
             continue
         try:
             obj = json.loads(line)
-            if isinstance(obj, dict):
-                entries.append(obj)
         except json.JSONDecodeError:
             continue
+        if isinstance(obj, dict):
+            entries.append(obj)
     return entries
 
 
@@ -151,13 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     if violations:
         print(f"FAIL: {len(access_logs)} entries validated, {len(violations)} violations")
         for v in violations:
-            status = ""
-            # Find the entry to show status if error
-            if v.entry_index < len(access_logs):
-                entry = access_logs[v.entry_index]
-                if entry.get("status") == "error":
-                    status = ", status=error"
-            print(f"  entry {v.entry_index} (method={v.method}{status}): {v.rule} — missing '{v.field}'")
+            print(f"  entry {v.entry_index} (method={v.method}, path={v.path}): {v.message}")
         return 1
 
     print(f"PASS: {len(access_logs)} entries validated, 0 violations")

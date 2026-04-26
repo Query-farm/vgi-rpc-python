@@ -34,6 +34,7 @@ otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 oauth = ["joserfc>=1.0"]
 mtls = ["cryptography>=41.0"]
 sentry = ["sentry-sdk>=2.0"]
+conformance = ["jsonschema>=4.0"]
 
 [project.scripts]
 vgi-rpc = "vgi_rpc.cli:app"
@@ -182,6 +183,8 @@ dev = [
     "falcon>=3.0",
     "google-cloud-storage>=2.10",
     "httpx>=0.24",
+    "jsonschema>=4.0",
+    "types-jsonschema>=4.0",
     "lxml>=6.0.2",
     "moto[s3]>=4.0",
     "mutmut>=3.4.0",

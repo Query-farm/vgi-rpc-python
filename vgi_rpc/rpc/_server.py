@@ -509,7 +509,7 @@ class RpcServer:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
-                    error_message = str(exc)[:500]
+                    error_message = str(exc)
                     _write_error_batch(writer, schema, exc, server_id=self._server_id)
                     return
                 _write_result_batch(writer, info.result_schema, result, self._external_config, shm=shm)
@@ -569,7 +569,7 @@ class RpcServer:
             _hook_exc = exc
             status = "error"
             error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
-            error_message = str(exc)[:500]
+            error_message = str(exc)
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
             return
@@ -693,7 +693,7 @@ class RpcServer:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
-                    error_message = str(exc)[:500]
+                    error_message = str(exc)
                     with contextlib.suppress(BrokenPipeError, OSError):
                         _write_error_batch(output_writer, output_schema, exc, server_id=self._server_id)
         finally:

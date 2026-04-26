@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/queryfarm/vgi-rpc/access_log.schema.json",
+  "title": "vgi-rpc access log record",
+  "description": "Cross-language conformance schema for one record on the vgi_rpc.access logger. See docs/access-log-spec.md for the full prose.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "timestamp",
+    "level",
+    "logger",
+    "message",
+    "server_id",
+    "protocol",
+    "method",
+    "method_type",
+    "principal",
+    "auth_domain",
+    "authenticated",
+    "remote_addr",
+    "duration_ms",
+    "status",
+    "error_type"
+  ],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "minLength": 1
+    },
+    "level": {
+      "const": "INFO"
+    },
+    "logger": {
+      "const": "vgi_rpc.access"
+    },
+    "message": {
+      "type": "string"
+    },
+    "server_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "protocol": {
+      "type": "string",
+      "minLength": 1
+    },
+    "method": {
+      "type": "string",
+      "minLength": 1
+    },
+    "method_type": {
+      "enum": ["unary", "stream"]
+    },
+    "principal": {
+      "type": "string"
+    },
+    "auth_domain": {
+      "type": "string"
+    },
+    "authenticated": {
+      "type": "boolean"
+    },
+    "remote_addr": {
+      "type": "string"
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "status": {
+      "enum": ["ok", "error"]
+    },
+    "error_type": {
+      "type": "string"
+    },
+    "error_message": {
+      "type": "string"
+    },
+    "cancelled": {
+      "const": true
+    },
+    "server_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "http_status": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "request_data": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+    },
+    "stream_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "claims": {
+      "type": "object"
+    },
+    "request_state": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+    },
+    "response_state": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+    },
+    "input_batches": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "output_batches": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "input_rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "output_rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "input_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "output_bytes": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "allOf": [
+    {
+      "description": "status=error requires non-empty error_message",
+      "if": {
+        "properties": {"status": {"const": "error"}},
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["error_message"],
+        "properties": {
+          "error_message": {"minLength": 1}
+        }
+      }
+    },
+    {
+      "description": "status=ok forbids non-empty error_type",
+      "if": {
+        "properties": {"status": {"const": "ok"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "error_type": {"const": ""}
+        }
+      }
+    },
+    {
+      "description": "method_type=stream requires stream_id",
+      "if": {
+        "properties": {"method_type": {"const": "stream"}},
+        "required": ["method_type"]
+      },
+      "then": {
+        "required": ["stream_id"]
+      }
+    },
+    {
+      "description": "method_type=unary requires request_data",
+      "if": {
+        "properties": {"method_type": {"const": "unary"}},
+        "required": ["method_type"]
+      },
+      "then": {
+        "required": ["request_data"]
+      }
+    },
+    {
+      "description": "Call statistics: all six fields present together or all absent",
+      "anyOf": [
+        {
+          "not": {
+            "anyOf": [
+              {"required": ["input_batches"]},
+              {"required": ["output_batches"]},
+              {"required": ["input_rows"]},
+              {"required": ["output_rows"]},
+              {"required": ["input_bytes"]},
+              {"required": ["output_bytes"]}
+            ]
+          }
+        },
+        {
+          "required": [
+            "input_batches",
+            "output_batches",
+            "input_rows",
+            "output_rows",
+            "input_bytes",
+            "output_bytes"
+          ]
+        }
+      ]
+    }
+  ]
+}
