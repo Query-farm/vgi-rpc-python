@@ -99,6 +99,8 @@ def _run_unary_sync(
                 http_status=HTTPStatus.OK.value,
                 stats=stats,
                 server_version=app._server.server_version,
+                protocol_hash=app._server.protocol_hash,
+                protocol_version=app._server.protocol_version,
             )
             return resp_buf, HTTPStatus.OK
 

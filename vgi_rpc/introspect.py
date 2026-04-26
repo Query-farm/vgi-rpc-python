@@ -26,17 +26,15 @@ the same over HTTP (see ``http.py``).
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Annotated, get_args, get_origin
+from dataclasses import dataclass
 
 import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.metadata import (
     DESCRIBE_VERSION_KEY,
+    PROTOCOL_HASH_KEY,
     PROTOCOL_NAME_KEY,
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
@@ -51,7 +49,7 @@ from vgi_rpc.rpc import (
     _dispatch_log_or_error,
     _drain_stream,
 )
-from vgi_rpc.utils import IpcValidation, ValidatedReader, _is_optional_type
+from vgi_rpc.utils import IpcValidation, ValidatedReader
 
 __all__ = [
     "DESCRIBE_METHOD_NAME",
@@ -59,6 +57,7 @@ __all__ = [
     "MethodDescription",
     "ServiceDescription",
     "build_describe_batch",
+    "compute_protocol_hash",
     "introspect",
     "parse_describe_batch",
 ]
@@ -70,105 +69,28 @@ __all__ = [
 DESCRIBE_METHOD_NAME = "__describe__"
 """Well-known method name for introspection requests."""
 
-DESCRIBE_VERSION = "3"
-"""Introspection format version for forward compatibility."""
+DESCRIBE_VERSION = "4"
+"""Introspection format version for forward compatibility.
+
+History:
+  - v4: dropped Python-flavoured fields (``doc``, ``param_types_json``,
+    ``param_defaults_json``, ``param_docs_json``); introduced
+    ``protocol_hash`` (SHA-256 over the canonical describe payload).
+  - v3: added ``param_docs_json``.
+  - v2: added ``has_header``, ``header_schema_ipc``, ``is_exchange``.
+"""
 
 _DESCRIBE_FIELDS: list[pa.Field[pa.DataType]] = [
     pa.field("name", pa.utf8()),
     pa.field("method_type", pa.utf8()),
-    pa.field("doc", pa.utf8(), nullable=True),
     pa.field("has_return", pa.bool_()),
     pa.field("params_schema_ipc", pa.binary()),
     pa.field("result_schema_ipc", pa.binary()),
-    pa.field("param_types_json", pa.utf8(), nullable=True),
-    pa.field("param_defaults_json", pa.utf8(), nullable=True),
     pa.field("has_header", pa.bool_()),
     pa.field("header_schema_ipc", pa.binary(), nullable=True),
     pa.field("is_exchange", pa.bool_(), nullable=True),
-    pa.field("param_docs_json", pa.utf8(), nullable=True),
 ]
 _DESCRIBE_SCHEMA = pa.schema(_DESCRIBE_FIELDS)
-
-
-# ---------------------------------------------------------------------------
-# Type-name helper
-# ---------------------------------------------------------------------------
-
-
-def _type_name(python_type: object) -> str:
-    """Convert a Python type annotation to a human-readable string.
-
-    Handles basic types, Optional, generics, Enum subclasses,
-    and ArrowSerializableDataclass subclasses.
-
-    Args:
-        python_type: A Python type annotation.
-
-    Returns:
-        A concise, human-readable type name string.
-
-    """
-    if python_type is type(None):
-        return "None"
-
-    inner, is_nullable = _is_optional_type(python_type)
-    if is_nullable:
-        return f"{_type_name(inner)} | None"
-
-    origin = get_origin(python_type)
-
-    # Annotated[T, ...] → unwrap to T
-    if origin is Annotated:
-        return _type_name(get_args(python_type)[0])
-
-    if isinstance(python_type, type):
-        return python_type.__name__
-
-    # Generic types: list[T], dict[K, V], frozenset[T]
-    args = get_args(python_type)
-    if origin is list:
-        return f"list[{_type_name(args[0])}]" if args else "list"
-    if origin is dict:
-        return f"dict[{_type_name(args[0])}, {_type_name(args[1])}]" if len(args) >= 2 else "dict"
-    if origin is frozenset:
-        return f"frozenset[{_type_name(args[0])}]" if args else "frozenset"
-
-    return str(python_type)
-
-
-# ---------------------------------------------------------------------------
-# Defaults serialization
-# ---------------------------------------------------------------------------
-
-
-def _safe_defaults_json(defaults: dict[str, object]) -> str | None:
-    """JSON-serialize parameter defaults, skipping non-serializable values.
-
-    Args:
-        defaults: Mapping of parameter name to default value.
-
-    Returns:
-        JSON string of serializable defaults, or ``None`` if empty.
-
-    """
-    if not defaults:
-        return None
-    safe: dict[str, object] = {}
-    for name, value in defaults.items():
-        if isinstance(value, Enum):
-            safe[name] = value.name
-        elif isinstance(value, (str, int, float, bool)):
-            safe[name] = value
-        elif value is None:
-            safe[name] = None
-        elif isinstance(value, (list, tuple, dict)):
-            try:
-                json.dumps(value)
-                safe[name] = value
-            except (TypeError, ValueError):
-                pass
-        # Skip non-serializable values silently
-    return json.dumps(safe) if safe else None
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +102,12 @@ def _safe_defaults_json(defaults: dict[str, object]) -> str | None:
 class MethodDescription:
     """Description of a single RPC method from introspection.
 
+    The wire format carries only language-neutral data: name, method
+    type, schemas, and stream flags.  Rich Python-flavoured metadata
+    (parameter type names, defaults, docstrings) lives in the Protocol
+    source class — consumers needing that information import the
+    Protocol directly rather than reconstructing it from the wire.
+
     For ``STREAM`` methods, ``result_schema`` reflects the Protocol-level
     return type (always empty).  The actual stream output schema is
     determined at runtime by the implementation and cannot be reported
@@ -188,12 +116,9 @@ class MethodDescription:
     Attributes:
         name: Method name as it appears on the Protocol.
         method_type: Whether this is UNARY or STREAM.
-        doc: The method's docstring, or ``None``.
         has_return: ``True`` for unary methods that return a value.
         params_schema: Arrow schema for request parameters.
         result_schema: Arrow schema for the response (unary) or empty (streams).
-        param_types: Human-readable type names keyed by parameter name.
-        param_defaults: Parsed default values keyed by parameter name.
         has_header: ``True`` for stream methods that declare a header type.
         header_schema: Arrow schema for the header, or ``None`` if no header.
         is_exchange: For streams, ``True`` if exchange (bidi), ``False`` if
@@ -203,13 +128,9 @@ class MethodDescription:
 
     name: str
     method_type: MethodType
-    doc: str | None
     has_return: bool
     params_schema: pa.Schema
     result_schema: pa.Schema
-    param_types: dict[str, str] = field(default_factory=dict)
-    param_defaults: dict[str, object] = field(default_factory=dict)
-    param_docs: dict[str, str] = field(default_factory=dict)
     has_header: bool = False
     header_schema: pa.Schema | None = None
     is_exchange: bool | None = None
@@ -223,6 +144,10 @@ class ServiceDescription:
         protocol_name: Name of the Protocol class.
         request_version: Wire protocol version.
         describe_version: Introspection format version.
+        protocol_hash: SHA-256 hex digest of the canonical describe payload.
+            Stable across server processes that expose the same Protocol;
+            changes when any wire-relevant detail changes.  Use this as the
+            schema-registry key when decoding archived access-log records.
         server_id: Server instance identifier.
         methods: Mapping of method name to ``MethodDescription``.
 
@@ -231,6 +156,7 @@ class ServiceDescription:
     protocol_name: str
     request_version: str
     describe_version: str
+    protocol_hash: str
     server_id: str
     methods: Mapping[str, MethodDescription]
 
@@ -241,17 +167,15 @@ class ServiceDescription:
             f"  server_id: {self.server_id}",
             f"  request_version: {self.request_version}",
             f"  describe_version: {self.describe_version}",
+            f"  protocol_hash: {self.protocol_hash}",
             "",
         ]
         for name, md in sorted(self.methods.items()):
             lines.append(f"  {name}({md.method_type.value})")
-            if md.param_types:
-                params_str = ", ".join(f"{k}: {v}" for k, v in md.param_types.items())
-                lines.append(f"    params: {params_str}")
+            if md.params_schema.names:
+                lines.append(f"    params: {md.params_schema}")
             if md.has_return:
                 lines.append(f"    returns: {md.result_schema}")
-            if md.doc:
-                lines.append(f"    doc: {md.doc.strip()}")
             lines.append("")
         return "\n".join(lines)
 
@@ -268,9 +192,10 @@ def build_describe_batch(
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
     """Build the ``__describe__`` response batch.
 
-    One row per method.  The returned ``pa.KeyValueMetadata`` carries
-    protocol name, wire protocol version, describe format version, and
-    server identity — callers pass it as ``custom_metadata`` when writing.
+    One row per method, sorted by name.  The returned
+    ``pa.KeyValueMetadata`` carries protocol name, wire protocol
+    version, describe format version, ``protocol_hash``, and server
+    identity — callers pass it as ``custom_metadata`` when writing.
 
     Args:
         protocol_name: Name of the Protocol class.
@@ -278,82 +203,129 @@ def build_describe_batch(
         server_id: The server's identity string.
 
     Returns:
-        A ``(pa.RecordBatch, pa.KeyValueMetadata)`` tuple.  The batch uses
-        the plain ``_DESCRIBE_SCHEMA`` (no schema-level metadata); the
-        metadata dict carries the four introspection keys.
+        A ``(pa.RecordBatch, pa.KeyValueMetadata)`` tuple.  The batch
+        uses the plain ``_DESCRIBE_SCHEMA`` (no schema-level metadata);
+        the metadata dict carries the five introspection keys.
 
     """
     names: list[str] = []
     method_types: list[str] = []
-    docs: list[str | None] = []
     has_returns: list[bool] = []
     params_schemas: list[bytes] = []
     result_schemas: list[bytes] = []
-    param_types_jsons: list[str | None] = []
-    param_defaults_jsons: list[str | None] = []
     has_headers: list[bool] = []
     header_schemas: list[bytes | None] = []
     is_exchanges: list[bool | None] = []
-    param_docs_jsons: list[str | None] = []
 
     for name, info in sorted(methods.items()):
         names.append(name)
         method_types.append(info.method_type.value)
-        docs.append(info.doc)
         has_returns.append(info.has_return)
         params_schemas.append(info.params_schema.serialize().to_pybytes())
         result_schemas.append(info.result_schema.serialize().to_pybytes())
-
-        # Build param_types_json
-        if info.param_types:
-            pt = {k: _type_name(v) for k, v in info.param_types.items()}
-            param_types_jsons.append(json.dumps(pt))
-        else:
-            param_types_jsons.append(None)
-
-        # Build param_defaults_json
-        param_defaults_jsons.append(_safe_defaults_json(info.param_defaults))
-
-        # Header info
         has_headers.append(info.header_type is not None)
-        if info.header_type is not None:
-            header_schemas.append(info.header_type.ARROW_SCHEMA.serialize().to_pybytes())
-        else:
-            header_schemas.append(None)
-
+        header_schemas.append(
+            info.header_type.ARROW_SCHEMA.serialize().to_pybytes() if info.header_type is not None else None
+        )
         is_exchanges.append(info.is_exchange)
-
-        # Build param_docs_json
-        param_docs_jsons.append(json.dumps(info.param_docs) if info.param_docs else None)
-
-    # Introspection metadata (written as batch custom_metadata)
-    custom_metadata = pa.KeyValueMetadata(
-        {
-            PROTOCOL_NAME_KEY: protocol_name.encode(),
-            REQUEST_VERSION_KEY: REQUEST_VERSION,
-            DESCRIBE_VERSION_KEY: DESCRIBE_VERSION.encode(),
-            SERVER_ID_KEY: server_id.encode(),
-        }
-    )
 
     batch = pa.RecordBatch.from_pydict(
         {
             "name": names,
             "method_type": method_types,
-            "doc": docs,
             "has_return": has_returns,
             "params_schema_ipc": params_schemas,
             "result_schema_ipc": result_schemas,
-            "param_types_json": param_types_jsons,
-            "param_defaults_json": param_defaults_jsons,
             "has_header": has_headers,
             "header_schema_ipc": header_schemas,
             "is_exchange": is_exchanges,
-            "param_docs_json": param_docs_jsons,
         },
         schema=_DESCRIBE_SCHEMA,
     )
+
+    protocol_hash = compute_protocol_hash(protocol_name, batch)
+
+    custom_metadata = pa.KeyValueMetadata(
+        {
+            PROTOCOL_NAME_KEY: protocol_name.encode(),
+            REQUEST_VERSION_KEY: REQUEST_VERSION,
+            DESCRIBE_VERSION_KEY: DESCRIBE_VERSION.encode(),
+            PROTOCOL_HASH_KEY: protocol_hash.encode(),
+            SERVER_ID_KEY: server_id.encode(),
+        }
+    )
     return batch, custom_metadata
+
+
+# ---------------------------------------------------------------------------
+# Protocol hash
+# ---------------------------------------------------------------------------
+
+
+def compute_protocol_hash(protocol_name: str, batch: pa.RecordBatch) -> str:
+    """Return the SHA-256 hex digest of the canonical describe payload.
+
+    The hash covers only language-neutral wire fields: ``protocol_name``,
+    ``request_version``, ``describe_version``, and for each method (sorted
+    by name) ``name``, ``method_type``, ``has_return``, ``has_header``,
+    ``is_exchange``, ``params_schema_ipc``, ``result_schema_ipc``, and
+    ``header_schema_ipc``.  Server identity, docstrings, parameter type
+    names, parameter defaults, and parameter docstrings are *not* part of
+    the hash — they vary across processes/builds without changing protocol
+    semantics.
+
+    The hash is reproducible across language ports that produce the same
+    Arrow schema bytes for the same Protocol.
+
+    Args:
+        protocol_name: Name of the Protocol class.
+        batch: A ``__describe__`` response batch built by
+            :func:`build_describe_batch` (rows sorted by name).
+
+    Returns:
+        Lowercase 64-character hex SHA-256 digest.
+
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(b"vgi_rpc.describe.v")
+    h.update(DESCRIBE_VERSION.encode())
+    h.update(b"|")
+    h.update(REQUEST_VERSION)
+    h.update(b"|")
+    h.update(protocol_name.encode())
+    h.update(b"|")
+    n = batch.num_rows
+    name_col = batch.column("name")
+    method_type_col = batch.column("method_type")
+    has_return_col = batch.column("has_return")
+    params_col = batch.column("params_schema_ipc")
+    result_col = batch.column("result_schema_ipc")
+    has_header_col = batch.column("has_header")
+    header_col = batch.column("header_schema_ipc")
+    is_exchange_col = batch.column("is_exchange")
+    for i in range(n):
+        h.update(b"\x1f")
+        h.update(name_col[i].as_py().encode())
+        h.update(b"\x1e")
+        h.update(method_type_col[i].as_py().encode())
+        h.update(b"\x1e")
+        h.update(b"1" if has_return_col[i].as_py() else b"0")
+        h.update(b"\x1e")
+        h.update(b"1" if has_header_col[i].as_py() else b"0")
+        h.update(b"\x1e")
+        is_exchange = is_exchange_col[i].as_py()
+        h.update(b"-" if is_exchange is None else (b"1" if is_exchange else b"0"))
+        h.update(b"\x1e")
+        h.update(params_col[i].as_py())
+        h.update(b"\x1e")
+        h.update(result_col[i].as_py())
+        h.update(b"\x1e")
+        header_bytes = header_col[i].as_py()
+        if header_bytes is not None:
+            h.update(header_bytes)
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -387,13 +359,13 @@ def parse_describe_batch(
     protocol_name: str = md.get(PROTOCOL_NAME_KEY, b"").decode()
     request_version: str = md.get(REQUEST_VERSION_KEY, b"").decode()
     describe_version: str = md.get(DESCRIBE_VERSION_KEY, b"").decode()
+    protocol_hash: str = md.get(PROTOCOL_HASH_KEY, b"").decode()
     server_id: str = md.get(SERVER_ID_KEY, b"").decode()
 
     method_map: dict[str, MethodDescription] = {}
     for i in range(batch.num_rows):
         name: str = batch.column("name")[i].as_py()
         method_type = MethodType(batch.column("method_type")[i].as_py())
-        doc: str | None = batch.column("doc")[i].as_py()
         has_return: bool = batch.column("has_return")[i].as_py()
 
         params_schema_bytes: bytes = batch.column("params_schema_ipc")[i].as_py()
@@ -401,44 +373,20 @@ def parse_describe_batch(
         params_schema = pa.ipc.read_schema(pa.py_buffer(params_schema_bytes))
         result_schema = pa.ipc.read_schema(pa.py_buffer(result_schema_bytes))
 
-        pt_json: str | None = batch.column("param_types_json")[i].as_py()
-        param_types: dict[str, str] = json.loads(pt_json) if pt_json else {}
-
-        pd_json: str | None = batch.column("param_defaults_json")[i].as_py()
-        param_defaults: dict[str, object] = json.loads(pd_json) if pd_json else {}
-
-        # Header fields (v2+)
-        has_header: bool = False
+        has_header: bool = batch.column("has_header")[i].as_py()
         header_schema: pa.Schema | None = None
-        if "has_header" in batch.schema.names:
-            has_header = batch.column("has_header")[i].as_py()
-        if "header_schema_ipc" in batch.schema.names:
-            header_schema_bytes: bytes | None = batch.column("header_schema_ipc")[i].as_py()
-            if header_schema_bytes is not None:
-                header_schema = pa.ipc.read_schema(pa.py_buffer(header_schema_bytes))
+        header_schema_bytes: bytes | None = batch.column("header_schema_ipc")[i].as_py()
+        if header_schema_bytes is not None:
+            header_schema = pa.ipc.read_schema(pa.py_buffer(header_schema_bytes))
 
-        # Exchange field (v2+)
-        is_exchange: bool | None = None
-        if "is_exchange" in batch.schema.names:
-            is_exchange = batch.column("is_exchange")[i].as_py()
-
-        # Param docs (v3+)
-        param_docs: dict[str, str] = {}
-        if "param_docs_json" in batch.schema.names:
-            pdocs_json: str | None = batch.column("param_docs_json")[i].as_py()
-            if pdocs_json:
-                param_docs = json.loads(pdocs_json)
+        is_exchange: bool | None = batch.column("is_exchange")[i].as_py()
 
         method_map[name] = MethodDescription(
             name=name,
             method_type=method_type,
-            doc=doc,
             has_return=has_return,
             params_schema=params_schema,
             result_schema=result_schema,
-            param_types=param_types,
-            param_defaults=param_defaults,
-            param_docs=param_docs,
             has_header=has_header,
             header_schema=header_schema,
             is_exchange=is_exchange,
@@ -448,6 +396,7 @@ def parse_describe_batch(
         protocol_name=protocol_name,
         request_version=request_version,
         describe_version=describe_version,
+        protocol_hash=protocol_hash,
         server_id=server_id,
         methods=method_map,
     )

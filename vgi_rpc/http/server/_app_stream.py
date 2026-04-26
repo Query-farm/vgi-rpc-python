@@ -238,6 +238,8 @@ def _run_stream_init_sync(
                 http_status=http_status.value,
                 stats=stats,
                 server_version=app._server.server_version,
+                protocol_hash=app._server.protocol_hash,
+                protocol_version=app._server.protocol_version,
                 error_message=error_message,
                 response_state=_response_state_bytes,
             )
@@ -350,6 +352,8 @@ def _run_stream_exchange_sync(
                 http_status=HTTPStatus.OK.value,
                 stats=stats,
                 server_version=app._server.server_version,
+                protocol_hash=app._server.protocol_hash,
+                protocol_version=app._server.protocol_version,
                 request_state=token if isinstance(token, bytes) else token.encode() if token else None,
                 cancelled=True,
             )
@@ -403,6 +407,8 @@ def _run_stream_exchange_sync(
                     http_status=http_status.value,
                     stats=stats,
                     server_version=app._server.server_version,
+                    protocol_hash=app._server.protocol_hash,
+                    protocol_version=app._server.protocol_version,
                     request_state=token if isinstance(token, bytes) else token.encode() if token else None,
                 )
                 if hook is not None and info is not None:
@@ -498,7 +504,9 @@ def _run_stream_exchange_sync(
                     http_status=http_status.value,
                     stats=stats,
                     server_version=app._server.server_version,
-                    error_message=str(_hook_exc_e)[:500] if _hook_exc_e is not None else "",
+                    protocol_hash=app._server.protocol_hash,
+                    protocol_version=app._server.protocol_version,
+                    error_message=str(_hook_exc_e) if _hook_exc_e is not None else "",
                     request_state=token if isinstance(token, bytes) else token.encode() if token else None,
                     response_state=_response_state_bytes,
                 )

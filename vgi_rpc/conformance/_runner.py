@@ -1383,15 +1383,6 @@ _HEADER_METHODS = frozenset(
     }
 )
 
-_PARAM_DOCS_METHODS = frozenset(
-    {
-        "exchange_with_rich_header",
-        "produce_dynamic_schema",
-        "produce_with_rich_header",
-    }
-)
-
-
 # ---------------------------------------------------------------------------
 # Describe service-level tests
 # ---------------------------------------------------------------------------
@@ -1477,21 +1468,6 @@ def _test_desc_stream_no_return(desc: ServiceDescription) -> None:
 # ---------------------------------------------------------------------------
 
 
-@_describe_test(category="describe_docstrings", name="all_have_docs")
-def _test_desc_all_have_docs(desc: ServiceDescription) -> None:
-    for name, method in sorted(desc.methods.items()):
-        assert method.doc is not None, f"{name} should have a docstring"
-        assert len(method.doc.strip()) > 0, f"{name} docstring should not be empty"
-
-
-@_describe_test(category="describe_docstrings", name="spot_check_content")
-def _test_desc_spot_check_docs(desc: ServiceDescription) -> None:
-    assert "Echo a string" in (desc.methods["echo_string"].doc or "")
-    assert "Add two floats" in (desc.methods["add_floats"].doc or "")
-    assert "void" in (desc.methods["void_noop"].doc or "").lower()
-    assert "Produce" in (desc.methods["produce_n"].doc or "")
-
-
 # ---------------------------------------------------------------------------
 # Describe param_schemas tests
 # ---------------------------------------------------------------------------
@@ -1538,79 +1514,6 @@ def _test_desc_params_produce_n(desc: ServiceDescription) -> None:
     schema = desc.methods["produce_n"].params_schema
     assert schema.names == ["count"]
     assert schema.field("count").type == pa.int64()
-
-
-# ---------------------------------------------------------------------------
-# Describe param_types tests
-# ---------------------------------------------------------------------------
-
-
-@_describe_test(category="describe_param_types", name="scalar_types")
-def _test_desc_param_types_scalar(desc: ServiceDescription) -> None:
-    assert desc.methods["echo_string"].param_types == {"value": "str"}
-    assert desc.methods["echo_int"].param_types == {"value": "int"}
-    assert desc.methods["echo_float"].param_types == {"value": "float"}
-    assert desc.methods["echo_bool"].param_types == {"value": "bool"}
-    assert desc.methods["echo_bytes"].param_types == {"data": "bytes"}
-
-
-@_describe_test(category="describe_param_types", name="complex_types")
-def _test_desc_param_types_complex(desc: ServiceDescription) -> None:
-    assert desc.methods["echo_list"].param_types == {"values": "list[str]"}
-    assert desc.methods["echo_dict"].param_types == {"mapping": "dict[str, int]"}
-    assert desc.methods["echo_nested_list"].param_types == {"matrix": "list[list[int]]"}
-    assert desc.methods["echo_enum"].param_types == {"status": "Status"}
-
-
-@_describe_test(category="describe_param_types", name="optional_types")
-def _test_desc_param_types_optional(desc: ServiceDescription) -> None:
-    assert desc.methods["echo_optional_string"].param_types == {"value": "str | None"}
-    assert desc.methods["echo_optional_int"].param_types == {"value": "int | None"}
-
-
-@_describe_test(category="describe_param_types", name="dataclass_types")
-def _test_desc_param_types_dataclass(desc: ServiceDescription) -> None:
-    assert desc.methods["echo_point"].param_types == {"point": "Point"}
-    assert desc.methods["echo_all_types"].param_types == {"data": "AllTypes"}
-    assert desc.methods["echo_bounding_box"].param_types == {"box": "BoundingBox"}
-
-
-@_describe_test(category="describe_param_types", name="annotated_types")
-def _test_desc_param_types_annotated(desc: ServiceDescription) -> None:
-    # Annotated[int, ArrowType(...)] unwraps to "int"
-    assert desc.methods["echo_int32"].param_types == {"value": "int"}
-    assert desc.methods["echo_float32"].param_types == {"value": "float"}
-
-
-@_describe_test(category="describe_param_types", name="multi_param_types")
-def _test_desc_param_types_multi(desc: ServiceDescription) -> None:
-    assert desc.methods["add_floats"].param_types == {"a": "float", "b": "float"}
-    assert desc.methods["concatenate"].param_types == {"prefix": "str", "suffix": "str", "separator": "str"}
-    assert desc.methods["produce_n"].param_types == {"count": "int"}
-
-
-# ---------------------------------------------------------------------------
-# Describe param_defaults tests
-# ---------------------------------------------------------------------------
-
-
-@_describe_test(category="describe_param_defaults", name="concatenate_separator")
-def _test_desc_defaults_concatenate(desc: ServiceDescription) -> None:
-    defaults = desc.methods["concatenate"].param_defaults
-    assert "separator" in defaults
-    assert defaults["separator"] == "-"
-
-
-@_describe_test(category="describe_param_defaults", name="with_defaults_values")
-def _test_desc_defaults_with_defaults(desc: ServiceDescription) -> None:
-    defaults = desc.methods["with_defaults"].param_defaults
-    assert defaults["optional_str"] == "default"
-    assert defaults["optional_int"] == 42
-
-
-@_describe_test(category="describe_param_defaults", name="echo_string_no_defaults")
-def _test_desc_defaults_echo_string(desc: ServiceDescription) -> None:
-    assert len(desc.methods["echo_string"].param_defaults) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1671,24 +1574,15 @@ def _test_desc_no_header_schema(desc: ServiceDescription) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Describe param_docs tests
+# Describe protocol_hash tests
 # ---------------------------------------------------------------------------
 
 
-@_describe_test(category="describe_param_docs", name="methods_with_args")
-def _test_desc_param_docs_present(desc: ServiceDescription) -> None:
-    for name in sorted(_PARAM_DOCS_METHODS):
-        pdocs = desc.methods[name].param_docs
-        assert len(pdocs) > 0, f"{name} should have non-empty param_docs"
-        for param_name, doc_text in pdocs.items():
-            assert len(doc_text.strip()) > 0, f"{name}.{param_name} doc should not be empty"
-
-
-@_describe_test(category="describe_param_docs", name="methods_without_args")
-def _test_desc_param_docs_empty(desc: ServiceDescription) -> None:
-    for name, method in sorted(desc.methods.items()):
-        if name not in _PARAM_DOCS_METHODS:
-            assert len(method.param_docs) == 0, f"{name} should have empty param_docs"
+@_describe_test(category="describe_protocol_hash", name="format")
+def _test_desc_protocol_hash_format(desc: ServiceDescription) -> None:
+    assert desc.protocol_hash, "protocol_hash must be present"
+    assert len(desc.protocol_hash) == 64, "protocol_hash must be 64 hex chars"
+    assert all(c in "0123456789abcdef" for c in desc.protocol_hash), "protocol_hash must be lowercase hex"
 
 
 # ---------------------------------------------------------------------------

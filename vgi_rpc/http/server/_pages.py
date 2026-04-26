@@ -226,23 +226,17 @@ def _build_method_card(md: MethodDescription) -> str:
         parts.append('<span class="badge badge-header">header</span>')
     parts.append("</div>")
 
-    if md.doc:
-        parts.append(f'<p class="docstring">{_html.escape(md.doc)}</p>')
-
-    # Parameters table
-    if md.param_types:
+    # Parameters table — Arrow schema is the source of truth on the wire.
+    # (Python-flavoured docstrings/defaults/type-name strings are no longer
+    # carried by __describe__; consult the Protocol class source for those.)
+    if md.params_schema and len(md.params_schema) > 0:
         parts.append('<div class="section-label">Parameters</div>')
-        parts.append("<table><tr><th>Name</th><th>Type</th><th>Default</th><th>Description</th></tr>")
-        for pname, ptype in md.param_types.items():
-            default_val = md.param_defaults.get(pname)
-            default_str = _html.escape(repr(default_val)) if default_val is not None else "&mdash;"
-            desc_str = _html.escape(md.param_docs[pname]) if pname in md.param_docs else "&mdash;"
-            parts.append(
-                f"<tr><td><code>{_html.escape(pname)}</code></td>"
-                f"<td><code>{_html.escape(ptype)}</code></td>"
-                f"<td>{default_str}</td>"
-                f"<td>{desc_str}</td></tr>"
-            )
+        parts.append("<table><tr><th>Name</th><th>Type</th></tr>")
+        parts.extend(
+            f"<tr><td><code>{_html.escape(field.name)}</code></td>"
+            f"<td><code>{_html.escape(str(field.type))}</code></td></tr>"
+            for field in md.params_schema
+        )
         parts.append("</table>")
     else:
         parts.append('<p class="no-params">No parameters</p>')

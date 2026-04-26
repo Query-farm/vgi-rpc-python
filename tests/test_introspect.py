@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -19,13 +18,18 @@ from vgi_rpc.http import _SyncTestClient, http_introspect, make_sync_client
 from vgi_rpc.introspect import (
     DESCRIBE_VERSION,
     ServiceDescription,
-    _safe_defaults_json,
-    _type_name,
     build_describe_batch,
+    compute_protocol_hash,
     introspect,
     parse_describe_batch,
 )
-from vgi_rpc.metadata import DESCRIBE_VERSION_KEY, PROTOCOL_NAME_KEY, REQUEST_VERSION_KEY, SERVER_ID_KEY
+from vgi_rpc.metadata import (
+    DESCRIBE_VERSION_KEY,
+    PROTOCOL_HASH_KEY,
+    PROTOCOL_NAME_KEY,
+    REQUEST_VERSION_KEY,
+    SERVER_ID_KEY,
+)
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     AuthContext,
@@ -165,119 +169,6 @@ class _EmptyProtoImpl:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: _type_name
-# ---------------------------------------------------------------------------
-
-
-class TestTypeName:
-    """Tests for _type_name helper."""
-
-    def test_basic_types(self) -> None:
-        """Basic Python types produce simple names."""
-        assert _type_name(str) == "str"
-        assert _type_name(int) == "int"
-        assert _type_name(float) == "float"
-        assert _type_name(bool) == "bool"
-        assert _type_name(bytes) == "bytes"
-
-    def test_none_type(self) -> None:
-        """NoneType produces 'None'."""
-        assert _type_name(type(None)) == "None"
-
-    def test_optional(self) -> None:
-        """Optional types produce 'T | None'."""
-        assert _type_name(float | None) == "float | None"
-        assert _type_name(str | None) == "str | None"
-
-    def test_enum(self) -> None:
-        """Enum subclass produces class name."""
-        assert _type_name(Color) == "Color"
-
-    def test_arrow_serializable(self) -> None:
-        """ArrowSerializableDataclass produces class name."""
-        assert _type_name(Point) == "Point"
-
-    def test_generic_list(self) -> None:
-        """list[T] produces 'list[T]'."""
-        assert _type_name(list[int]) == "list[int]"
-        assert _type_name(list[str]) == "list[str]"
-
-    def test_generic_dict(self) -> None:
-        """dict[K, V] produces 'dict[K, V]'."""
-        assert _type_name(dict[str, int]) == "dict[str, int]"
-
-    def test_generic_frozenset(self) -> None:
-        """frozenset[T] produces 'frozenset[T]'."""
-        assert _type_name(frozenset[int]) == "frozenset[int]"
-
-    def test_annotated(self) -> None:
-        """Annotated[T, ...] unwraps to T."""
-        from typing import Annotated
-
-        assert _type_name(Annotated[int, "some metadata"]) == "int"
-        assert _type_name(Annotated[str, 42]) == "str"
-
-    def test_unknown_type_falls_back_to_str(self) -> None:
-        """Non-standard types fall back to str(python_type)."""
-        from typing import TypeVar
-
-        T = TypeVar("T")
-        result = _type_name(T)
-        assert result == "~T"
-
-
-# ---------------------------------------------------------------------------
-# Unit tests: _safe_defaults_json
-# ---------------------------------------------------------------------------
-
-
-class TestSafeDefaultsJson:
-    """Tests for _safe_defaults_json helper."""
-
-    def test_empty(self) -> None:
-        """Empty dict returns None."""
-        assert _safe_defaults_json({}) is None
-
-    def test_scalars(self) -> None:
-        """Scalar defaults are serialized."""
-        result = _safe_defaults_json({"x": 1, "y": "hello", "z": True, "w": None})
-        assert result is not None
-        parsed = json.loads(result)
-        assert parsed == {"x": 1, "y": "hello", "z": True, "w": None}
-
-    def test_enum_default(self) -> None:
-        """Enum defaults are serialized as name."""
-        result = _safe_defaults_json({"color": Color.RED})
-        assert result is not None
-        parsed = json.loads(result)
-        assert parsed == {"color": "RED"}
-
-    def test_non_serializable_skipped(self) -> None:
-        """Non-serializable values are silently skipped."""
-        result = _safe_defaults_json({"good": 1, "bad": object()})
-        assert result is not None
-        parsed = json.loads(result)
-        assert parsed == {"good": 1}
-
-    def test_serializable_list_default(self) -> None:
-        """List defaults that are JSON-serializable are included."""
-        result = _safe_defaults_json({"items": [1, 2, 3]})
-        assert result is not None
-        parsed = json.loads(result)
-        assert parsed == {"items": [1, 2, 3]}
-
-    def test_non_serializable_container_skipped(self) -> None:
-        """Container defaults with non-serializable content are skipped."""
-        result = _safe_defaults_json({"bad_list": [object()]})
-        assert result is None
-
-    def test_all_non_serializable_returns_none(self) -> None:
-        """When all values are non-serializable, returns None."""
-        result = _safe_defaults_json({"a": object(), "b": object()})
-        assert result is None
-
-
-# ---------------------------------------------------------------------------
 # Unit tests: build_describe_batch
 # ---------------------------------------------------------------------------
 
@@ -292,15 +183,25 @@ class TestBuildDescribeBatch:
         assert batch.num_rows == len(methods)
         assert batch.schema.get_field_index("name") >= 0
         assert batch.schema.get_field_index("method_type") >= 0
-        assert batch.schema.get_field_index("doc") >= 0
         assert batch.schema.get_field_index("has_return") >= 0
         assert batch.schema.get_field_index("params_schema_ipc") >= 0
         assert batch.schema.get_field_index("result_schema_ipc") >= 0
-        assert batch.schema.get_field_index("param_types_json") >= 0
-        assert batch.schema.get_field_index("param_defaults_json") >= 0
+        assert batch.schema.get_field_index("has_header") >= 0
+        assert batch.schema.get_field_index("header_schema_ipc") >= 0
+        assert batch.schema.get_field_index("is_exchange") >= 0
+
+    def test_pythonisms_dropped(self) -> None:
+        """v4 dropped doc, param_types_json, param_defaults_json, param_docs_json."""
+        methods = rpc_methods(_TestProto)
+        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
+        names = set(batch.schema.names)
+        assert "doc" not in names
+        assert "param_types_json" not in names
+        assert "param_defaults_json" not in names
+        assert "param_docs_json" not in names
 
     def test_batch_metadata(self) -> None:
-        """Batch custom_metadata contains protocol name, versions, server_id."""
+        """Batch custom_metadata contains protocol name, versions, hash, server_id."""
         methods = rpc_methods(_TestProto)
         batch, cm = build_describe_batch("TestProto", methods, "srv123")
         assert batch.schema.metadata is None
@@ -308,6 +209,9 @@ class TestBuildDescribeBatch:
         assert cm[REQUEST_VERSION_KEY] == b"1"
         assert cm[DESCRIBE_VERSION_KEY] == DESCRIBE_VERSION.encode()
         assert cm[SERVER_ID_KEY] == b"srv123"
+        h = cm[PROTOCOL_HASH_KEY].decode()
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
 
     def test_method_types_correct(self) -> None:
         """Method type column matches expected values."""
@@ -343,42 +247,38 @@ class TestBuildDescribeBatch:
             assert isinstance(ps, pa.Schema)
             assert isinstance(rs, pa.Schema)
 
-    def test_param_types_json_correct(self) -> None:
-        """param_types_json has correct type names."""
-        methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        rows = batch.to_pydict()
-        name_to_pt = dict(zip(rows["name"], rows["param_types_json"], strict=True))
-        add_types = json.loads(name_to_pt["add"])
-        assert add_types == {"a": "float", "b": "float"}
-        enum_types = json.loads(name_to_pt["with_enum"])
-        assert enum_types == {"color": "Color"}
-
-    def test_param_defaults_json(self) -> None:
-        """param_defaults_json contains defaults for methods that have them."""
-        methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        rows = batch.to_pydict()
-        name_to_pd = dict(zip(rows["name"], rows["param_defaults_json"], strict=True))
-        greet_defaults = json.loads(name_to_pd["greet"])
-        assert greet_defaults == {"greeting": "Hello"}
-        # Methods without defaults have null
-        assert name_to_pd["add"] is None
-
     def test_empty_protocol(self) -> None:
         """Empty protocol produces 0-row batch."""
         methods = rpc_methods(_EmptyProto)
         batch, _cm = build_describe_batch("EmptyProto", methods, "srv123")
         assert batch.num_rows == 0
 
-    def test_doc_column(self) -> None:
-        """Doc column contains method docstrings."""
+
+class TestProtocolHash:
+    """Tests for compute_protocol_hash."""
+
+    def test_stable_across_calls(self) -> None:
+        """Same protocol → same hash, regardless of server_id."""
         methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        rows = batch.to_pydict()
-        name_to_doc = dict(zip(rows["name"], rows["doc"], strict=True))
-        assert name_to_doc["add"] == "Add two numbers."
-        assert name_to_doc["greet"] == "Greet someone."
+        b1, _ = build_describe_batch("TestProto", methods, "srv-a")
+        b2, _ = build_describe_batch("TestProto", methods, "srv-zzz")
+        assert compute_protocol_hash("TestProto", b1) == compute_protocol_hash("TestProto", b2)
+
+    def test_changes_with_protocol_name(self) -> None:
+        """Different protocol_name → different hash, even for same methods."""
+        methods = rpc_methods(_TestProto)
+        b, _ = build_describe_batch("TestProto", methods, "srv-a")
+        h1 = compute_protocol_hash("TestProto", b)
+        h2 = compute_protocol_hash("Renamed", b)
+        assert h1 != h2
+
+    def test_hex_format(self) -> None:
+        """Hash is 64 lowercase hex characters."""
+        methods = rpc_methods(_TestProto)
+        b, _ = build_describe_batch("TestProto", methods, "srv-a")
+        h = compute_protocol_hash("TestProto", b)
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +311,6 @@ class TestParseDescribeBatch:
         assert add.name == "add"
         assert add.method_type == MethodType.UNARY
         assert add.has_return is True
-        assert add.doc == "Add two numbers."
-        assert add.param_types == {"a": "float", "b": "float"}
 
     def test_schemas_preserved(self) -> None:
         """Params and result schemas are correctly round-tripped."""
@@ -425,14 +323,13 @@ class TestParseDescribeBatch:
         assert add_desc.params_schema == add_info.params_schema
         assert add_desc.result_schema == add_info.result_schema
 
-    def test_defaults_preserved(self) -> None:
-        """Param defaults survive the round-trip."""
+    def test_protocol_hash_round_trip(self) -> None:
+        """ServiceDescription.protocol_hash is populated from the wire."""
         methods = rpc_methods(_TestProto)
         batch, cm = build_describe_batch("TestProto", methods, "srv123")
         desc = parse_describe_batch(batch, cm)
-
-        greet = desc.methods["greet"]
-        assert greet.param_defaults == {"greeting": "Hello"}
+        assert len(desc.protocol_hash) == 64
+        assert desc.protocol_hash == compute_protocol_hash("TestProto", batch)
 
     def test_empty_protocol_round_trip(self) -> None:
         """Empty protocol round-trips correctly."""
@@ -465,38 +362,14 @@ class TestServiceDescriptionStr:
         assert "stream_data(stream)" in text
         assert "bidi(stream)" in text
 
-    def test_doc_in_output(self) -> None:
-        """Methods with docs show doc line in __str__."""
+    def test_protocol_hash_in_output(self) -> None:
+        """The hash is rendered in the __str__ summary."""
         methods = rpc_methods(_TestProto)
         batch, cm = build_describe_batch("TestProto", methods, "srv123")
         desc = parse_describe_batch(batch, cm)
         text = str(desc)
-        # "noop" has no return but has a doc — tests the doc branch for non-returning methods
-        assert "doc: Do nothing." in text
-
-    def test_no_doc_method_omits_doc_line(self) -> None:
-        """Methods without docs omit the doc line."""
-        from vgi_rpc.introspect import MethodDescription
-
-        desc = ServiceDescription(
-            protocol_name="Test",
-            request_version="1",
-            describe_version="1",
-            server_id="x",
-            methods={
-                "nodoc": MethodDescription(
-                    name="nodoc",
-                    method_type=MethodType.UNARY,
-                    doc=None,
-                    has_return=True,
-                    params_schema=pa.schema([]),
-                    result_schema=pa.schema([pa.field("result", pa.float64())]),
-                ),
-            },
-        )
-        text = str(desc)
-        assert "nodoc(unary)" in text
-        assert "doc:" not in text
+        assert "protocol_hash:" in text
+        assert desc.protocol_hash in text
 
     def test_empty_protocol_str(self) -> None:
         """Empty protocol produces minimal output."""
@@ -636,7 +509,8 @@ class TestHttpIntrospect:
         add = desc.methods["add"]
         assert add.method_type == MethodType.UNARY
         assert add.has_return is True
-        assert add.param_types == {"a": "float", "b": "float"}
+        # Arrow schema is the wire-canonical type information.
+        assert add.params_schema.names == ["a", "b"]
 
     def test_auth_middleware_applies(self) -> None:
         """Auth middleware applies to __describe__ endpoint."""

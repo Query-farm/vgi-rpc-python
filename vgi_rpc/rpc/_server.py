@@ -110,6 +110,8 @@ def _emit_access_log(
     http_status: int | None = None,
     stats: CallStatistics | None = None,
     server_version: str = "",
+    protocol_hash: str = "",
+    protocol_version: str = "",
     request_state: bytes | None = None,
     response_state: bytes | None = None,
     cancelled: bool = False,
@@ -121,6 +123,7 @@ def _emit_access_log(
         extra: dict[str, object] = {
             "server_id": server_id,
             "protocol": protocol_name,
+            "protocol_hash": protocol_hash,
             "method": method_name,
             "method_type": method_type,
             "principal": auth.principal or "",
@@ -131,6 +134,8 @@ def _emit_access_log(
             "status": status,
             "error_type": error_type,
         }
+        if protocol_version:
+            extra["protocol_version"] = protocol_version
         if cancelled:
             extra["cancelled"] = True
         if error_message:
@@ -218,6 +223,8 @@ class RpcServer:
         "_ipc_validation",
         "_methods",
         "_protocol",
+        "_protocol_hash",
+        "_protocol_version",
         "_server_id",
         "_server_version",
     )
@@ -230,6 +237,7 @@ class RpcServer:
         external_location: ExternalLocationConfig | None = None,
         server_id: str | None = None,
         server_version: str = "",
+        protocol_version: str = "",
         enable_describe: bool = False,
         ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> None:
@@ -240,7 +248,11 @@ class RpcServer:
             implementation: Object implementing all methods from *protocol*.
             external_location: Optional ExternalLocation configuration.
             server_id: Optional server identifier; auto-generated if ``None``.
-            server_version: Version string included in access log entries.
+            server_version: Build version string included in access log entries
+                (separate from *protocol_version*).
+            protocol_version: Operator-supplied free-form protocol contract version
+                included in access log entries; complements ``protocol_hash`` for
+                humans.
             enable_describe: When ``True``, the server handles ``__describe__``
                 requests returning machine-readable method metadata.
             ipc_validation: Validation level for incoming IPC batches.
@@ -250,6 +262,7 @@ class RpcServer:
         self._protocol = protocol
         self._impl = implementation
         self._server_version = server_version
+        self._protocol_version = protocol_version
         self._ipc_validation = ipc_validation
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
@@ -257,14 +270,20 @@ class RpcServer:
         self._dispatch_hook: _DispatchHook | None = None
         _validate_implementation(protocol, implementation, self._methods)
 
-        if enable_describe:
-            from vgi_rpc.introspect import DESCRIBE_METHOD_NAME, build_describe_batch
+        # Compute protocol_hash regardless of describe flag — it is needed for
+        # access-log records on every dispatch.
+        from vgi_rpc.introspect import build_describe_batch
 
-            self._describe_batch: pa.RecordBatch | None
-            self._describe_metadata: pa.KeyValueMetadata | None
-            self._describe_batch, self._describe_metadata = build_describe_batch(
-                protocol.__name__, self._methods, self._server_id
-            )
+        _hash_batch, _hash_md = build_describe_batch(protocol.__name__, self._methods, self._server_id)
+        from vgi_rpc.metadata import PROTOCOL_HASH_KEY
+
+        self._protocol_hash: str = _hash_md.get(PROTOCOL_HASH_KEY, b"").decode()
+
+        if enable_describe:
+            from vgi_rpc.introspect import DESCRIBE_METHOD_NAME
+
+            self._describe_batch: pa.RecordBatch | None = _hash_batch
+            self._describe_metadata: pa.KeyValueMetadata | None = _hash_md
             # Register __describe__ as a synthetic unary method so normal dispatch handles it.
             self._methods = {
                 **self._methods,
@@ -327,6 +346,16 @@ class RpcServer:
     def server_version(self) -> str:
         """Version string passed at construction (empty if not set)."""
         return self._server_version
+
+    @property
+    def protocol_version(self) -> str:
+        """Operator-supplied free-form protocol version label."""
+        return self._protocol_version
+
+    @property
+    def protocol_hash(self) -> str:
+        """SHA-256 hex digest of the canonical __describe__ payload."""
+        return self._protocol_hash
 
     @property
     def ctx_methods(self) -> frozenset[str]:
@@ -480,6 +509,8 @@ class RpcServer:
                 "ok",
                 stats=stats,
                 server_version=self._server_version,
+                protocol_hash=self._protocol_hash,
+                protocol_version=self._protocol_version,
             )
             return
 
@@ -528,6 +559,8 @@ class RpcServer:
                 error_message=error_message,
                 stats=stats,
                 server_version=self._server_version,
+                protocol_hash=self._protocol_hash,
+                protocol_version=self._protocol_version,
             )
             if hook is not None:
                 try:
@@ -589,6 +622,8 @@ class RpcServer:
                     error_message=error_message,
                     stats=stats,
                     server_version=self._server_version,
+                    protocol_hash=self._protocol_hash,
+                    protocol_version=self._protocol_version,
                 )
                 if hook is not None:
                     try:
@@ -711,6 +746,8 @@ class RpcServer:
                 error_message=error_message,
                 stats=stats,
                 server_version=self._server_version,
+                protocol_hash=self._protocol_hash,
+                protocol_version=self._protocol_version,
                 cancelled=cancelled,
             )
             if hook is not None:

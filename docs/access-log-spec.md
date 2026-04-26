@@ -33,6 +33,7 @@ These fields MUST appear in every record, regardless of method type or status.
 |---|---|---|
 | `server_id` | string | Stable identifier for the server instance (12-char hex by default). Same value attached to every record from the same process lifetime. |
 | `protocol` | string | The Protocol class name being served, e.g. `"ConformanceService"`. |
+| `protocol_hash` | string | SHA-256 hex digest of the canonical `__describe__` payload. 64 lowercase hex characters. Stable across processes/builds that expose the same Protocol; changes whenever any wire-relevant detail of the Protocol changes. Use as the registry key when decoding archived records. |
 | `method` | string | The RPC method name. For built-ins, the leading double-underscore is preserved (e.g. `"__describe__"`). |
 | `method_type` | string | One of `"unary"` or `"stream"`. |
 | `principal` | string | Authenticated principal, or empty string when anonymous. |
@@ -81,7 +82,8 @@ These fields appear on HTTP transports only.
 
 | Field | Type | Condition |
 |---|---|---|
-| `server_version` | string | Present when the implementation knows its version (e.g. set from a build constant). |
+| `server_version` | string | Present when the implementation knows its server *build* version (e.g. set from a build constant). |
+| `protocol_version` | string | Present when the operator labels the *protocol contract* with a version (separate from `server_version`, which describes the build). Free-form. Use `protocol_hash` for machine comparisons. |
 | `claims` | object | Present and non-empty when `authenticated == true` and the auth provider produced claims. JSON-serializable; nested values follow JSON conventions. |
 
 ### 4.6 Call statistics

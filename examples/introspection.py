@@ -107,13 +107,16 @@ def main() -> None:
         desc = introspect(client_pipe)
 
         print(f"Service: {desc.protocol_name}")
+        print(f"protocol_hash: {desc.protocol_hash}")
         print(f"Methods ({len(desc.methods)}):")
         for name in sorted(desc.methods):
             method = desc.methods[name]
             kind = "unary" if method.method_type == MethodType.UNARY else "stream"
-            params = ", ".join(f"{p}: {method.param_types[p]}" for p in method.param_types)
+            # Arrow schema is the wire-canonical type information.
+            params = ", ".join(f"{f.name}: {f.type}" for f in method.params_schema)
             print(f"  {name} ({kind})")
-            print(f"    {params}")
+            if params:
+                print(f"    {params}")
     finally:
         client_pipe.close()
         thread.join(timeout=5)

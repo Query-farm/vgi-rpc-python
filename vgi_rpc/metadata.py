@@ -24,6 +24,7 @@ __all__ = [
     "LOG_EXTRA_KEY",
     "LOG_LEVEL_KEY",
     "LOG_MESSAGE_KEY",
+    "PROTOCOL_HASH_KEY",
     "PROTOCOL_NAME_KEY",
     "REQUEST_ID_KEY",
     "REQUEST_VERSION",
@@ -82,6 +83,7 @@ SHM_SEGMENT_SIZE_KEY = b"vgi_rpc.shm_segment_size"
 # Introspection (__describe__ response batch metadata)
 PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"
 DESCRIBE_VERSION_KEY = b"vgi_rpc.describe_version"
+PROTOCOL_HASH_KEY = b"vgi_rpc.protocol_hash"
 
 # W3C trace context propagation (on request batch custom metadata)
 TRACEPARENT_KEY = b"traceparent"

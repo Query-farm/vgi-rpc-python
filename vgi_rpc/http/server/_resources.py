@@ -259,7 +259,9 @@ class _UploadUrlResource:
                 error_type,
                 http_status=http_status.value,
                 server_version=self._app._server.server_version,
-                error_message=str(_upload_exc)[:500] if _upload_exc is not None else "",
+                protocol_hash=self._app._server.protocol_hash,
+                protocol_version=self._app._server.protocol_version,
+                error_message=str(_upload_exc) if _upload_exc is not None else "",
             )
 
         resp_buf.seek(0)

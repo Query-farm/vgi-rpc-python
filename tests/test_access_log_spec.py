@@ -144,6 +144,7 @@ class TestValidator:
             "message": "Svc.greet ok",
             "server_id": "abc123",
             "protocol": "Svc",
+            "protocol_hash": "0" * 64,
             "method": "greet",
             "method_type": "unary",
             "principal": "",

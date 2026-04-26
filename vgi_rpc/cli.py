@@ -831,13 +831,13 @@ def describe(ctx: typer.Context) -> None:
             "server_id": desc.server_id,
             "request_version": desc.request_version,
             "describe_version": desc.describe_version,
+            "protocol_hash": desc.protocol_hash,
             "methods": {
                 name: {
                     "method_type": md.method_type.value,
-                    "doc": md.doc,
                     "has_return": md.has_return,
-                    "param_types": md.param_types,
-                    "param_defaults": md.param_defaults,
+                    "params_schema": str(md.params_schema),
+                    "result_schema": str(md.result_schema),
                 }
                 for name, md in sorted(desc.methods.items())
             },
@@ -1047,8 +1047,11 @@ def call(
     else:
         kwargs = {}
 
-    # Merge defaults
-    merged: dict[str, object] = {**md.param_defaults, **kwargs}
+    # Defaults are no longer carried on the wire (DESCRIBE_VERSION 4 dropped
+    # the Python-flavoured ``param_defaults_json`` field). Server-side
+    # ``_validate_params`` still merges defaults from the Protocol class, so
+    # missing optional kwargs are filled in by the server.
+    merged: dict[str, object] = dict(kwargs)
 
     on_log = _get_on_log(config)
 
