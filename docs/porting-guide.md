@@ -33,7 +33,7 @@ Workers SHOULD respond to `SIGTERM`/`SIGINT` by shutting down cleanly so the tes
 
 ### 3. The access log
 
-This is the conformance proof for observability. The full spec is in [`access-log-spec.md`](access-log-spec.md); the schema is [`vgi_rpc/access_log.schema.json`](../vgi_rpc/access_log.schema.json). Highlights:
+This is the conformance proof for observability. The full spec is in [`access-log-spec.md`](access-log-spec.md); the schema is [`vgi_rpc/access_log.schema.json`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/access_log.schema.json). Highlights:
 
 - One record per RPC call (or per stream init / per stream continuation).
 - JSON-Lines (NDJSON), UTF-8.
@@ -43,7 +43,7 @@ This is the conformance proof for observability. The full spec is in [`access-lo
 
 ### 4. The conformance service
 
-Your repo must include a runnable conformance worker that registers the [`vgi_rpc.conformance.ConformanceService`](../vgi_rpc/conformance/_protocol.py) protocol. The Python definition is the reference; your port translates each method to native types preserving Arrow schema. Method names, parameter names, and stream-state semantics must match exactly.
+Your repo must include a runnable conformance worker that registers the [`vgi_rpc.conformance.ConformanceService`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/conformance/_protocol.py) protocol. The Python definition is the reference; your port translates each method to native types preserving Arrow schema. Method names, parameter names, and stream-state semantics must match exactly.
 
 Run `vgi-rpc-test --list` to see the test surface. ~150 tests cover unary, streaming, errors, logging, defaults, enums, optionals, externalized batches, and HTTP-specific behavior.
 

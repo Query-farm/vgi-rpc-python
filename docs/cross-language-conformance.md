@@ -79,7 +79,7 @@ Every conformant vgi-rpc worker MUST accept a `--access-log <path>` flag and wri
 vgi-rpc-test --cmd "./my-worker --access-log /tmp/worker.log" --access-log /tmp/worker.log
 ```
 
-Validation is performed against [`access-log-spec.md`](access-log-spec.md) (machine-checkable form: [`vgi_rpc/access_log.schema.json`](../vgi_rpc/access_log.schema.json)). The CLI exit code reflects both suite success and access-log conformance.
+Validation is performed against [`access-log-spec.md`](access-log-spec.md) (machine-checkable form: [`vgi_rpc/access_log.schema.json`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/access_log.schema.json)). The CLI exit code reflects both suite success and access-log conformance.
 
 ## Exit Codes
 

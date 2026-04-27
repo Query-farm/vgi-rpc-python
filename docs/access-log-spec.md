@@ -2,7 +2,7 @@
 
 This document is the cross-language contract for the access log emitted by every conformant vgi-rpc server implementation. The Python implementation in this repository is the reference; other-language implementations (Go, Rust, JS, Java, …) MUST emit records that satisfy this spec so a single tool — `vgi-rpc-test --access-log` — can validate them all.
 
-The machine-checkable form of this spec is [`vgi_rpc/access_log.schema.json`](../vgi_rpc/access_log.schema.json) (JSON Schema 2020-12). Where this document and the schema disagree, **the schema wins**.
+The machine-checkable form of this spec is [`vgi_rpc/access_log.schema.json`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/access_log.schema.json) (JSON Schema 2020-12). Where this document and the schema disagree, **the schema wins**.
 
 ## 1. Stream
 
@@ -128,7 +128,7 @@ The exit code is `0` if every record passes, `1` if any record fails, `2` if the
 
 ## 8. Reference
 
-- JSON Schema: [`vgi_rpc/access_log.schema.json`](../vgi_rpc/access_log.schema.json)
+- JSON Schema: [`vgi_rpc/access_log.schema.json`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/access_log.schema.json)
 - Python emitter: `vgi_rpc/rpc/_server.py` (`_emit_access_log`)
 - Python JSON formatter: `vgi_rpc/logging_utils.py` (`VgiJsonFormatter`)
 - Python validator: `vgi_rpc/access_log_conformance.py`

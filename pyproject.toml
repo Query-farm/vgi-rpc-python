@@ -175,6 +175,7 @@ docs = [
     "mkdocs-section-index>=0.3",
     "mkdocs-d2-plugin>=1.4",
     "pygments>=2.20",
+    "pymdown-extensions>=10.21.2",
 ]
 dev = [
     "aioresponses>=0.7",
