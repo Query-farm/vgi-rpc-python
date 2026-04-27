@@ -287,11 +287,13 @@ def make_wsgi_app(
 
         from vgi_rpc.http._bearer import chain_authenticate
         from vgi_rpc.http._oauth_pkce import (
+            _DEFAULT_ALLOWED_RETURN_ORIGINS,
             _create_oidc_discovery,
             _derive_session_key,
             _OAuthCallbackResource,
             _OAuthLogoutResource,
             _OAuthPkceMiddleware,
+            _OAuthTokenProxyResource,
             build_user_info_html,
             make_cookie_authenticate,
         )
@@ -362,7 +364,15 @@ def make_wsgi_app(
     if _validated_oauth_metadata is not None:
         from vgi_rpc.http._oauth import _OAuthResourceMetadataResource
 
-        well_known = _OAuthResourceMetadataResource(_validated_oauth_metadata)
+        # When PKCE is active and a server-side client_secret is configured,
+        # advertise the proxy token endpoint so SPA clients can perform PKCE
+        # token exchanges without holding the secret themselves.
+        _advertised_token_endpoint: str | None = None
+        if _pkce_active and _validated_oauth_metadata.client_secret is not None:
+            _advertised_token_endpoint = (
+                f"{_pkce_resource_parsed.scheme}://{_pkce_resource_parsed.netloc}{prefix}/_oauth/token"
+            )
+        well_known = _OAuthResourceMetadataResource(_validated_oauth_metadata, _advertised_token_endpoint)
         app.add_route("/.well-known/oauth-protected-resource", well_known)
         if prefix and prefix != "/":
             app.add_route(f"/.well-known/oauth-protected-resource{prefix}", well_known)
@@ -389,6 +399,18 @@ def make_wsgi_app(
             ),
         )
         app.add_route(f"{prefix}/_oauth/logout", _OAuthLogoutResource(prefix, _pkce_secure))
+        # Token-exchange proxy: lets SPA PKCE clients (which cannot safely
+        # hold a client_secret) complete authorization_code/refresh_token
+        # exchanges against IdPs that require client_secret (e.g. Google).
+        app.add_route(
+            f"{prefix}/_oauth/token",
+            _OAuthTokenProxyResource(
+                client_id=_pkce_client_id,
+                client_secret=_pkce_client_secret,
+                oidc_discovery=_pkce_oidc_discovery,
+                allowed_origins=_DEFAULT_ALLOWED_RETURN_ORIGINS,
+            ),
+        )
 
     # Describe page — GET {prefix}/describe (requires both flags and server support)
     describe_page_active = enable_describe_page and server.describe_enabled

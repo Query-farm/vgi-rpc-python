@@ -150,8 +150,27 @@ class _OAuthResourceMetadataResource:
 
     __slots__ = ("_body",)
 
-    def __init__(self, metadata: OAuthResourceMetadata) -> None:
-        self._body = json.dumps(metadata.to_json_dict(), separators=(",", ":")).encode()
+    def __init__(
+        self,
+        metadata: OAuthResourceMetadata,
+        token_endpoint: str | None = None,
+    ) -> None:
+        """Build the cached metadata JSON.
+
+        Args:
+            metadata: The configured OAuth resource metadata.
+            token_endpoint: When set, advertised in the metadata document as
+                ``token_endpoint``.  Used by SPA clients (e.g. Cupola) to
+                route PKCE token exchanges through the vgi-rpc server's
+                ``/_oauth/token`` proxy, which injects the server-side
+                ``client_secret`` before forwarding to the IdP.  This is a
+                non-standard extension to RFC 9728.
+
+        """
+        body = metadata.to_json_dict()
+        if token_endpoint is not None:
+            body["token_endpoint"] = token_endpoint
+        self._body = json.dumps(body, separators=(",", ":")).encode()
 
     def on_get(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Serve the cached JSON metadata document.

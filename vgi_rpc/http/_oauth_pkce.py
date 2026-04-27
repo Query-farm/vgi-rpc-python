@@ -846,6 +846,195 @@ class _OAuthPkceMiddleware:
 
 
 # ---------------------------------------------------------------------------
+# Falcon resource: OAuth token proxy
+# ---------------------------------------------------------------------------
+
+
+_ALLOWED_TOKEN_GRANT_TYPES: frozenset[str] = frozenset(("authorization_code", "refresh_token"))
+
+
+class _OAuthTokenProxyResource:
+    """Falcon resource for ``POST {prefix}/_oauth/token``.
+
+    Public OAuth clients (SPAs) cannot safely hold a ``client_secret``, but
+    some IdPs (notably Google) reject PKCE token-endpoint requests from
+    "Web application" clients unless ``client_secret`` is present.  This
+    resource lets a browser-based client perform the PKCE token exchange
+    against a vgi-rpc server, which injects the configured server-side
+    ``client_secret`` and forwards the request to the IdP's real token
+    endpoint.
+
+    Only ``grant_type=authorization_code`` and ``grant_type=refresh_token``
+    are accepted; any other value is rejected with HTTP 400 so the proxy
+    cannot be abused to obtain client-credentials tokens.
+
+    Forwards both successful and error IdP responses verbatim (status code
+    and JSON body).  CORS preflight (OPTIONS) is handled inline since the
+    response must include ``Access-Control-Allow-Origin`` even when the
+    Falcon-level CORS middleware isn't configured.
+    """
+
+    __slots__ = (
+        "_allowed_origins",
+        "_client_id",
+        "_client_secret",
+        "_oidc_discovery",
+    )
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str | None,
+        oidc_discovery: Callable[[], tuple[str, str] | None],
+        allowed_origins: frozenset[str],
+    ) -> None:
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._oidc_discovery = oidc_discovery
+        self._allowed_origins = allowed_origins
+
+    def _origin_for(self, req: falcon.Request) -> str | None:
+        """Return the request Origin if it is in the allowlist (or localhost)."""
+        origin = req.get_header("Origin")
+        if not origin:
+            return None
+        parsed = urlparse(origin)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        host = parsed.hostname
+        if _is_localhost(host) and parsed.scheme == "http":
+            return origin
+        if origin in self._allowed_origins:
+            return origin
+        return None
+
+    def _set_cors(self, req: falcon.Request, resp: falcon.Response) -> None:
+        origin = self._origin_for(req)
+        if origin is not None:
+            resp.set_header("Access-Control-Allow-Origin", origin)
+            resp.set_header("Vary", "Origin")
+
+    def on_options(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Handle CORS preflight."""
+        self._set_cors(req, resp)
+        resp.set_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        resp.set_header("Access-Control-Allow-Headers", "Content-Type")
+        resp.set_header("Access-Control-Max-Age", "7200")
+        resp.status = "204 No Content"
+        resp.data = None
+        resp.text = None
+
+    def _json_error(
+        self,
+        resp: falcon.Response,
+        status: str,
+        error: str,
+        description: str,
+    ) -> None:
+        resp.status = status
+        resp.content_type = falcon.MEDIA_JSON
+        resp.data = json.dumps({"error": error, "error_description": description}).encode("utf-8")
+
+    def on_post(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Forward an authorization_code or refresh_token exchange to the IdP."""
+        self._set_cors(req, resp)
+
+        ctype = (req.content_type or "").split(";")[0].strip().lower()
+        if ctype != "application/x-www-form-urlencoded":
+            self._json_error(
+                resp,
+                "415 Unsupported Media Type",
+                "invalid_request",
+                "Content-Type must be application/x-www-form-urlencoded",
+            )
+            return
+
+        # Falcon parses form bodies into req.params when content type matches
+        # and auto_parse_form_urlencoded is enabled. We re-read from the body
+        # ourselves to avoid relying on that setting.
+        try:
+            raw = req.bounded_stream.read()
+        except Exception:
+            self._json_error(resp, "400 Bad Request", "invalid_request", "Could not read request body")
+            return
+        from urllib.parse import parse_qs as _parse_qs
+
+        parsed = _parse_qs(raw.decode("utf-8", errors="replace"), keep_blank_values=False)
+        form: dict[str, str] = {k: v[0] for k, v in parsed.items() if v}
+
+        grant_type = form.get("grant_type", "")
+        if grant_type not in _ALLOWED_TOKEN_GRANT_TYPES:
+            self._json_error(
+                resp,
+                "400 Bad Request",
+                "unsupported_grant_type",
+                f"grant_type must be one of {sorted(_ALLOWED_TOKEN_GRANT_TYPES)}",
+            )
+            return
+
+        submitted_client_id = form.get("client_id", "")
+        if submitted_client_id and submitted_client_id != self._client_id:
+            self._json_error(
+                resp,
+                "400 Bad Request",
+                "invalid_client",
+                "client_id does not match the configured client",
+            )
+            return
+
+        endpoints = self._oidc_discovery()
+        if endpoints is None:
+            self._json_error(
+                resp,
+                "502 Bad Gateway",
+                "server_error",
+                "Authorization server discovery failed",
+            )
+            return
+        _, token_endpoint = endpoints
+
+        # Build the upstream form: include the proxy-injected client_secret,
+        # ensure client_id is set even if the SPA omitted it.
+        upstream: dict[str, str] = {
+            "grant_type": grant_type,
+            "client_id": self._client_id,
+        }
+        if self._client_secret is not None:
+            upstream["client_secret"] = self._client_secret
+
+        # Forward all standard PKCE / refresh fields the SPA submitted.
+        for key in ("code", "code_verifier", "redirect_uri", "refresh_token", "scope"):
+            value = form.get(key)
+            if value is not None:
+                upstream[key] = value
+
+        try:
+            with httpx.Client() as client:
+                upstream_resp = client.post(token_endpoint, data=upstream, timeout=15.0)
+            body_bytes = upstream_resp.content
+            status_code = upstream_resp.status_code
+        except Exception as exc:
+            logger.warning("OAuth token proxy: upstream request failed: %s", exc)
+            self._json_error(resp, "502 Bad Gateway", "server_error", f"Upstream token endpoint failed: {exc}")
+            return
+
+        # Pass the IdP response through verbatim (status + JSON body).
+        resp.status = f"{status_code} {_status_phrase(status_code)}"
+        resp.content_type = upstream_resp.headers.get("content-type") or falcon.MEDIA_JSON
+        resp.data = body_bytes
+
+
+def _status_phrase(code: int) -> str:
+    """Best-effort HTTP status reason phrase for Falcon's resp.status string."""
+    import http
+
+    try:
+        return http.HTTPStatus(code).phrase
+    except ValueError:
+        return "Unknown"
+
+
+# ---------------------------------------------------------------------------
 # Cookie authenticate function
 # ---------------------------------------------------------------------------
 
