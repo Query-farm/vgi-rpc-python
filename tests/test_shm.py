@@ -360,6 +360,35 @@ class TestShmSegment:
         with pytest.raises(ValueError, match="must be >"):
             ShmSegment.create(HEADER_SIZE)
 
+    def test_create_handles_non_page_aligned_size(self) -> None:
+        """Non-page-aligned create must still survive a self-attach.
+
+        macOS rounds shm sizes up to a page boundary (16 KiB on Apple
+        Silicon). ``data_size`` in the header must reflect the
+        post-rounding actual mmap size — not the requested size — or a
+        peer attaching with ``shm.size`` will see a data_size mismatch.
+        """
+        # Pick a size that is intentionally not a multiple of 4096 or
+        # 16384 so both Linux and macOS round it up.
+        requested = HEADER_SIZE + 4097
+        shm1 = ShmSegment.create(requested)
+        try:
+            # The post-rounding actual size and the header data_size
+            # must agree, so a peer attaching with the actual size
+            # validates cleanly.
+            shm2 = ShmSegment.attach(shm1.name, shm1.size, track=False)
+            try:
+                assert shm2.size == shm1.size
+                assert shm2.allocator.num_allocs == 0
+                # And the segment is still usable.
+                off = shm2.allocator.allocate(1024)
+                assert off is not None
+                assert shm1.allocator.num_allocs == 1
+            finally:
+                shm2.close()
+        finally:
+            _cleanup_shm(shm1)
+
     def test_attach(self) -> None:
         """Attach to existing segment validates header."""
         shm1 = ShmSegment.create(128 * 1024)

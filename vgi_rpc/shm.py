@@ -346,6 +346,11 @@ class ShmSegment:
 
         Args:
             size: Total segment size in bytes (must be > HEADER_SIZE).
+                The OS may round up to a page boundary (e.g. 16 KiB on
+                macOS / Apple Silicon); the actual post-mmap size is
+                what gets written into the header so cross-language
+                peers attaching with the actual ``shm.size`` see a
+                consistent ``data_size`` field.
 
         """
         if size <= HEADER_SIZE:
@@ -353,8 +358,13 @@ class ShmSegment:
         shm = SharedMemory(create=True, size=size)
         buf = shm.buf
         assert buf is not None  # always valid after create
-        ShmAllocator.initialize(buf, size)
-        allocator = ShmAllocator(buf, size)
+        # Use shm.size (the actual post-rounding mmap size), not the
+        # caller's requested size. macOS rounds shm sizes up to a page
+        # boundary, and a peer (Python or Rust) attaching with the
+        # actual size would otherwise see a data_size mismatch.
+        actual_size = shm.size
+        ShmAllocator.initialize(buf, actual_size)
+        allocator = ShmAllocator(buf, actual_size)
         return cls(shm, allocator)
 
     @classmethod
@@ -363,7 +373,10 @@ class ShmSegment:
 
         Args:
             name: The shared memory segment name.
-            size: Expected segment size.
+            size: Expected segment size. The kernel may report a
+                slightly different ``shm.size`` after attach (page
+                rounding); the allocator and header validation use the
+                kernel-reported size.
             track: Whether the resource tracker should track this segment.
                 Set to ``False`` when the caller does not own the segment
                 (e.g. dynamic attachment in a subprocess).
@@ -372,7 +385,11 @@ class ShmSegment:
         shm = SharedMemory(name=name, create=False, size=size, track=track)
         buf = shm.buf
         assert buf is not None  # always valid after attach
-        allocator = ShmAllocator(buf, size)
+        # Trust the kernel's reported size, not the caller's hint, so a
+        # peer that created the segment with a non-page-aligned size
+        # (where the OS rounded up) still validates correctly.
+        actual_size = shm.size
+        allocator = ShmAllocator(buf, actual_size)
         return cls(shm, allocator)
 
     def allocate_and_write(
