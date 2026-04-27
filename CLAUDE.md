@@ -62,7 +62,9 @@ The full process before committing code is
 
 - **`metadata.py`** — Shared helpers for `pa.KeyValueMetadata`. Centralises well-known metadata key constants (`vgi_rpc.method`, `vgi_rpc.stream_state#b64`, `vgi_rpc.log_level`, `vgi_rpc.log_message`, `vgi_rpc.log_extra`, `vgi_rpc.server_id`, `vgi_rpc.request_version`, `vgi_rpc.location`, `vgi_rpc.shm_offset`, etc.) and provides encoding, merging, and key-stripping utilities used by `rpc/`, `http/`, `log.py`, `external.py`, `shm.py`, and `introspect.py`.
 
-- **`introspect.py`** — Introspection support. Provides the built-in `__describe__` RPC method, `MethodDescription`, `ServiceDescription`, `build_describe_batch`, `parse_describe_batch`, and `introspect()`. Enabled on `RpcServer` via `enable_describe=True`.
+- **`introspect.py`** — Introspection support. Provides the built-in `__describe__` RPC method, `MethodDescription`, `ServiceDescription`, `build_describe_batch`, `parse_describe_batch`, `compute_protocol_hash`, and `introspect()`. Enabled on `RpcServer` via `enable_describe=True`. The wire format is `DESCRIBE_VERSION = "4"` — slim 8-column schema (`name`, `method_type`, `has_return`, `params_schema_ipc`, `result_schema_ipc`, `has_header`, `header_schema_ipc`, `is_exchange`). Python-flavoured fields (`doc`, `param_types_json`, `param_defaults_json`, `param_docs_json`) were dropped in v4 so the wire stays language-neutral; the Protocol source class is the source of truth for human-readable type names, defaults, and docstrings. The response batch's custom metadata also carries `vgi_rpc.protocol_hash` — a SHA-256 hex digest over the canonical describe payload that uniquely identifies the protocol contract within a process and is stable across runs/builds for the same Protocol.
+
+- **`access_log.schema.json`** + **`access_log_conformance.py`** — Cross-language access-log spec. Every conformant server emits one JSON record per RPC call on the `vgi_rpc.access` logger; the schema is enforced by `vgi-rpc-test --access-log <path>`. Always-required fields include `protocol_hash` (the hash from `__describe__`) so consumers reading archived JSONL can decide whether a cached schema decoder still applies; `protocol_version` (operator-supplied free-form label) is optional. See `docs/access-log-spec.md` for the full contract and `docs/porting-guide.md` for the cross-language conformance status of Go/TypeScript/Java/Rust ports.
 
 - **`shm.py`** — Shared memory transport support. Provides `ShmAllocator`, `ShmSegment`, and pointer batch helpers for zero-copy Arrow IPC batch transfer between co-located processes. Used by `ShmPipeTransport`.
 
@@ -100,6 +102,11 @@ For HTTP transport, the wire protocol maps to separate endpoints: `POST /vgi/{me
 **Authentication**: `AuthContext` (frozen dataclass) carries `domain`, `authenticated`, `principal`, and `claims`. For HTTP transport, `make_wsgi_app(authenticate=...)` installs `_AuthMiddleware` that calls the callback on each request and populates `CallContext.auth`. Pipe transport gets anonymous auth by default. Methods can call `ctx.auth.require_authenticated()` to gate access.
 
 **Server identity**: Each `RpcServer` gets a `server_id` (auto-generated 12-char hex or caller-supplied). This ID is attached to all log and error batches as `vgi_rpc.server_id` metadata for distributed tracing. `RpcServer` also accepts `enable_describe=True` to register the synthetic `__describe__` introspection method.
+
+**Protocol identity**: `RpcServer` computes `protocol_hash` (SHA-256) over the canonical `__describe__` payload at construction. Two answer-different questions:
+- `server_version` (constructor arg, free-form): which *build* produced this record. Used for rollout/rollback dashboards.
+- `protocol_version` (constructor arg, free-form): which release of the *protocol contract* this is. Human label.
+- `protocol_hash` (auto-computed): byte-stable identity of the *Protocol*. Decoders trust this; humans read the version strings. Surfaced in `__describe__` response metadata and on every access-log record.
 
 **Error propagation**: Server exceptions become zero-row batches with error metadata; clients receive `RpcError` with `error_type`, `error_message`, and `remote_traceback`. The transport stays clean for subsequent requests.
 
