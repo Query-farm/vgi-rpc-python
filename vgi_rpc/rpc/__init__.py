@@ -75,6 +75,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -272,6 +273,49 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def _configure_access_log(
+    *,
+    path: str,
+    max_bytes: int,
+    backup_count: int,
+    when: str | None,
+    max_record_bytes: int,
+    server_id: str,
+) -> None:
+    """Attach a handler to the ``vgi_rpc.access`` logger.
+
+    The path is expanded with ``{pid}`` and ``{server_id}`` placeholders.
+    If ``max_bytes`` > 0 a ``RotatingFileHandler`` is used; if ``when`` is
+    set a ``TimedRotatingFileHandler`` is used; otherwise a plain
+    ``FileHandler`` (current default behaviour).
+    """
+    from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+
+    from vgi_rpc.logging_utils import VgiAccessLogFormatter
+
+    resolved_path = path.format(pid=os.getpid(), server_id=server_id)
+    parent = os.path.dirname(resolved_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    handler: logging.Handler
+    if max_bytes > 0:
+        handler = RotatingFileHandler(
+            resolved_path, mode="a", maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
+        )
+    elif when:
+        handler = TimedRotatingFileHandler(
+            resolved_path, when=when, backupCount=backup_count, encoding="utf-8", utc=True
+        )
+    else:
+        handler = logging.FileHandler(resolved_path, mode="a", encoding="utf-8")
+
+    handler.setFormatter(VgiAccessLogFormatter(max_record_bytes=max_record_bytes))
+    access_logger = logging.getLogger("vgi_rpc.access")
+    access_logger.setLevel(logging.INFO)
+    access_logger.addHandler(handler)
+
+
 def run_server(protocol_or_server: type | RpcServer, implementation: object | None = None) -> None:
     """Serve RPC requests, defaulting to stdin/stdout pipe transport.
 
@@ -313,21 +357,46 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     parser.add_argument(
         "--access-log",
         metavar="PATH",
-        default=None,
-        help="Append JSONL access log records to PATH (vgi_rpc.access logger at INFO).",
+        default=os.environ.get("VGI_RPC_ACCESS_LOG"),
+        help=(
+            "Append JSONL access log records to PATH (vgi_rpc.access logger at INFO). "
+            "PATH may contain {pid} and {server_id} placeholders. "
+            "Env: VGI_RPC_ACCESS_LOG."
+        ),
+    )
+    parser.add_argument(
+        "--access-log-max-bytes",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_ACCESS_LOG_MAX_BYTES", "0")),
+        help="Rotate the access log at this size in bytes (0 = no rotation). Env: VGI_RPC_ACCESS_LOG_MAX_BYTES.",
+    )
+    parser.add_argument(
+        "--access-log-backup-count",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_ACCESS_LOG_BACKUP_COUNT", "5")),
+        help="Number of rotated access-log files to retain. Env: VGI_RPC_ACCESS_LOG_BACKUP_COUNT.",
+    )
+    parser.add_argument(
+        "--access-log-when",
+        default=os.environ.get("VGI_RPC_ACCESS_LOG_WHEN"),
+        help=(
+            "Time-based rotation interval (e.g. 'H', 'D', 'midnight'); mutually exclusive with "
+            "--access-log-max-bytes. Env: VGI_RPC_ACCESS_LOG_WHEN."
+        ),
+    )
+    parser.add_argument(
+        "--access-log-max-record-bytes",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_ACCESS_LOG_MAX_RECORD_BYTES", "1048576")),
+        help=(
+            "Maximum size in bytes of one access-log record (default 1048576 = 1 MiB). "
+            "Env: VGI_RPC_ACCESS_LOG_MAX_RECORD_BYTES."
+        ),
     )
     args = parser.parse_args()
 
-    if args.access_log:
-        import logging as _logging
-
-        from vgi_rpc.logging_utils import VgiJsonFormatter
-
-        _handler = _logging.FileHandler(args.access_log, mode="a", encoding="utf-8")
-        _handler.setFormatter(VgiJsonFormatter())
-        _access = _logging.getLogger("vgi_rpc.access")
-        _access.setLevel(_logging.INFO)
-        _access.addHandler(_handler)
+    if args.access_log_max_bytes and args.access_log_when:
+        raise SystemExit("--access-log-max-bytes and --access-log-when are mutually exclusive")
 
     if isinstance(protocol_or_server, RpcServer):
         if implementation is not None:
@@ -339,6 +408,16 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         server = RpcServer(protocol_or_server, implementation, enable_describe=args.describe)
     else:
         raise TypeError(f"Expected a Protocol class or RpcServer, got {type(protocol_or_server).__name__}")
+
+    if args.access_log:
+        _configure_access_log(
+            path=args.access_log,
+            max_bytes=args.access_log_max_bytes,
+            backup_count=args.access_log_backup_count,
+            when=args.access_log_when,
+            max_record_bytes=args.access_log_max_record_bytes,
+            server_id=server.server_id,
+        )
 
     if args.http:
         try:

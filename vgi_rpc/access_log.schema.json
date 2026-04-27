@@ -145,6 +145,18 @@
     "output_bytes": {
       "type": "integer",
       "minimum": 0
+    },
+    "truncated": {
+      "description": "Set when the formatter shed fields to keep the line under a per-record cap. true = field-level truncation; \"record_too_large\" = the sentinel form where most optional fields were dropped.",
+      "oneOf": [
+        {"const": true},
+        {"const": "record_too_large"}
+      ]
+    },
+    "original_request_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Length in characters of the request_data field that was dropped due to truncation."
     }
   },
   "allOf": [
@@ -184,10 +196,11 @@
       }
     },
     {
-      "description": "method_type=unary requires request_data",
+      "description": "method_type=unary requires request_data unless the record was truncated",
       "if": {
         "properties": {"method_type": {"const": "unary"}},
-        "required": ["method_type"]
+        "required": ["method_type"],
+        "not": {"required": ["truncated"]}
       },
       "then": {
         "required": ["request_data"]

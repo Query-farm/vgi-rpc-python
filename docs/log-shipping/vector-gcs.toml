@@ -1,0 +1,28 @@
+# Vector config: tail vgi-rpc access logs and ship to Google Cloud Storage.
+# Auth is picked up from Application Default Credentials (workload identity,
+# GKE node SA, or GOOGLE_APPLICATION_CREDENTIALS).
+
+[sources.vgi_rpc_access]
+type            = "file"
+include         = ["/var/log/vgi-rpc/access-*.jsonl*"]
+read_from       = "beginning"
+max_line_bytes  = 1048576
+
+[transforms.parse]
+type    = "remap"
+inputs  = ["vgi_rpc_access"]
+source  = '''
+. = parse_json!(.message)
+'''
+
+[sinks.gcs]
+type           = "gcp_cloud_storage"
+inputs         = ["parse"]
+bucket         = "my-vgi-rpc-access-logs"
+key_prefix     = "vgi-rpc/{{ server_id }}/%Y/%m/%d/"
+compression    = "gzip"
+encoding.codec = "ndjson"
+
+  [sinks.gcs.batch]
+  max_bytes   = 10485760
+  timeout_secs = 60

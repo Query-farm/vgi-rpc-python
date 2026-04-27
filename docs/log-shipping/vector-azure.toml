@@ -1,0 +1,31 @@
+# Vector config: tail vgi-rpc access logs and ship to Azure Blob Storage.
+# Auth is picked up via managed identity (preferred) or AZURE_* env vars /
+# the connection_string field below if you must use a static credential.
+
+[sources.vgi_rpc_access]
+type            = "file"
+include         = ["/var/log/vgi-rpc/access-*.jsonl*"]
+read_from       = "beginning"
+max_line_bytes  = 1048576
+
+[transforms.parse]
+type    = "remap"
+inputs  = ["vgi_rpc_access"]
+source  = '''
+. = parse_json!(.message)
+'''
+
+[sinks.azure]
+type           = "azure_blob"
+inputs         = ["parse"]
+container_name = "vgi-rpc-access-logs"
+# Prefer managed identity: leave connection_string and storage_account unset
+# and grant the pod's identity Storage Blob Data Contributor on the container.
+storage_account = "myaccountname"
+blob_prefix    = "vgi-rpc/{{ server_id }}/%Y/%m/%d/"
+compression    = "gzip"
+encoding.codec = "ndjson"
+
+  [sinks.azure.batch]
+  max_bytes   = 10485760
+  timeout_secs = 60

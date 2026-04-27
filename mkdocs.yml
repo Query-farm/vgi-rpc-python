@@ -132,6 +132,8 @@ nav:
     - Examples: examples.md
     - Hosting: hosting.md
     - Access Log: access-log.md
+    - Access Log Specification: access-log-spec.md
+    - Log Shipping: log-shipping/README.md
     - Conformance Testing: cross-language-conformance.md
   - About:
     - Benchmarks: benchmarks.md

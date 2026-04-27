@@ -111,6 +111,41 @@ All conditional behavior is keyed off `method_type` (and, for streams, whether t
 | `cancelled` present | Stream call cancelled by client. |
 | `error_message` non-empty | `status == "error"`. |
 
+## 5b. Truncation
+
+Downstream log shippers (Vector's `file` source, Fluent Bit's `tail` input) impose a per-line ceiling — Vector defaults to 100 KiB and Fluent Bit's `Buffer_Max_Size` defaults to 256 KiB. Lines longer than the shipper's ceiling are silently dropped.
+
+To stay compatible, an emitter MAY enforce a per-record byte cap. When it does, it MUST shed fields in this order and signal the truncation via top-level keys:
+
+1. Drop `request_data` and add `original_request_bytes` (integer, character length of the dropped field). Set `truncated: true`.
+2. Replace `claims` with `{}`. Keep `truncated: true`.
+3. If the record still exceeds the cap, emit a sentinel form: keep all always-required envelope fields plus `error_message` (when `status == "error"`) and set `truncated: "record_too_large"`. All other optional fields are dropped.
+
+`error_message` MUST NOT be truncated — operators rely on the full server-side message for debugging. The Python reference implementation uses a default cap of 1 048 576 bytes (1 MiB), configurable via `--access-log-max-record-bytes` or the env var `VGI_RPC_ACCESS_LOG_MAX_RECORD_BYTES`. Pair the cap with shipper configs that raise their per-line limits to match (Vector's `max_line_bytes`, Fluent Bit's `Buffer_Max_Size`).
+
+| Field | Type | Condition |
+|---|---|---|
+| `truncated` | boolean or `"record_too_large"` | Present iff field-shedding was applied. `true` = at least one optional field dropped. `"record_too_large"` = sentinel form; most optional fields dropped. |
+| `original_request_bytes` | integer | Present when `request_data` was dropped due to truncation. Reports the character length of the dropped string. |
+
+A `unary` record carrying `truncated` is NOT required to also carry `request_data` — the schema relaxes that rule when truncation is signalled.
+
+## 5c. Encoding & atomicity
+
+- One JSON object per line, terminated by `\n`. UTF-8 encoded. No literal newlines inside field values (the standard `json.dumps` escapes them).
+- A single emitter process appending via the stdlib `logging.FileHandler` is thread-safe (the handler holds a lock) and atomic on Linux.
+- **Two processes writing to the same access-log file is unsupported.** Concurrent appends from multiple processes can interleave, and concurrent rotation will race. Run one access-log file per process — use `{pid}` and/or `{server_id}` placeholders in the path. The Python reference implementation expands these placeholders in `--access-log` paths automatically.
+
+## 5d. Rotation
+
+Implementations MAY rotate the access log via rename (e.g. `access.jsonl` → `access.jsonl.1`). Both `logging.handlers.RotatingFileHandler` (size-based) and `TimedRotatingFileHandler` (time-based) in Python's stdlib implement this correctly, and Vector and Fluent Bit are designed to follow rename-rotated files. **Do not truncate-in-place** — shippers will lose their read position.
+
+The Python reference implementation exposes:
+
+- `--access-log-max-bytes N` / `VGI_RPC_ACCESS_LOG_MAX_BYTES` — size-based rotation when > 0.
+- `--access-log-when STR` / `VGI_RPC_ACCESS_LOG_WHEN` — time-based rotation (e.g. `H`, `D`, `midnight`); mutually exclusive with `--access-log-max-bytes`.
+- `--access-log-backup-count N` / `VGI_RPC_ACCESS_LOG_BACKUP_COUNT` — number of rotated files retained (default 5).
+
 ## 6. Extra fields
 
 Implementations MAY add fields beyond those defined here. Validators MUST NOT reject records carrying unknown fields (`additionalProperties: true`). Conformance is measured by what the schema requires, not by what it forbids.
@@ -133,3 +168,4 @@ The exit code is `0` if every record passes, `1` if any record fails, `2` if the
 - Python JSON formatter: `vgi_rpc/logging_utils.py` (`VgiJsonFormatter`)
 - Python validator: `vgi_rpc/access_log_conformance.py`
 - Cross-language conformance overview: [`cross-language-conformance.md`](cross-language-conformance.md)
+- Reference shipper configs (Vector and Fluent Bit, S3/GCS/Azure): [`log-shipping/`](log-shipping/)

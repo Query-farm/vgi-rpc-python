@@ -1,0 +1,29 @@
+# Vector config: tail vgi-rpc access logs and ship to AWS S3.
+# Auth is picked up from the environment (instance profile, task role, AWS_* env).
+# Adjust bucket, region, and key_prefix for your deployment.
+
+[sources.vgi_rpc_access]
+type            = "file"
+include         = ["/var/log/vgi-rpc/access-*.jsonl*"]
+read_from       = "beginning"
+max_line_bytes  = 1048576
+
+[transforms.parse]
+type    = "remap"
+inputs  = ["vgi_rpc_access"]
+source  = '''
+. = parse_json!(.message)
+'''
+
+[sinks.s3]
+type           = "aws_s3"
+inputs         = ["parse"]
+bucket         = "my-vgi-rpc-access-logs"
+region         = "us-east-1"
+key_prefix     = "vgi-rpc/{{ server_id }}/%Y/%m/%d/"
+compression    = "gzip"
+encoding.codec = "ndjson"
+
+  [sinks.s3.batch]
+  max_bytes   = 10485760
+  timeout_secs = 60
