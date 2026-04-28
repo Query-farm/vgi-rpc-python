@@ -29,6 +29,7 @@ Everything else is optional and can be added incrementally.
 | [External Storage](external.md) | `ExternalLocationConfig`, `S3Storage`, `GCSStorage` | `pip install vgi-rpc[s3\|gcs]` |
 | [Logging](logging.md) | `Level`, `Message`, `VgiJsonFormatter` | If using client-directed logs |
 | [OpenTelemetry](otel.md) | `OtelConfig`, `instrument_server` | `pip install vgi-rpc[otel]` |
+| [Sentry](sentry.md) | `SentryConfig`, `instrument_server_sentry`; auto-attaches when `sentry_sdk` is initialised | `pip install vgi-rpc[sentry]` |
 | [CLI](cli.md) | `vgi-rpc describe` and `vgi-rpc call` commands | `pip install vgi-rpc[cli]` |
 
 ## Import Convention

@@ -45,6 +45,7 @@ app = make_wsgi_app(
 | `cors_origins` | Enable CORS for browser clients | None (disabled) |
 | `upload_url_provider` | Enable pre-signed upload URL vending | None (disabled) |
 | `otel_config` | [OpenTelemetry](api/otel.md) instrumentation | None (disabled) |
+| `sentry_config` | [Sentry](api/sentry.md) error reporting (auto-attaches with default config when `sentry_sdk.is_initialized()`; pass this kwarg to override) | None (disabled) |
 | `enable_not_found_page` | Friendly HTML 404 for unmatched routes | `True` |
 | `enable_landing_page` | HTML landing page at `GET {prefix}` | `True` |
 | `enable_describe_page` | HTML describe page at `GET {prefix}/describe` | `True` (requires `enable_describe=True`) |
@@ -421,6 +422,7 @@ Before going live, verify these settings:
 - **Introspection** — `enable_describe=True` for [service discovery](api/introspection.md) (disable in production if sensitive)
 - **Logging** — structured JSON logging with [`VgiJsonFormatter`](api/logging.md)
 - **OpenTelemetry** — [`otel_config`](api/otel.md) for distributed tracing (`pip install vgi-rpc[otel]`)
+- **Sentry** — [`sentry_config`](api/sentry.md) for unhandled exception reporting (`pip install vgi-rpc[sentry]`); auto-attaches with default config whenever `sentry_sdk.init()` has run in the worker
 - **Not-found page** — `enable_not_found_page=True` (default) shows a branded HTML 404; set to `False` if you prefer your reverse proxy's error pages
 - **Landing page** — `enable_landing_page=True` (default) serves an HTML page at `GET {prefix}` with protocol name, server ID, and links
 - **Describe page** — `enable_describe_page=True` (default) serves an HTML API reference at `GET {prefix}/describe` when `enable_describe=True`; disable in production if sensitive

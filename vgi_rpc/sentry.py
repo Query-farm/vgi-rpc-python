@@ -10,7 +10,8 @@ auth principal, server ID, etc.).
 Requires ``pip install vgi-rpc[sentry]`` (sentry-sdk>=2.0).
 
 Users must initialize Sentry separately via ``sentry_sdk.init()`` — this
-module does **not** manage the DSN or SDK lifecycle.
+module does **not** manage the DSN or SDK lifecycle.  The Sentry SDK itself
+auto-initialises from the standard ``SENTRY_DSN`` environment variable.
 
 Usage::
 
@@ -20,6 +21,21 @@ Usage::
     sentry_sdk.init(dsn="https://...")
     server = RpcServer(MyProtocol, MyImpl())
     instrument_server_sentry(server)  # uses default config
+
+Automatic instrumentation
+-------------------------
+
+If ``sentry_sdk`` is already imported and ``sentry_sdk.is_initialized()``
+returns ``True`` when ``RpcServer`` is constructed, the framework attaches
+:func:`instrument_server_sentry` with default config automatically.  No
+flag, no extra env var — if Sentry is on (e.g. ``SENTRY_DSN`` was set and
+the SDK auto-initialised), vgi-rpc reports RPC errors with full context.
+
+To customise (``custom_tags``, ``claim_tags``, ``enable_performance``,
+``ignored_exceptions``), call :func:`instrument_server_sentry` explicitly
+or pass ``sentry_config=`` to ``make_wsgi_app`` / ``serve_http``.  The
+explicit call always wins: it **replaces** any auto-attached default hook
+in the dispatch chain regardless of call order.
 """
 
 from __future__ import annotations
@@ -36,6 +52,8 @@ from vgi_rpc.rpc._common import (
     AuthContext,
     CallStatistics,
     HookToken,
+    _CompositeDispatchHook,
+    _DispatchHook,
     _format_claim_value,
     _register_dispatch_hook,
 )
@@ -80,9 +98,13 @@ class SentryConfig:
 
 
 def instrument_server_sentry(server: RpcServer, config: SentryConfig | None = None) -> RpcServer:
-    """Attach Sentry error reporting to a server.
+    """Attach Sentry error reporting to a server, replacing any prior Sentry hook.
 
     Must be called before ``serve()`` — not thread-safe during dispatch.
+    If a ``_SentryDispatchHook`` is already registered on *server* (e.g. an
+    auto-attached default), it is removed and replaced with one configured
+    from *config*.  This guarantees explicit calls always win regardless of
+    whether they happen before or after auto-attach.
 
     Args:
         server: The ``RpcServer`` to instrument.
@@ -94,9 +116,65 @@ def instrument_server_sentry(server: RpcServer, config: SentryConfig | None = No
     """
     if config is None:
         config = SentryConfig()
+    server._dispatch_hook = _strip_sentry_hook(server._dispatch_hook)
     hook = _SentryDispatchHook(config, server.protocol_name, server.server_id)
     server._dispatch_hook = _register_dispatch_hook(server._dispatch_hook, hook)
     return server
+
+
+def _has_sentry_hook(hook: _DispatchHook | None) -> bool:
+    """Return True when *hook* (or any composite child) is a ``_SentryDispatchHook``."""
+    if hook is None:
+        return False
+    if isinstance(hook, _SentryDispatchHook):
+        return True
+    if isinstance(hook, _CompositeDispatchHook):
+        return any(isinstance(inner, _SentryDispatchHook) for inner in hook._hooks)
+    return False
+
+
+def _strip_sentry_hook(hook: _DispatchHook | None) -> _DispatchHook | None:
+    """Return *hook* with any ``_SentryDispatchHook`` removed from the chain."""
+    if hook is None or isinstance(hook, _SentryDispatchHook):
+        return None
+    if isinstance(hook, _CompositeDispatchHook):
+        kept = [inner for inner in hook._hooks if not isinstance(inner, _SentryDispatchHook)]
+        if len(kept) == len(hook._hooks):
+            return hook
+        if not kept:
+            return None
+        if len(kept) == 1:
+            return kept[0]
+        return _CompositeDispatchHook(kept)
+    return hook
+
+
+def _maybe_auto_instrument(server: RpcServer) -> bool:
+    """Attach default Sentry instrumentation when ``sentry_sdk`` has been initialised.
+
+    Called by ``RpcServer.__init__`` whenever ``sentry_sdk`` is already
+    importable in the current process.  No env-var gate: the user's call to
+    ``sentry_sdk.init()`` (or the SDK's own auto-init from ``SENTRY_DSN``)
+    is the signal of intent.  Idempotent — if the server already carries
+    a Sentry hook (e.g. via explicit ``instrument_server_sentry`` or
+    ``sentry_config=`` on ``make_wsgi_app``), this is a no-op.
+
+    Args:
+        server: The ``RpcServer`` to potentially instrument.
+
+    Returns:
+        ``True`` when instrumentation was attached on this call, ``False``
+        otherwise (SDK not initialised or already instrumented).
+
+    """
+    if not sentry_sdk.is_initialized():
+        return False
+    if _has_sentry_hook(server._dispatch_hook):
+        return False
+    hook = _SentryDispatchHook(SentryConfig(), server.protocol_name, server.server_id)
+    server._dispatch_hook = _register_dispatch_hook(server._dispatch_hook, hook)
+    _logger.debug("Auto-attached Sentry instrumentation to server %s", server.server_id)
+    return True
 
 
 # ---------------------------------------------------------------------------

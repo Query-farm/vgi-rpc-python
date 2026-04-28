@@ -9,6 +9,7 @@ import base64
 import contextlib
 import inspect
 import logging
+import sys
 import time
 import uuid
 from collections.abc import Mapping
@@ -340,6 +341,18 @@ class RpcServer:
             len(self._methods),
             extra={"server_id": self._server_id, "protocol": protocol.__name__, "method_count": len(self._methods)},
         )
+
+        # Auto-attach Sentry instrumentation when the SDK is initialised in
+        # this process.  We only consult sentry_sdk when it is already
+        # imported, so this never forces the optional dependency on users
+        # who have not opted into Sentry.
+        if "sentry_sdk" in sys.modules:
+            try:
+                from vgi_rpc.sentry import _maybe_auto_instrument
+
+                _maybe_auto_instrument(self)
+            except ImportError:
+                _logger.debug("sentry_sdk imported but vgi_rpc.sentry unavailable", exc_info=True)
 
     @property
     def methods(self) -> Mapping[str, RpcMethodInfo]:

@@ -127,6 +127,7 @@ nav:
     - External Storage: api/external.md
     - Logging: api/logging.md
     - OpenTelemetry: api/otel.md
+    - Sentry: api/sentry.md
     - CLI: api/cli.md
   - Guides:
     - Examples: examples.md

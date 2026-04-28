@@ -30,7 +30,14 @@ from vgi_rpc.rpc._common import (
     _CompositeDispatchHook,
     _register_dispatch_hook,
 )
-from vgi_rpc.sentry import SentryConfig, instrument_server_sentry
+from vgi_rpc.sentry import (
+    SentryConfig,
+    _has_sentry_hook,
+    _maybe_auto_instrument,
+    _SentryDispatchHook,
+    _strip_sentry_hook,
+    instrument_server_sentry,
+)
 
 # ---------------------------------------------------------------------------
 # Test protocol + implementation
@@ -601,3 +608,145 @@ class TestSentryAuthTags:
         _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
         tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
         assert "auth.roles" not in tag_calls
+
+
+def _collect_sentry_hooks(hook: object) -> list[_SentryDispatchHook]:
+    """Return every _SentryDispatchHook in a (possibly composite) dispatch chain."""
+    if hook is None:
+        return []
+    if isinstance(hook, _SentryDispatchHook):
+        return [hook]
+    if isinstance(hook, _CompositeDispatchHook):
+        return [inner for inner in hook._hooks if isinstance(inner, _SentryDispatchHook)]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Auto-attach when sentry_sdk.is_initialized()
+# ---------------------------------------------------------------------------
+
+
+class TestSentryHookDetection:
+    """_has_sentry_hook walks the dispatch chain correctly."""
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_detects_direct(self, mock_sdk: MagicMock) -> None:
+        """A bare _SentryDispatchHook is detected."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server)
+        assert _has_sentry_hook(server._dispatch_hook) is True
+
+    def test_handles_none(self) -> None:
+        """No hook returns False."""
+        assert _has_sentry_hook(None) is False
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_detects_in_composite(self, mock_sdk: MagicMock) -> None:
+        """A Sentry hook nested in a composite is found."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        server._dispatch_hook = MagicMock()
+        instrument_server_sentry(server)
+        assert isinstance(server._dispatch_hook, _CompositeDispatchHook)
+        assert _has_sentry_hook(server._dispatch_hook) is True
+
+
+class TestSentryAutoAttach:
+    """Auto-attach gated solely on sentry_sdk.is_initialized()."""
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_attaches_when_initialised(self, mock_sdk: MagicMock) -> None:
+        """Initialised SDK triggers default-config attach."""
+        mock_sdk.is_initialized.return_value = True
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        server._dispatch_hook = None
+        attached = _maybe_auto_instrument(server)
+        assert attached is True
+        assert _has_sentry_hook(server._dispatch_hook)
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_skips_when_not_initialised(self, mock_sdk: MagicMock) -> None:
+        """Un-initialised SDK is a no-op."""
+        mock_sdk.is_initialized.return_value = False
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        server._dispatch_hook = None
+        attached = _maybe_auto_instrument(server)
+        assert attached is False
+        assert server._dispatch_hook is None
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_skips_when_already_instrumented(self, mock_sdk: MagicMock) -> None:
+        """An existing Sentry hook prevents auto re-attach."""
+        mock_sdk.is_initialized.return_value = True
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, SentryConfig(custom_tags={"explicit": "1"}))
+        prior_hook = server._dispatch_hook
+        attached = _maybe_auto_instrument(server)
+        assert attached is False
+        assert server._dispatch_hook is prior_hook
+
+    def test_rpcserver_init_auto_attach_end_to_end(self) -> None:
+        """RpcServer.__init__ wires Sentry whenever the SDK is initialised."""
+        import sentry_sdk as real_sentry_sdk
+
+        with patch.object(real_sentry_sdk, "is_initialized", return_value=True):
+            server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        assert _has_sentry_hook(server._dispatch_hook)
+
+    def test_rpcserver_init_no_attach_when_uninitialised(self) -> None:
+        """When the SDK is not initialised, no auto hook is attached."""
+        import sentry_sdk as real_sentry_sdk
+
+        with patch.object(real_sentry_sdk, "is_initialized", return_value=False):
+            server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        assert not _has_sentry_hook(server._dispatch_hook)
+
+
+class TestSentryReplaceSemantics:
+    """Explicit instrument_server_sentry replaces any existing Sentry hook."""
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_explicit_replaces_auto(self, mock_sdk: MagicMock) -> None:
+        """Auto-attached default is replaced by an explicit configured hook."""
+        mock_sdk.is_initialized.return_value = True
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        # Auto-attach happened in __init__.
+        assert _has_sentry_hook(server._dispatch_hook)
+        explicit_config = SentryConfig(custom_tags={"replaced": "yes"})
+        instrument_server_sentry(server, explicit_config)
+        sentry_hooks = _collect_sentry_hooks(server._dispatch_hook)
+        assert len(sentry_hooks) == 1
+        assert sentry_hooks[0]._config is explicit_config
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_explicit_then_explicit_replaces(self, mock_sdk: MagicMock) -> None:
+        """A later explicit call replaces an earlier explicit one."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, SentryConfig(custom_tags={"first": "1"}))
+        second = SentryConfig(custom_tags={"second": "2"})
+        instrument_server_sentry(server, second)
+        sentry_hooks = _collect_sentry_hooks(server._dispatch_hook)
+        assert len(sentry_hooks) == 1
+        assert sentry_hooks[0]._config is second
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_strip_keeps_other_hooks(self, mock_sdk: MagicMock) -> None:
+        """_strip_sentry_hook leaves non-Sentry hooks intact."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        other = MagicMock()
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        server._dispatch_hook = other
+        instrument_server_sentry(server)
+        # Composite now contains [other, sentry]
+        assert isinstance(server._dispatch_hook, _CompositeDispatchHook)
+        stripped = _strip_sentry_hook(server._dispatch_hook)
+        assert stripped is other  # collapses single-element back to the bare hook
+
+    def test_strip_handles_none(self) -> None:
+        """Stripping None returns None."""
+        assert _strip_sentry_hook(None) is None

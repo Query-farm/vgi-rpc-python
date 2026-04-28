@@ -102,6 +102,7 @@ pip install vgi-rpc[gcs]        # Google Cloud Storage backend
 pip install vgi-rpc[cli]        # CLI tool (typer + httpx)
 pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
+pip install vgi-rpc[sentry]     # Sentry error reporting
 pip install vgi-rpc[oauth]      # JWT authentication (Authlib)
 pip install vgi-rpc[mtls]       # mTLS client certificate auth (cryptography)
 ```
