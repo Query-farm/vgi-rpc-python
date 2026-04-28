@@ -415,7 +415,13 @@ def serve_unix(
     with contextlib.suppress(FileNotFoundError):
         os.unlink(path)
     sock.bind(path)
-    sock.listen(128 if threaded else 1)
+    # Even in sequential mode the listen backlog only governs the kernel's
+    # pending-connection queue; it does *not* affect how many connections we
+    # service at once.  ``listen(1)`` is fragile on macOS, where the backlog
+    # is enforced strictly and the brief window between ``serve()`` returning
+    # and the next ``accept()`` can drop incoming connects with
+    # ECONNREFUSED.  16 leaves margin without changing serving semantics.
+    sock.listen(128 if threaded else 16)
     if wire_transport_logger.isEnabledFor(logging.DEBUG):
         wire_transport_logger.debug(
             "serve_unix: server_id=%s, protocol=%s, path=%s, threaded=%s",
