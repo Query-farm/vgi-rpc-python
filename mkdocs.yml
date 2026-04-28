@@ -134,7 +134,9 @@ nav:
     - Access Log: access-log.md
     - Access Log Specification: access-log-spec.md
     - Log Shipping: log-shipping/README.md
+    - Wire Protocol: WIRE_PROTOCOL.md
     - Conformance Testing: cross-language-conformance.md
+    - Cross-Language Porting Guide: porting-guide.md
   - About:
     - Benchmarks: benchmarks.md
     - Comparison: comparison.md

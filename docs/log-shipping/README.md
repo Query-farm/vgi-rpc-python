@@ -39,4 +39,4 @@ vgi-rpc deliberately does **not** include an in-process uploader. Vector and Flu
 
 ## Validating downstream
 
-The access-log JSON Schema at [`vgi_rpc/access_log.schema.json`](../../vgi_rpc/access_log.schema.json) is authoritative. Use it to validate records after they land in your bucket — for example, with `jsonschema-cli` or DuckDB's `read_json_auto` plus a CHECK constraint.
+The access-log JSON Schema at [`vgi_rpc/access_log.schema.json`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/access_log.schema.json) is authoritative. Use it to validate records after they land in your bucket — for example, with `jsonschema-cli` or DuckDB's `read_json_auto` plus a CHECK constraint.

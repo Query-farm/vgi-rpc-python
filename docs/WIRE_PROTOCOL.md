@@ -576,10 +576,15 @@ Response body:
   [IPC stream: output_schema, (log* + data)*, EOS]
 ```
 
-All produced data batches are included inline. If the response would exceed
-`max_stream_response_bytes`, the server truncates the output and appends a
-**continuation batch**: a zero-row batch with `vgi_rpc.stream_state#b64` in its
-custom metadata. The client then follows up with `/exchange` requests.
+All produced data batches are included inline. If the response body would
+exceed `max_response_bytes` (the operator-configured HTTP body cap), the
+server stops producing and appends a **continuation batch**: a zero-row
+batch with `vgi_rpc.stream_state#b64` in its custom metadata. The client
+then follows up with `/exchange` requests carrying that token. For
+producer streams the wire cap is *soft* — continuation tokens cover the
+overshoot. The companion cap `max_externalized_response_bytes` governs
+external-channel uploads independently and is *hard*: a producer that
+would exceed it surfaces an `RpcError` rather than continuing.
 
 #### Exchange stream init response
 

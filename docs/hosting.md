@@ -38,7 +38,8 @@ app = make_wsgi_app(
 | `signing_key` | HMAC-SHA256 key for stream state tokens | Random per-process (breaks multi-worker!) |
 | `prefix` | URL path prefix for RPC endpoints | `/vgi` |
 | `max_request_bytes` | Advertised request size limit | None (unlimited) |
-| `max_stream_response_bytes` | Split large producer stream responses | None (single response) |
+| `max_response_bytes` | HTTP body cap (every method).  Soft for producer streams (continuation tokens); hard for unary + exchange (200 + EXCEPTION batch on overshoot) | None (unlimited) |
+| `max_externalized_response_bytes` | Cap on bytes uploaded to external storage per HTTP response.  Always hard.  Pre-flighted before the upload | None (unlimited) |
 | `max_upload_bytes` | Advertised upload size limit | None (unlimited) |
 | `authenticate` | Auth callback `(Request) → AuthContext` | None (anonymous) |
 | `cors_origins` | Enable CORS for browser clients | None (disabled) |
@@ -312,7 +313,7 @@ handler = make_lambda_handler(app)
 - Set `externalize_threshold_bytes` well below the payload limit (512 KB is a good starting point) to leave headroom for log batches and metadata
 - Use zstd compression — it reduces S3 storage and fetch time
 - Store the signing key in AWS Secrets Manager and cache it in the Lambda init phase
-- For producer streams, enable `max_stream_response_bytes` to split large streaming responses across multiple exchanges
+- For producer streams, set `max_response_bytes` to split large streaming responses across multiple HTTP turns; the server mints continuation tokens at the cap and the client transparently resumes
 
 ### Cloudflare Workers
 

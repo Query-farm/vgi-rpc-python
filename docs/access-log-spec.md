@@ -168,4 +168,4 @@ The exit code is `0` if every record passes, `1` if any record fails, `2` if the
 - Python JSON formatter: `vgi_rpc/logging_utils.py` (`VgiJsonFormatter`)
 - Python validator: `vgi_rpc/access_log_conformance.py`
 - Cross-language conformance overview: [`cross-language-conformance.md`](cross-language-conformance.md)
-- Reference shipper configs (Vector and Fluent Bit, S3/GCS/Azure): [`log-shipping/`](log-shipping/)
+- Reference shipper configs (Vector and Fluent Bit, S3/GCS/Azure): [`log-shipping/`](log-shipping/README.md)
