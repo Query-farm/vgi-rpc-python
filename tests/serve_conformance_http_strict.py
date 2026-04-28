@@ -39,14 +39,19 @@ def main() -> None:
     parser.add_argument(
         "--max-response-bytes",
         type=int,
-        default=64 * 1024,
-        help="HTTP body cap (default: 64 KiB).",
+        # 1 MiB is large enough that incidental tests (e.g.
+        # ``cancellable_producer`` running for ~1s before being cancelled)
+        # don't trip the cap, while still being small enough that the
+        # ``http_response_cap.*`` tests' 4x target overshoots provably
+        # (4 MiB > 1 MiB).
+        default=1024 * 1024,
+        help="HTTP body cap (default: 1 MiB).",
     )
     parser.add_argument(
         "--max-externalized-response-bytes",
         type=int,
-        default=64 * 1024,
-        help="External-channel cap per HTTP response (default: 64 KiB).",
+        default=1024 * 1024,
+        help="External-channel cap per HTTP response (default: 1 MiB).",
     )
     parser.add_argument(
         "--fake-storage",

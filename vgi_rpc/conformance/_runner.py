@@ -26,7 +26,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 
@@ -117,18 +117,30 @@ class ConformanceSuite:
 
 
 class LogCollector:
-    """Collects log messages from RPC calls for assertion."""
+    """Collects log messages from RPC calls for assertion.
+
+    Also carries optional transport metadata (``http_base_url``) the
+    runner sets when the active transport is HTTP, so capability-aware
+    conformance tests can probe ``http_capabilities()`` without needing
+    a hidden contextvar (which doesn't propagate across the runner's
+    timeout-thread boundary).
+    """
 
     def __init__(self) -> None:
         """Initialize with an empty message list."""
         self.messages: list[Message] = []
+        self.http_base_url: str | None = None
 
     def __call__(self, msg: Message) -> None:
         """Append a log message."""
         self.messages.append(msg)
 
     def clear(self) -> None:
-        """Clear all collected messages."""
+        """Clear all collected messages.
+
+        Note: ``http_base_url`` is not cleared — it is suite-scoped, set
+        once when the runner opens the transport.
+        """
         self.messages = []
 
 
@@ -139,6 +151,17 @@ class LogCollector:
 
 _Transport = Literal["pipe", "http", "unix"]
 _ALL_TRANSPORTS: tuple[_Transport, ...] = ("pipe", "http", "unix")
+
+
+class _ConformanceSkip(Exception):
+    """Signals that a conformance test should be reported as skipped.
+
+    Raised from inside a test when an environmental precondition is not
+    met (e.g., the strict-fail tests need an HTTP server with response
+    caps configured; if the active server has no caps, the test cannot
+    verify the strict-fail behaviour and skips cleanly instead of
+    failing).  The message becomes the ``skip_reason`` on the result.
+    """
 
 
 @dataclass(frozen=True)
@@ -899,6 +922,149 @@ def _test_exchange_header_then_exchange(proxy: ConformanceService, logs: LogColl
     with session:
         out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
         assert abs(cast(float, out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# HTTP response cap (strict-fail) tests
+# ---------------------------------------------------------------------------
+#
+# These tests verify that HTTP responses overshooting the operator-configured
+# cap are surfaced as ``RpcError`` (200 + EXCEPTION-batch) rather than
+# producing truncated or silently-oversize responses.  Tests are HTTP-only
+# (``transports=("http",)``) and self-skip via :class:`_ConformanceSkip`
+# when the active HTTP server has no caps configured — the strict-fail
+# behaviour is only verifiable when ``max_response_bytes`` (or
+# ``max_externalized_response_bytes``) is set.
+#
+# Cross-language ports must boot a strict-cap variant of the conformance
+# worker to exercise these tests.  See ``tests/serve_conformance_http_strict.py``
+# for the Python reference; it sets ``max_response_bytes = 64 KiB`` and
+# ``max_externalized_response_bytes = 64 KiB``.
+
+
+def _http_capabilities_or_skip(logs: LogCollector) -> Any:
+    """Probe the active HTTP server's capabilities or skip the test.
+
+    Returns a ``vgi_rpc.http.HttpServerCapabilities``.  Typed ``Any`` to
+    avoid making the ``vgi_rpc.http`` import a hard requirement at module
+    import time — the conformance package itself is transport-agnostic.
+
+    Reads ``logs.http_base_url`` (set by the runner when opening the HTTP
+    transport).  Skips when the active transport is not HTTP (the
+    caller's ``transports=("http",)`` filter should have already gated
+    this, but we handle it defensively) or when ``http_capabilities()``
+    cannot be imported.
+    """
+    if logs.http_base_url is None:
+        raise _ConformanceSkip(
+            "HTTP base URL not available to conformance runner — cannot probe response-cap configuration"
+        )
+    try:
+        from vgi_rpc.http import http_capabilities
+    except ImportError as exc:
+        raise _ConformanceSkip(f"vgi_rpc.http not importable: {exc}") from exc
+    return http_capabilities(base_url=logs.http_base_url)
+
+
+def _skip_if_no_wire_cap(caps: Any) -> None:
+    """Skip-helper for wire-strict-fail tests on lockstep paths (unary/exchange).
+
+    Producer streams have a *soft* wire cap (continuation tokens handle
+    overshoots), so the wire-strict-fail tests are limited to method
+    types that genuinely have no escape valve.
+    """
+    if caps.max_response_bytes is None:
+        raise _ConformanceSkip("server has no max_response_bytes configured")
+    if caps.externalization_enabled:
+        # When externalisation is on, oversize emissions are rescued onto
+        # external storage and the wire body stays small.  The wire cap
+        # cannot trip — the external cap is what governs.  Defer to
+        # ``producer_external_strict_fail`` / ``externalized_strict_fail``
+        # for that scenario.
+        raise _ConformanceSkip("server has externalisation enabled — wire cap is rescued by external uploads")
+
+
+@_conformance_test(category="http_response_cap", name="unary_strict_fail", transports=("http",))
+def _test_http_response_cap_unary(proxy: ConformanceService, logs: LogCollector) -> None:
+    """Unary returning more bytes than the cap allows surfaces RpcError."""
+    caps = _http_capabilities_or_skip(logs)
+    _skip_if_no_wire_cap(caps)
+    target = caps.max_response_bytes * 4
+    try:
+        proxy.oversized_unary(target_bytes=target)
+    except RpcError as e:
+        assert "max_response_bytes" in str(e), f"unexpected RpcError shape: {e}"
+        return
+    raise AssertionError(f"expected RpcError but oversized_unary({target}) succeeded")
+
+
+@_conformance_test(category="http_response_cap", name="exchange_strict_fail", transports=("http",))
+def _test_http_response_cap_exchange(proxy: ConformanceService, logs: LogCollector) -> None:
+    """Exchange returning oversize output surfaces RpcError."""
+    caps = _http_capabilities_or_skip(logs)
+    _skip_if_no_wire_cap(caps)
+    target_rows = max(1024, (caps.max_response_bytes * 4) // 16)
+    try:
+        with proxy.exchange_oversized(rows_per_batch=target_rows) as session:
+            session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
+    except RpcError as e:
+        assert "max_response_bytes" in str(e), f"unexpected RpcError shape: {e}"
+        return
+    raise AssertionError(
+        f"expected RpcError but exchange_oversized(rows_per_batch={target_rows}) returned without error"
+    )
+
+
+@_conformance_test(category="http_response_cap", name="producer_external_strict_fail", transports=("http",))
+def _test_http_response_cap_producer_external(proxy: ConformanceService, logs: LogCollector) -> None:
+    """Verify that an oversize externalised producer payload surfaces RpcError.
+
+    Producer streams have a soft wire cap (continuation tokens cover
+    wire overshoots).  The external-channel cap, by contrast, is hard:
+    externalised uploads have no escape valve, so a producer that
+    pushes more bytes than ``max_externalized_response_bytes`` allows
+    must surface ``RpcError`` on iteration.
+    """
+    caps = _http_capabilities_or_skip(logs)
+    if not caps.externalization_enabled:
+        raise _ConformanceSkip("server has no externalisation backend configured")
+    if caps.max_externalized_response_bytes is None:
+        raise _ConformanceSkip("server has no max_externalized_response_bytes configured")
+    target_rows = max(1024, (caps.max_externalized_response_bytes * 4) // 16)
+    try:
+        list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
+    except RpcError as e:
+        assert "max_externalized_response_bytes" in str(e), f"unexpected RpcError shape: {e}"
+        return
+    raise AssertionError(
+        f"expected RpcError but produce_oversized_batch(rows_per_batch={target_rows}) drained without error"
+    )
+
+
+@_conformance_test(category="http_response_cap", name="externalized_strict_fail", transports=("http",))
+def _test_http_response_cap_externalized(proxy: ConformanceService, logs: LogCollector) -> None:
+    """Verify that an oversize externalised payload surfaces RpcError.
+
+    Skips unless the server has externalisation enabled *and* a configured
+    ``max_externalized_response_bytes`` cap.
+    """
+    caps = _http_capabilities_or_skip(logs)
+    if not caps.externalization_enabled:
+        raise _ConformanceSkip("server has no externalisation backend configured")
+    if caps.max_externalized_response_bytes is None:
+        raise _ConformanceSkip("server has no max_externalized_response_bytes configured")
+    # Size the emit to provoke externalisation: rows_per_batch large enough
+    # that the batch exceeds the externalize threshold (handled by server)
+    # and the resulting upload exceeds the external cap.
+    target_rows = max(1024, (caps.max_externalized_response_bytes * 4) // 16)
+    try:
+        list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
+    except RpcError as e:
+        assert "max_externalized_response_bytes" in str(e), f"unexpected RpcError shape: {e}"
+        return
+    raise AssertionError(
+        f"expected RpcError but produce_oversized_batch(rows_per_batch={target_rows}) drained without error"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1708,11 +1874,16 @@ def run_conformance(
         start = time.monotonic()
         error: str | None = None
         passed = True
+        skipped_runtime = False
+        skip_reason: str | None = None
         try:
             if timeout > 0:
                 _run_with_timeout(lambda t=test: t.fn(proxy, log_collector), timeout)  # type: ignore[misc]
             else:
                 test.fn(proxy, log_collector)
+        except _ConformanceSkip as e:
+            skipped_runtime = True
+            skip_reason = str(e) or "(no reason given)"
         except _TestTimeoutError as e:
             passed = False
             error = str(e)
@@ -1730,9 +1901,11 @@ def run_conformance(
         result = ConformanceResult(
             name=test.full_name,
             category=test.category,
-            passed=passed,
+            passed=True if skipped_runtime else passed,
             duration_ms=elapsed_ms,
             error=error,
+            skipped=skipped_runtime,
+            skip_reason=skip_reason,
         )
         results.append(result)
         if on_progress:

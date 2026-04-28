@@ -40,6 +40,7 @@ from vgi_rpc.rpc._common import (
 )
 
 from .._common import _RpcHttpError
+from ._responses import _enforce_response_budgets
 
 if TYPE_CHECKING:
     from ._app import _HttpRpcApp
@@ -135,12 +136,13 @@ def _run_unary_sync(
                 hook = None
         _hook_exc: BaseException | None = None
         try:
+            external_bytes_written = 0
             with ipc.new_stream(resp_buf, schema) as writer:
                 sink.flush_contents(writer, schema)
                 try:
                     result = getattr(app._server.implementation, method_name)(**kwargs)
                     _validate_result(info.name, result, info.result_type)
-                    _write_result_batch(writer, schema, result, app._server.external_config)
+                    external_bytes_written = _write_result_batch(writer, schema, result, app._server.external_config)
                 except (TypeError, pa.ArrowInvalid) as exc:
                     _hook_exc = exc
                     status = "error"
@@ -152,6 +154,29 @@ def _run_unary_sync(
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                     _write_error_batch(writer, schema, exc, server_id=server_id)
+                    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+            # Enforce caps after the response has been flushed.  On overshoot,
+            # discard the oversize body and emit a fresh response containing
+            # only the EXCEPTION batch.  ``_set_http_status`` rewrites the
+            # 500 to 200 + ``X-VGI-RPC-Error`` so the transport layer sees
+            # success while the RPC client surfaces a normal ``RpcError``.
+            if status == "ok":
+                try:
+                    _enforce_response_budgets(
+                        method_name=method_name,
+                        wire_bytes=resp_buf.tell(),
+                        external_bytes=external_bytes_written,
+                        wire_cap=app._max_response_bytes,
+                        external_cap=app._max_externalized_response_bytes,
+                    )
+                except RuntimeError as overshoot:
+                    _hook_exc = overshoot
+                    status = "error"
+                    error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                    resp_buf = BytesIO()
+                    with ipc.new_stream(resp_buf, schema) as err_writer:
+                        _write_error_batch(err_writer, schema, overshoot, server_id=server_id)
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         finally:
             duration_ms = (time.monotonic() - start) * 1000

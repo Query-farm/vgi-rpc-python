@@ -82,6 +82,16 @@ The full process before committing code is
 
 - **`http/`** *(optional — `pip install vgi-rpc[http]`)* — HTTP transport package using Falcon (server) and httpx (client). Exposes `make_wsgi_app()` to serve an `RpcServer` as a Falcon WSGI app, `serve_http()` as a convenience wrapper that combines `make_wsgi_app` + automatic free-port selection + `waitress.serve` (prints `PORT:<port>` to stdout for machine-readable discovery), and `http_connect()` for the client side. Streaming is stateless: each exchange carries serialized `StreamState` in a signed token in Arrow custom metadata. Supports pluggable authentication via an `authenticate` callback and `_AuthMiddleware`. Includes `_testing.py` with `make_sync_client()` for in-process testing without a real HTTP server.
 
+  **HTTP response caps**. Two independent operator knobs gate response size:
+  - `max_response_bytes` caps the HTTP body (what literally lands on the wire). Default `None` = unbounded. For producer streams this is *soft* — continuation tokens cover overshoot; for unary and stream-exchange it is *hard* and surfaces as `RpcError` (200 + `X-VGI-RPC-Error: true` + EXCEPTION batch).
+  - `max_externalized_response_bytes` caps total bytes uploaded to external storage during one HTTP response. Always *hard* — externalised uploads have no escape valve. Strict-fail surfaces the same way.
+
+  Externalised payloads are NOT charged against `max_response_bytes` (they leave only tiny pointer batches on the wire). The two knobs answer different operator questions: HTTP body size (proxy/gateway limit) vs per-call data volume.
+
+  Both are surfaced via response headers (`VGI-Max-Response-Bytes`, `VGI-Max-Externalized-Response-Bytes`, `VGI-Externalization-Enabled`) so `http_capabilities()` and conformance tests can probe them. Workers can read `out.remaining_response_bytes` / `out.remaining_externalized_response_bytes` / `out.externalization_enabled` on `OutputCollector` to size emits within budget.
+
+  The deprecated alias `max_stream_response_bytes` (constructor kwarg, `--max-stream-response-bytes` CLI flag, `VGI_RPC_MAX_STREAM_RESPONSE_BYTES` env) is retained for one release cycle; emits a DeprecationWarning when set. The cap is no longer stream-only — it now governs all HTTP method responses.
+
 ### Wire protocol
 
 Multiple IPC streams are written sequentially on the same pipe. Every request batch carries `vgi_rpc.request_version` in custom metadata; the server validates this before dispatch and rejects mismatches with `VersionError`. Each method call writes one request stream and reads one response stream:

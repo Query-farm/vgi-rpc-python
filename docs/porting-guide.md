@@ -82,6 +82,105 @@ In order, smallest-blast-radius first:
 - **Java**: aligned for the stdio transport (120 access-log entries validate). HTTP transport does not yet wire the dispatch hook; stream_id stability across HTTP continuations is a follow-up — see `vgi-rpc-go` for the reference state-token plumbing.
 - **Rust**: aligned for the stdio transport (120 access-log entries validate). HTTP transport does not yet wire the new DispatchInfo fields (remote_addr, request_data, stable stream_id via state-token round-trip) — see `vgi-rpc-go` for reference plumbing.
 
+## HTTP response-cap conformance
+
+The conformance suite includes HTTP-only tests under category
+`http_response_cap.*` that verify the framework refuses to emit
+oversize responses when the operator has configured caps and there is
+no externalisation escape valve.
+
+### Two operator knobs
+
+- **`max_response_bytes`** — caps the HTTP body size (the bytes that
+  literally land on the wire).  Externalised payloads do not count
+  against this; their pointer batches are tiny.
+- **`max_externalized_response_bytes`** — caps the total bytes
+  uploaded to external storage during one HTTP response.  Bounds how
+  much data the client will end up fetching for one RPC, regardless
+  of how the framework chose to deliver it.
+
+Both default to `None` (unbounded) and are configurable via
+constructor kwargs, CLI flags, or env vars (see `make_wsgi_app`,
+`serve_http`, and `run_server` for the full set; the deprecated
+`max_stream_response_bytes` alias remains for one release cycle).
+
+### Capability discovery (HTTP response headers)
+
+Servers advertise the configured caps so capability-aware clients and
+conformance tests can probe without a separate handshake:
+
+| Header | Value when set |
+|---|---|
+| `VGI-Max-Response-Bytes` | integer body cap |
+| `VGI-Max-Externalized-Response-Bytes` | integer external cap |
+| `VGI-Externalization-Enabled` | `true` or `false` (always present) |
+
+Cross-language ports must emit these headers on every response when
+the corresponding knob is configured.
+
+### Strict-fail behaviour by method type
+
+| Method type | Wire cap (`max_response_bytes`) | External cap |
+|---|---|---|
+| Unary | hard — strict-fail | hard — strict-fail |
+| Stream-exchange | hard — strict-fail | hard — strict-fail |
+| Stream-producer | **soft** — continuation tokens cover overshoot | hard — strict-fail |
+
+Strict-fail surfaces as the existing 200 + EXCEPTION-batch shape
+(`_set_http_status` rewrites 500 → 200 with `X-VGI-RPC-Error: true`
+for unary; producer/exchange append a zero-row EXCEPTION batch to the
+in-progress IPC stream).  The client sees a normal `RpcError`.
+
+The error message is one of:
+
+- `HTTP body exceeds max_response_bytes (...) for method '<name>'`
+- `Externalised payload exceeds max_externalized_response_bytes (...) for method '<name>'`
+
+Cross-language ports must produce error messages containing the
+token `max_response_bytes` or `max_externalized_response_bytes`
+respectively — the conformance tests assert on those substrings.
+
+### `transports` field on conformance tests
+
+The Python catalog gained a `transports: tuple[Literal["pipe","http","unix"], ...]`
+field on `@_conformance_test`, defaulting to all three.  The CLI
+runner (`vgi-rpc-test`) detects the active transport from the user's
+flag (`--cmd` → `pipe`, `--unix` → `unix`, `--url` → `http`) and
+skips tests whose `transports` tuple excludes it.  Ports must
+honour this for the four `http_response_cap.*` tests:
+
+- `http_response_cap.unary_strict_fail` (HTTP only)
+- `http_response_cap.exchange_strict_fail` (HTTP only)
+- `http_response_cap.producer_external_strict_fail` (HTTP only;
+  also requires externalisation enabled and an external cap)
+- `http_response_cap.externalized_strict_fail` (HTTP only; same
+  preconditions)
+
+The tests self-skip when caps aren't configured, so a port can run
+the full suite against any worker without these failing.  To
+exercise them, boot a strict-cap worker — see
+`tests/serve_conformance_http_strict.py` for the Python reference
+(defaults to 1 MiB body + 1 MiB external).
+
+### Worker visibility (optional)
+
+`OutputCollector` exposes three new properties so worker code can
+size its emit to the available budget:
+
+- `out.remaining_response_bytes: int | None` — wire body bytes left
+  this iteration.
+- `out.remaining_externalized_response_bytes: int | None` — external
+  channel bytes left.
+- `out.externalization_enabled: bool` — whether the server has a
+  storage backend wired up.
+
+Snapshot semantic: each value is fixed at collector construction;
+within one `state.process()` call it does not update as the worker
+emits.  Wire bytes include IPC framing (slightly conservative for a
+worker computing payload size).  Optional surface; ports that don't
+expose it are still conformant — strict-fail catches workers that
+ignore the budget.
+
 ## Gotchas
 
 - **Arrow dictionary encoding.** Across language Arrow libraries, the placement of dictionary messages in IPC streams differs. The schema's `request_data` round-trip rule was chosen specifically to absorb this — don't try to byte-match Python.

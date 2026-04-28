@@ -253,8 +253,17 @@ def _open_http_transport(
         sys.stderr.write("HTTP transport requires vgi-rpc[http]: pip install vgi-rpc[http]\n")
         sys.exit(2)
 
-    with http_connect(ConformanceService, url, prefix=prefix, on_log=log_collector) as proxy:  # type: ignore[type-abstract]
-        yield proxy
+    # Stash the base URL on the log collector so capability-aware HTTP-only
+    # conformance tests can probe ``http_capabilities()`` to discover whether
+    # response caps are configured.  LogCollector is the natural carrier
+    # because it's already passed to every test fn; contextvars don't
+    # propagate across the runner's per-test timeout-thread boundary.
+    log_collector.http_base_url = url + prefix
+    try:
+        with http_connect(ConformanceService, url, prefix=prefix, on_log=log_collector) as proxy:  # type: ignore[type-abstract]
+            yield proxy
+    finally:
+        log_collector.http_base_url = None
 
 
 @contextlib.contextmanager

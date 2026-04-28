@@ -26,6 +26,54 @@ def _vgi_version() -> str:
         return "dev"
 
 
+def _enforce_response_budgets(
+    *,
+    method_name: str,
+    wire_bytes: int,
+    external_bytes: int,
+    wire_cap: int | None,
+    external_cap: int | None,
+) -> None:
+    """Raise ``RuntimeError`` if a response overshoots either configured cap.
+
+    Called *after* a response has been flushed.  Both caps are independent:
+
+    - ``wire_cap`` (``max_response_bytes``) governs the HTTP body size.
+      Externalised payloads do not count toward this — they leave only
+      tiny pointer batches on the wire.
+    - ``external_cap`` (``max_externalized_response_bytes``) governs the
+      total bytes uploaded to external storage during one HTTP response.
+      Bounds how much data the client will end up fetching for one RPC,
+      regardless of how the framework chose to deliver it.
+
+    The transport layer surfaces the failure as 200 + EXCEPTION-batch via
+    the existing ``_set_http_status`` (unary: 500 → 200 + ``X-VGI-RPC-Error``)
+    or by appending a zero-row error batch to the in-progress IPC stream
+    (producer/exchange).  The RPC client sees a normal ``RpcError``.
+
+    Args:
+        method_name: For diagnostic messages.
+        wire_bytes: ``resp_buf.tell()`` after flushing the response body.
+        external_bytes: Cumulative bytes uploaded to external storage
+            during this response.
+        wire_cap: ``max_response_bytes`` or ``None`` for unbounded.
+        external_cap: ``max_externalized_response_bytes`` or ``None``.
+
+    Raises:
+        RuntimeError: When either cap is exceeded.
+
+    """
+    if wire_cap is not None and wire_bytes > wire_cap:
+        raise RuntimeError(
+            f"HTTP body exceeds max_response_bytes ({wire_bytes} > {wire_cap}) for method {method_name!r}"
+        )
+    if external_cap is not None and external_bytes > external_cap:
+        raise RuntimeError(
+            f"Externalised payload exceeds max_externalized_response_bytes "
+            f"({external_bytes} > {external_cap}) for method {method_name!r}"
+        )
+
+
 def _check_content_type(req: falcon.Request) -> None:
     """Raise ``_RpcHttpError`` if Content-Type is not Arrow IPC stream."""
     content_type = req.content_type or ""

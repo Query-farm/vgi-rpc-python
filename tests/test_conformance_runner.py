@@ -33,7 +33,12 @@ class TestRunnerViaPipe:
             suite = run_conformance(proxy, log_collector)
         assert suite.success, f"Failed tests: {[r.name for r in suite.results if not r.passed]}"
         assert suite.total > 0
-        assert suite.passed == suite.total
+        # When ``transport`` is not specified, ``run_conformance`` runs every
+        # registered test regardless of the per-test ``transports`` filter.
+        # HTTP-only tests (``http_response_cap.*``) self-skip via
+        # ``_ConformanceSkip`` because the LogCollector has no
+        # ``http_base_url``; they appear as skipped, not failed.
+        assert suite.passed + suite.skipped == suite.total
         assert suite.failed == 0
 
     def test_filter_mechanism(self) -> None:

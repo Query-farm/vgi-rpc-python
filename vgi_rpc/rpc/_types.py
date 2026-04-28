@@ -82,10 +82,13 @@ class OutputCollector:
     __slots__ = (
         "_batches",
         "_data_batch_idx",
+        "_externalization_enabled",
         "_finished",
         "_output_schema",
         "_prior_data_bytes",
         "_producer_mode",
+        "_remaining_externalized_response_bytes",
+        "_remaining_response_bytes",
         "_server_id",
     )
 
@@ -96,6 +99,9 @@ class OutputCollector:
         prior_data_bytes: int = 0,
         server_id: str | None = None,
         producer_mode: bool = True,
+        remaining_response_bytes: int | None = None,
+        remaining_externalized_response_bytes: int | None = None,
+        externalization_enabled: bool = False,
     ) -> None:
         """Initialize with the output schema for this stream.
 
@@ -106,6 +112,38 @@ class OutputCollector:
             producer_mode: When ``True`` (default), ``finish()`` is allowed.
                 Set to ``False`` for exchange streams where ``finish()`` is
                 not permitted.
+            remaining_response_bytes: HTTP body bytes the framework will
+                accept from this iteration before triggering a continuation
+                token (producer) or strict-fail (unary/exchange).  ``None``
+                for transports that have no body cap (pipe, subprocess,
+                unix, shm) or when the operator has not configured one.
+                Surfaced to worker code as ``out.remaining_response_bytes``
+                so a worker can size its emitted batch to fit the budget.
+                **Snapshot semantic**: the value is fixed at construction
+                and does not update as the worker accumulates batches
+                within one ``state.process()`` call — within one call the
+                worker emits exactly one data batch plus a handful of tiny
+                log batches; a fluctuating live counter would be more
+                confusing than helpful.
+            remaining_externalized_response_bytes: External-channel bytes
+                the framework will accept from this iteration before strict-
+                fail.  ``None`` when no external cap is configured *or*
+                when externalisation is not enabled (the worker should
+                consult ``externalization_enabled`` to disambiguate).
+                Same snapshot semantic as ``remaining_response_bytes``.
+            externalization_enabled: ``True`` iff the server has an
+                external-storage backend wired up.  Surfaced as
+                ``out.externalization_enabled`` so workers can decide
+                whether to expect externalisation as an escape valve for
+                large emissions.
+
+        Note on wire-vs-payload semantics: ``remaining_response_bytes`` is
+        wire bytes (HTTP body including IPC framing), while a worker
+        typically computes payload bytes from its own data structures.
+        The framework's value is therefore slightly conservative — worker
+        comparisons like ``estimated_payload <= remaining_response_bytes``
+        leave a small margin for IPC framing overhead.  This is the safe
+        direction.
 
         """
         self._output_schema = output_schema
@@ -115,6 +153,9 @@ class OutputCollector:
         self._prior_data_bytes = prior_data_bytes
         self._producer_mode = producer_mode
         self._server_id = server_id
+        self._remaining_response_bytes = remaining_response_bytes
+        self._remaining_externalized_response_bytes = remaining_externalized_response_bytes
+        self._externalization_enabled = externalization_enabled
 
     @property
     def output_schema(self) -> pa.Schema:
@@ -143,6 +184,34 @@ class OutputCollector:
     def batches(self) -> list[AnnotatedBatch]:
         """The accumulated batches."""
         return self._batches
+
+    @property
+    def remaining_response_bytes(self) -> int | None:
+        """HTTP body budget remaining for this iteration (snapshot at construction).
+
+        ``None`` when no body cap is in effect (e.g., pipe/subprocess/unix
+        transports, or HTTP without ``max_response_bytes`` configured).
+        Wire bytes including IPC framing — slightly conservative for a
+        worker computing payload size from its own data structures.
+        """
+        return self._remaining_response_bytes
+
+    @property
+    def remaining_externalized_response_bytes(self) -> int | None:
+        """External-channel budget remaining for this iteration (snapshot).
+
+        ``None`` when no external cap is configured *or* when
+        externalisation is not enabled.  Workers should consult
+        :attr:`externalization_enabled` to disambiguate the two ``None``
+        cases when deciding whether to expect externalisation as an
+        escape valve for oversize emissions.
+        """
+        return self._remaining_externalized_response_bytes
+
+    @property
+    def externalization_enabled(self) -> bool:
+        """Whether the server has an external-storage backend wired up."""
+        return self._externalization_enabled
 
     # --- Data emission (exactly one per call) ---
 

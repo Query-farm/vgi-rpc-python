@@ -1767,3 +1767,84 @@ class TestRichHeaderExchange:
             with session:
                 out = session.exchange(AnnotatedBatch.from_pydict({"value": [7.0]}))
                 assert out.batch.column("value")[0].as_py() == pytest.approx(7.0)
+
+
+# ---------------------------------------------------------------------------
+# HTTP response cap (strict-fail) tests — HTTP-only
+# ---------------------------------------------------------------------------
+#
+# These tests verify the framework's strict-fail behaviour for HTTP
+# responses that overshoot the operator-configured caps.  They require a
+# server booted with ``max_response_bytes`` (and optionally
+# ``max_externalized_response_bytes``) set, so they bypass the
+# ``conformance_conn`` matrix and use the strict-cap fixture directly.
+
+
+class TestHttpResponseCap:
+    """HTTP-only strict-fail tests for response-size caps.
+
+    Mirror the catalog-based tests in ``_runner.py``'s ``http_response_cap``
+    category.  Use ``conformance_http_strict_cap_port`` (a session-scoped
+    fixture booting a worker with tight caps) so the overshoot is provably
+    triggered.
+    """
+
+    def _connect(self, port: int) -> Any:
+        """Open an HTTP connection to the strict-cap conformance worker."""
+        from vgi_rpc.http import http_connect
+
+        return http_connect(ConformanceService, f"http://127.0.0.1:{port}")
+
+    def test_unary_strict_fail(self, conformance_http_strict_cap_port: int) -> None:
+        """Unary returning more bytes than ``max_response_bytes`` allows surfaces RpcError."""
+        from vgi_rpc.http import http_capabilities
+
+        caps = http_capabilities(base_url=f"http://127.0.0.1:{conformance_http_strict_cap_port}")
+        assert caps.max_response_bytes is not None, "strict-cap fixture must advertise a wire cap"
+        with (
+            self._connect(conformance_http_strict_cap_port) as proxy,
+            pytest.raises(RpcError, match=r"max_response_bytes"),
+        ):
+            proxy.oversized_unary(target_bytes=caps.max_response_bytes * 4)
+
+    def test_exchange_strict_fail(self, conformance_http_strict_cap_port: int) -> None:
+        """Exchange returning oversize output surfaces RpcError."""
+        from vgi_rpc.http import http_capabilities
+
+        caps = http_capabilities(base_url=f"http://127.0.0.1:{conformance_http_strict_cap_port}")
+        assert caps.max_response_bytes is not None
+        target_rows = max(1024, (caps.max_response_bytes * 4) // 16)
+        with (
+            self._connect(conformance_http_strict_cap_port) as proxy,
+            pytest.raises(RpcError, match=r"max_response_bytes"),
+            proxy.exchange_oversized(rows_per_batch=target_rows) as session,
+        ):
+            session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
+
+
+class TestHttpResponseCapSoftWire:
+    """Producer streams have a *soft* wire cap.
+
+    Verifies the design choice that a producer emitting more than
+    ``max_response_bytes`` does **not** strict-fail when there's no
+    externalisation — continuation tokens cover the overshoot
+    transparently.  The opposite direction (strict-fail) is exercised
+    in :class:`TestHttpResponseCap` for unary and exchange.
+    """
+
+    def test_producer_overshoot_uses_continuation(self, conformance_http_strict_cap_port: int) -> None:
+        """Oversize producer emit splits across continuation tokens, not RpcError."""
+        from vgi_rpc.http import http_capabilities, http_connect
+
+        caps = http_capabilities(base_url=f"http://127.0.0.1:{conformance_http_strict_cap_port}")
+        assert caps.max_response_bytes is not None
+        # Emit ~2x the wire cap of int64+int64 rows in a single batch.
+        # A single oversized iteration overflows the cap; the framework
+        # emits the body and mints a continuation token.  No RpcError.
+        target_rows = max(1024, (caps.max_response_bytes * 2) // 16)
+        with http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_strict_cap_port}") as proxy:
+            batches = list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
+            # Single emit + finish; the framework may have split it into
+            # the data batch + a continuation token + trailing finish, but
+            # the client-visible batches are: 1 data batch.
+            assert sum(b.batch.num_rows for b in batches) == target_rows
