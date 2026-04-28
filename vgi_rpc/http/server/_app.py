@@ -33,7 +33,6 @@ class _HttpRpcApp:
     __slots__ = (
         "_max_request_bytes",
         "_max_stream_response_bytes",
-        "_max_stream_response_time",
         "_max_upload_bytes",
         "_server",
         "_signing_key",
@@ -47,7 +46,6 @@ class _HttpRpcApp:
         server: RpcServer,
         signing_key: bytes,
         max_stream_response_bytes: int | None = None,
-        max_stream_response_time: float | None = None,
         max_request_bytes: int | None = None,
         upload_url_provider: UploadUrlProvider | None = None,
         max_upload_bytes: int | None = None,
@@ -57,7 +55,6 @@ class _HttpRpcApp:
         self._signing_key = signing_key
         self._state_types = _resolve_state_types(server)
         self._max_stream_response_bytes = max_stream_response_bytes
-        self._max_stream_response_time = max_stream_response_time
         self._max_request_bytes = max_request_bytes
         self._upload_url_provider = upload_url_provider
         self._max_upload_bytes = max_upload_bytes

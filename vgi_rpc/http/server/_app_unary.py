@@ -25,6 +25,7 @@ from vgi_rpc.rpc import (
     _get_auth_and_metadata,
     _log_method_error,
     _read_request,
+    _truncate_error_message,
     _validate_params,
     _validate_result,
     _write_error_batch,
@@ -168,7 +169,7 @@ def _run_unary_sync(
                 stats=stats,
                 server_version=app._server.server_version,
                 protocol_hash=app._server.protocol_hash,
-                error_message=str(_hook_exc)[:500] if _hook_exc is not None else "",
+                error_message=_truncate_error_message(_hook_exc),
             )
             if hook is not None:
                 try:

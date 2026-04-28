@@ -54,6 +54,7 @@ from vgi_rpc.rpc._types import (
 )
 from vgi_rpc.rpc._wire import (
     _ClientLogSink,
+    _coerce_input_batch,
     _deserialize_params,
     _drain_stream,
     _flush_collector,
@@ -71,6 +72,29 @@ from vgi_rpc.utils import IpcValidation, ValidatedReader
 # ---------------------------------------------------------------------------
 # Server helpers
 # ---------------------------------------------------------------------------
+
+
+_ACCESS_LOG_ERROR_MESSAGE_LIMIT = 500
+"""Cap for ``error_message`` fields surfaced via the access log.
+
+Long exception messages (typically with embedded tracebacks or repeated
+context) bloat each JSONL record without adding signal — the full traceback
+is logged separately by ``_log_method_error``.  The cap matches the
+historical inline truncation used at every dispatch site.
+"""
+
+
+def _truncate_error_message(exc: BaseException | None, limit: int = _ACCESS_LOG_ERROR_MESSAGE_LIMIT) -> str:
+    """Render an exception's message for the access-log ``error_message`` field.
+
+    Returns ``""`` for ``None`` (the no-error case).  Otherwise returns
+    ``str(exc)`` truncated to ``limit`` characters.  Centralises the
+    historically duplicated ``str(exc)[:500]`` pattern across the unary
+    and stream dispatch shells so the truncation policy is one knob.
+    """
+    if exc is None:
+        return ""
+    return str(exc)[:limit]
 
 
 def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc: BaseException) -> str:
@@ -690,13 +714,7 @@ class RpcServer:
                         # Resolve SHM pointer on input batch
                         input_batch, resolved_cm, release_fn = resolve_shm_batch(input_batch, resolved_cm, shm)
 
-                        if input_batch.schema != input_schema:
-                            # Cast compatible types (e.g., decimal→double, int32→int64)
-                            try:
-                                input_batch = input_batch.cast(input_schema)
-                            except (pa.ArrowInvalid, pa.ArrowNotImplementedError, ValueError):
-                                msg = f"Input schema mismatch: expected {input_schema}, got {input_batch.schema}"
-                                raise TypeError(msg) from None
+                        input_batch = _coerce_input_batch(input_batch, input_schema)
 
                         ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=resolved_cm, _release_fn=release_fn)
                         if prev_input is not None:

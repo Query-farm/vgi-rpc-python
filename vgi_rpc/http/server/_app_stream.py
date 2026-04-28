@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO, IOBase
 from typing import TYPE_CHECKING, Any, Literal
@@ -31,12 +33,14 @@ from vgi_rpc.rpc import (
     StreamState,
     VersionError,
     _ClientLogSink,
+    _coerce_input_batch,
     _deserialize_params,
     _emit_access_log,
     _flush_collector,
     _get_auth_and_metadata,
     _log_method_error,
     _read_request,
+    _truncate_error_message,
     _validate_params,
     _write_error_batch,
     _write_stream_header,
@@ -68,6 +72,108 @@ if TYPE_CHECKING:
 _logger = logging.getLogger("vgi_rpc.http")
 
 
+@dataclass
+class _DispatchOutcome:
+    """Mutable telemetry fields populated by a dispatch shell.
+
+    The shell runs its body inside ``with _dispatch_telemetry(...) as outcome:``
+    and writes to these fields as work progresses (e.g. on error paths,
+    after token mints, on cancel).  The context manager reads them on exit
+    to emit the access log and dispatch-hook bookkeeping uniformly across
+    all four stream-call shells.
+
+    The fields intentionally cover both producer-loop turns (which may
+    accumulate batches before returning) and lockstep exchange turns
+    (which run ``state.process()`` exactly once); the shell decides how
+    to drive its work, the outcome only records what the access log needs
+    to know about the result.
+    """
+
+    status: Literal["ok", "error"] = "ok"
+    error_type: str = ""
+    error_message: str = ""
+    http_status: HTTPStatus = HTTPStatus.OK
+    response_state_bytes: bytes | None = None
+    request_state_bytes: bytes | None = None
+    cancelled: bool = False
+
+
+@contextlib.contextmanager
+def _dispatch_telemetry(
+    app: _HttpRpcApp,
+    *,
+    info: RpcMethodInfo | None,
+    method_name: str,
+    method_type: str,
+    auth: AuthContext,
+    transport_metadata: Mapping[str, Any],
+) -> Iterator[_DispatchOutcome]:
+    """Wrap a stream-call shell with shared start/end telemetry.
+
+    On enter: optionally invokes ``hook.on_dispatch_start`` (when an
+    ``RpcMethodInfo`` and a registered dispatch hook are both present)
+    and captures the wall-clock start time.
+
+    On exit (always — the ``finally`` runs whether the body returned
+    normally or raised): emits the access-log record using the fields
+    in the yielded :class:`_DispatchOutcome`, then invokes
+    ``hook.on_dispatch_end`` with the captured exception (or ``None``
+    on success).  Any exception raised by the body propagates to the
+    caller after telemetry has been recorded.
+
+    Pass ``info=None`` for code paths that are not regular dispatch —
+    e.g. the ``/exchange`` cancel handler, which should still produce
+    an access-log record but does not run a method (and so should not
+    fire dispatch hooks).
+    """
+    server_id = app._server.server_id
+    protocol_name = app._server.protocol_name
+    outcome = _DispatchOutcome()
+    start = time.monotonic()
+    hook: _DispatchHook | None = app._server._dispatch_hook if info is not None else None
+    hook_token: HookToken = None
+    if hook is not None and info is not None:
+        try:
+            hook_token = hook.on_dispatch_start(info, auth, transport_metadata)
+        except Exception:
+            _logger.debug("Dispatch hook start failed", exc_info=True)
+            hook = None
+    hook_exc: BaseException | None = None
+    try:
+        try:
+            yield outcome
+        except BaseException as exc:
+            hook_exc = exc
+            raise
+    finally:
+        duration_ms = (time.monotonic() - start) * 1000
+        _emit_access_log(
+            protocol_name,
+            method_name,
+            method_type,
+            server_id,
+            auth,
+            transport_metadata,
+            duration_ms,
+            outcome.status,
+            outcome.error_type,
+            http_status=outcome.http_status.value,
+            stats=_current_call_stats.get(),
+            server_version=app._server.server_version,
+            protocol_hash=app._server.protocol_hash,
+            protocol_version=app._server.protocol_version,
+            error_message=outcome.error_message,
+            request_state=outcome.request_state_bytes,
+            response_state=outcome.response_state_bytes,
+            cancelled=outcome.cancelled,
+        )
+        if hook is not None and info is not None:
+            try:
+                hook.on_dispatch_end(hook_token, info, hook_exc, stats=_current_call_stats.get())
+            except Exception:
+                _logger.debug("Dispatch hook end failed", exc_info=True)
+
+
 def _run_stream_init_sync(
     app: _HttpRpcApp,
     method_name: str,
@@ -77,7 +183,7 @@ def _run_stream_init_sync(
     """Run stream init synchronously.
 
     For producer streams (input_schema == _EMPTY_SCHEMA), produces data
-    immediately via _produce_stream_response.
+    immediately via _run_http_producer_turn.
     For exchange streams, returns a state token for subsequent exchanges.
     """
     stats = CallStatistics()
@@ -116,39 +222,34 @@ def _run_stream_init_sync(
                 protocol_name=protocol_name,
             )
 
-        start = time.monotonic()
-        http_status = HTTPStatus.OK
-        status: Literal["ok", "error"] = "ok"
-        error_type = ""
-        error_message = ""
-        _response_state_bytes: bytes | None = None
-        hook: _DispatchHook | None = app._server._dispatch_hook
-        hook_token_init: HookToken = None
-        if hook is not None:
-            try:
-                hook_token_init = hook.on_dispatch_start(info, auth, transport_metadata)
-            except Exception:
-                _logger.debug("Dispatch hook start failed", exc_info=True)
-                hook = None
-        _hook_exc: BaseException | None = None
-        _current_stream_id.set(uuid.uuid4().hex)
-        try:
+        # The chain-correlation id for all HTTP turns of this stream.  Carried
+        # in every continuation token; observers (logger formatters, OTel)
+        # also see it via ``_current_stream_id`` so they can tag log lines
+        # without threading the value through every helper signature.
+        stream_id = uuid.uuid4().hex
+        _current_stream_id.set(stream_id)
+        with _dispatch_telemetry(
+            app,
+            info=info,
+            method_name=method_name,
+            method_type=info.method_type.value,
+            auth=auth,
+            transport_metadata=transport_metadata,
+        ) as outcome:
             try:
                 result: Stream[StreamState, Any] = getattr(app._server.implementation, method_name)(**kwargs)
             except (TypeError, pa.ArrowInvalid) as exc:
-                _hook_exc = exc
-                status = "error"
-                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                error_message = str(exc)[:500]
-                http_status = HTTPStatus.BAD_REQUEST
-                raise _RpcHttpError(exc, status_code=http_status) from exc
+                outcome.status = "error"
+                outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                outcome.error_message = _truncate_error_message(exc)
+                outcome.http_status = HTTPStatus.BAD_REQUEST
+                raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
             except Exception as exc:
-                _hook_exc = exc
-                status = "error"
-                error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                error_message = str(exc)[:500]
-                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-                raise _RpcHttpError(exc, status_code=http_status) from exc
+                outcome.status = "error"
+                outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                outcome.error_message = _truncate_error_message(exc)
+                outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
 
             is_producer = result.input_schema == _EMPTY_SCHEMA
 
@@ -159,22 +260,23 @@ def _run_stream_init_sync(
                     _write_stream_header(
                         resp_buf, result.header, app._server.external_config, sink=sink, method_name=method_name
                     )
-                produce_buf, produce_error_type, produce_error_msg = _produce_stream_response(
+                produce_buf, produce_error_type, produce_error_msg = _run_http_producer_turn(
                     app,
                     result.output_schema,
                     result.state,
                     result.input_schema,
                     sink,
                     method_name=method_name,
+                    stream_id=stream_id,
                     auth=auth,
                     transport_metadata=transport_metadata,
                 )
                 resp_buf.write(produce_buf.getvalue())
                 resp_buf.seek(0)
                 if produce_error_type is not None:
-                    status = "error"
-                    error_type = produce_error_type
-                    error_message = produce_error_msg
+                    outcome.status = "error"
+                    outcome.error_type = produce_error_type
+                    outcome.error_message = produce_error_msg
                 return resp_buf
             else:
                 # Exchange stream — return state token
@@ -185,7 +287,7 @@ def _run_stream_init_sync(
 
                     # Pack state + output schema + input schema into a signed token
                     state_bytes = _serialize_state_bytes(state, state_info)
-                    _response_state_bytes = state_bytes
+                    outcome.response_state_bytes = state_bytes
                     schema_bytes = output_schema.serialize().to_pybytes()
                     input_schema_bytes = input_schema.serialize().to_pybytes()
                     token = _pack_state_token(
@@ -194,7 +296,7 @@ def _run_stream_init_sync(
                         input_schema_bytes,
                         _derive_signing_key(app._signing_key, auth),
                         int(time.time()),
-                        stream_id=_current_stream_id.get(),
+                        stream_id=stream_id,
                     )
 
                     # Write response: header (if declared) + log batches + zero-row batch with token in metadata
@@ -214,40 +316,14 @@ def _run_stream_init_sync(
                         _record_output(zero_batch)
                         writer.write_batch(zero_batch, custom_metadata=state_metadata)
                 except Exception as exc:
-                    _hook_exc = exc
-                    status = "error"
-                    error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                    error_message = str(exc)[:500]
-                    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-                    raise _RpcHttpError(exc, status_code=http_status) from exc
+                    outcome.status = "error"
+                    outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                    outcome.error_message = _truncate_error_message(exc)
+                    outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                    raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
 
                 resp_buf.seek(0)
                 return resp_buf
-        finally:
-            duration_ms = (time.monotonic() - start) * 1000
-            _emit_access_log(
-                protocol_name,
-                method_name,
-                info.method_type.value,
-                server_id,
-                auth,
-                transport_metadata,
-                duration_ms,
-                status,
-                error_type,
-                http_status=http_status.value,
-                stats=stats,
-                server_version=app._server.server_version,
-                protocol_hash=app._server.protocol_hash,
-                protocol_version=app._server.protocol_version,
-                error_message=error_message,
-                response_state=_response_state_bytes,
-            )
-            if hook is not None:
-                try:
-                    hook.on_dispatch_end(hook_token_init, info, _hook_exc, stats=stats)
-                except Exception:
-                    _logger.debug("Dispatch hook end failed", exc_info=True)
     finally:
         _current_call_stats.reset(stats_token)
 
@@ -302,7 +378,7 @@ def _run_stream_exchange_sync(
         auth, transport_metadata = _get_auth_and_metadata()
 
         # Unpack and verify the signed token, recover state + schema + input_schema
-        state_obj, output_schema, input_schema = _unpack_and_recover_state(app, token, state_info, auth)
+        state_obj, output_schema, input_schema, stream_id = _unpack_and_recover_state(app, token, state_info, auth)
 
         is_producer = input_schema == _EMPTY_SCHEMA
 
@@ -318,106 +394,74 @@ def _run_stream_exchange_sync(
         # _stream_exchange_sync is only reached for known stream methods)
         info = app._server.methods.get(method_name)
 
+        request_state_bytes = token if isinstance(token, bytes) else token.encode() if token else None
+
         if cancel_flag:
+            # Cancel is not a method dispatch — pass info=None to suppress
+            # dispatch-hook calls; access log still records cancelled=True.
             server_id = app._server.server_id
             protocol_name = app._server.protocol_name
-            auth, transport_metadata = _get_auth_and_metadata()
-            start = time.monotonic()
-            cancel_sink = _ClientLogSink(server_id=server_id)
-            cancel_ctx = CallContext(
-                auth=auth,
-                emit_client_log=cancel_sink,
-                transport_metadata=transport_metadata,
-                server_id=server_id,
+            with _dispatch_telemetry(
+                app,
+                info=None,
                 method_name=method_name,
-                protocol_name=protocol_name,
-            )
-            try:
-                state_obj.on_cancel(cancel_ctx)
-            except Exception:
-                _logger.debug("on_cancel hook failed", exc_info=True)
-            resp_buf = BytesIO()
-            with ipc.new_stream(resp_buf, output_schema):
-                pass
-            duration_ms = (time.monotonic() - start) * 1000
-            _emit_access_log(
-                protocol_name,
-                method_name,
-                "stream",
-                server_id,
-                auth,
-                transport_metadata,
-                duration_ms,
-                "ok",
-                http_status=HTTPStatus.OK.value,
-                stats=stats,
-                server_version=app._server.server_version,
-                protocol_hash=app._server.protocol_hash,
-                protocol_version=app._server.protocol_version,
-                request_state=token if isinstance(token, bytes) else token.encode() if token else None,
-                cancelled=True,
-            )
-            resp_buf.seek(0)
-            return resp_buf
+                method_type="stream",
+                auth=auth,
+                transport_metadata=transport_metadata,
+            ) as outcome:
+                outcome.cancelled = True
+                outcome.request_state_bytes = request_state_bytes
+                cancel_sink = _ClientLogSink(server_id=server_id)
+                cancel_ctx = CallContext(
+                    auth=auth,
+                    emit_client_log=cancel_sink,
+                    transport_metadata=transport_metadata,
+                    server_id=server_id,
+                    method_name=method_name,
+                    protocol_name=protocol_name,
+                )
+                try:
+                    state_obj.on_cancel(cancel_ctx)
+                except Exception:
+                    _logger.debug("on_cancel hook failed", exc_info=True)
+                resp_buf = BytesIO()
+                with ipc.new_stream(resp_buf, output_schema):
+                    pass
+                resp_buf.seek(0)
+                return resp_buf
 
         if is_producer:
-            # Producer continuation
-            server_id = app._server.server_id
-            protocol_name = app._server.protocol_name
-            auth, transport_metadata = _get_auth_and_metadata()
-            start = time.monotonic()
-            http_status = HTTPStatus.OK
-            status: Literal["ok", "error"] = "ok"
-            error_type = ""
-            hook: _DispatchHook | None = app._server._dispatch_hook if info is not None else None
-            hook_token_exch: HookToken = None
-            if hook is not None and info is not None:
-                try:
-                    hook_token_exch = hook.on_dispatch_start(info, auth, transport_metadata)
-                except Exception:
-                    _logger.debug("Dispatch hook start failed", exc_info=True)
-                    hook = None
-            _hook_exc: BaseException | None = None
-            produce_error_msg = ""
-            try:
-                resp_buf, produce_error_type, produce_error_msg = _produce_stream_response(
+            # Producer continuation — multi-batch capable; the producer-turn
+            # helper buffers up to ``max_stream_response_bytes`` before
+            # emitting a continuation token.
+            with _dispatch_telemetry(
+                app,
+                info=info,
+                method_name=method_name,
+                method_type="stream",
+                auth=auth,
+                transport_metadata=transport_metadata,
+            ) as outcome:
+                outcome.request_state_bytes = request_state_bytes
+                resp_buf, produce_error_type, produce_error_msg = _run_http_producer_turn(
                     app,
                     output_schema,
                     state_obj,
                     input_schema,
                     method_name=method_name,
+                    stream_id=stream_id,
                 )
                 if produce_error_type is not None:
-                    status = "error"
-                    error_type = produce_error_type
+                    outcome.status = "error"
+                    outcome.error_type = produce_error_type
+                    outcome.error_message = produce_error_msg
                 return resp_buf
-            finally:
-                duration_ms = (time.monotonic() - start) * 1000
-                _emit_access_log(
-                    protocol_name,
-                    method_name,
-                    "stream",
-                    server_id,
-                    auth,
-                    transport_metadata,
-                    duration_ms,
-                    status,
-                    error_type,
-                    error_message=produce_error_msg,
-                    http_status=http_status.value,
-                    stats=stats,
-                    server_version=app._server.server_version,
-                    protocol_hash=app._server.protocol_hash,
-                    protocol_version=app._server.protocol_version,
-                    request_state=token if isinstance(token, bytes) else token.encode() if token else None,
-                )
-                if hook is not None and info is not None:
-                    try:
-                        hook.on_dispatch_end(hook_token_exch, info, _hook_exc, stats=stats)
-                    except Exception:
-                        _logger.debug("Dispatch hook end failed", exc_info=True)
         else:
-            # Exchange — resolve external locations on real input data
+            # Exchange — lockstep one input batch in, one output batch out.
+            # External-location resolution must happen before we hand the
+            # batch to ``state.process``; if resolution fails we surface a
+            # 500 directly (no telemetry shell — the failure pre-dates the
+            # method dispatch).
             try:
                 input_batch, resolved_cm = resolve_external_location(
                     input_batch,
@@ -430,99 +474,73 @@ def _run_stream_exchange_sync(
 
             server_id = app._server.server_id
             protocol_name = app._server.protocol_name
-            auth, transport_md = _get_auth_and_metadata()
-            start = time.monotonic()
-            http_status = HTTPStatus.OK
-            status_str: Literal["ok", "error"] = "ok"
-            error_type_str = ""
-            hook_e: _DispatchHook | None = app._server._dispatch_hook if info is not None else None
-            hook_token_e: HookToken = None
-            if hook_e is not None and info is not None:
+            with _dispatch_telemetry(
+                app,
+                info=info,
+                method_name=method_name,
+                method_type="stream",
+                auth=auth,
+                transport_metadata=transport_metadata,
+            ) as outcome:
+                outcome.request_state_bytes = request_state_bytes
                 try:
-                    hook_token_e = hook_e.on_dispatch_start(info, auth, transport_md)
-                except Exception:
-                    _logger.debug("Dispatch hook start failed", exc_info=True)
-                    hook_e = None
-            _hook_exc_e: BaseException | None = None
-            _response_state_bytes: bytes | None = None
-            try:
-                # Strip state token from metadata visible to process()
-                user_cm = strip_keys(resolved_cm, STATE_KEY)
+                    # Reconcile the inbound batch's schema against the declared
+                    # input schema (strict on field set, tolerant of order/type).
+                    # Same helper used by the pipe transport so callers see a
+                    # uniform TypeError on mismatch regardless of transport.
+                    input_batch = _coerce_input_batch(input_batch, input_schema)
 
-                ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
-                out = OutputCollector(output_schema, server_id=server_id, producer_mode=False)
+                    # Strip state token from metadata visible to process()
+                    user_cm = strip_keys(resolved_cm, STATE_KEY)
 
-                process_ctx = CallContext(
-                    auth=auth,
-                    emit_client_log=out.emit_client_log_message,
-                    transport_metadata=transport_md,
-                    server_id=server_id,
-                    method_name=method_name,
-                    protocol_name=protocol_name,
-                )
-                state_obj.process(ab_in, out, process_ctx)
-                if not out.finished:
-                    out.validate()
+                    ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
+                    out = OutputCollector(output_schema, server_id=server_id, producer_mode=False)
 
-                # Repack updated state with same schemas into new signed token
-                updated_state_bytes = _serialize_state_bytes(state_obj, state_info)
-                _response_state_bytes = updated_state_bytes
-                schema_bytes = output_schema.serialize().to_pybytes()
-                input_schema_bytes_upd = input_schema.serialize().to_pybytes()
-                updated_token = _pack_state_token(
-                    updated_state_bytes,
-                    schema_bytes,
-                    input_schema_bytes_upd,
-                    _derive_signing_key(app._signing_key, auth),
-                    int(time.time()),
-                    stream_id=_current_stream_id.get(),
-                )
-                out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
+                    process_ctx = CallContext(
+                        auth=auth,
+                        emit_client_log=out.emit_client_log_message,
+                        transport_metadata=transport_metadata,
+                        server_id=server_id,
+                        method_name=method_name,
+                        protocol_name=protocol_name,
+                    )
+                    state_obj.process(ab_in, out, process_ctx)
+                    if not out.finished:
+                        out.validate()
 
-                # Write response batches (log + data, in order)
-                resp_buf = BytesIO()
-                with ipc.new_stream(resp_buf, output_schema) as writer:
-                    _flush_collector(writer, out, app._server.external_config)
-            except Exception as exc:
-                _hook_exc_e = exc
-                status_str = "error"
-                error_type_str = _log_method_error(protocol_name, method_name, server_id, exc)
-                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-                raise _RpcHttpError(exc, status_code=http_status, schema=output_schema) from exc
-            finally:
-                duration_ms = (time.monotonic() - start) * 1000
-                _emit_access_log(
-                    protocol_name,
-                    method_name,
-                    "stream",
-                    server_id,
-                    auth,
-                    transport_md,
-                    duration_ms,
-                    status_str,
-                    error_type_str,
-                    http_status=http_status.value,
-                    stats=stats,
-                    server_version=app._server.server_version,
-                    protocol_hash=app._server.protocol_hash,
-                    protocol_version=app._server.protocol_version,
-                    error_message=str(_hook_exc_e) if _hook_exc_e is not None else "",
-                    request_state=token if isinstance(token, bytes) else token.encode() if token else None,
-                    response_state=_response_state_bytes,
-                )
-                if hook_e is not None and info is not None:
-                    try:
-                        hook_e.on_dispatch_end(hook_token_e, info, _hook_exc_e, stats=stats)
-                    except Exception:
-                        _logger.debug("Dispatch hook end failed", exc_info=True)
+                    # Repack updated state with same schemas into new signed token
+                    updated_state_bytes = _serialize_state_bytes(state_obj, state_info)
+                    outcome.response_state_bytes = updated_state_bytes
+                    schema_bytes = output_schema.serialize().to_pybytes()
+                    input_schema_bytes_upd = input_schema.serialize().to_pybytes()
+                    updated_token = _pack_state_token(
+                        updated_state_bytes,
+                        schema_bytes,
+                        input_schema_bytes_upd,
+                        _derive_signing_key(app._signing_key, auth),
+                        int(time.time()),
+                        stream_id=stream_id,
+                    )
+                    out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
 
-            resp_buf.seek(0)
-            return resp_buf
+                    # Write response batches (log + data, in order)
+                    resp_buf = BytesIO()
+                    with ipc.new_stream(resp_buf, output_schema) as writer:
+                        _flush_collector(writer, out, app._server.external_config)
+                except Exception as exc:
+                    outcome.status = "error"
+                    outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                    outcome.error_message = _truncate_error_message(exc)
+                    outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                    raise _RpcHttpError(exc, status_code=outcome.http_status, schema=output_schema) from exc
+
+                resp_buf.seek(0)
+                return resp_buf
     finally:
         _current_call_stats.reset(stats_token)
 
 
-def _produce_stream_response(
+def _run_http_producer_turn(
     app: _HttpRpcApp,
     schema: pa.Schema,
     state: StreamState,
@@ -530,10 +548,35 @@ def _produce_stream_response(
     sink: _ClientLogSink | None = None,
     *,
     method_name: str,
+    stream_id: str,
     auth: AuthContext | None = None,
     transport_metadata: Mapping[str, str] | None = None,
 ) -> tuple[BytesIO, str | None, str]:
-    """Run the produce loop for a producer stream, with optional size-based continuation.
+    """Run one HTTP turn of a producer stream, returning an IPC body + error fields.
+
+    A "turn" here means a single HTTP request/response cycle:
+
+    - ``state.process()`` is invoked one or more times against ``_TICK_BATCH``;
+      each call may emit a data batch, log batches, and/or call ``finish()``.
+    - All emitted batches are written to a single IPC stream that becomes the
+      HTTP response body.
+    - The loop exits when the stream finishes (no continuation token) or when
+      the wire-effective response size (HTTP body + externalized payload)
+      reaches ``app._max_stream_response_bytes``, in which case a continuation
+      token is appended as a zero-row sentinel and the client resumes via
+      ``POST /{method}/exchange``.
+
+    HTTP-specific responsibilities — the reason this is its own helper rather
+    than shared with the pipe transport:
+
+    - Mints a signed continuation token carrying serialised state + schemas
+      (HTTP is stateless across requests).
+    - Charges externalised payload bytes against the wire-size cap so
+      ``ExternalLocationConfig`` cannot silently bypass it.
+
+    The pipe-family producer loop in :mod:`vgi_rpc.rpc._server` looks similar
+    on the surface but holds ``state`` in-process for the duration of the
+    connection, never serialises it, and never mints tokens.
 
     Args:
         app: The HTTP app holding server + limit configuration.
@@ -542,6 +585,12 @@ def _produce_stream_response(
         input_schema: The input schema (stored in continuation tokens).
         sink: Optional log sink to flush before producing (initial request only).
         method_name: The RPC method name (for logging context).
+        stream_id: The chain-correlation id baked into the continuation
+            token.  Generated fresh by the init turn and recovered from
+            the inbound token by exchange/continuation turns; passed in
+            explicitly so this helper does not depend on the
+            ``_current_stream_id`` contextvar (the contextvar is kept
+            only for ambient telemetry observers).
         auth: Auth context; falls back to contextvar when ``None`` (continuation path).
         transport_metadata: Transport metadata; falls back to contextvar when ``None``.
 
@@ -560,14 +609,19 @@ def _produce_stream_response(
     protocol_name = app._server.protocol_name
     resp_buf = BytesIO()
     max_bytes = app._max_stream_response_bytes
-    max_time = app._max_stream_response_time
     produce_error_type: str | None = None
     produce_error_message: str = ""
     with ipc.new_stream(resp_buf, schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, schema)
         cumulative_bytes = 0
-        start_time = time.monotonic()
+        # Bytes uploaded to external storage across this HTTP turn.  Counted
+        # against ``max_bytes`` alongside ``resp_buf.tell()`` so the cap
+        # bounds *effective* response size — the bytes the client will
+        # ultimately fetch, whether inline or via an external pointer.
+        # Without this, externalizing producers would defeat the cap because
+        # only tiny pointer batches land in the HTTP body.
+        cumulative_external_bytes = 0
         try:
             while True:
                 out = OutputCollector(
@@ -584,20 +638,18 @@ def _produce_stream_response(
                 state.process(_TICK_BATCH, out, produce_ctx)
                 if not out.finished:
                     out.validate()
-                _flush_collector(writer, out, app._server.external_config)
+                cumulative_external_bytes += _flush_collector(writer, out, app._server.external_config)
                 if out.finished:
                     break
                 cumulative_bytes = out.total_data_bytes
                 # Decide whether to continue producing or break with a
-                # continuation token.  By default (no limits configured),
+                # continuation token.  By default (no limit configured),
                 # break after every produce cycle so the client receives
-                # data incrementally.  When limits are configured, buffer
-                # multiple batches until a limit is reached.
-                should_continue = max_bytes is not None or max_time is not None
-                if max_bytes is not None and resp_buf.tell() >= max_bytes:
-                    should_continue = False
-                if max_time is not None and (time.monotonic() - start_time) >= max_time:
-                    should_continue = False
+                # data incrementally.  When ``max_bytes`` is configured,
+                # buffer multiple batches until the wire-effective limit
+                # (HTTP body + externalized payload) is reached.
+                effective_bytes = resp_buf.tell() + cumulative_external_bytes
+                should_continue = max_bytes is not None and effective_bytes < max_bytes
                 if not should_continue:
                     # Serialize state into a continuation token
                     state_info = app._state_types.get(method_name)
@@ -615,7 +667,7 @@ def _produce_stream_response(
                         input_schema_bytes,
                         _derive_signing_key(app._signing_key, auth),
                         int(time.time()),
-                        stream_id=_current_stream_id.get(),
+                        stream_id=stream_id,
                     )
                     state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
                     continuation_batch = empty_batch(schema)
@@ -624,7 +676,7 @@ def _produce_stream_response(
                     break
         except Exception as exc:
             produce_error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-            produce_error_message = str(exc)[:500]
+            produce_error_message = _truncate_error_message(exc)
             _write_error_batch(writer, schema, exc, server_id=server_id)
     resp_buf.seek(0)
     return resp_buf, produce_error_type, produce_error_message
@@ -635,7 +687,7 @@ def _unpack_and_recover_state(
     token: bytes,
     state_info: _StateInfo,
     auth: AuthContext | None,
-) -> tuple[StreamState, pa.Schema, pa.Schema]:
+) -> tuple[StreamState, pa.Schema, pa.Schema, str]:
     """Unpack a signed state token and recover state, output schema, and input schema.
 
     Args:
@@ -650,7 +702,12 @@ def _unpack_and_recover_state(
             cannot be replayed across users.
 
     Returns:
-        Tuple of (state_object, output_schema, input_schema).
+        Tuple of ``(state_object, output_schema, input_schema, stream_id)``.
+        ``stream_id`` carries the chain identifier from the unpacked token
+        and must be threaded back into the next continuation token by
+        callers; the contextvar ``_current_stream_id`` is also updated as
+        a convenience for ambient telemetry observers (logger formatters,
+        OTel hooks).
 
     Raises:
         _RpcHttpError: On malformed tokens, expired tokens, failed
@@ -689,4 +746,4 @@ def _unpack_and_recover_state(
             status_code=HTTPStatus.BAD_REQUEST,
         ) from exc
 
-    return state_obj, output_schema, input_schema
+    return state_obj, output_schema, input_schema, stream_id

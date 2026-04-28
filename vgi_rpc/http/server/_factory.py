@@ -61,7 +61,6 @@ def make_wsgi_app(
     prefix: str = "",
     signing_key: bytes | None = None,
     max_stream_response_bytes: int | None = None,
-    max_stream_response_time: float | None = None,
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     cors_origins: str | Iterable[str] | None = None,
@@ -93,14 +92,16 @@ def make_wsgi_app(
             buffer multiple batches in a single HTTP response up to this
             size before emitting a continuation token.  The client
             transparently resumes via ``POST /{method}/exchange``.
-            When ``None`` (the default) and ``max_stream_response_time``
-            is also ``None``, each produce cycle emits one batch per HTTP
-            response for incremental streaming.
-        max_stream_response_time: When set, producer stream responses may
-            buffer multiple batches up to this many seconds of wall time
-            before emitting a continuation token.  Can be combined with
-            ``max_stream_response_bytes`` — the response breaks on
-            whichever limit is reached first.
+            The cap is measured against *wire-effective* bytes — the
+            current HTTP body size (including IPC framing) **plus** any
+            payload uploaded to external storage during this turn.
+            Counting externalized bytes prevents the cap from being
+            silently defeated when ``ExternalLocationConfig`` is active:
+            in that mode the HTTP body contains only small pointer
+            batches but the client still fetches the underlying
+            payload, so both should be charged against the same budget.
+            When ``None`` (the default), each produce cycle emits one
+            batch per HTTP response for incremental streaming.
         max_request_bytes: When set, the value is advertised via the
             ``VGI-Max-Request-Bytes`` response header on every response
             (including OPTIONS).  Clients can use ``http_capabilities()``
@@ -202,7 +203,6 @@ def make_wsgi_app(
         server,
         signing_key,
         max_stream_response_bytes,
-        max_stream_response_time,
         max_request_bytes,
         upload_url_provider,
         max_upload_bytes,

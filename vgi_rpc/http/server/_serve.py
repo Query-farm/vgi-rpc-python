@@ -15,6 +15,7 @@ def serve_http(
     *,
     host: str = "127.0.0.1",
     port: int = 0,
+    max_stream_response_bytes: int | None = None,
 ) -> None:
     """Serve an ``RpcServer`` over HTTP using waitress.
 
@@ -28,6 +29,13 @@ def serve_http(
         server: The ``RpcServer`` to expose.
         host: Bind address (default ``127.0.0.1``).
         port: TCP port.  ``0`` (the default) auto-selects a free port.
+        max_stream_response_bytes: Outgoing wire-size cap for producer-stream
+            responses.  When set, the producer loop packs multiple Arrow
+            batches into a single HTTP response body up to this size
+            (including IPC framing) before emitting a continuation token.
+            ``None`` (the default) keeps the conservative behaviour of one
+            data batch per HTTP response.  See ``make_wsgi_app`` for full
+            semantics.
 
     """
     import socket
@@ -44,7 +52,7 @@ def serve_http(
             s.bind((host, 0))
             port = int(s.getsockname()[1])
 
-    app = make_wsgi_app(server)
+    app = make_wsgi_app(server, max_stream_response_bytes=max_stream_response_bytes)
     print(f"PORT:{port}", flush=True)
     print(f"Serving on http://{host}:{port}/", file=sys.stderr, flush=True)
     _waitress.serve(app, host=host, port=port, _quiet=True)

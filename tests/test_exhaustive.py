@@ -1188,7 +1188,13 @@ class TestRunServerArgParsing:
         monkeypatch.setattr("sys.argv", ["worker", "--http"])
         called_with: list[tuple[object, str, int]] = []
 
-        def fake_serve_http(server: object, *, host: str = "127.0.0.1", port: int = 0) -> None:
+        def fake_serve_http(
+            server: object,
+            *,
+            host: str = "127.0.0.1",
+            port: int = 0,
+            max_stream_response_bytes: int | None = None,
+        ) -> None:
             called_with.append((server, host, port))
 
         monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)
@@ -1217,7 +1223,13 @@ class TestRunServerArgParsing:
         monkeypatch.setattr("sys.argv", ["worker", "--http", "--host", "0.0.0.0", "--port", "9999"])
         called_with: list[tuple[object, str, int]] = []
 
-        def fake_serve_http(server: object, *, host: str = "127.0.0.1", port: int = 0) -> None:
+        def fake_serve_http(
+            server: object,
+            *,
+            host: str = "127.0.0.1",
+            port: int = 0,
+            max_stream_response_bytes: int | None = None,
+        ) -> None:
             called_with.append((server, host, port))
 
         monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)

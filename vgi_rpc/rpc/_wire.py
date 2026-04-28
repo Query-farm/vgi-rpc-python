@@ -87,6 +87,46 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_input_batch(batch: pa.RecordBatch, target_schema: pa.Schema) -> pa.RecordBatch:
+    """Reconcile an inbound batch's schema to the declared input schema.
+
+    Input validation is **strict on the field set** but tolerant of column
+    order and tolerant of compatible type coercions.  This mirrors how the
+    pipe transport historically validated inputs (positional ``.cast``):
+    a worker's declared ``input_schema`` is the contract, and clients
+    sending unexpected columns indicate a contract violation, not a hint
+    that the worker should silently drop data it didn't ask for.
+
+    Behaviour:
+
+    - Schemas equal → return unchanged (fast path).
+    - Same field set, different order → reorder via ``select``.
+    - Same field names, different types → ``cast`` for type coercion
+      (e.g. float32→float64, decimal→double).
+    - Different field set (extras, missing, wrong names) → raise
+      ``TypeError`` with a uniform "Input schema mismatch" message.
+
+    The output-side equivalent in :meth:`OutputCollector.emit` is more
+    permissive (drops extras) because projection-pushdown explicitly
+    asks workers to emit a superset.  No analogous protocol exists on
+    the input side.
+    """
+    if batch.schema == target_schema:
+        return batch
+    target_names = list(target_schema.names)
+    batch_names = list(batch.schema.names)
+    if set(batch_names) != set(target_names):
+        raise TypeError(f"Input schema mismatch: expected {target_schema}, got {batch.schema}")
+    if batch_names != target_names:
+        batch = batch.select(target_names)
+    if batch.schema != target_schema:
+        try:
+            batch = batch.cast(target_schema)
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, ValueError) as exc:
+            raise TypeError(f"Input schema mismatch: expected {target_schema}, got {batch.schema}") from exc
+    return batch
+
+
 def _convert_for_arrow(val: object) -> object:
     """Convert a Python value for Arrow serialization.
 
@@ -359,8 +399,17 @@ def _flush_collector(
     external_config: ExternalLocationConfig | None = None,
     *,
     shm: ShmSegment | None = None,
-) -> None:
-    """Write all accumulated batches from an OutputCollector to an IPC stream writer."""
+) -> int:
+    """Write all accumulated batches from an OutputCollector to an IPC stream writer.
+
+    Returns:
+        Bytes of payload uploaded to external storage during this flush.
+        ``0`` when no externalization happened (storage not configured,
+        below threshold, or SHM/inline route).  Callers enforcing a
+        wire-effective cap should add this to the on-wire response size,
+        since externalized payloads still cost the client a fetch.
+
+    """
     # Record all logical batches for stats before any SHM/external transforms
     for ab in out.batches:
         _record_output(ab.batch)
@@ -379,19 +428,21 @@ def _flush_collector(
                 writer.write_batch(batch, custom_metadata=cm)
             else:
                 writer.write_batch(batch)
-    elif external_config is not None:
-        batch_list = maybe_externalize_collector(out, external_config)
+        return 0
+    if external_config is not None:
+        batch_list, external_bytes = maybe_externalize_collector(out, external_config)
         for batch, cm in batch_list:
             if cm is not None:
                 writer.write_batch(batch, custom_metadata=cm)
             else:
                 writer.write_batch(batch)
-    else:
-        for ab in out.batches:
-            if ab.custom_metadata is not None:
-                writer.write_batch(ab.batch, custom_metadata=ab.custom_metadata)
-            else:
-                writer.write_batch(ab.batch)
+        return external_bytes
+    for ab in out.batches:
+        if ab.custom_metadata is not None:
+            writer.write_batch(ab.batch, custom_metadata=ab.custom_metadata)
+        else:
+            writer.write_batch(ab.batch)
+    return 0
 
 
 def _dispatch_log_or_error(

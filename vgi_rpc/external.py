@@ -631,7 +631,7 @@ def _fetch_and_resolve(
 def maybe_externalize_collector(
     out: OutputCollector,
     config: ExternalLocationConfig,
-) -> list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]]:
+) -> tuple[list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]], int]:
     """Possibly externalize an entire OutputCollector cycle.
 
     If the data batch exceeds ``config.externalize_threshold_bytes`` and storage is
@@ -643,25 +643,32 @@ def maybe_externalize_collector(
 
     Args:
         out: The ``OutputCollector`` to check.
-        config: ExternalLocation configuration.
+        config: ExternalLocationConfig configuration.
 
     Returns:
-        List of ``(batch, custom_metadata)`` tuples ready for writing.
+        ``(batches, external_payload_bytes)``.  ``batches`` is the list of
+        ``(batch, custom_metadata)`` tuples ready for writing.
+        ``external_payload_bytes`` is the size of the data uploaded to
+        external storage during this call (raw IPC bytes, pre-compression);
+        ``0`` when nothing was externalized.  Callers that want to enforce
+        a wire-effective response cap should add this to the on-wire
+        bytes — externalized payloads do not appear in the HTTP body but
+        the client still has to fetch them.
 
     """
     if config.storage is None:
-        return [(ab.batch, ab.custom_metadata) for ab in out.batches]
+        return [(ab.batch, ab.custom_metadata) for ab in out.batches], 0
 
     # Check if there is a data batch to externalize
     try:
         data_ab = out.data_batch
     except RuntimeError:
         # No data batch — finished-only or log-only collector
-        return [(ab.batch, ab.custom_metadata) for ab in out.batches]
+        return [(ab.batch, ab.custom_metadata) for ab in out.batches], 0
 
     # Fast O(1) size check
     if data_ab.batch.get_total_buffer_size() < config.externalize_threshold_bytes:
-        return [(ab.batch, ab.custom_metadata) for ab in out.batches]
+        return [(ab.batch, ab.custom_metadata) for ab in out.batches], 0
 
     # Serialize all batches into one IPC stream
     buf = BytesIO()
@@ -706,7 +713,7 @@ def maybe_externalize_collector(
     )
 
     pointer_batch, pointer_cm = make_external_location_batch(out.output_schema, url, sha256=data_sha256)
-    return [(pointer_batch, pointer_cm)]
+    return [(pointer_batch, pointer_cm)], raw_size
 
 
 # ---------------------------------------------------------------------------

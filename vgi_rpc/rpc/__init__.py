@@ -118,6 +118,7 @@ from vgi_rpc.rpc._server import (
     RpcServer,
     _emit_access_log,
     _log_method_error,
+    _truncate_error_message,
 )
 from vgi_rpc.rpc._transport import (
     PipeTransport,
@@ -153,6 +154,7 @@ from vgi_rpc.rpc._types import (
 )
 from vgi_rpc.rpc._wire import (
     _ClientLogSink,
+    _coerce_input_batch,
     _convert_for_arrow,
     _deserialize_params,
     _deserialize_value,
@@ -230,6 +232,7 @@ __all__ = [
     "_build_params_schema",
     "_build_result_schema",
     "_classify_return_type",
+    "_coerce_input_batch",
     "_convert_for_arrow",
     "_current_request_id",
     "_current_request_metadata",
@@ -254,6 +257,7 @@ __all__ = [
     "_read_stream_header",
     "_read_unary_response",
     "_send_request",
+    "_truncate_error_message",
     "_unwrap_annotated",
     "_validate_implementation",
     "_validate_params",
@@ -332,6 +336,11 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     - ``--access-log PATH`` — Append JSONL access log records to ``PATH``.
       The cross-language conformance contract requires every worker to
       accept this flag; see ``docs/access-log-spec.md``.
+    - ``--max-stream-response-bytes N`` — HTTP-only.  Cap the outgoing
+      response body of producer-stream calls at ``N`` bytes (including
+      IPC framing).  When set, the producer loop packs multiple batches
+      into a single response up to this size before emitting a
+      continuation token.  Default: one batch per response.
 
     Without ``--http`` the server runs over stdin/stdout pipes (the
     default, suitable for ``SubprocessTransport``).
@@ -393,6 +402,18 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             "Env: VGI_RPC_ACCESS_LOG_MAX_RECORD_BYTES."
         ),
     )
+    parser.add_argument(
+        "--max-stream-response-bytes",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_MAX_STREAM_RESPONSE_BYTES", "0")) or None,
+        help=(
+            "HTTP-only.  Cap the outgoing response body of producer-stream calls "
+            "at this many bytes (including IPC framing).  When set, the producer "
+            "packs multiple Arrow batches into a single response up to this size "
+            "before emitting a continuation token.  Default: one batch per "
+            "response.  Env: VGI_RPC_MAX_STREAM_RESPONSE_BYTES."
+        ),
+    )
     args = parser.parse_args()
 
     if args.access_log_max_bytes and args.access_log_when:
@@ -425,7 +446,12 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         except ImportError:
             print("HTTP transport requires vgi-rpc[http]: pip install vgi-rpc[http]", file=sys.stderr)
             sys.exit(1)
-        serve_http(server, host=args.host, port=args.port)
+        serve_http(
+            server,
+            host=args.host,
+            port=args.port,
+            max_stream_response_bytes=args.max_stream_response_bytes,
+        )
     else:
         serve_stdio(server)
 

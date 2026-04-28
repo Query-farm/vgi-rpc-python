@@ -24,6 +24,7 @@ from vgi_rpc.rpc import (
     _get_auth_and_metadata,
     _log_method_error,
     _read_request,
+    _truncate_error_message,
     _write_error_batch,
 )
 from vgi_rpc.rpc._common import CookieSpec, _current_response_cookies
@@ -261,7 +262,7 @@ class _UploadUrlResource:
                 server_version=self._app._server.server_version,
                 protocol_hash=self._app._server.protocol_hash,
                 protocol_version=self._app._server.protocol_version,
-                error_message=str(_upload_exc) if _upload_exc is not None else "",
+                error_message=_truncate_error_message(_upload_exc),
             )
 
         resp_buf.seek(0)

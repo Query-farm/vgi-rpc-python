@@ -588,7 +588,7 @@ class TestMaybeExternalizeCollector:
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 1
         batch, cm = result[0]
         assert batch.num_rows == 0
@@ -604,7 +604,7 @@ class TestMaybeExternalizeCollector:
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": [1]})
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 1
         batch, _ = result[0]
         assert batch.num_rows == 1
@@ -616,7 +616,7 @@ class TestMaybeExternalizeCollector:
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 1
         batch, _ = result[0]
         assert batch.num_rows == 100
@@ -629,7 +629,7 @@ class TestMaybeExternalizeCollector:
         out = OutputCollector(_SCHEMA)
         out.finish()
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 0
         assert len(storage.data) == 0
 
@@ -643,7 +643,7 @@ class TestMaybeExternalizeCollector:
         # Don't emit a data batch — this is a log-only collector that also finishes
         out.finish()
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 1
         batch, cm = result[0]
         assert batch.num_rows == 0
@@ -678,7 +678,7 @@ class TestMaybeExternalizeCollector:
         out.client_log(Level.INFO, "pre-data log")
         out.emit_pydict({"value": list(range(100))})
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 1
         assert len(storage.data) == 1
 
@@ -824,7 +824,7 @@ class TestSHA256Checksum:
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 1
         _batch, cm = result[0]
         assert cm is not None
@@ -1752,7 +1752,7 @@ class TestCompression:
         out = OutputCollector(_SCHEMA)
         out.emit_pydict({"value": list(range(100))})
 
-        result = maybe_externalize_collector(out, config)
+        result, _external_bytes = maybe_externalize_collector(out, config)
         assert len(result) == 1
 
         uploaded_bytes = next(iter(storage.data.values()))
