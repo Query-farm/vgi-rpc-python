@@ -96,7 +96,7 @@ def resumable_client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient
     c = make_sync_client(
         RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
         signing_key=b"test-key",
-        max_stream_response_bytes=200,
+        max_response_bytes=200,
         prefix=prefix,
     )
     yield c
@@ -334,7 +334,7 @@ class TestResumableServerStream:
             assert len(batches) == 0
 
     def test_disabled_by_default(self, client: _SyncTestClient) -> None:
-        """Without max_stream_response_bytes, no continuation tokens are used."""
+        """Without max_response_bytes, no continuation tokens are used."""
         with http_connect(RpcFixtureService, client=client) as proxy:
             stream = proxy.generate(count=5)
             assert isinstance(stream, HttpStreamSession)
@@ -418,7 +418,7 @@ class TestResumableServerStream:
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             signing_key=b"test-key",
-            max_stream_response_bytes=200,
+            max_response_bytes=200,
         )
         with http_connect(RpcFixtureService, client=c) as proxy:
             batches = list(proxy.generate(count=1))
@@ -494,7 +494,7 @@ class TestStateTokenStateEncoding:
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             signing_key=b"test-key",
-            max_stream_response_bytes=200,
+            max_response_bytes=200,
             token_ttl=3600,
         )
         resp = c.post(
@@ -554,7 +554,7 @@ class TestStateTokenStateEncoding:
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             signing_key=b"test-key",
-            max_stream_response_bytes=200,
+            max_response_bytes=200,
             token_ttl=0,
         )
         resp = c.post(
@@ -1609,7 +1609,7 @@ class TestZstdCompression:
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             signing_key=b"test-key",
-            max_stream_response_bytes=200,
+            max_response_bytes=200,
             compression_level=3,
         )
         with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:

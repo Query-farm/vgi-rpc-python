@@ -30,6 +30,7 @@ _CONFORMANCE_PIPE = str(Path(__file__).parent / "serve_conformance_pipe.py")
 _CONFORMANCE_HTTP = str(Path(__file__).parent / "serve_conformance_http.py")
 _CONFORMANCE_HTTP_SHARED = str(Path(__file__).parent / "serve_conformance_http_shared.py")
 _CONFORMANCE_HTTP_AUTH = str(Path(__file__).parent / "serve_conformance_http_auth.py")
+_CONFORMANCE_HTTP_STRICT = str(Path(__file__).parent / "serve_conformance_http_strict.py")
 _CONFORMANCE_UNIX = str(Path(__file__).parent / "serve_conformance_unix.py")
 _CONFORMANCE_UNIX_THREADED = str(Path(__file__).parent / "serve_conformance_unix_threaded.py")
 
@@ -306,6 +307,34 @@ def conformance_http_port() -> Iterator[int]:
     """Spawn a single conformance HTTP server subprocess for the session."""
     proc = subprocess.Popen(
         _conformance_http_cmd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+
+        _wait_for_http(port)
+
+        yield port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_strict_cap_port() -> Iterator[int]:
+    """Spawn a strict-cap conformance HTTP server for HTTP-only strict-fail tests.
+
+    The server is booted with tight ``max_response_bytes`` and
+    ``max_externalized_response_bytes`` so the strict-fail conformance
+    tests can deliberately overshoot the caps via ``produce_oversized_batch``,
+    ``oversized_unary``, and ``exchange_oversized``.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, _CONFORMANCE_HTTP_STRICT],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )

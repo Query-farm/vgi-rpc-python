@@ -277,8 +277,16 @@ def _write_result_batch(
     external_config: ExternalLocationConfig | None = None,
     *,
     shm: ShmSegment | None = None,
-) -> None:
-    """Write a unary result batch to an already-open IPC stream writer."""
+) -> int:
+    """Write a unary result batch to an already-open IPC stream writer.
+
+    Returns:
+        Bytes uploaded to external storage during this call.  ``0`` when no
+        externalisation happened (SHM route, inline, below threshold, or
+        no storage configured).  Callers enforcing a per-response
+        external-channel cap should add this to a running total.
+
+    """
     if len(result_schema) == 0:
         batch = pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
     else:
@@ -293,17 +301,18 @@ def _write_result_batch(
             if wire_response_logger.isEnabledFor(logging.DEBUG):
                 wire_response_logger.debug("Write result batch: %s, route=shm", fmt_batch(batch))
             writer.write_batch(batch, custom_metadata=cm)
-            return
+            return 0
     elif external_config is not None:
-        batch, cm = maybe_externalize_batch(batch, None, external_config)
+        batch, cm, external_bytes = maybe_externalize_batch(batch, None, external_config)
         if cm is not None:
             if wire_response_logger.isEnabledFor(logging.DEBUG):
                 wire_response_logger.debug("Write result batch: %s, route=external", fmt_batch(batch))
             writer.write_batch(batch, custom_metadata=cm)
-            return
+            return external_bytes
     if wire_response_logger.isEnabledFor(logging.DEBUG):
         wire_response_logger.debug("Write result batch: %s, route=inline", fmt_batch(batch))
     writer.write_batch(batch)
+    return 0
 
 
 def _read_request(
@@ -638,7 +647,10 @@ def _write_stream_header(
         raise TypeError(f"Method '{method_name}' declares header type but returned header=None")
     batch = header._serialize()
     _record_output(batch)
-    batch, cm = maybe_externalize_batch(batch, None, external_config) if external_config else (batch, None)
+    if external_config is not None:
+        batch, cm, _ext_bytes = maybe_externalize_batch(batch, None, external_config)
+    else:
+        cm = None
     with ipc.new_stream(dest, batch.schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, batch.schema)

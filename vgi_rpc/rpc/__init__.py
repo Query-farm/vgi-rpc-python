@@ -336,11 +336,18 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     - ``--access-log PATH`` — Append JSONL access log records to ``PATH``.
       The cross-language conformance contract requires every worker to
       accept this flag; see ``docs/access-log-spec.md``.
-    - ``--max-stream-response-bytes N`` — HTTP-only.  Cap the outgoing
-      response body of producer-stream calls at ``N`` bytes (including
-      IPC framing).  When set, the producer loop packs multiple batches
-      into a single response up to this size before emitting a
-      continuation token.  Default: one batch per response.
+    - ``--max-response-bytes N`` — HTTP-only.  Cap the outgoing HTTP body
+      of every method response at ``N`` bytes (including IPC framing).
+      For producer streams, controls when the framework mints a
+      continuation token to split the response across multiple HTTP
+      turns.  Default: no body cap.  Env:
+      ``VGI_RPC_MAX_RESPONSE_BYTES``.
+    - ``--max-externalized-response-bytes N`` — HTTP-only.  Cap the
+      total bytes uploaded to external storage during one HTTP response.
+      Default: unbounded.  Env:
+      ``VGI_RPC_MAX_EXTERNALIZED_RESPONSE_BYTES``.
+    - ``--max-stream-response-bytes N`` — **Deprecated**; alias for
+      ``--max-response-bytes``.
 
     Without ``--http`` the server runs over stdin/stdout pipes (the
     default, suitable for ``SubprocessTransport``).
@@ -403,18 +410,45 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         ),
     )
     parser.add_argument(
+        "--max-response-bytes",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_MAX_RESPONSE_BYTES", "0")) or None,
+        help=(
+            "HTTP-only.  Cap the outgoing HTTP body of every method response "
+            "at this many bytes (including IPC framing).  For producer streams, "
+            "controls when the framework mints a continuation token to split "
+            "the response across HTTP turns.  Default: no body cap.  "
+            "Env: VGI_RPC_MAX_RESPONSE_BYTES."
+        ),
+    )
+    parser.add_argument(
+        "--max-externalized-response-bytes",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_MAX_EXTERNALIZED_RESPONSE_BYTES", "0")) or None,
+        help=(
+            "HTTP-only.  Cap the total bytes uploaded to external storage "
+            "during one HTTP response (one producer turn or one unary/exchange "
+            "call).  Default: unbounded.  Env: "
+            "VGI_RPC_MAX_EXTERNALIZED_RESPONSE_BYTES."
+        ),
+    )
+    parser.add_argument(
         "--max-stream-response-bytes",
         type=int,
         default=int(os.environ.get("VGI_RPC_MAX_STREAM_RESPONSE_BYTES", "0")) or None,
-        help=(
-            "HTTP-only.  Cap the outgoing response body of producer-stream calls "
-            "at this many bytes (including IPC framing).  When set, the producer "
-            "packs multiple Arrow batches into a single response up to this size "
-            "before emitting a continuation token.  Default: one batch per "
-            "response.  Env: VGI_RPC_MAX_STREAM_RESPONSE_BYTES."
-        ),
+        help=("Deprecated alias for --max-response-bytes.  Env: VGI_RPC_MAX_STREAM_RESPONSE_BYTES (deprecated)."),
     )
     args = parser.parse_args()
+
+    # Deprecation alias
+    if args.max_stream_response_bytes is not None:
+        if args.max_response_bytes is not None:
+            raise SystemExit("Pass either --max-response-bytes or --max-stream-response-bytes, not both")
+        print(
+            "warning: --max-stream-response-bytes is deprecated; use --max-response-bytes instead.",
+            file=sys.stderr,
+        )
+        args.max_response_bytes = args.max_stream_response_bytes
 
     if args.access_log_max_bytes and args.access_log_when:
         raise SystemExit("--access-log-max-bytes and --access-log-when are mutually exclusive")
@@ -450,7 +484,8 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             server,
             host=args.host,
             port=args.port,
-            max_stream_response_bytes=args.max_stream_response_bytes,
+            max_response_bytes=args.max_response_bytes,
+            max_externalized_response_bytes=args.max_externalized_response_bytes,
         )
     else:
         serve_stdio(server)

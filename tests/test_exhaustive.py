@@ -1193,7 +1193,8 @@ class TestRunServerArgParsing:
             *,
             host: str = "127.0.0.1",
             port: int = 0,
-            max_stream_response_bytes: int | None = None,
+            max_response_bytes: int | None = None,
+            max_externalized_response_bytes: int | None = None,
         ) -> None:
             called_with.append((server, host, port))
 
@@ -1228,7 +1229,8 @@ class TestRunServerArgParsing:
             *,
             host: str = "127.0.0.1",
             port: int = 0,
-            max_stream_response_bytes: int | None = None,
+            max_response_bytes: int | None = None,
+            max_externalized_response_bytes: int | None = None,
         ) -> None:
             called_with.append((server, host, port))
 

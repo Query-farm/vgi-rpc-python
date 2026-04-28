@@ -31,8 +31,9 @@ class _HttpRpcApp:
     """Internal helper that wraps an RpcServer and manages stream state."""
 
     __slots__ = (
+        "_max_externalized_response_bytes",
         "_max_request_bytes",
-        "_max_stream_response_bytes",
+        "_max_response_bytes",
         "_max_upload_bytes",
         "_server",
         "_signing_key",
@@ -45,16 +46,18 @@ class _HttpRpcApp:
         self,
         server: RpcServer,
         signing_key: bytes,
-        max_stream_response_bytes: int | None = None,
+        max_response_bytes: int | None = None,
         max_request_bytes: int | None = None,
         upload_url_provider: UploadUrlProvider | None = None,
         max_upload_bytes: int | None = None,
         token_ttl: int = 3600,
+        max_externalized_response_bytes: int | None = None,
     ) -> None:
         self._server = server
         self._signing_key = signing_key
         self._state_types = _resolve_state_types(server)
-        self._max_stream_response_bytes = max_stream_response_bytes
+        self._max_response_bytes = max_response_bytes
+        self._max_externalized_response_bytes = max_externalized_response_bytes
         self._max_request_bytes = max_request_bytes
         self._upload_url_provider = upload_url_provider
         self._max_upload_bytes = max_upload_bytes

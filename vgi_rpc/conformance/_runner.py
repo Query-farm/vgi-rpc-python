@@ -26,7 +26,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import pyarrow as pa
 
@@ -90,6 +90,8 @@ class ConformanceResult:
     passed: bool
     duration_ms: float
     error: str | None = None
+    skipped: bool = False
+    skip_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,32 +137,57 @@ class LogCollector:
 # ---------------------------------------------------------------------------
 
 
+_Transport = Literal["pipe", "http", "unix"]
+_ALL_TRANSPORTS: tuple[_Transport, ...] = ("pipe", "http", "unix")
+
+
 @dataclass(frozen=True)
 class _ConformanceTest:
-    """A registered conformance test."""
+    """A registered conformance test.
+
+    Attributes:
+        category: Logical grouping (e.g., ``"unary"``, ``"producer_stream"``).
+        name: Test name within the category.
+        fn: The test function.
+        transports: Tuple of transports this test is compatible with.  The
+            CLI runner detects the active transport from the user's flag
+            (``--cmd`` → ``"pipe"``, ``--unix`` → ``"unix"``, ``--url`` →
+            ``"http"``) and skips tests whose tuple excludes it.  Cross-
+            language ports must honour this field — the strict-fail tests
+            in particular require behaviour that is HTTP-specific.
+
+    """
 
     category: str
     name: str
     fn: Callable[[ConformanceService, LogCollector], None]
+    transports: tuple[_Transport, ...] = _ALL_TRANSPORTS
 
     @property
     def full_name(self) -> str:
         """Return category.name format."""
         return f"{self.category}.{self.name}"
 
+    def applies_to(self, transport: _Transport) -> bool:
+        """Return whether this test should run on the given transport."""
+        return transport in self.transports
+
 
 _TESTS: list[_ConformanceTest] = []
 
 
 def _conformance_test(
-    *, category: str, name: str
+    *,
+    category: str,
+    name: str,
+    transports: tuple[_Transport, ...] = _ALL_TRANSPORTS,
 ) -> Callable[[Callable[[ConformanceService, LogCollector], None]], Callable[[ConformanceService, LogCollector], None]]:
     """Register a conformance test function."""
 
     def decorator(
         fn: Callable[[ConformanceService, LogCollector], None],
     ) -> Callable[[ConformanceService, LogCollector], None]:
-        _TESTS.append(_ConformanceTest(category=category, name=name, fn=fn))
+        _TESTS.append(_ConformanceTest(category=category, name=name, fn=fn, transports=transports))
         return fn
 
     return decorator
@@ -1284,6 +1311,14 @@ _EXPECTED_METHODS = frozenset(
         "void_noop",
         "void_with_param",
         "with_defaults",
+        # HTTP-only response-cap conformance support (added 2026-04).
+        # Cross-language ports may either skip the http_response_cap.*
+        # tests entirely or implement the methods to make those tests
+        # exercisable.  The methods themselves are inert against
+        # non-HTTP transports — they simply emit large payloads.
+        "exchange_oversized",
+        "oversized_unary",
+        "produce_oversized_batch",
     }
 )
 
@@ -1333,6 +1368,7 @@ _UNARY_METHODS = frozenset(
         "echo_with_log_extras",
         "echo_with_multi_logs",
         "inspect_point",
+        "oversized_unary",
         "raise_runtime_error",
         "raise_type_error",
         "raise_value_error",
@@ -1351,6 +1387,7 @@ _STREAM_METHODS = frozenset(
         "exchange_cast_compatible",
         "exchange_error_on_init",
         "exchange_error_on_nth",
+        "exchange_oversized",
         "exchange_scale",
         "exchange_with_header",
         "exchange_with_logs",
@@ -1362,6 +1399,7 @@ _STREAM_METHODS = frozenset(
         "produce_error_on_init",
         "produce_large_batches",
         "produce_n",
+        "produce_oversized_batch",
         "produce_single",
         "produce_with_header",
         "produce_with_header_and_logs",
@@ -1405,7 +1443,10 @@ def _test_desc_describe_version(desc: ServiceDescription) -> None:
 
 @_describe_test(category="describe_service", name="method_count")
 def _test_desc_method_count(desc: ServiceDescription) -> None:
-    assert len(desc.methods) == 73
+    # Bumped to 76 in 2026-04 when the HTTP-only response-cap conformance
+    # methods (``oversized_unary``, ``produce_oversized_batch``,
+    # ``exchange_oversized``) were added.
+    assert len(desc.methods) == 76
 
 
 # ---------------------------------------------------------------------------
@@ -1618,6 +1659,7 @@ def run_conformance(
     filter_patterns: list[str] | None = None,
     on_progress: Callable[[ConformanceResult], None] | None = None,
     timeout: float = DEFAULT_TEST_TIMEOUT,
+    transport: _Transport | None = None,
 ) -> ConformanceSuite:
     """Run conformance tests against a proxy and return results.
 
@@ -1627,6 +1669,11 @@ def run_conformance(
         filter_patterns: Optional glob patterns to filter which tests run.
         on_progress: Optional callback invoked after each test completes.
         timeout: Per-test timeout in seconds.  Set to ``0`` to disable.
+        transport: Active transport (``"pipe"``, ``"http"``, or ``"unix"``).
+            When set, tests whose ``transports`` tuple excludes this value
+            are reported as skipped (with ``passed=True`` so they don't fail
+            the suite).  When ``None`` (back-compat), all tests run
+            regardless of the transports field.
 
     Returns:
         A ConformanceSuite with all results.
@@ -1640,6 +1687,23 @@ def run_conformance(
         tests_to_run = [t for t in _TESTS if _matches_filter(t.full_name, filter_patterns)]
 
     for test in tests_to_run:
+        if transport is not None and not test.applies_to(transport):
+            results.append(
+                ConformanceResult(
+                    name=test.full_name,
+                    category=test.category,
+                    passed=True,
+                    duration_ms=0.0,
+                    skipped=True,
+                    skip_reason=(
+                        f"not compatible with transport {transport!r} (test transports={list(test.transports)})"
+                    ),
+                )
+            )
+            if on_progress:
+                on_progress(results[-1])
+            continue
+
         log_collector.clear()
         start = time.monotonic()
         error: str | None = None
@@ -1675,15 +1739,16 @@ def run_conformance(
             on_progress(result)
 
     suite_elapsed = (time.monotonic() - suite_start) * 1000
-    passed_count = sum(1 for r in results if r.passed)
+    passed_count = sum(1 for r in results if r.passed and not r.skipped)
     failed_count = sum(1 for r in results if not r.passed)
+    skipped_count = sum(1 for r in results if r.skipped)
 
     return ConformanceSuite(
         results=results,
         total=len(results),
         passed=passed_count,
         failed=failed_count,
-        skipped=0,
+        skipped=skipped_count,
         duration_ms=suite_elapsed,
     )
 

@@ -56,6 +56,7 @@ class _EchoImpl:
     def echo(self, message: str) -> str:
         return message
 
+
 CLIENT_ID = "my-client-id"
 CLIENT_SECRET = "my-client-secret"
 PREFIX = "/vgi"
@@ -91,11 +92,13 @@ class _MockIdP:
 
             def do_GET(self) -> None:
                 if self.path == "/.well-known/openid-configuration":
-                    body = json.dumps({
-                        "issuer": idp.url,
-                        "authorization_endpoint": idp.url + "/authorize",
-                        "token_endpoint": idp.url + "/token",
-                    }).encode("utf-8")
+                    body = json.dumps(
+                        {
+                            "issuer": idp.url,
+                            "authorization_endpoint": idp.url + "/authorize",
+                            "token_endpoint": idp.url + "/token",
+                        }
+                    ).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))

@@ -725,7 +725,7 @@ def maybe_externalize_batch(
     batch: pa.RecordBatch,
     custom_metadata: pa.KeyValueMetadata | None,
     config: ExternalLocationConfig,
-) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
+) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None, int]:
     """Possibly externalize a single batch.
 
     For non-OutputCollector write points (unary results, bidi inputs).
@@ -736,20 +736,26 @@ def maybe_externalize_batch(
         config: ExternalLocation configuration.
 
     Returns:
-        Original ``(batch, custom_metadata)`` if below threshold or no
-        storage configured; otherwise a pointer batch.
+        ``(batch, custom_metadata, external_bytes)``.  When the batch is
+        below threshold or no storage is configured, returns the original
+        batch and ``external_bytes=0``.  When externalised, returns the
+        pointer batch and ``external_bytes`` set to the raw IPC byte count
+        (pre-compression).  Callers enforcing a per-response external-
+        channel cap should add this to a running total — externalised
+        payloads are not on the HTTP wire body but the client still has
+        to fetch them.
 
     """
     if config.storage is None:
-        return batch, custom_metadata
+        return batch, custom_metadata, 0
 
     # Never externalize zero-row batches (logs, errors, finish markers)
     if batch.num_rows == 0:
-        return batch, custom_metadata
+        return batch, custom_metadata, 0
 
     # Fast O(1) size check
     if batch.get_total_buffer_size() < config.externalize_threshold_bytes:
-        return batch, custom_metadata
+        return batch, custom_metadata, 0
 
     # Serialize the single batch as IPC stream
     buf = BytesIO()
@@ -792,4 +798,5 @@ def maybe_externalize_batch(
         },
     )
 
-    return make_external_location_batch(batch.schema, url, sha256=data_sha256)
+    pointer_batch, pointer_cm = make_external_location_batch(batch.schema, url, sha256=data_sha256)
+    return pointer_batch, pointer_cm, raw_size

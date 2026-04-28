@@ -1596,7 +1596,10 @@ class TestDescribeConformance:
 
     def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
-        assert len(service_description.methods) == 73
+        # Bumped to 76 in 2026-04 when the HTTP-only response-cap conformance
+        # methods were added (oversized_unary, produce_oversized_batch,
+        # exchange_oversized).
+        assert len(service_description.methods) == 76
         assert service_description.protocol_name == "ConformanceService"
         echo_str = service_description.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

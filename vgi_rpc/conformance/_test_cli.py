@@ -30,6 +30,7 @@ import shlex
 import sys
 from collections.abc import Callable, Iterator
 from io import IOBase
+from typing import Literal
 
 from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.conformance._runner import (
@@ -158,13 +159,23 @@ def _log_to_stderr(msg: Message) -> None:
 def _format_table(suite: ConformanceSuite) -> str:
     """Format results as a human-readable table."""
     lines: list[str] = []
-    lines.append(f"vgi-rpc-test: {suite.passed} passed, {suite.failed} failed ({suite.duration_ms / 1000:.2f}s)")
+    summary = f"{suite.passed} passed, {suite.failed} failed"
+    if suite.skipped:
+        summary += f", {suite.skipped} skipped"
+    lines.append(f"vgi-rpc-test: {summary} ({suite.duration_ms / 1000:.2f}s)")
     lines.append("")
 
     for r in suite.results:
-        status = "PASS" if r.passed else "FAIL"
+        if r.skipped:
+            status = "SKIP"
+        elif r.passed:
+            status = "PASS"
+        else:
+            status = "FAIL"
         lines.append(f"  {r.name:<45s} {status:>4s}  {r.duration_ms:>7.1f}ms")
-        if r.error:
+        if r.skipped and r.skip_reason:
+            lines.append(f"    {r.skip_reason}")
+        elif r.error:
             lines.append(f"    {r.error}")
 
     return "\n".join(lines)
@@ -183,6 +194,8 @@ def _format_json(suite: ConformanceSuite) -> str:
                 "name": r.name,
                 "category": r.category,
                 "passed": r.passed,
+                "skipped": r.skipped,
+                "skip_reason": r.skip_reason,
                 "duration_ms": round(r.duration_ms, 1),
                 "error": r.error,
             }
@@ -457,12 +470,16 @@ def main(argv: list[str] | None = None) -> None:
 
     # Open transport and run
     try:
+        active_transport: Literal["pipe", "http", "unix"]
         if args.cmd:
             ctx_manager = _open_pipe_transport(args.cmd, args.shm, effective_collector)
+            active_transport = "pipe"
         elif args.unix:
             ctx_manager = _open_unix_transport(args.unix, effective_collector)
+            active_transport = "unix"
         else:
             ctx_manager = _open_http_transport(args.url, args.prefix, effective_collector)
+            active_transport = "http"
 
         with ctx_manager as proxy:
             # Determine output format
@@ -479,6 +496,7 @@ def main(argv: list[str] | None = None) -> None:
                 filter_patterns=filter_patterns,
                 on_progress=progress_cb,
                 timeout=args.timeout,
+                transport=active_transport,
             )
 
             # Format output

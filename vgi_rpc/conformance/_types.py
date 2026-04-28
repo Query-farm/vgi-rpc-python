@@ -237,6 +237,28 @@ class LargeProducerState(ProducerState):
 
 
 @dataclass
+class OversizedBatchState(ProducerState):
+    """Emit one large batch of int64 rows, then finish.
+
+    Used by HTTP-only conformance tests to overshoot the operator-
+    configured response cap in a single producer iteration.  Sized to
+    the worst case the test wants to provoke.
+    """
+
+    rows_per_batch: int
+    emitted: bool = False
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit one big int64 batch on the first call; finish on the next."""
+        if self.emitted:
+            out.finish()
+            return
+        indices = list(range(self.rows_per_batch))
+        out.emit_pydict({"index": indices, "value": [v * 10 for v in indices]})
+        self.emitted = True
+
+
+@dataclass
 class LoggingProducerState(ProducerState):
     """Produce batches with an INFO log before each."""
 
@@ -364,6 +386,24 @@ class FailOnExchangeNState(ExchangeState):
         if self.exchange_count >= self.fail_on:
             raise RuntimeError(f"intentional error on exchange {self.exchange_count}")
         out.emit(input.batch)
+
+
+@dataclass
+class OversizedExchangeState(ExchangeState):
+    """Emit a large output batch for any input.
+
+    Used by HTTP-only conformance tests for the lockstep exchange path.
+    Each call produces ``rows_per_batch`` int64 rows of output regardless
+    of the input size — sized to deliberately overshoot the operator-
+    configured response cap.
+    """
+
+    rows_per_batch: int
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit a large fixed-size output batch."""
+        indices = list(range(self.rows_per_batch))
+        out.emit_pydict({"index": indices, "value": [v * 10 for v in indices]})
 
 
 # ---------------------------------------------------------------------------

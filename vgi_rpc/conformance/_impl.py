@@ -42,6 +42,8 @@ from ._types import (
     LargeProducerState,
     LoggingExchangeState,
     LoggingProducerState,
+    OversizedBatchState,
+    OversizedExchangeState,
     Point,
     RichHeader,
     ScaleExchangeState,
@@ -73,6 +75,14 @@ class ConformanceServiceImpl:
     def echo_bytes(self, data: bytes) -> bytes:
         """Echo a bytes value."""
         return data
+
+    def oversized_unary(self, target_bytes: int) -> bytes:
+        """Return a bytes payload of approximately ``target_bytes`` bytes."""
+        # ``b"\x00"`` is the cheapest predictable filler; the test only
+        # cares that the result is large.
+        if target_bytes < 0:
+            raise ValueError("target_bytes must be non-negative")
+        return b"\x00" * target_bytes
 
     def echo_int(self, value: int) -> int:
         """Echo an integer value."""
@@ -354,6 +364,13 @@ class ConformanceServiceImpl:
         """Raise during init."""
         raise RuntimeError("intentional init error")
 
+    def produce_oversized_batch(self, rows_per_batch: int) -> Stream[OversizedBatchState]:
+        """Emit one oversized batch then finish."""
+        return Stream(
+            output_schema=_COUNTER_SCHEMA,
+            state=OversizedBatchState(rows_per_batch=rows_per_batch),
+        )
+
     # ------------------------------------------------------------------
     # Producer Streams With Headers
     # ------------------------------------------------------------------
@@ -424,6 +441,14 @@ class ConformanceServiceImpl:
     def exchange_error_on_init(self) -> Stream[ScaleExchangeState]:
         """Raise during exchange init."""
         raise RuntimeError("intentional exchange init error")
+
+    def exchange_oversized(self, rows_per_batch: int) -> Stream[OversizedExchangeState]:
+        """Exchange that emits a large output for any input."""
+        return Stream(
+            output_schema=_COUNTER_SCHEMA,
+            state=OversizedExchangeState(rows_per_batch=rows_per_batch),
+            input_schema=_SCALE_INPUT_SCHEMA,
+        )
 
     # ------------------------------------------------------------------
     # Exchange Streams With Headers

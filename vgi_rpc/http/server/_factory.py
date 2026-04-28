@@ -20,7 +20,10 @@ from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, RpcServer
 
 from .._common import (
+    EXTERNALIZATION_ENABLED_HEADER,
+    MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER,
     MAX_REQUEST_BYTES_HEADER,
+    MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
     RPC_ERROR_HEADER,
     UPLOAD_URL_HEADER,
@@ -60,7 +63,8 @@ def make_wsgi_app(
     *,
     prefix: str = "",
     signing_key: bytes | None = None,
-    max_stream_response_bytes: int | None = None,
+    max_response_bytes: int | None = None,
+    max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     cors_origins: str | Iterable[str] | None = None,
@@ -77,6 +81,7 @@ def make_wsgi_app(
     enable_health_endpoint: bool = True,
     repo_url: str | None = None,
     oauth_resource_metadata: OAuthResourceMetadata | None = None,
+    max_stream_response_bytes: int | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -88,20 +93,29 @@ def make_wsgi_app(
             This means state tokens issued by one worker are invalid in
             another — you **must** provide a shared key for multi-process
             deployments (e.g. gunicorn with multiple workers).
-        max_stream_response_bytes: When set, producer stream responses may
-            buffer multiple batches in a single HTTP response up to this
-            size before emitting a continuation token.  The client
-            transparently resumes via ``POST /{method}/exchange``.
-            The cap is measured against *wire-effective* bytes — the
-            current HTTP body size (including IPC framing) **plus** any
-            payload uploaded to external storage during this turn.
-            Counting externalized bytes prevents the cap from being
-            silently defeated when ``ExternalLocationConfig`` is active:
-            in that mode the HTTP body contains only small pointer
-            batches but the client still fetches the underlying
-            payload, so both should be charged against the same budget.
-            When ``None`` (the default), each produce cycle emits one
-            batch per HTTP response for incremental streaming.
+        max_response_bytes: HTTP body cap.  Measured against the on-wire
+            body size only (``resp_buf.tell()``); externalised payloads
+            are governed by the separate ``max_externalized_response_bytes``
+            below.  Applies to every HTTP method (unary, exchange, and
+            producer streams).  For producer streams it controls when
+            the framework mints a continuation token to split a long
+            response across multiple HTTP turns.  When ``None`` (the
+            default), no body cap is enforced — producer streams emit
+            one batch per HTTP response for incremental streaming, and
+            unary/exchange responses are unbounded.  Phase B introduces
+            strict-fail when a body would exceed this cap and
+            externalisation cannot rescue it; until then the cap only
+            governs producer continuation-token boundaries.
+        max_externalized_response_bytes: Cap on the *external* channel —
+            total bytes uploaded to external storage across one HTTP
+            response (one producer turn or one unary/exchange call).
+            Bounds how much data the client will end up fetching for one
+            RPC, regardless of how the framework chose to deliver it.
+            Default ``None`` is unbounded (current behaviour).  Without
+            this, a worker that emits 10 GB with externalisation enabled
+            produces a tiny HTTP body but a 10 GB upload + 10 GB client
+            fetch — operators with a per-call data budget need this knob
+            to stop that.
         max_request_bytes: When set, the value is advertised via the
             ``VGI-Max-Request-Bytes`` response header on every response
             (including OPTIONS).  Clients can use ``http_capabilities()``
@@ -170,11 +184,28 @@ def make_wsgi_app(
             ``/.well-known/oauth-protected-resource`` and adds
             ``WWW-Authenticate: Bearer resource_metadata="..."`` to 401
             responses.
+        max_stream_response_bytes: **Deprecated** alias for
+            ``max_response_bytes`` retained for backward compatibility.
+            Emits a ``DeprecationWarning`` when set.  Will be removed
+            in a future release.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
 
     """
+    # Deprecated alias: ``max_stream_response_bytes`` was renamed to
+    # ``max_response_bytes`` once the cap stopped being stream-only.
+    if max_stream_response_bytes is not None:
+        if max_response_bytes is not None:
+            raise TypeError("Pass either max_response_bytes or max_stream_response_bytes, not both")
+        warnings.warn(
+            "max_stream_response_bytes is deprecated; use max_response_bytes instead. "
+            "The cap now applies to all HTTP method responses, not just streams.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        max_response_bytes = max_stream_response_bytes
+
     if signing_key is None:
         warnings.warn(
             "No signing_key provided; generating a random per-process key. "
@@ -202,11 +233,12 @@ def make_wsgi_app(
     app_handler = _HttpRpcApp(
         server,
         signing_key,
-        max_stream_response_bytes,
+        max_response_bytes,
         max_request_bytes,
         upload_url_provider,
         max_upload_bytes,
         token_ttl,
+        max_externalized_response_bytes=max_externalized_response_bytes,
     )
     middleware: list[Any] = [_DrainRequestMiddleware(), _RequestIdMiddleware(), _AccessLogContextMiddleware()]
 
@@ -242,6 +274,20 @@ def make_wsgi_app(
     if max_request_bytes is not None:
         capability_headers[MAX_REQUEST_BYTES_HEADER] = str(max_request_bytes)
         cors_expose.append(MAX_REQUEST_BYTES_HEADER)
+    if max_response_bytes is not None:
+        capability_headers[MAX_RESPONSE_BYTES_HEADER] = str(max_response_bytes)
+        cors_expose.append(MAX_RESPONSE_BYTES_HEADER)
+    if max_externalized_response_bytes is not None:
+        capability_headers[MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER] = str(max_externalized_response_bytes)
+        cors_expose.append(MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER)
+    # Externalisation-enabled status reflects whether the server has a
+    # storage backend wired up.  Conformance tests use this to decide
+    # whether to expect externalised payloads (and to skip the strict-fail
+    # tests that need it on/off).
+    capability_headers[EXTERNALIZATION_ENABLED_HEADER] = (
+        "true" if server.external_config is not None and server.external_config.storage is not None else "false"
+    )
+    cors_expose.append(EXTERNALIZATION_ENABLED_HEADER)
     if upload_url_provider is not None:
         capability_headers[UPLOAD_URL_HEADER] = "true"
         cors_expose.append(UPLOAD_URL_HEADER)

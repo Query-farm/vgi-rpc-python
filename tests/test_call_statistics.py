@@ -475,7 +475,7 @@ class TestHttpStats:
         client = make_sync_client(
             server,
             signing_key=b"testtesttesttesttesttesttesttest",
-            max_stream_response_bytes=1,
+            max_response_bytes=1,
         )
 
         with (

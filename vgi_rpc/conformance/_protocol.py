@@ -49,6 +49,19 @@ class ConformanceService(Protocol):
         """Echo a bytes value."""
         ...
 
+    def oversized_unary(self, target_bytes: int) -> bytes:
+        """Return a bytes payload of approximately ``target_bytes`` bytes.
+
+        Used by HTTP-only conformance tests to deliberately overshoot
+        the operator-configured ``max_response_bytes`` (or
+        ``max_externalized_response_bytes`` when externalisation is on)
+        so the strict-fail behaviour can be verified.  Implementations
+        should return a payload sized within ~1% of the requested
+        value; the test's only sensitivity is "is this clearly larger
+        than the cap?".
+        """
+        ...
+
     def echo_int(self, value: int) -> int:
         """Echo an integer value."""
         ...
@@ -332,6 +345,18 @@ class ConformanceService(Protocol):
         """Raise during stream initialization."""
         ...
 
+    def produce_oversized_batch(self, rows_per_batch: int) -> Stream[StreamState]:
+        """Emit one batch of ``rows_per_batch`` int64 rows, then finish.
+
+        Used by HTTP-only conformance tests to deliberately overshoot the
+        operator-configured ``max_response_bytes`` (or
+        ``max_externalized_response_bytes`` when externalisation is on)
+        for a single producer turn, so the strict-fail behaviour can be
+        verified.  The single-batch shape ensures the overshoot happens
+        before any continuation-token boundary.
+        """
+        ...
+
     # ------------------------------------------------------------------
     # Producer Streams With Headers
     # ------------------------------------------------------------------
@@ -370,6 +395,17 @@ class ConformanceService(Protocol):
 
     def exchange_error_on_init(self) -> Stream[StreamState]:
         """Raise during exchange stream initialization."""
+        ...
+
+    def exchange_oversized(self, rows_per_batch: int) -> Stream[StreamState]:
+        """Exchange that emits an oversized output batch for any input.
+
+        Companion to :meth:`produce_oversized_batch` for the lockstep
+        exchange path.  Each input batch produces a single output batch
+        of ``rows_per_batch`` int64 rows — sized to deliberately exceed
+        the operator-configured response cap so HTTP strict-fail can be
+        verified.
+        """
         ...
 
     # ------------------------------------------------------------------

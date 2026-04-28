@@ -92,8 +92,10 @@ def make_sync_client(
     *,
     prefix: str = "",
     signing_key: bytes | None = None,
-    max_stream_response_bytes: int | None = None,
+    max_response_bytes: int | None = None,
+    max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
+    max_stream_response_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     default_headers: dict[str, str] | None = None,
     upload_url_provider: UploadUrlProvider | None = None,
@@ -118,8 +120,11 @@ def make_sync_client(
         prefix: URL prefix for RPC endpoints (default ``""`` — root).
         signing_key: HMAC key for signing state tokens (see
             ``make_wsgi_app`` for details).
-        max_stream_response_bytes: See ``make_wsgi_app``.
+        max_response_bytes: See ``make_wsgi_app``.
+        max_externalized_response_bytes: See ``make_wsgi_app``.
         max_request_bytes: See ``make_wsgi_app``.
+        max_stream_response_bytes: **Deprecated** alias for
+            ``max_response_bytes``.
         authenticate: See ``make_wsgi_app``.
         default_headers: Headers merged into every request (e.g. auth tokens).
         upload_url_provider: See ``make_wsgi_app``.
@@ -143,6 +148,8 @@ def make_sync_client(
         server,
         prefix=prefix,
         signing_key=signing_key,
+        max_response_bytes=max_response_bytes,
+        max_externalized_response_bytes=max_externalized_response_bytes,
         max_stream_response_bytes=max_stream_response_bytes,
         max_request_bytes=max_request_bytes,
         authenticate=authenticate,

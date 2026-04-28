@@ -918,11 +918,11 @@ class TestHttpServerStreamAccessLog:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_StreamService, _StreamServiceImpl(), server_id="stream_srv")
-        # Small max_stream_response_bytes to force continuation
+        # Small max_response_bytes to force continuation
         client = make_sync_client(
             server,
             signing_key=b"testtesttesttesttesttesttesttest",
-            max_stream_response_bytes=1,
+            max_response_bytes=1,
         )
 
         with (

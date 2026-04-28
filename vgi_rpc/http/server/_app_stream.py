@@ -433,7 +433,7 @@ def _run_stream_exchange_sync(
 
         if is_producer:
             # Producer continuation — multi-batch capable; the producer-turn
-            # helper buffers up to ``max_stream_response_bytes`` before
+            # helper buffers up to ``max_response_bytes`` before
             # emitting a continuation token.
             with _dispatch_telemetry(
                 app,
@@ -563,7 +563,7 @@ def _run_http_producer_turn(
       HTTP response body.
     - The loop exits when the stream finishes (no continuation token) or when
       the wire-effective response size (HTTP body + externalized payload)
-      reaches ``app._max_stream_response_bytes``, in which case a continuation
+      reaches ``app._max_response_bytes``, in which case a continuation
       token is appended as a zero-row sentinel and the client resumes via
       ``POST /{method}/exchange``.
 
@@ -609,19 +609,19 @@ def _run_http_producer_turn(
     server_id = app._server.server_id
     protocol_name = app._server.protocol_name
     resp_buf = BytesIO()
-    max_bytes = app._max_stream_response_bytes
+    max_bytes = app._max_response_bytes
     produce_error_type: str | None = None
     produce_error_message: str = ""
     with ipc.new_stream(resp_buf, schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, schema)
         cumulative_bytes = 0
-        # Bytes uploaded to external storage across this HTTP turn.  Counted
-        # against ``max_bytes`` alongside ``resp_buf.tell()`` so the cap
-        # bounds *effective* response size — the bytes the client will
-        # ultimately fetch, whether inline or via an external pointer.
-        # Without this, externalizing producers would defeat the cap because
-        # only tiny pointer batches land in the HTTP body.
+        # Bytes uploaded to external storage across this HTTP turn.  Tracked
+        # separately from the HTTP body cap (``max_response_bytes`` measures
+        # ``resp_buf.tell()`` only — externalised payloads do not occupy the
+        # wire body, so charging them against the body cap would conflate
+        # two different operator concerns).  External payload size is
+        # governed by ``max_externalized_response_bytes`` in Phase B.
         cumulative_external_bytes = 0
         # The CallContext is hoisted out of the loop — its non-collector
         # fields (auth, transport_metadata, ids) are constant for the whole
@@ -660,10 +660,11 @@ def _run_http_producer_turn(
                 # continuation token.  By default (no limit configured),
                 # break after every produce cycle so the client receives
                 # data incrementally.  When ``max_bytes`` is configured,
-                # buffer multiple batches until the wire-effective limit
-                # (HTTP body + externalized payload) is reached.
-                effective_bytes = resp_buf.tell() + cumulative_external_bytes
-                should_continue = max_bytes is not None and effective_bytes < max_bytes
+                # buffer multiple batches until the HTTP body fills the cap.
+                # Externalised payloads do *not* count toward this cap —
+                # only what's literally on the wire (``resp_buf.tell()``)
+                # does.  External-channel volume has its own cap (Phase B).
+                should_continue = max_bytes is not None and resp_buf.tell() < max_bytes
                 if not should_continue:
                     # Serialize state into a continuation token
                     state_info = app._state_types.get(method_name)

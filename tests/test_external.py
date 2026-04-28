@@ -717,7 +717,7 @@ class TestMaybeExternalizeBatch:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+        result_batch, result_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert result_batch.num_rows == 0
         assert result_cm is not None
@@ -729,7 +729,7 @@ class TestMaybeExternalizeBatch:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10_000_000)
 
         batch = pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA)
-        result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+        result_batch, result_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert result_batch.num_rows == 1
         assert result_cm is None
@@ -739,7 +739,7 @@ class TestMaybeExternalizeBatch:
         config = ExternalLocationConfig(storage=None)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        result_batch, _ = maybe_externalize_batch(batch, None, config)
+        result_batch, _, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert result_batch.num_rows == 100
 
@@ -749,7 +749,7 @@ class TestMaybeExternalizeBatch:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=0)
 
         batch = empty_batch(_SCHEMA)
-        result_batch, _ = maybe_externalize_batch(batch, None, config)
+        result_batch, _, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert result_batch.num_rows == 0
         assert len(storage.data) == 0
@@ -761,7 +761,7 @@ class TestMaybeExternalizeBatch:
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         user_cm = pa.KeyValueMetadata({b"user.key": b"user.value"})
-        result_batch, result_cm = maybe_externalize_batch(batch, user_cm, config)
+        result_batch, result_cm, _external_bytes = maybe_externalize_batch(batch, user_cm, config)
 
         assert result_batch.num_rows == 0
         assert result_cm is not None
@@ -781,7 +781,7 @@ class TestMaybeExternalizeBatch:
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         user_cm = pa.KeyValueMetadata({b"user.key": b"user.value"})
 
-        ext_batch, ext_cm = maybe_externalize_batch(batch, user_cm, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, user_cm, config)
         assert ext_batch.num_rows == 0
         assert ext_cm is not None
 
@@ -807,7 +807,7 @@ class TestSHA256Checksum:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+        result_batch, result_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert result_batch.num_rows == 0
         assert result_cm is not None
@@ -841,7 +841,7 @@ class TestSHA256Checksum:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        _result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+        _result_batch, result_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert result_cm is not None
         sha256_val = result_cm.get(LOCATION_SHA256_KEY)
@@ -859,7 +859,7 @@ class TestSHA256Checksum:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         with _mock_aio(storage):
             resolved, _ = resolve_external_location(ext_batch, ext_cm, config)
@@ -872,7 +872,7 @@ class TestSHA256Checksum:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         # Tamper with the SHA-256 in the metadata
         assert ext_cm is not None
@@ -922,7 +922,7 @@ class TestSHA256Checksum:
         )
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert ext_cm is not None
         assert ext_cm.get(LOCATION_SHA256_KEY) is not None
@@ -946,7 +946,7 @@ class TestSHA256Checksum:
         )
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        _result_batch, result_cm = maybe_externalize_batch(batch, None, config)
+        _result_batch, result_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert result_cm is not None
         sha256_hex = result_cm.get(LOCATION_SHA256_KEY)
@@ -1502,7 +1502,7 @@ class TestGCSStorage:
 
         data_batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
 
-        ext_batch, ext_cm = maybe_externalize_batch(data_batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(data_batch, None, config)
 
         assert ext_batch.num_rows == 0
         assert ext_cm is not None
@@ -1703,7 +1703,7 @@ class TestCompression:
         )
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         assert ext_batch.num_rows == 0
         assert ext_cm is not None
@@ -1767,7 +1767,7 @@ class TestCompression:
         )
 
         batch = pa.RecordBatch.from_pydict({"value": [42, 43, 44]}, schema=_SCHEMA)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         with _mock_aio(storage):
             resolved, _ = resolve_external_location(ext_batch, ext_cm, config)
@@ -1786,7 +1786,7 @@ class TestCompression:
         )
 
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         uploaded_bytes = next(iter(storage.data.values()))
         # Verify it's valid zstd
@@ -1807,7 +1807,7 @@ class TestCompression:
         config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
 
         batch = pa.RecordBatch.from_pydict({"value": [1]}, schema=_SCHEMA)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, config)
 
         # Serve raw IPC without Content-Encoding — should work fine
         with _mock_aio(storage):
@@ -1825,7 +1825,7 @@ class TestCompression:
         batch = pa.RecordBatch.from_pydict({"value": list(range(100))}, schema=_SCHEMA)
         # Externalize WITHOUT compression — raw IPC uploaded
         no_compress_config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10)
-        ext_batch, ext_cm = maybe_externalize_batch(batch, None, no_compress_config)
+        ext_batch, ext_cm, _external_bytes = maybe_externalize_batch(batch, None, no_compress_config)
 
         # Now try to resolve with the zstd mock — raw IPC isn't valid zstd
         with (

@@ -59,7 +59,10 @@ from ._common import (
     _ARROW_CONTENT_TYPE,
     _UPLOAD_URL_METHOD,
     _UPLOAD_URL_PARAMS_SCHEMA,
+    EXTERNALIZATION_ENABLED_HEADER,
+    MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER,
     MAX_REQUEST_BYTES_HEADER,
+    MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
     UPLOAD_URL_HEADER,
     _compress_body,
@@ -1011,6 +1014,16 @@ class HttpServerCapabilities:
             server returns ``413 Payload Too Large`` for inline bodies
             above this; clients should externalize via the upload-URL
             flow.
+        max_response_bytes: HTTP body cap the server advertises for its
+            own responses, or ``None`` if no body cap is configured.
+            Conformance tests sizing oversized payloads should multiply
+            this by a comfortable factor to provably overshoot.
+        max_externalized_response_bytes: Cap on per-response externalised
+            payload bytes, or ``None`` if no external cap is configured.
+        externalization_enabled: ``True`` iff the server has a storage
+            backend wired up.  When ``False``, externalisation cannot
+            rescue an oversize response; conformance tests for the
+            externalised strict-fail path should skip.
         upload_url_support: Whether the server exposes
             ``__upload_url__/init`` for client-vended pointer-batch uploads.
         max_upload_bytes: Maximum upload size the server advertises for
@@ -1022,6 +1035,9 @@ class HttpServerCapabilities:
     """
 
     max_request_bytes: int | None = None
+    max_response_bytes: int | None = None
+    max_externalized_response_bytes: int | None = None
+    externalization_enabled: bool = False
     upload_url_support: bool = False
     max_upload_bytes: int | None = None
     cache_expires_at: float | None = None
@@ -1080,6 +1096,25 @@ def http_capabilities(
             with contextlib.suppress(ValueError):
                 max_req = int(raw)
 
+        max_resp: int | None = None
+        raw = headers.get(MAX_RESPONSE_BYTES_HEADER) or headers.get(MAX_RESPONSE_BYTES_HEADER.lower())
+        if raw is not None:
+            with contextlib.suppress(ValueError):
+                max_resp = int(raw)
+
+        max_ext_resp: int | None = None
+        raw = headers.get(MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER) or headers.get(
+            MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER.lower()
+        )
+        if raw is not None:
+            with contextlib.suppress(ValueError):
+                max_ext_resp = int(raw)
+
+        ext_enabled_raw = headers.get(EXTERNALIZATION_ENABLED_HEADER) or headers.get(
+            EXTERNALIZATION_ENABLED_HEADER.lower()
+        )
+        ext_enabled = ext_enabled_raw == "true" if ext_enabled_raw is not None else False
+
         upload_raw = headers.get(UPLOAD_URL_HEADER) or headers.get(UPLOAD_URL_HEADER.lower())
         upload_support = upload_raw == "true" if upload_raw is not None else False
 
@@ -1102,6 +1137,9 @@ def http_capabilities(
 
         return HttpServerCapabilities(
             max_request_bytes=max_req,
+            max_response_bytes=max_resp,
+            max_externalized_response_bytes=max_ext_resp,
+            externalization_enabled=ext_enabled,
             upload_url_support=upload_support,
             max_upload_bytes=max_upload,
             cache_expires_at=cache_expires_at,
