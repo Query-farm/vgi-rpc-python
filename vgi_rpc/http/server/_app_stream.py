@@ -252,78 +252,136 @@ def _run_stream_init_sync(
                 outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                 raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
 
-            is_producer = result.input_schema == _EMPTY_SCHEMA
-
-            if is_producer:
-                # Producer stream — write header (if declared) then run produce loop
-                resp_buf = BytesIO()
-                if info.header_type is not None:
-                    _write_stream_header(
-                        resp_buf, result.header, app._server.external_config, sink=sink, method_name=method_name
-                    )
-                produce_buf, produce_error_type, produce_error_msg = _run_http_producer_turn(
+            if result.input_schema == _EMPTY_SCHEMA:
+                return _run_http_producer_init(
                     app,
-                    result.output_schema,
-                    result.state,
-                    result.input_schema,
-                    sink,
+                    info=info,
+                    result=result,
+                    sink=sink,
                     method_name=method_name,
                     stream_id=stream_id,
                     auth=auth,
                     transport_metadata=transport_metadata,
+                    outcome=outcome,
                 )
-                resp_buf.write(produce_buf.getvalue())
-                resp_buf.seek(0)
-                if produce_error_type is not None:
-                    outcome.status = "error"
-                    outcome.error_type = produce_error_type
-                    outcome.error_message = produce_error_msg
-                return resp_buf
-            else:
-                # Exchange stream — return state token
-                try:
-                    state = result.state
-                    output_schema = result.output_schema
-                    input_schema = result.input_schema
-
-                    token, state_bytes = _mint_continuation_token(
-                        state,
-                        state_info,
-                        output_schema,
-                        input_schema,
-                        app._signing_key,
-                        auth,
-                        stream_id,
-                    )
-                    outcome.response_state_bytes = state_bytes
-
-                    # Write response: header (if declared) + log batches + zero-row batch with token in metadata
-                    resp_buf = BytesIO()
-                    if info.header_type is not None:
-                        _write_stream_header(
-                            resp_buf,
-                            result.header,
-                            app._server.external_config,
-                            sink=sink,
-                            method_name=method_name,
-                        )
-                    with ipc.new_stream(resp_buf, output_schema) as writer:
-                        sink.flush_contents(writer, output_schema)
-                        state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
-                        zero_batch = empty_batch(output_schema)
-                        _record_output(zero_batch)
-                        writer.write_batch(zero_batch, custom_metadata=state_metadata)
-                except Exception as exc:
-                    outcome.status = "error"
-                    outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                    outcome.error_message = _truncate_error_message(exc)
-                    outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-                    raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
-
-                resp_buf.seek(0)
-                return resp_buf
+            return _run_http_exchange_init(
+                app,
+                info=info,
+                result=result,
+                state_info=state_info,
+                sink=sink,
+                method_name=method_name,
+                stream_id=stream_id,
+                auth=auth,
+                transport_metadata=transport_metadata,
+                outcome=outcome,
+            )
     finally:
         _current_call_stats.reset(stats_token)
+
+
+def _run_http_producer_init(
+    app: _HttpRpcApp,
+    *,
+    info: RpcMethodInfo,
+    result: Stream[StreamState, Any],
+    sink: _ClientLogSink,
+    method_name: str,
+    stream_id: str,
+    auth: AuthContext,
+    transport_metadata: Mapping[str, Any],
+    outcome: _DispatchOutcome,
+) -> BytesIO:
+    """Init for a producer stream — header (if declared) then producer turn.
+
+    The header lives in its own IPC stream (separate schema), so the
+    response body is two concatenated IPC streams: the header stream
+    followed by the producer turn's data stream.  ``_run_http_producer_turn``
+    handles the producer-loop semantics; this helper just stitches the
+    optional header onto the front.
+    """
+    resp_buf = BytesIO()
+    if info.header_type is not None:
+        _write_stream_header(resp_buf, result.header, app._server.external_config, sink=sink, method_name=method_name)
+    produce_buf = _run_http_producer_turn(
+        app,
+        schema=result.output_schema,
+        state=result.state,
+        input_schema=result.input_schema,
+        method_name=method_name,
+        stream_id=stream_id,
+        auth=auth,
+        transport_metadata=transport_metadata,
+        outcome=outcome,
+        sink=sink,
+    )
+    resp_buf.write(produce_buf.getvalue())
+    resp_buf.seek(0)
+    return resp_buf
+
+
+def _run_http_exchange_init(
+    app: _HttpRpcApp,
+    *,
+    info: RpcMethodInfo,
+    result: Stream[StreamState, Any],
+    state_info: _StateInfo,
+    sink: _ClientLogSink,
+    method_name: str,
+    stream_id: str,
+    auth: AuthContext,
+    transport_metadata: Mapping[str, Any],
+    outcome: _DispatchOutcome,
+) -> BytesIO:
+    """Init for an exchange stream — header (if declared) + signed continuation token.
+
+    Mints the first continuation token for this stream and writes a
+    zero-row sentinel batch carrying it in custom metadata.  The client
+    echoes the token on each subsequent ``POST /{method}/exchange`` call.
+    """
+    server_id = app._server.server_id
+    protocol_name = app._server.protocol_name
+    try:
+        state = result.state
+        output_schema = result.output_schema
+        input_schema = result.input_schema
+
+        token, state_bytes = _mint_continuation_token(
+            state,
+            state_info,
+            output_schema,
+            input_schema,
+            app._signing_key,
+            auth,
+            stream_id,
+        )
+        outcome.response_state_bytes = state_bytes
+
+        # Response: header (if declared) + zero-row batch carrying the token.
+        resp_buf = BytesIO()
+        if info.header_type is not None:
+            _write_stream_header(
+                resp_buf,
+                result.header,
+                app._server.external_config,
+                sink=sink,
+                method_name=method_name,
+            )
+        with ipc.new_stream(resp_buf, output_schema) as writer:
+            sink.flush_contents(writer, output_schema)
+            state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
+            zero_batch = empty_batch(output_schema)
+            _record_output(zero_batch)
+            writer.write_batch(zero_batch, custom_metadata=state_metadata)
+    except Exception as exc:
+        outcome.status = "error"
+        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+        outcome.error_message = _truncate_error_message(exc)
+        outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
+
+    resp_buf.seek(0)
+    return resp_buf
 
 
 def _run_stream_exchange_sync(
@@ -446,19 +504,17 @@ def _run_stream_exchange_sync(
                 transport_metadata=transport_metadata,
             ) as outcome:
                 outcome.request_state_bytes = request_state_bytes
-                resp_buf, produce_error_type, produce_error_msg = _run_http_producer_turn(
+                return _run_http_producer_turn(
                     app,
-                    output_schema,
-                    state_obj,
-                    input_schema,
+                    schema=output_schema,
+                    state=state_obj,
+                    input_schema=input_schema,
                     method_name=method_name,
                     stream_id=stream_id,
+                    auth=auth,
+                    transport_metadata=transport_metadata,
+                    outcome=outcome,
                 )
-                if produce_error_type is not None:
-                    outcome.status = "error"
-                    outcome.error_type = produce_error_type
-                    outcome.error_message = produce_error_msg
-                return resp_buf
         # Exchange — lockstep one input batch in, one output batch out.
         # External resolution + coercion + state.process + token mint +
         # cap enforcement live in ``_run_http_exchange_turn``; this
@@ -660,17 +716,18 @@ def _exchange_error_response(
 
 def _run_http_producer_turn(
     app: _HttpRpcApp,
+    *,
     schema: pa.Schema,
     state: StreamState,
     input_schema: pa.Schema,
-    sink: _ClientLogSink | None = None,
-    *,
     method_name: str,
     stream_id: str,
-    auth: AuthContext | None = None,
-    transport_metadata: Mapping[str, str] | None = None,
-) -> tuple[BytesIO, str | None, str]:
-    """Run one HTTP turn of a producer stream, returning an IPC body + error fields.
+    auth: AuthContext,
+    transport_metadata: Mapping[str, Any],
+    outcome: _DispatchOutcome,
+    sink: _ClientLogSink | None = None,
+) -> BytesIO:
+    """Run one HTTP turn of a producer stream.
 
     A "turn" here means a single HTTP request/response cycle:
 
@@ -679,18 +736,19 @@ def _run_http_producer_turn(
     - All emitted batches are written to a single IPC stream that becomes the
       HTTP response body.
     - The loop exits when the stream finishes (no continuation token) or when
-      the wire-effective response size (HTTP body + externalized payload)
-      reaches ``app._max_response_bytes``, in which case a continuation
-      token is appended as a zero-row sentinel and the client resumes via
-      ``POST /{method}/exchange``.
+      the wire body reaches ``app._max_response_bytes``, in which case a
+      continuation token is appended as a zero-row sentinel and the client
+      resumes via ``POST /{method}/exchange``.
 
     HTTP-specific responsibilities — the reason this is its own helper rather
     than shared with the pipe transport:
 
     - Mints a signed continuation token carrying serialised state + schemas
-      (HTTP is stateless across requests).
-    - Charges externalised payload bytes against the wire-size cap so
-      ``ExternalLocationConfig`` cannot silently bypass it.
+      (HTTP is stateless across requests).  When minted,
+      ``outcome.response_state_bytes`` is set so the access log records the
+      issued state.
+    - Pre-flights ``max_externalized_response_bytes`` so a violating upload
+      is refused before incurring the storage round-trip.
 
     The pipe-family producer loop in :mod:`vgi_rpc.rpc._server` looks similar
     on the surface but holds ``state`` in-process for the duration of the
@@ -701,28 +759,25 @@ def _run_http_producer_turn(
         schema: The output schema for the stream.
         state: The stream state object.
         input_schema: The input schema (stored in continuation tokens).
-        sink: Optional log sink to flush before producing (initial request only).
         method_name: The RPC method name (for logging context).
         stream_id: The chain-correlation id baked into the continuation
             token.  Generated fresh by the init turn and recovered from
             the inbound token by exchange/continuation turns; passed in
             explicitly so this helper does not depend on the
-            ``_current_stream_id`` contextvar (the contextvar is kept
-            only for ambient telemetry observers).
-        auth: Auth context; falls back to contextvar when ``None`` (continuation path).
-        transport_metadata: Transport metadata; falls back to contextvar when ``None``.
+            ``_current_stream_id`` contextvar.
+        auth: Authenticated identity for this request.
+        transport_metadata: Transport metadata for the CallContext.
+        outcome: The shared :class:`_DispatchOutcome` from the surrounding
+            telemetry shell.  Mutated on continuation-token mint
+            (``response_state_bytes``) and on any error path
+            (``status``, ``error_type``, ``error_message``).
+        sink: Optional log sink to flush before producing (initial request
+            only).  Continuation calls pass ``None``.
 
     Returns:
-        A ``(BytesIO, error_type, error_message)`` tuple — the IPC response
-        stream, the exception class name on failure (``None`` on success),
-        and the error message (empty on success).
+        The IPC response body as a ``BytesIO``, positioned at the start.
 
     """
-    if auth is None or transport_metadata is None:
-        cv_auth, cv_md = _get_auth_and_metadata()
-        auth = auth if auth is not None else cv_auth
-        transport_metadata = transport_metadata if transport_metadata is not None else cv_md
-
     server_id = app._server.server_id
     protocol_name = app._server.protocol_name
     resp_buf = BytesIO()
@@ -731,8 +786,6 @@ def _run_http_producer_turn(
     externalization_enabled = (
         app._server.external_config is not None and app._server.external_config.storage is not None
     )
-    produce_error_type: str | None = None
-    produce_error_message: str = ""
     with ipc.new_stream(resp_buf, schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, schema)
@@ -740,15 +793,13 @@ def _run_http_producer_turn(
         # Bytes uploaded to external storage across this HTTP turn.  Tracked
         # separately from the HTTP body cap (``max_response_bytes`` measures
         # ``resp_buf.tell()`` only — externalised payloads do not occupy the
-        # wire body, so charging them against the body cap would conflate
-        # two different operator concerns).  External payload size is
-        # governed by ``max_externalized_response_bytes`` in Phase B.
+        # wire body).  External payload size is governed by
+        # ``max_externalized_response_bytes``.
         cumulative_external_bytes = 0
         # The CallContext is hoisted out of the loop — its non-collector
-        # fields (auth, transport_metadata, ids) are constant for the whole
-        # turn.  ``emit_client_log`` is the only thing that needs to follow
-        # the current iteration's ``OutputCollector``; we route it through a
-        # tiny mutable proxy that the loop body re-points each turn.
+        # fields are constant for the whole turn.  ``emit_client_log`` is the
+        # only thing that needs to follow the current iteration's
+        # ``OutputCollector``; we route it through a mutable proxy.
         current_out: list[OutputCollector | None] = [None]
 
         def _emit_to_current(msg: Message) -> None:
@@ -766,10 +817,7 @@ def _run_http_producer_turn(
         )
         try:
             while True:
-                # Snapshot the budgets remaining at the start of this iteration
-                # so the worker can size its emit to fit.  Wire budget shrinks
-                # with each iteration's body bytes; external budget shrinks with
-                # each iteration's externalised uploads.
+                # Snapshot the budgets remaining at the start of this iteration.
                 remaining_wire = None if max_bytes is None else max(0, max_bytes - resp_buf.tell())
                 remaining_external = (
                     None
@@ -789,13 +837,9 @@ def _run_http_producer_turn(
                 state.process(_TICK_BATCH, out, produce_ctx)
                 if not out.finished:
                     out.validate()
-                # Pre-flight the external cap BEFORE flushing — predicting
-                # the upload size from the data batch's buffer size lets us
-                # refuse a violating upload without paying for the
-                # round-trip to S3/GCS.  The wire body cap is soft for
-                # producer streams (continuation tokens handle overshoots);
-                # the external channel has no equivalent escape, hence the
-                # strict-fail path.
+                # Pre-flight the external cap BEFORE flushing — predicting the
+                # upload size from the data batch's buffer size lets us refuse
+                # a violating upload without paying the storage round-trip.
                 if max_external_bytes is not None and externalization_enabled and not out.finished:
                     ext_cfg = app._server.external_config
                     assert ext_cfg is not None  # narrowed by externalization_enabled
@@ -806,8 +850,9 @@ def _run_http_producer_turn(
                             f"Externalised payload exceeds max_externalized_response_bytes "
                             f"({projected} > {max_external_bytes}) for method {method_name!r}"
                         )
-                        produce_error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
-                        produce_error_message = _truncate_error_message(overshoot)
+                        outcome.status = "error"
+                        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                        outcome.error_message = _truncate_error_message(overshoot)
                         _write_error_batch(writer, schema, overshoot, server_id=server_id)
                         break
                 cumulative_external_bytes += _flush_collector(writer, out, app._server.external_config)
@@ -819,19 +864,16 @@ def _run_http_producer_turn(
                 # break after every produce cycle so the client receives
                 # data incrementally.  When ``max_bytes`` is configured,
                 # buffer multiple batches until the HTTP body fills the cap.
-                # Externalised payloads do *not* count toward this cap —
-                # only what's literally on the wire (``resp_buf.tell()``)
-                # does.  External-channel volume has its own cap (Phase B).
                 should_continue = max_bytes is not None and resp_buf.tell() < max_bytes
                 if not should_continue:
-                    # Serialize state into a continuation token
+                    # Serialize state into a continuation token.
                     state_info = app._state_types.get(method_name)
                     if state_info is None:
                         raise _RpcHttpError(
                             RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
                             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
-                    token, _state_bytes = _mint_continuation_token(
+                    token, state_bytes = _mint_continuation_token(
                         state,
                         state_info,
                         schema,
@@ -840,17 +882,19 @@ def _run_http_producer_turn(
                         auth,
                         stream_id,
                     )
+                    outcome.response_state_bytes = state_bytes
                     state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
                     continuation_batch = empty_batch(schema)
                     _record_output(continuation_batch)
                     writer.write_batch(continuation_batch, custom_metadata=state_metadata)
                     break
         except Exception as exc:
-            produce_error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-            produce_error_message = _truncate_error_message(exc)
+            outcome.status = "error"
+            outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+            outcome.error_message = _truncate_error_message(exc)
             _write_error_batch(writer, schema, exc, server_id=server_id)
     resp_buf.seek(0)
-    return resp_buf, produce_error_type, produce_error_message
+    return resp_buf
 
 
 def _unpack_and_recover_state(
