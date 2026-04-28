@@ -61,9 +61,8 @@ from .._common import _RpcHttpError
 from ._responses import _enforce_response_budgets
 from ._state_token import (
     _derive_signing_key,
-    _pack_state_token,
+    _mint_continuation_token,
     _resolve_state_cls,
-    _serialize_state_bytes,
     _StateInfo,
     _unpack_state_token,
 )
@@ -287,19 +286,16 @@ def _run_stream_init_sync(
                     output_schema = result.output_schema
                     input_schema = result.input_schema
 
-                    # Pack state + output schema + input schema into a signed token
-                    state_bytes = _serialize_state_bytes(state, state_info)
-                    outcome.response_state_bytes = state_bytes
-                    schema_bytes = output_schema.serialize().to_pybytes()
-                    input_schema_bytes = input_schema.serialize().to_pybytes()
-                    token = _pack_state_token(
-                        state_bytes,
-                        schema_bytes,
-                        input_schema_bytes,
-                        _derive_signing_key(app._signing_key, auth),
-                        int(time.time()),
-                        stream_id=stream_id,
+                    token, state_bytes = _mint_continuation_token(
+                        state,
+                        state_info,
+                        output_schema,
+                        input_schema,
+                        app._signing_key,
+                        auth,
+                        stream_id,
                     )
+                    outcome.response_state_bytes = state_bytes
 
                     # Write response: header (if declared) + log batches + zero-row batch with token in metadata
                     resp_buf = BytesIO()
@@ -392,11 +388,16 @@ def _run_stream_exchange_sync(
         if not is_producer and not cancel_flag:
             _record_input(input_batch)
 
-        # Resolve method info for hook (may be None for unknown methods, but
-        # _stream_exchange_sync is only reached for known stream methods)
+        # Resolve method info for hook.  ``_stream_exchange_sync`` is only
+        # reached for known stream methods (``_resources.py`` rejects
+        # unknown methods with 404 before dispatch), so this is always
+        # populated; the cancel branch passes ``info=None`` to its
+        # telemetry shell deliberately, not because info is missing.
         info = app._server.methods.get(method_name)
 
-        request_state_bytes = token if isinstance(token, bytes) else token.encode() if token else None
+        # Token comes from Arrow custom-metadata (always ``bytes``) and we
+        # already rejected the None case above, so no defensive coercion.
+        request_state_bytes = token
 
         if cancel_flag:
             # Cancel is not a method dispatch — pass info=None to suppress
@@ -458,150 +459,203 @@ def _run_stream_exchange_sync(
                     outcome.error_type = produce_error_type
                     outcome.error_message = produce_error_msg
                 return resp_buf
-        else:
-            # Exchange — lockstep one input batch in, one output batch out.
-            # External-location resolution must happen before we hand the
-            # batch to ``state.process``; if resolution fails we surface a
-            # 500 directly (no telemetry shell — the failure pre-dates the
-            # method dispatch).
-            try:
-                input_batch, resolved_cm = resolve_external_location(
-                    input_batch,
-                    custom_metadata,
-                    app._server.external_config,
-                    ipc_validation=app._server.ipc_validation,
-                )
-            except Exception as exc:
-                raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
-
-            server_id = app._server.server_id
-            protocol_name = app._server.protocol_name
-            with _dispatch_telemetry(
+        # Exchange — lockstep one input batch in, one output batch out.
+        # External resolution + coercion + state.process + token mint +
+        # cap enforcement live in ``_run_http_exchange_turn``; this
+        # branch is just the telemetry envelope.
+        with _dispatch_telemetry(
+            app,
+            info=info,
+            method_name=method_name,
+            method_type="stream",
+            auth=auth,
+            transport_metadata=transport_metadata,
+        ) as outcome:
+            outcome.request_state_bytes = request_state_bytes
+            return _run_http_exchange_turn(
                 app,
-                info=info,
+                state=state_obj,
+                state_info=state_info,
+                output_schema=output_schema,
+                input_schema=input_schema,
+                input_batch=input_batch,
+                custom_metadata=custom_metadata,
                 method_name=method_name,
-                method_type="stream",
+                stream_id=stream_id,
                 auth=auth,
                 transport_metadata=transport_metadata,
-            ) as outcome:
-                outcome.request_state_bytes = request_state_bytes
-                try:
-                    # Reconcile the inbound batch's schema against the declared
-                    # input schema (strict on field set, tolerant of order/type).
-                    # Same helper used by the pipe transport so callers see a
-                    # uniform TypeError on mismatch regardless of transport.
-                    input_batch = _coerce_input_batch(input_batch, input_schema)
-
-                    # Strip state token from metadata visible to process()
-                    user_cm = strip_keys(resolved_cm, STATE_KEY)
-
-                    ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
-                    # Exchange is lockstep — one process() call, one output
-                    # batch, one HTTP response.  The whole budget is available
-                    # to this single emit; there's no prior accumulation.
-                    ext_enabled = (
-                        app._server.external_config is not None and app._server.external_config.storage is not None
-                    )
-                    out = OutputCollector(
-                        output_schema,
-                        server_id=server_id,
-                        producer_mode=False,
-                        remaining_response_bytes=app._max_response_bytes,
-                        remaining_externalized_response_bytes=(
-                            app._max_externalized_response_bytes if ext_enabled else None
-                        ),
-                        externalization_enabled=ext_enabled,
-                    )
-
-                    process_ctx = CallContext(
-                        auth=auth,
-                        emit_client_log=out.emit_client_log_message,
-                        transport_metadata=transport_metadata,
-                        server_id=server_id,
-                        method_name=method_name,
-                        protocol_name=protocol_name,
-                    )
-                    state_obj.process(ab_in, out, process_ctx)
-                    if not out.finished:
-                        out.validate()
-
-                    # Repack updated state with same schemas into new signed token
-                    updated_state_bytes = _serialize_state_bytes(state_obj, state_info)
-                    outcome.response_state_bytes = updated_state_bytes
-                    schema_bytes = output_schema.serialize().to_pybytes()
-                    input_schema_bytes_upd = input_schema.serialize().to_pybytes()
-                    updated_token = _pack_state_token(
-                        updated_state_bytes,
-                        schema_bytes,
-                        input_schema_bytes_upd,
-                        _derive_signing_key(app._signing_key, auth),
-                        int(time.time()),
-                        stream_id=stream_id,
-                    )
-                    out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
-
-                    # Pre-flight the external cap BEFORE flushing — refuses
-                    # a violating upload without paying for the storage
-                    # round-trip.  The wire-body cap can be checked after
-                    # flush since it does not incur an upload cost.
-                    ext_cfg = app._server.external_config
-                    predicted_external = (
-                        predict_externalize_bytes_for_collector(out, ext_cfg) if ext_cfg is not None else 0
-                    )
-                    if (
-                        app._max_externalized_response_bytes is not None
-                        and predicted_external > app._max_externalized_response_bytes
-                    ):
-                        overshoot = RuntimeError(
-                            f"Externalised payload exceeds max_externalized_response_bytes "
-                            f"({predicted_external} > {app._max_externalized_response_bytes}) "
-                            f"for method {method_name!r}"
-                        )
-                        outcome.status = "error"
-                        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
-                        outcome.error_message = _truncate_error_message(overshoot)
-                        resp_buf = BytesIO()
-                        with ipc.new_stream(resp_buf, output_schema) as err_writer:
-                            _write_error_batch(err_writer, output_schema, overshoot, server_id=server_id)
-                        resp_buf.seek(0)
-                        return resp_buf
-
-                    # Write response batches (log + data, in order)
-                    resp_buf = BytesIO()
-                    exchange_external_bytes = 0
-                    with ipc.new_stream(resp_buf, output_schema) as writer:
-                        exchange_external_bytes = _flush_collector(writer, out, app._server.external_config)
-                    # Wire body cap is checked post-flush — no upload cost
-                    # was incurred for the body itself.
-                    try:
-                        _enforce_response_budgets(
-                            method_name=method_name,
-                            wire_bytes=resp_buf.tell(),
-                            external_bytes=exchange_external_bytes,
-                            wire_cap=app._max_response_bytes,
-                            external_cap=app._max_externalized_response_bytes,
-                        )
-                    except RuntimeError as overshoot:
-                        outcome.status = "error"
-                        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
-                        outcome.error_message = _truncate_error_message(overshoot)
-                        # Discard the oversize body; emit a fresh response
-                        # containing only the EXCEPTION batch.  The client
-                        # sees a normal RpcError round-trip.
-                        resp_buf = BytesIO()
-                        with ipc.new_stream(resp_buf, output_schema) as err_writer:
-                            _write_error_batch(err_writer, output_schema, overshoot, server_id=server_id)
-                except Exception as exc:
-                    outcome.status = "error"
-                    outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                    outcome.error_message = _truncate_error_message(exc)
-                    outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
-                    raise _RpcHttpError(exc, status_code=outcome.http_status, schema=output_schema) from exc
-
-                resp_buf.seek(0)
-                return resp_buf
+                outcome=outcome,
+            )
     finally:
         _current_call_stats.reset(stats_token)
+
+
+def _run_http_exchange_turn(
+    app: _HttpRpcApp,
+    *,
+    state: StreamState,
+    state_info: _StateInfo,
+    output_schema: pa.Schema,
+    input_schema: pa.Schema,
+    input_batch: pa.RecordBatch,
+    custom_metadata: pa.KeyValueMetadata | None,
+    method_name: str,
+    stream_id: str,
+    auth: AuthContext,
+    transport_metadata: Mapping[str, Any],
+    outcome: _DispatchOutcome,
+) -> BytesIO:
+    """Run one HTTP exchange turn — lockstep input → output → refreshed token.
+
+    Mirrors :func:`_run_http_producer_turn` for the exchange shape:
+
+    - Resolves any external-location pointer in the inbound batch.
+    - Coerces the inbound batch's schema against the declared input schema.
+    - Runs ``state.process()`` exactly once with the budget snapshots
+      surfaced on ``OutputCollector``.
+    - Mints a refreshed continuation token via :func:`_mint_continuation_token`.
+    - Pre-flights ``max_externalized_response_bytes`` so an oversize
+      upload is refused before the storage round-trip.
+    - Writes the response IPC stream and post-flush enforces the
+      wire-body cap.
+
+    Mutates ``outcome`` for telemetry: ``response_state_bytes`` on
+    success, ``status``/``error_type``/``error_message`` on either kind
+    of overshoot.  Unexpected exceptions during ``state.process`` raise
+    :class:`_RpcHttpError` (status 500) so the telemetry shell records
+    them via the ``hook_exc`` path.
+    """
+    server_id = app._server.server_id
+    protocol_name = app._server.protocol_name
+
+    # External-location resolution on inbound input.  Failures pre-date
+    # the method dispatch but still need to surface as 500 to the client.
+    try:
+        input_batch, resolved_cm = resolve_external_location(
+            input_batch,
+            custom_metadata,
+            app._server.external_config,
+            ipc_validation=app._server.ipc_validation,
+        )
+    except Exception as exc:
+        outcome.status = "error"
+        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+        outcome.error_message = _truncate_error_message(exc)
+        outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
+
+    try:
+        # Reconcile the inbound batch's schema against the declared
+        # input schema (strict on field set, tolerant of order/type).
+        input_batch = _coerce_input_batch(input_batch, input_schema)
+
+        user_cm = strip_keys(resolved_cm, STATE_KEY)
+        ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
+
+        # Exchange is lockstep — one process() call, one output batch,
+        # one HTTP response.  The whole budget is available to this
+        # single emit; there's no prior accumulation.
+        ext_enabled = app._server.external_config is not None and app._server.external_config.storage is not None
+        out = OutputCollector(
+            output_schema,
+            server_id=server_id,
+            producer_mode=False,
+            remaining_response_bytes=app._max_response_bytes,
+            remaining_externalized_response_bytes=(app._max_externalized_response_bytes if ext_enabled else None),
+            externalization_enabled=ext_enabled,
+        )
+
+        process_ctx = CallContext(
+            auth=auth,
+            emit_client_log=out.emit_client_log_message,
+            transport_metadata=transport_metadata,
+            server_id=server_id,
+            method_name=method_name,
+            protocol_name=protocol_name,
+        )
+        state.process(ab_in, out, process_ctx)
+        if not out.finished:
+            out.validate()
+
+        # Refresh the continuation token (state advanced; schemas unchanged).
+        updated_token, updated_state_bytes = _mint_continuation_token(
+            state,
+            state_info,
+            output_schema,
+            input_schema,
+            app._signing_key,
+            auth,
+            stream_id,
+        )
+        outcome.response_state_bytes = updated_state_bytes
+        out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
+
+        # Pre-flight the external cap BEFORE flushing — refuse a violating
+        # upload without paying for the storage round-trip.
+        ext_cfg = app._server.external_config
+        predicted_external = predict_externalize_bytes_for_collector(out, ext_cfg) if ext_cfg is not None else 0
+        if (
+            app._max_externalized_response_bytes is not None
+            and predicted_external > app._max_externalized_response_bytes
+        ):
+            overshoot = RuntimeError(
+                f"Externalised payload exceeds max_externalized_response_bytes "
+                f"({predicted_external} > {app._max_externalized_response_bytes}) "
+                f"for method {method_name!r}"
+            )
+            return _exchange_error_response(output_schema, server_id, protocol_name, method_name, overshoot, outcome)
+
+        # Write response batches (log + data, in order).
+        resp_buf = BytesIO()
+        exchange_external_bytes = 0
+        with ipc.new_stream(resp_buf, output_schema) as writer:
+            exchange_external_bytes = _flush_collector(writer, out, app._server.external_config)
+
+        # Wire body cap — checked post-flush since BytesIO writes are free.
+        try:
+            _enforce_response_budgets(
+                method_name=method_name,
+                wire_bytes=resp_buf.tell(),
+                external_bytes=exchange_external_bytes,
+                wire_cap=app._max_response_bytes,
+                external_cap=app._max_externalized_response_bytes,
+            )
+        except RuntimeError as overshoot:
+            return _exchange_error_response(output_schema, server_id, protocol_name, method_name, overshoot, outcome)
+
+        resp_buf.seek(0)
+        return resp_buf
+    except Exception as exc:
+        outcome.status = "error"
+        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+        outcome.error_message = _truncate_error_message(exc)
+        outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        raise _RpcHttpError(exc, status_code=outcome.http_status, schema=output_schema) from exc
+
+
+def _exchange_error_response(
+    output_schema: pa.Schema,
+    server_id: str,
+    protocol_name: str,
+    method_name: str,
+    exc: BaseException,
+    outcome: _DispatchOutcome,
+) -> BytesIO:
+    """Build a fresh response IPC stream containing only an EXCEPTION batch.
+
+    Used by :func:`_run_http_exchange_turn` on either kind of cap
+    overshoot — the worker emitted a successful batch, but the response
+    would violate an operator cap, so we discard the oversize body and
+    deliver an :class:`RpcError` round-trip instead.
+    """
+    outcome.status = "error"
+    outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+    outcome.error_message = _truncate_error_message(exc)
+    resp_buf = BytesIO()
+    with ipc.new_stream(resp_buf, output_schema) as err_writer:
+        _write_error_batch(err_writer, output_schema, exc, server_id=server_id)
+    resp_buf.seek(0)
+    return resp_buf
 
 
 def _run_http_producer_turn(
@@ -777,16 +831,14 @@ def _run_http_producer_turn(
                             RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
                             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
-                    state_bytes = _serialize_state_bytes(state, state_info)
-                    schema_bytes = schema.serialize().to_pybytes()
-                    input_schema_bytes = input_schema.serialize().to_pybytes()
-                    token = _pack_state_token(
-                        state_bytes,
-                        schema_bytes,
-                        input_schema_bytes,
-                        _derive_signing_key(app._signing_key, auth),
-                        int(time.time()),
-                        stream_id=stream_id,
+                    token, _state_bytes = _mint_continuation_token(
+                        state,
+                        state_info,
+                        schema,
+                        input_schema,
+                        app._signing_key,
+                        auth,
+                        stream_id,
                     )
                     state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
                     continuation_batch = empty_batch(schema)

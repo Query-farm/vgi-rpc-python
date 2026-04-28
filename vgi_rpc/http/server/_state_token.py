@@ -20,6 +20,8 @@ import types as _types
 from http import HTTPStatus
 from typing import get_args, get_origin, get_type_hints
 
+import pyarrow as pa
+
 from vgi_rpc.rpc import AuthContext, MethodType, RpcServer, Stream, StreamState
 
 from .._common import _RpcHttpError
@@ -199,6 +201,62 @@ _StateInfo = type[StreamState] | tuple[type[StreamState], ...]
 # Arrow IPC streams always start with 0xFF (continuation indicator).
 # We use 0x00 as a discriminator byte for union-tagged state envelopes.
 _UNION_STATE_MARKER = b"\x00"
+
+
+def _mint_continuation_token(
+    state: StreamState,
+    state_info: _StateInfo,
+    output_schema: pa.Schema,
+    input_schema: pa.Schema,
+    signing_key: bytes,
+    auth: AuthContext | None,
+    stream_id: str,
+    *,
+    now: int | None = None,
+) -> tuple[bytes, bytes]:
+    """Serialize state + schemas + stream_id into a signed continuation token.
+
+    Centralises the per-turn token packaging shared by:
+
+    - ``_run_stream_init_sync`` (exchange-stream init: mint the first token).
+    - ``_run_http_producer_turn`` (producer continuation: mint the next token
+      when the wire body cap is reached).
+    - ``_run_http_exchange_turn`` (exchange continuation: mint a refreshed
+      token after each ``state.process()`` call).
+
+    Args:
+        state: The current ``StreamState`` instance.
+        state_info: Concrete state class or union tuple, used by
+            :func:`_serialize_state_bytes` to pick the wire format.
+        output_schema: Per-stream output schema (frozen at init).
+        input_schema: Per-stream input schema (frozen at init).
+        signing_key: Master HMAC key from the server config.
+        auth: Authenticated identity for per-principal key derivation.
+        stream_id: Chain-correlation id; threaded through every turn so
+            access-log and tracing observers can correlate continuations.
+        now: Override for the timestamp baked into the token; default is
+            ``int(time.time())``.  Useful for tests that need a fixed
+            reference point.
+
+    Returns:
+        ``(token, state_bytes)`` — the signed token (suitable for the
+        ``vgi_rpc.stream_state#b64`` metadata key) and the raw state
+        bytes (passed separately to the access log's ``response_state``
+        field; the token itself is opaque/HMAC-protected).
+
+    """
+    state_bytes = _serialize_state_bytes(state, state_info)
+    schema_bytes = output_schema.serialize().to_pybytes()
+    input_schema_bytes = input_schema.serialize().to_pybytes()
+    token = _pack_state_token(
+        state_bytes,
+        schema_bytes,
+        input_schema_bytes,
+        _derive_signing_key(signing_key, auth),
+        int(time.time()) if now is None else now,
+        stream_id=stream_id,
+    )
+    return token, state_bytes
 
 
 def _serialize_state_bytes(state: StreamState, state_info: _StateInfo) -> bytes:
