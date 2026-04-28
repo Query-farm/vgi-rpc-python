@@ -186,12 +186,40 @@ class OutputCollector:
         """Emit a pre-built data batch. Raises if a data batch was already emitted."""
         if self._data_batch_idx is not None:
             raise RuntimeError("Only one data batch may be emitted per call")
-        # Reconcile schema if the batch types differ from the output schema.
-        # This handles cases where the caller produces dictionary-encoded
-        # columns (e.g. from Arrow extension types like arrow.duckdb.enum)
-        # but the output schema expects the resolved value type (e.g. string).
+        # Reconcile the batch's schema to the output schema if they differ.
+        #
+        # ``output_schema`` is the projected target (the framework computes
+        # it from the call's ``projection_ids`` for tables that support
+        # projection pushdown). The batch the caller produced may be:
+        #
+        #   * Exactly the target schema → fast path, no work.
+        #   * A SUPERSET of the target's columns (e.g., the worker emitted
+        #     its declared FIXED_SCHEMA and let the framework project) →
+        #     ``select`` the target column names. This is the standard
+        #     projection step. ``select`` also handles the
+        #     ``len(target.names) == 0`` case (count(*) shape) by
+        #     producing a 0-column batch with the same row count.
+        #   * Same names but different types (e.g., dictionary-encoded
+        #     vs. resolved string from an Arrow extension type) →
+        #     ``cast`` resolves the type coercion.
+        #
+        # We do select-then-cast so projection happens before type
+        # coercion, and a missing column surfaces as a clear KeyError-
+        # turned-ValueError rather than the opaque "Target schema's field
+        # names are not matching" error from ``cast``.
         if batch.schema != self._output_schema:
-            batch = batch.cast(self._output_schema)
+            target_names = self._output_schema.names
+            if list(batch.schema.names) != target_names:
+                try:
+                    batch = batch.select(target_names)
+                except KeyError as exc:
+                    raise ValueError(
+                        f"emitted batch is missing column(s) required by "
+                        f"output_schema: batch has {batch.schema.names}, "
+                        f"output_schema needs {target_names}"
+                    ) from exc
+            if batch.schema != self._output_schema:
+                batch = batch.cast(self._output_schema)
         self._data_batch_idx = len(self._batches)
         custom_metadata = encode_metadata(metadata) if metadata else None
         self._batches.append(AnnotatedBatch(batch=batch, custom_metadata=custom_metadata))
