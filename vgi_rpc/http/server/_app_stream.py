@@ -19,6 +19,7 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.external import resolve_external_location
+from vgi_rpc.log import Message
 from vgi_rpc.metadata import CANCEL_KEY, STATE_KEY, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
@@ -622,19 +623,32 @@ def _run_http_producer_turn(
         # Without this, externalizing producers would defeat the cap because
         # only tiny pointer batches land in the HTTP body.
         cumulative_external_bytes = 0
+        # The CallContext is hoisted out of the loop — its non-collector
+        # fields (auth, transport_metadata, ids) are constant for the whole
+        # turn.  ``emit_client_log`` is the only thing that needs to follow
+        # the current iteration's ``OutputCollector``; we route it through a
+        # tiny mutable proxy that the loop body re-points each turn.
+        current_out: list[OutputCollector | None] = [None]
+
+        def _emit_to_current(msg: Message) -> None:
+            collector = current_out[0]
+            if collector is not None:
+                collector.emit_client_log_message(msg)
+
+        produce_ctx = CallContext(
+            auth=auth,
+            emit_client_log=_emit_to_current,
+            transport_metadata=transport_metadata,
+            server_id=server_id,
+            method_name=method_name,
+            protocol_name=protocol_name,
+        )
         try:
             while True:
                 out = OutputCollector(
                     schema, prior_data_bytes=cumulative_bytes, server_id=server_id, producer_mode=True
                 )
-                produce_ctx = CallContext(
-                    auth=auth,
-                    emit_client_log=out.emit_client_log_message,
-                    transport_metadata=transport_metadata,
-                    server_id=server_id,
-                    method_name=method_name,
-                    protocol_name=protocol_name,
-                )
+                current_out[0] = out
                 state.process(_TICK_BATCH, out, produce_ctx)
                 if not out.finished:
                     out.validate()
