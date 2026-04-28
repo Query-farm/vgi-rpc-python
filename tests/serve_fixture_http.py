@@ -15,7 +15,7 @@ import sys
 
 import waitress
 
-from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
+from tests._fixture_service import RpcFixtureService, RpcFixtureServiceImpl
 from vgi_rpc.http import make_wsgi_app
 from vgi_rpc.rpc import RpcServer
 

@@ -10,7 +10,7 @@ Imports the test service Protocol and implementation, then serves
 RPC requests over stdin/stdout.
 """
 
-from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
+from tests._fixture_service import RpcFixtureService, RpcFixtureServiceImpl
 from vgi_rpc.rpc import run_server
 
 

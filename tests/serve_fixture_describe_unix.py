@@ -9,7 +9,7 @@ a Unix domain socket for introspection via the CLI.
 
 import sys
 
-from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
+from tests._fixture_service import RpcFixtureService, RpcFixtureServiceImpl
 from vgi_rpc.rpc import RpcServer, serve_unix
 
 

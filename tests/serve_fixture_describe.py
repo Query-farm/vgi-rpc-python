@@ -7,7 +7,7 @@ Serves the test RPC fixture service with ``enable_describe=True`` over
 stdin/stdout for introspection via the CLI.
 """
 
-from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
+from tests._fixture_service import RpcFixtureService, RpcFixtureServiceImpl
 from vgi_rpc.rpc import RpcServer, serve_stdio
 
 
