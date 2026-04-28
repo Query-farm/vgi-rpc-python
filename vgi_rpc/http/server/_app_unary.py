@@ -14,11 +14,13 @@ from typing import TYPE_CHECKING, Literal
 import pyarrow as pa
 from pyarrow import ipc
 
+from vgi_rpc.external import predict_externalize_bytes_for_batch
 from vgi_rpc.rpc import (
     CallContext,
     RpcError,
     RpcMethodInfo,
     VersionError,
+    _build_result_batch,
     _ClientLogSink,
     _deserialize_params,
     _emit_access_log,
@@ -142,7 +144,32 @@ def _run_unary_sync(
                 try:
                     result = getattr(app._server.implementation, method_name)(**kwargs)
                     _validate_result(info.name, result, info.result_type)
-                    external_bytes_written = _write_result_batch(writer, schema, result, app._server.external_config)
+                    # Build the result batch eagerly so we can pre-flight the
+                    # external-channel cap before paying for an upload that
+                    # would violate it.
+                    result_batch = _build_result_batch(schema, result)
+                    ext_cfg = app._server.external_config
+                    predicted_external = (
+                        predict_externalize_bytes_for_batch(result_batch, ext_cfg) if ext_cfg is not None else 0
+                    )
+                    if (
+                        app._max_externalized_response_bytes is not None
+                        and predicted_external > app._max_externalized_response_bytes
+                    ):
+                        overshoot = RuntimeError(
+                            f"Externalised payload exceeds max_externalized_response_bytes "
+                            f"({predicted_external} > {app._max_externalized_response_bytes}) "
+                            f"for method {method_name!r}"
+                        )
+                        _hook_exc = overshoot
+                        status = "error"
+                        error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                        _write_error_batch(writer, schema, overshoot, server_id=server_id)
+                        http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                    else:
+                        external_bytes_written = _write_result_batch(
+                            writer, schema, result, app._server.external_config, prebuilt=result_batch
+                        )
                 except (TypeError, pa.ArrowInvalid) as exc:
                     _hook_exc = exc
                     status = "error"
@@ -156,11 +183,11 @@ def _run_unary_sync(
                     _write_error_batch(writer, schema, exc, server_id=server_id)
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
-            # Enforce caps after the response has been flushed.  On overshoot,
-            # discard the oversize body and emit a fresh response containing
-            # only the EXCEPTION batch.  ``_set_http_status`` rewrites the
-            # 500 to 200 + ``X-VGI-RPC-Error`` so the transport layer sees
-            # success while the RPC client surfaces a normal ``RpcError``.
+            # Wire body cap is checked post-flush — no upload cost was
+            # incurred for the body itself.  External cap was pre-flighted
+            # above before the upload happened.  On overshoot, discard
+            # the oversize body and emit a fresh response containing only
+            # the EXCEPTION batch.
             if status == "ok":
                 try:
                     _enforce_response_budgets(

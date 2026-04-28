@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import pyarrow as pa
 from pyarrow import ipc
 
-from vgi_rpc.external import resolve_external_location
+from vgi_rpc.external import predict_externalize_bytes_for_collector, resolve_external_location
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import CANCEL_KEY, STATE_KEY, strip_keys
 from vgi_rpc.rpc import (
@@ -540,14 +540,39 @@ def _run_stream_exchange_sync(
                     )
                     out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
 
+                    # Pre-flight the external cap BEFORE flushing — refuses
+                    # a violating upload without paying for the storage
+                    # round-trip.  The wire-body cap can be checked after
+                    # flush since it does not incur an upload cost.
+                    ext_cfg = app._server.external_config
+                    predicted_external = (
+                        predict_externalize_bytes_for_collector(out, ext_cfg) if ext_cfg is not None else 0
+                    )
+                    if (
+                        app._max_externalized_response_bytes is not None
+                        and predicted_external > app._max_externalized_response_bytes
+                    ):
+                        overshoot = RuntimeError(
+                            f"Externalised payload exceeds max_externalized_response_bytes "
+                            f"({predicted_external} > {app._max_externalized_response_bytes}) "
+                            f"for method {method_name!r}"
+                        )
+                        outcome.status = "error"
+                        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                        outcome.error_message = _truncate_error_message(overshoot)
+                        resp_buf = BytesIO()
+                        with ipc.new_stream(resp_buf, output_schema) as err_writer:
+                            _write_error_batch(err_writer, output_schema, overshoot, server_id=server_id)
+                        resp_buf.seek(0)
+                        return resp_buf
+
                     # Write response batches (log + data, in order)
                     resp_buf = BytesIO()
                     exchange_external_bytes = 0
                     with ipc.new_stream(resp_buf, output_schema) as writer:
                         exchange_external_bytes = _flush_collector(writer, out, app._server.external_config)
-                    # Enforce caps after flush.  On overshoot, append the
-                    # EXCEPTION batch to the same IPC stream so the client
-                    # observes a normal RpcError round-trip.
+                    # Wire body cap is checked post-flush — no upload cost
+                    # was incurred for the body itself.
                     try:
                         _enforce_response_budgets(
                             method_name=method_name,
@@ -560,14 +585,9 @@ def _run_stream_exchange_sync(
                         outcome.status = "error"
                         outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
                         outcome.error_message = _truncate_error_message(overshoot)
-                        # Append EXCEPTION batch to the same response stream.
-                        # Re-open the writer in append mode is impossible; we
-                        # rebuild the response with the existing payload + a
-                        # trailing EXCEPTION batch by re-reading and re-writing.
-                        # Simpler: discard the overshoot and emit a fresh body
-                        # containing only the EXCEPTION (clients tolerate this
-                        # because they see an RpcError before any data — they
-                        # haven't yielded results yet).
+                        # Discard the oversize body; emit a fresh response
+                        # containing only the EXCEPTION batch.  The client
+                        # sees a normal RpcError round-trip.
                         resp_buf = BytesIO()
                         with ipc.new_stream(resp_buf, output_schema) as err_writer:
                             _write_error_batch(err_writer, output_schema, overshoot, server_id=server_id)
@@ -715,22 +735,28 @@ def _run_http_producer_turn(
                 state.process(_TICK_BATCH, out, produce_ctx)
                 if not out.finished:
                     out.validate()
+                # Pre-flight the external cap BEFORE flushing — predicting
+                # the upload size from the data batch's buffer size lets us
+                # refuse a violating upload without paying for the
+                # round-trip to S3/GCS.  The wire body cap is soft for
+                # producer streams (continuation tokens handle overshoots);
+                # the external channel has no equivalent escape, hence the
+                # strict-fail path.
+                if max_external_bytes is not None and externalization_enabled and not out.finished:
+                    ext_cfg = app._server.external_config
+                    assert ext_cfg is not None  # narrowed by externalization_enabled
+                    predicted = predict_externalize_bytes_for_collector(out, ext_cfg)
+                    if predicted and cumulative_external_bytes + predicted > max_external_bytes:
+                        projected = cumulative_external_bytes + predicted
+                        overshoot = RuntimeError(
+                            f"Externalised payload exceeds max_externalized_response_bytes "
+                            f"({projected} > {max_external_bytes}) for method {method_name!r}"
+                        )
+                        produce_error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                        produce_error_message = _truncate_error_message(overshoot)
+                        _write_error_batch(writer, schema, overshoot, server_id=server_id)
+                        break
                 cumulative_external_bytes += _flush_collector(writer, out, app._server.external_config)
-                # Enforce the *external-channel* cap only.  The wire body
-                # cap is soft for producer streams: continuation tokens
-                # handle overshoots gracefully (the loop hits the cap,
-                # mints a token, and the client resumes).  The external
-                # channel has no equivalent escape — uploads are
-                # synchronous and unbounded if not strict-failed.
-                if max_external_bytes is not None and cumulative_external_bytes > max_external_bytes:
-                    overshoot = RuntimeError(
-                        f"Externalised payload exceeds max_externalized_response_bytes "
-                        f"({cumulative_external_bytes} > {max_external_bytes}) for method {method_name!r}"
-                    )
-                    produce_error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
-                    produce_error_message = _truncate_error_message(overshoot)
-                    _write_error_batch(writer, schema, overshoot, server_id=server_id)
-                    break
                 if out.finished:
                     break
                 cumulative_bytes = out.total_data_bytes

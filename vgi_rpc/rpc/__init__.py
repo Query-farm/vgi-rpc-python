@@ -153,6 +153,7 @@ from vgi_rpc.rpc._types import (
     rpc_methods,
 )
 from vgi_rpc.rpc._wire import (
+    _build_result_batch,
     _ClientLogSink,
     _coerce_input_batch,
     _convert_for_arrow,
@@ -230,6 +231,7 @@ __all__ = [
     "_TransportContext",
     "_access_logger",
     "_build_params_schema",
+    "_build_result_batch",
     "_build_result_schema",
     "_classify_return_type",
     "_coerce_input_batch",

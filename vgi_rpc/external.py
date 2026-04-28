@@ -628,6 +628,49 @@ def _fetch_and_resolve(
 # ---------------------------------------------------------------------------
 
 
+def predict_externalize_bytes_for_collector(out: OutputCollector, config: ExternalLocationConfig) -> int:
+    """Predict the external upload size if :func:`maybe_externalize_collector` ran now.
+
+    Returns the data batch's logical buffer size when externalisation
+    would fire (storage configured + threshold met), else ``0``.  The
+    real upload includes IPC framing for log + data batches and may
+    differ slightly; this is a lower-bound estimate suitable for
+    pre-flight cap checks.
+
+    Used by HTTP dispatch paths to refuse a violating upload BEFORE
+    incurring the storage round-trip — the operator's intent in setting
+    ``max_externalized_response_bytes`` is "don't emit data beyond this
+    per call," not "emit and then complain."
+    """
+    if config.storage is None:
+        return 0
+    try:
+        data_ab = out.data_batch
+    except RuntimeError:
+        return 0
+    size = data_ab.batch.get_total_buffer_size()
+    if size < config.externalize_threshold_bytes:
+        return 0
+    return size
+
+
+def predict_externalize_bytes_for_batch(batch: pa.RecordBatch, config: ExternalLocationConfig) -> int:
+    """Predict the external upload size if :func:`maybe_externalize_batch` ran now.
+
+    See :func:`predict_externalize_bytes_for_collector` for the rationale.
+    Mirrors the threshold logic at ``maybe_externalize_batch``'s decision
+    point so the prediction matches what the upload helper actually does.
+    """
+    if config.storage is None:
+        return 0
+    if batch.num_rows == 0:
+        return 0
+    size = batch.get_total_buffer_size()
+    if size < config.externalize_threshold_bytes:
+        return 0
+    return size
+
+
 def maybe_externalize_collector(
     out: OutputCollector,
     config: ExternalLocationConfig,

@@ -270,6 +270,19 @@ class _ClientLogSink:
         self._schema = None
 
 
+def _build_result_batch(result_schema: pa.Schema, value: object) -> pa.RecordBatch:
+    """Construct the unary result batch from a returned Python value.
+
+    Extracted from :func:`_write_result_batch` so HTTP callers can build
+    the batch eagerly and pre-flight the external-channel cap (predicting
+    upload size from the batch before paying for the actual S3/GCS PUT).
+    """
+    if len(result_schema) == 0:
+        return pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
+    wire_value = _convert_for_arrow(value)
+    return pa.RecordBatch.from_arrays([pa.array([wire_value], type=result_schema.field(0).type)], schema=result_schema)
+
+
 def _write_result_batch(
     writer: ipc.RecordBatchStreamWriter,
     result_schema: pa.Schema,
@@ -277,8 +290,19 @@ def _write_result_batch(
     external_config: ExternalLocationConfig | None = None,
     *,
     shm: ShmSegment | None = None,
+    prebuilt: pa.RecordBatch | None = None,
 ) -> int:
     """Write a unary result batch to an already-open IPC stream writer.
+
+    Args:
+        writer: IPC stream writer.
+        result_schema: Arrow schema for the result.
+        value: The Python return value (ignored when ``prebuilt`` is set).
+        external_config: Optional externalisation config.
+        shm: Optional shared-memory segment.
+        prebuilt: Optional pre-built batch; when supplied, ``value`` is
+            ignored.  Lets callers (HTTP unary path) construct the
+            batch eagerly to pre-flight the external-channel cap.
 
     Returns:
         Bytes uploaded to external storage during this call.  ``0`` when no
@@ -287,13 +311,7 @@ def _write_result_batch(
         external-channel cap should add this to a running total.
 
     """
-    if len(result_schema) == 0:
-        batch = pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
-    else:
-        wire_value = _convert_for_arrow(value)
-        batch = pa.RecordBatch.from_arrays(
-            [pa.array([wire_value], type=result_schema.field(0).type)], schema=result_schema
-        )
+    batch = prebuilt if prebuilt is not None else _build_result_batch(result_schema, value)
     _record_output(batch)
     if shm is not None:
         batch, cm = maybe_write_to_shm(batch, None, shm)
