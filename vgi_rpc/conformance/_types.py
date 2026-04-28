@@ -9,11 +9,15 @@ service Protocol and implementation.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
+import sys
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Annotated, Any, cast
+from typing import IO, Annotated, Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -411,6 +415,40 @@ class OversizedExchangeState(ExchangeState):
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _probe_file_lock(f: IO[str], *, exclusive: bool) -> Iterator[None]:
+    """Cross-platform advisory file lock for the conformance probe file.
+
+    Uses ``fcntl.flock`` on POSIX and ``msvcrt.locking`` on Windows so the
+    cross-process probe-counter file works on both platforms.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        f.seek(0)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(f.fileno(), flag)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
 class _CancelProbe:
     """Process-wide counters observed by cancel conformance tests.
 
@@ -440,22 +478,17 @@ class _CancelProbe:
         if path is None:
             setattr(cls, field, getattr(cls, field) + 1)
             return
-        import fcntl
         import json
 
-        with open(path, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                raw = f.read()
-                data = json.loads(raw) if raw else {"produce_calls": 0, "exchange_calls": 0, "on_cancel_calls": 0}
-                data[field] = data.get(field, 0) + 1
-                f.seek(0)
-                f.truncate()
-                f.write(json.dumps(data))
-                f.flush()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        with open(path, "a+") as f, _probe_file_lock(f, exclusive=True):
+            f.seek(0)
+            raw = f.read()
+            data = json.loads(raw) if raw else {"produce_calls": 0, "exchange_calls": 0, "on_cancel_calls": 0}
+            data[field] = data.get(field, 0) + 1
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(data))
+            f.flush()
 
     @classmethod
     def snapshot(cls) -> tuple[int, int, int]:
@@ -463,18 +496,13 @@ class _CancelProbe:
         path = cls._shared_path()
         if path is None:
             return cls.produce_calls, cls.exchange_calls, cls.on_cancel_calls
-        import fcntl
         import json
         import os
 
         if not os.path.exists(path):
             return 0, 0, 0
-        with open(path) as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-            try:
-                raw = f.read()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        with open(path) as f, _probe_file_lock(f, exclusive=False):
+            raw = f.read()
         if not raw:
             return 0, 0, 0
         data = json.loads(raw)
@@ -488,16 +516,11 @@ class _CancelProbe:
         cls.on_cancel_calls = 0
         path = cls._shared_path()
         if path is not None:
-            import fcntl
             import json
 
-            with open(path, "w") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(json.dumps({"produce_calls": 0, "exchange_calls": 0, "on_cancel_calls": 0}))
-                    f.flush()
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            with open(path, "w") as f, _probe_file_lock(f, exclusive=True):
+                f.write(json.dumps({"produce_calls": 0, "exchange_calls": 0, "on_cancel_calls": 0}))
+                f.flush()
 
 
 @dataclass

@@ -57,10 +57,13 @@ def _wait_for_http(port: int, timeout: float = 10.0) -> None:
 
 
 def _wait_for_unix(path: str, timeout: float = 10.0) -> None:
+    af_unix = getattr(socket, "AF_UNIX", None)
+    if af_unix is None:
+        raise RuntimeError("Unix domain sockets are not supported on this platform")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            with socket.socket(af_unix, socket.SOCK_STREAM) as s:
                 s.connect(path)
                 return
         except (FileNotFoundError, ConnectionRefusedError):

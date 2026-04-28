@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import logging
 import struct
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Protocol
@@ -41,6 +42,8 @@ from vgi_rpc.shm import (
     resolve_shm_batch,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="shared-memory transport is POSIX-only")
 
 # ---------------------------------------------------------------------------
 # Test schema & helpers
