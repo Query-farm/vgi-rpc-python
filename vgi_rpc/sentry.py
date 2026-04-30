@@ -79,6 +79,7 @@ Caveats:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -121,6 +122,66 @@ _TAG_VALUE_MAX_LEN = 200
 """Sentry tag value cap (chars).  Longer values are clipped."""
 
 
+def short_hash(value: bytes | str | None, *, length: int = 12) -> str | None:
+    """Return a stable hex prefix of ``sha256(value)`` suitable for a Sentry tag.
+
+    For tagging high-cardinality opaque IDs (``attach_id``, ``transaction_id``,
+    UUIDs, JWT subs) without exhausting Sentry's tag-value distribution UI.
+    Same input → same prefix; collisions are negligible at ``length>=8`` for
+    any realistic per-process volume.
+
+    ``bytes`` are normalised to their hex string before hashing so that
+    ``short_hash(id_bytes)`` and ``short_hash(id_bytes.hex())`` produce the
+    same tag value — call sites that already hold a hex string don't need
+    to round-trip through bytes.
+
+    Returns ``None`` when *value* is ``None``, so callers can pass through
+    optional fields without an extra branch.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.hex()
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+
+
+_WELL_KNOWN_ID_FIELDS: Mapping[str, str] = {
+    "attach_id": "vgi.attach_id",
+    "transaction_id": "vgi.transaction_id",
+}
+"""VGI base-protocol identifiers that get hashed and tagged automatically.
+
+These are the only VGI-specific names baked into vgi-rpc.  Justified because
+vgi-rpc was built for VGI; consumers whose RPC methods don't carry these
+names pay nothing (extraction returns ``None``, no tag is set).
+"""
+
+
+def _extract_well_known(kwargs: Mapping[str, Any], name: str) -> bytes | str | None:
+    """Pull *name* out of *kwargs* — top-level, nested attr, or InitRequest.bind_call.
+
+    Returns the first matching ``bytes``/``str`` value, or ``None``.  Walks
+    one level deep: top-level kwarg → ``getattr(kwarg, name)`` →
+    ``getattr(kwarg.bind_call, name)``.  Not a general tree walk; only the
+    shapes the VGI protocol actually uses (direct kwargs, request
+    dataclasses, ``InitRequest`` wrapping ``BindRequest``).
+    """
+    if name in kwargs:
+        v = kwargs[name]
+        if isinstance(v, (bytes, str)):
+            return v
+    for v in kwargs.values():
+        attr = getattr(v, name, None)
+        if isinstance(attr, (bytes, str)):
+            return attr
+        bind_call = getattr(v, "bind_call", None)
+        if bind_call is not None:
+            nested = getattr(bind_call, name, None)
+            if isinstance(nested, (bytes, str)):
+                return nested
+    return None
+
+
 def noop_redactor(kwargs: Mapping[str, Any]) -> Mapping[str, Any]:
     """Pass-through redactor — emit kwargs verbatim.  Use only when you trust them."""
     return kwargs
@@ -151,6 +212,14 @@ class SentryConfig:
         op_name: Sentry transaction operation name (default ``"rpc.server"``).
         claim_tags: Maps claim keys to Sentry tag names, e.g.
             ``{"tenant_id": "auth.tenant_id"}``.
+        user_claim_map: Maps Sentry user-object fields to JWT claim names, used
+            to populate ``user.username`` / ``user.email`` / ``user.name`` from
+            the decoded JWT.  Defaults to standard OIDC claims
+            (``preferred_username`` → ``username``, ``email`` → ``email``,
+            ``name`` → ``name``).  ``user.id`` is always set from
+            ``auth.principal`` (typically the ``sub`` claim) and is not
+            configurable here.  Override per-key for non-standard IdPs (e.g.
+            Auth0 namespaced claims).  Values absent from the JWT are skipped.
         set_transaction_name: Override Sentry's WSGI-derived transaction name with
             ``rpc {method}``.  Default ``True``.  Disable to keep the route-template
             grouping (rarely useful — the default ``/{method}`` placeholder loses
@@ -180,6 +249,13 @@ class SentryConfig:
     ignored_exceptions: tuple[type[BaseException], ...] = ()
     op_name: str = "rpc.server"
     claim_tags: Mapping[str, str] = field(default_factory=dict)
+    user_claim_map: Mapping[str, str] = field(
+        default_factory=lambda: {
+            "username": "preferred_username",
+            "email": "email",
+            "name": "name",
+        }
+    )
     set_transaction_name: bool = True
     record_params: bool = False
     tag_params: Sequence[str] = ()
@@ -414,8 +490,19 @@ class _SentryDispatchHook:
                     "server_id": self._server_id,
                 },
             )
+            user: dict[str, Any] = {}
             if auth.principal:
-                scope.set_user({"username": auth.principal})
+                # auth.principal is typically the JWT ``sub`` claim — an
+                # opaque, stable IdP-issued identifier.  Sentry's ``user.id``
+                # is the right field for that; ``user.username`` is meant
+                # for human-readable handles.
+                user["id"] = auth.principal
+            for user_field, claim_key in self._config.user_claim_map.items():
+                value = auth.claims.get(claim_key)
+                if isinstance(value, str) and value:
+                    user[user_field] = value
+            if user:
+                scope.set_user(user)
             if auth.domain:
                 scope.set_tag("auth.domain", auth.domain)
             scope.set_tag("auth.authenticated", str(auth.authenticated).lower())
@@ -426,6 +513,18 @@ class _SentryDispatchHook:
 
         for key, value in self._config.custom_tags.items():
             scope.set_tag(key, value)
+
+        # Auto-tag VGI well-known protocol IDs (attach_id, transaction_id) on
+        # *every* dispatch so subsequent operations on the same client session
+        # share a queryable tag value, regardless of which RPC method carried
+        # the ID.  Hashed to keep tag-value cardinality bounded.
+        for field_name, tag_name in _WELL_KNOWN_ID_FIELDS.items():
+            raw = _extract_well_known(kwargs, field_name)
+            hashed = short_hash(raw)
+            if hashed is not None:
+                scope.set_tag(tag_name, hashed)
+                if span is not None:
+                    span.set_data(tag_name, hashed)
 
         transaction: sentry_sdk.tracing.Transaction | sentry_sdk.tracing.NoOpSpan | None = None
         if self._config.enable_performance:

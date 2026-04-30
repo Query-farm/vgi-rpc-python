@@ -33,11 +33,13 @@ from vgi_rpc.rpc._common import (
 )
 from vgi_rpc.sentry import (
     SentryConfig,
+    _extract_well_known,
     _has_sentry_hook,
     _maybe_auto_instrument,
     _SentryDispatchHook,
     _strip_sentry_hook,
     instrument_server_sentry,
+    short_hash,
 )
 
 # ---------------------------------------------------------------------------
@@ -237,15 +239,96 @@ class TestSentryContext:
         assert ctx_data["server_id"] == "ctx-test"
 
     @patch("vgi_rpc.sentry.sentry_sdk")
-    def test_auth_user_set(self, mock_sdk: MagicMock) -> None:
-        """Auth principal is set as Sentry user."""
+    def test_auth_user_id_only(self, mock_sdk: MagicMock) -> None:
+        """Auth principal becomes ``user.id`` even when no claims are present."""
         mock_scope = MagicMock()
         mock_sdk.get_current_scope.return_value = mock_scope
         server = RpcServer(SentryTestService, SentryTestServiceImpl())
         instrument_server_sentry(server)
-        auth = AuthContext(domain="test", authenticated=True, principal="bob")
+        auth = AuthContext(domain="bearer", authenticated=True, principal="bob")
         _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
-        mock_scope.set_user.assert_called_with({"username": "bob"})
+        mock_scope.set_user.assert_called_with({"id": "bob"})
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_auth_user_oidc_claims(self, mock_sdk: MagicMock) -> None:
+        """Standard OIDC claims populate username/email/name; sub stays in id."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server)
+        auth = AuthContext(
+            domain="jwt",
+            authenticated=True,
+            principal="4FySzCeE4zIYuvph49iD9tcJL0_zDWfpMqarUUPc1uA",
+            claims={
+                "sub": "4FySzCeE4zIYuvph49iD9tcJL0_zDWfpMqarUUPc1uA",
+                "preferred_username": "rusty",
+                "email": "rusty@luckydinosaur.com",
+                "name": "Rusty Conover",
+            },
+        )
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
+        mock_scope.set_user.assert_called_with(
+            {
+                "id": "4FySzCeE4zIYuvph49iD9tcJL0_zDWfpMqarUUPc1uA",
+                "username": "rusty",
+                "email": "rusty@luckydinosaur.com",
+                "name": "Rusty Conover",
+            }
+        )
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_auth_user_claim_map_override(self, mock_sdk: MagicMock) -> None:
+        """user_claim_map overrides default claim names (e.g. Auth0 namespaced claims)."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        config = SentryConfig(
+            user_claim_map={
+                "username": "https://example.com/handle",
+                "email": "https://example.com/email",
+            }
+        )
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        auth = AuthContext(
+            domain="jwt",
+            authenticated=True,
+            principal="auth0|abc",
+            claims={
+                "sub": "auth0|abc",
+                "https://example.com/handle": "rusty",
+                "https://example.com/email": "rusty@example.com",
+                "preferred_username": "ignored",  # default key, but map overrides
+            },
+        )
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
+        mock_scope.set_user.assert_called_with(
+            {
+                "id": "auth0|abc",
+                "username": "rusty",
+                "email": "rusty@example.com",
+            }
+        )
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_auth_user_skips_non_string_claims(self, mock_sdk: MagicMock) -> None:
+        """Non-string or empty claim values are ignored — they don't poison user fields."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server)
+        auth = AuthContext(
+            domain="jwt",
+            authenticated=True,
+            principal="bob",
+            claims={
+                "preferred_username": "",  # empty
+                "email": ["a@b.com"],  # wrong type
+                "name": 42,  # wrong type
+            },
+        )
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2}, auth=auth)
+        mock_scope.set_user.assert_called_with({"id": "bob"})
 
     @patch("vgi_rpc.sentry.sentry_sdk")
     def test_custom_tags_applied(self, mock_sdk: MagicMock) -> None:
@@ -1104,3 +1187,204 @@ class TestSentryReplaceSemantics:
     def test_strip_handles_none(self) -> None:
         """Stripping None returns None."""
         assert _strip_sentry_hook(None) is None
+
+
+# ---------------------------------------------------------------------------
+# short_hash + well-known kwarg tagging
+# ---------------------------------------------------------------------------
+
+
+class TestShortHash:
+    """short_hash helper: stable hex prefix of sha256."""
+
+    def test_none_returns_none(self) -> None:
+        """None passes through to None."""
+        assert short_hash(None) is None
+
+    def test_deterministic_length(self) -> None:
+        """Default output is 12 lowercase hex characters."""
+        h = short_hash(b"\x01\x02\x03")
+        assert h is not None
+        assert len(h) == 12
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_bytes_and_hex_string_match(self) -> None:
+        """``short_hash(b)`` and ``short_hash(b.hex())`` produce the same value."""
+        raw = b"\x4f\x3c\x2a\x1b\x9d\x8e\xff\x01"
+        assert short_hash(raw) == short_hash(raw.hex())
+
+    def test_different_inputs_different_hashes(self) -> None:
+        """Distinct inputs yield distinct hashes."""
+        assert short_hash(b"a") != short_hash(b"b")
+
+    def test_custom_length(self) -> None:
+        """``length`` parameter controls prefix size."""
+        h = short_hash(b"x", length=8)
+        assert h is not None
+        assert len(h) == 8
+
+
+@dataclass
+class _FakeAttachId:
+    """Stand-in for a request dataclass with an ``attach_id`` attribute."""
+
+    attach_id: bytes
+    transaction_id: bytes | None = None
+
+
+@dataclass
+class _FakeBindRequest:
+    """Stand-in for ``BindRequest``."""
+
+    attach_id: bytes
+    transaction_id: bytes | None = None
+
+
+@dataclass
+class _FakeInitRequest:
+    """Stand-in for ``InitRequest`` (wraps a ``bind_call`` carrying the IDs)."""
+
+    bind_call: _FakeBindRequest
+
+
+class TestExtractWellKnown:
+    """_extract_well_known walks the three protocol shapes."""
+
+    def test_top_level_kwarg(self) -> None:
+        """Direct kwarg lookup."""
+        kwargs = {"attach_id": b"\x01\x02"}
+        assert _extract_well_known(kwargs, "attach_id") == b"\x01\x02"
+
+    def test_nested_attribute_on_request_dataclass(self) -> None:
+        """One level of attribute descent into a request dataclass."""
+        kwargs = {"request": _FakeAttachId(attach_id=b"\x0a\x0b")}
+        assert _extract_well_known(kwargs, "attach_id") == b"\x0a\x0b"
+
+    def test_init_request_descends_bind_call(self) -> None:
+        """Two-level descent: ``request.bind_call.attach_id``."""
+        kwargs = {"request": _FakeInitRequest(bind_call=_FakeBindRequest(attach_id=b"\xff"))}
+        assert _extract_well_known(kwargs, "attach_id") == b"\xff"
+
+    def test_missing_returns_none(self) -> None:
+        """No matching field anywhere returns None."""
+        assert _extract_well_known({"unrelated": 5}, "attach_id") is None
+
+    def test_none_value_returns_none(self) -> None:
+        """An explicit None on a request dataclass returns None, not the attr."""
+        kwargs = {"request": _FakeAttachId(attach_id=b"\x01", transaction_id=None)}
+        assert _extract_well_known(kwargs, "transaction_id") is None
+
+    def test_skips_non_bytes_str(self) -> None:
+        """Integer or list values are not extracted (defends against accidental shadowing)."""
+        kwargs = {"attach_id": 42}
+        assert _extract_well_known(kwargs, "attach_id") is None
+
+
+class TestWellKnownAutoTagging:
+    """_SentryDispatchHook auto-tags vgi.attach_id / vgi.transaction_id."""
+
+    def _make_info(self, name: str = "test_method") -> MagicMock:
+        """Build a minimal RpcMethodInfo stand-in for hook invocation."""
+        info = MagicMock()
+        info.name = name
+        info.method_type.value = "unary"
+        return info
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_top_level_attach_id_kwarg_tagged(self, mock_sdk: MagicMock) -> None:
+        """A direct ``attach_id: bytes`` kwarg becomes ``vgi.attach_id`` tag."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        mock_sdk.get_current_span.return_value = None
+        hook = _SentryDispatchHook(SentryConfig(), "TestProto", "srv-1")
+        attach_id = b"\x4f\x3c\x2a\x1b\x9d\x8e\xff\x01\x02\x03\x04\x05\x06\x07\x08\x09"
+        hook.on_dispatch_start(
+            self._make_info("catalog_detach"),
+            AuthContext(domain=None, authenticated=False),
+            {},
+            {"attach_id": attach_id},
+        )
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["vgi.attach_id"] == short_hash(attach_id)
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_nested_request_dataclass_tagged(self, mock_sdk: MagicMock) -> None:
+        """A request dataclass carrying ``attach_id``/``transaction_id`` is unwrapped."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        mock_sdk.get_current_span.return_value = None
+        hook = _SentryDispatchHook(SentryConfig(), "TestProto", "srv-1")
+        attach_id = b"\xab\xcd\xef\x01"
+        tx_id = b"\x99\x88\x77\x66"
+        hook.on_dispatch_start(
+            self._make_info("bind"),
+            AuthContext(domain=None, authenticated=False),
+            {},
+            {"request": _FakeBindRequest(attach_id=attach_id, transaction_id=tx_id)},
+        )
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["vgi.attach_id"] == short_hash(attach_id)
+        assert tag_calls["vgi.transaction_id"] == short_hash(tx_id)
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_init_request_descends_bind_call(self, mock_sdk: MagicMock) -> None:
+        """An ``InitRequest``-shaped kwarg is descended via ``bind_call``."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        mock_sdk.get_current_span.return_value = None
+        hook = _SentryDispatchHook(SentryConfig(), "TestProto", "srv-1")
+        attach_id = b"\xde\xad\xbe\xef"
+        hook.on_dispatch_start(
+            self._make_info("init"),
+            AuthContext(domain=None, authenticated=False),
+            {},
+            {"request": _FakeInitRequest(bind_call=_FakeBindRequest(attach_id=attach_id))},
+        )
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["vgi.attach_id"] == short_hash(attach_id)
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_no_tag_when_absent(self, mock_sdk: MagicMock) -> None:
+        """Methods without these IDs do not get the tags set."""
+        mock_scope = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        mock_sdk.get_current_span.return_value = None
+        hook = _SentryDispatchHook(SentryConfig(), "TestProto", "srv-1")
+        hook.on_dispatch_start(
+            self._make_info("add"),
+            AuthContext(domain=None, authenticated=False),
+            {},
+            {"a": 1, "b": 2},
+        )
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert "vgi.attach_id" not in tag_calls
+        assert "vgi.transaction_id" not in tag_calls
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_tag_value_is_stable_across_bytes_and_hex(self, mock_sdk: MagicMock) -> None:
+        """Same logical ID hashed the same whether it arrived as bytes or as a hex string."""
+        mock_scope_bytes = MagicMock()
+        mock_scope_hex = MagicMock()
+        mock_sdk.get_current_span.return_value = None
+        hook = _SentryDispatchHook(SentryConfig(), "TestProto", "srv-1")
+        attach_id = b"\x12\x34\x56\x78\x9a\xbc"
+
+        mock_sdk.get_current_scope.return_value = mock_scope_bytes
+        hook.on_dispatch_start(
+            self._make_info(),
+            AuthContext(domain=None, authenticated=False),
+            {},
+            {"attach_id": attach_id},
+        )
+        bytes_tag = {c[0][0]: c[0][1] for c in mock_scope_bytes.set_tag.call_args_list}["vgi.attach_id"]
+
+        mock_sdk.get_current_scope.return_value = mock_scope_hex
+        hook.on_dispatch_start(
+            self._make_info(),
+            AuthContext(domain=None, authenticated=False),
+            {},
+            {"attach_id": attach_id.hex()},
+        )
+        hex_tag = {c[0][0]: c[0][1] for c in mock_scope_hex.set_tag.call_args_list}["vgi.attach_id"]
+
+        assert bytes_tag == hex_tag
