@@ -167,9 +167,32 @@ class ValidatedReader:
 def empty_batch(schema: pa.Schema) -> pa.RecordBatch:
     """Return an empty batch conforming to the schema."""
     return pa.RecordBatch.from_arrays(
-        [pa.array([], type=field.type) for field in schema],
+        [_empty_array(field.type) for field in schema],
         schema=schema,
     )
+
+
+def _empty_array(arrow_type: pa.DataType) -> "pa.Array[Any]":
+    """Build a zero-length array of ``arrow_type``.
+
+    pyarrow's ``pa.array([], type=...)`` constructor doesn't support
+    union types — it raises ``ArrowNotImplementedError``. Build those
+    via ``Array.from_buffers`` from empty children + an empty type-codes
+    buffer (plus an empty offsets buffer for dense unions).
+    """
+    if pa.types.is_union(arrow_type):
+        union_type = cast(pa.UnionType, arrow_type)
+        children = [pa.array([], type=field.type) for field in union_type]
+        # buffers()[1] is the data buffer; for an empty primitive array it's
+        # always present, but the type stub says Buffer | None. The leading
+        # None stands in for the validity bitmap that union arrays don't
+        # carry (nulls live in the children).
+        type_codes_buf = cast(pa.Buffer, pa.array([], type=pa.int8()).buffers()[1])
+        buffers: list[pa.Buffer | None] = [None, type_codes_buf]
+        if union_type.mode == "dense":
+            buffers.append(cast(pa.Buffer, pa.array([], type=pa.int32()).buffers()[1]))
+        return pa.Array.from_buffers(arrow_type, 0, cast(list[pa.Buffer], buffers), children=children)
+    return pa.array([], type=arrow_type)
 
 
 def serialize_record_batch(

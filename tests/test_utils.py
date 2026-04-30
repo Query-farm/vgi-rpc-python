@@ -671,6 +671,22 @@ class TestEmptyBatch:
         assert batch.column("flag").type == pa.bool_()
         assert batch.column("data").type == pa.binary()
 
+    def test_empty_batch_sparse_union(self) -> None:
+        """Sparse union schemas — pa.array([], type=union) raises, so empty_batch must take a different path."""
+        union_type = pa.sparse_union([pa.field("i", pa.int32()), pa.field("s", pa.string())], type_codes=[0, 1])
+        schema = pa.schema([pa.field("u", union_type), pa.field("x", pa.int64())])
+        batch = empty_batch(schema)
+        assert batch.num_rows == 0
+        assert batch.schema.equals(schema)
+
+    def test_empty_batch_dense_union(self) -> None:
+        """Dense union schemas — same restriction as sparse, plus an extra offsets buffer."""
+        union_type = pa.dense_union([pa.field("i", pa.int32()), pa.field("s", pa.string())], type_codes=[0, 1])
+        schema = pa.schema([pa.field("u", union_type)])
+        batch = empty_batch(schema)
+        assert batch.num_rows == 0
+        assert batch.schema.equals(schema)
+
 
 # ---------------------------------------------------------------------------
 # TestSerializeDeserializeRecordBatch
