@@ -2,7 +2,7 @@
 
 Server-side Sentry instrumentation for unhandled exception capture and optional performance monitoring. Requires `pip install vgi-rpc[sentry]`.
 
-vgi-rpc does **not** manage Sentry's DSN or SDK lifecycle — call `sentry_sdk.init()` yourself (or rely on the SDK's own auto-init from `SENTRY_DSN`).
+vgi-rpc does **not** manage Sentry's DSN or SDK lifecycle — you must call `sentry_sdk.init()` yourself. Setting `SENTRY_DSN` alone is **not** enough: the Sentry SDK does not auto-initialise on import. `sentry_sdk.init()` will fall back to reading `SENTRY_DSN` from the environment only if you don't pass an explicit `dsn=`.
 
 ## Automatic instrumentation
 
@@ -10,7 +10,7 @@ If `sentry_sdk` is initialised in the worker process, vgi-rpc attaches default-c
 
 ```python
 import sentry_sdk
-sentry_sdk.init(dsn="https://...")        # or just set SENTRY_DSN
+sentry_sdk.init()                         # reads SENTRY_DSN if no dsn= passed
 
 from vgi_rpc import RpcServer
 server = RpcServer(MyService, MyServiceImpl())   # auto-attached

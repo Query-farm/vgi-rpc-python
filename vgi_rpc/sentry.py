@@ -10,8 +10,10 @@ auth principal, server ID, etc.).
 Requires ``pip install vgi-rpc[sentry]`` (sentry-sdk>=2.0).
 
 Users must initialize Sentry separately via ``sentry_sdk.init()`` — this
-module does **not** manage the DSN or SDK lifecycle.  The Sentry SDK itself
-auto-initialises from the standard ``SENTRY_DSN`` environment variable.
+module does **not** manage the DSN or SDK lifecycle.  Setting ``SENTRY_DSN``
+alone is **not** enough: the SDK does not auto-initialise on import.  You
+still have to call ``sentry_sdk.init()``; if you don't pass ``dsn=`` it
+falls back to reading ``SENTRY_DSN`` from the environment.
 
 Usage::
 
@@ -28,8 +30,8 @@ Automatic instrumentation
 If ``sentry_sdk`` is already imported and ``sentry_sdk.is_initialized()``
 returns ``True`` when ``RpcServer`` is constructed, the framework attaches
 :func:`instrument_server_sentry` with default config automatically.  No
-flag, no extra env var — if Sentry is on (e.g. ``SENTRY_DSN`` was set and
-the SDK auto-initialised), vgi-rpc reports RPC errors with full context.
+flag, no extra env var — if ``sentry_sdk.init()`` has run, vgi-rpc reports
+RPC errors with full context.
 
 To customise (``custom_tags``, ``claim_tags``, ``enable_performance``,
 ``ignored_exceptions``), call :func:`instrument_server_sentry` explicitly
@@ -154,10 +156,12 @@ def _maybe_auto_instrument(server: RpcServer) -> bool:
 
     Called by ``RpcServer.__init__`` whenever ``sentry_sdk`` is already
     importable in the current process.  No env-var gate: the user's call to
-    ``sentry_sdk.init()`` (or the SDK's own auto-init from ``SENTRY_DSN``)
-    is the signal of intent.  Idempotent — if the server already carries
-    a Sentry hook (e.g. via explicit ``instrument_server_sentry`` or
-    ``sentry_config=`` on ``make_wsgi_app``), this is a no-op.
+    ``sentry_sdk.init()`` is the signal of intent.  (``SENTRY_DSN`` alone
+    is not enough — the SDK does not auto-init on import; ``init()`` reads
+    the env var only if no explicit ``dsn=`` is passed.)  Idempotent — if
+    the server already carries a Sentry hook (e.g. via explicit
+    ``instrument_server_sentry`` or ``sentry_config=`` on
+    ``make_wsgi_app``), this is a no-op.
 
     Args:
         server: The ``RpcServer`` to potentially instrument.

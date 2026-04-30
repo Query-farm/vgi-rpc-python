@@ -1023,17 +1023,17 @@ logging.getLogger("vgi_rpc").addHandler(handler)
 
 vgi-rpc reports unhandled server exceptions to Sentry with RPC context (method, auth principal, server ID). Requires `pip install vgi-rpc[sentry]`.
 
-**Auto-attach.** If `sentry_sdk` is initialised in the worker (e.g. you called `sentry_sdk.init()` or set `SENTRY_DSN` so the SDK auto-inits), every `RpcServer` constructor attaches default-config Sentry instrumentation automatically — no flag, no extra env var:
+**Auto-attach.** If `sentry_sdk.init()` has been called in the worker before the server is constructed, every `RpcServer` constructor attaches default-config Sentry instrumentation automatically — no flag, no extra env var:
 
 ```python
 import sentry_sdk
-sentry_sdk.init(dsn="https://...")        # or just set SENTRY_DSN
+sentry_sdk.init()                         # reads SENTRY_DSN if no dsn= passed
 
 from vgi_rpc import RpcServer
 server = RpcServer(MyService, MyServiceImpl())   # Sentry already wired
 ```
 
-The check is gated on `sentry_sdk` being importable, so workers without the optional dep pay nothing. `sentry_sdk.init()` must run before `RpcServer(...)`; otherwise auto-attach is a no-op.
+Setting `SENTRY_DSN` alone is **not** enough — the Sentry SDK does not auto-initialise on import. You must call `sentry_sdk.init()`; without an explicit `dsn=` it falls back to reading `SENTRY_DSN`. The check is gated on `sentry_sdk` being importable, so workers without the optional dep pay nothing. `sentry_sdk.init()` must run before `RpcServer(...)`; otherwise auto-attach is a no-op.
 
 **Customising.** Call `instrument_server_sentry()` (or pass `sentry_config=` to `make_wsgi_app()`/`serve_http()`) to override the default config — the explicit call **replaces** any auto-attached hook regardless of order:
 
