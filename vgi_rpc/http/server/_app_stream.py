@@ -108,6 +108,7 @@ def _dispatch_telemetry(
     method_type: str,
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
+    kwargs: Mapping[str, Any] | None = None,
 ) -> Iterator[_DispatchOutcome]:
     """Wrap a stream-call shell with shared start/end telemetry.
 
@@ -125,7 +126,9 @@ def _dispatch_telemetry(
     Pass ``info=None`` for code paths that are not regular dispatch —
     e.g. the ``/exchange`` cancel handler, which should still produce
     an access-log record but does not run a method (and so should not
-    fire dispatch hooks).
+    fire dispatch hooks).  ``kwargs`` is forwarded to the hook so
+    observability backends can attach RPC parameters to traces; pass
+    ``None`` (the default) when no kwargs are available (cancel paths).
     """
     server_id = app._server.server_id
     protocol_name = app._server.protocol_name
@@ -135,7 +138,7 @@ def _dispatch_telemetry(
     hook_token: HookToken = None
     if hook is not None and info is not None:
         try:
-            hook_token = hook.on_dispatch_start(info, auth, transport_metadata)
+            hook_token = hook.on_dispatch_start(info, auth, transport_metadata, kwargs or {})
         except Exception:
             _logger.debug("Dispatch hook start failed", exc_info=True)
             hook = None
@@ -236,6 +239,7 @@ def _run_stream_init_sync(
             method_type=info.method_type.value,
             auth=auth,
             transport_metadata=transport_metadata,
+            kwargs=kwargs,
         ) as outcome:
             try:
                 result: Stream[StreamState, Any] = getattr(app._server.implementation, method_name)(**kwargs)

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 from unittest.mock import MagicMock, patch
@@ -404,6 +405,359 @@ class TestSentryOtelCoexistence:
 
 
 # ---------------------------------------------------------------------------
+# Transaction naming, span data, params (Phase A behavior)
+# ---------------------------------------------------------------------------
+
+
+def _fake_method_info(name: str, method_type: str = "unary") -> MagicMock:
+    """Build a MagicMock that quacks like an RpcMethodInfo for hook unit tests."""
+    info = MagicMock()
+    info.name = name
+    info.method_type.value = method_type
+    return info
+
+
+def _build_hook_with_mocks(
+    config: SentryConfig | None = None,
+) -> tuple[_SentryDispatchHook, MagicMock, MagicMock, MagicMock]:
+    """Construct the hook, a patched ``sentry_sdk`` module, and the scope/span mocks.
+
+    Returns ``(hook, mock_sdk, mock_scope, mock_span)``.  Caller is responsible
+    for entering ``patch("vgi_rpc.sentry.sentry_sdk", mock_sdk)`` if the test
+    needs side effects against the live SDK to be intercepted.
+    """
+    hook = _SentryDispatchHook(config or SentryConfig(), "TestService", "srv-1")
+    mock_sdk = MagicMock()
+    mock_scope = MagicMock()
+    mock_span = MagicMock()
+    mock_sdk.get_current_scope.return_value = mock_scope
+    mock_sdk.get_current_span.return_value = mock_span
+    return hook, mock_sdk, mock_scope, mock_span
+
+
+class TestTransactionName:
+    """Override of Falcon's route-template transaction name."""
+
+    def test_default_overrides_to_rpc_method(self) -> None:
+        """Default config replaces the WSGI-derived name with ``rpc {method}``."""
+        hook, mock_sdk, mock_scope, _ = _build_hook_with_mocks()
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(_fake_method_info("listUsers"), AuthContext.anonymous(), {}, {})
+        mock_scope.set_transaction_name.assert_called_once_with("rpc listUsers", source="custom")
+
+    def test_disabled_does_not_override(self) -> None:
+        """``set_transaction_name=False`` leaves the WSGI-derived name in place."""
+        hook, mock_sdk, mock_scope, _ = _build_hook_with_mocks(SentryConfig(set_transaction_name=False))
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(_fake_method_info("listUsers"), AuthContext.anonymous(), {}, {})
+        mock_scope.set_transaction_name.assert_not_called()
+
+
+class TestSpanCoreAttributes:
+    """Always-on span attributes: rpc.system / service / method / method_type."""
+
+    def test_core_attrs_set(self) -> None:
+        """rpc.system/service/method/method_type land on the active span."""
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks()
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(_fake_method_info("addNumbers"), AuthContext.anonymous(), {}, {})
+        keys = {call[0][0]: call[0][1] for call in mock_span.set_data.call_args_list}
+        assert keys["rpc.system"] == "vgi_rpc"
+        assert keys["rpc.service"] == "TestService"
+        assert keys["rpc.method"] == "addNumbers"
+        assert keys["rpc.method_type"] == "unary"
+
+    def test_no_span_skips_set_data(self) -> None:
+        """``get_current_span()`` returning None (e.g. tracing disabled) is safe."""
+        hook, mock_sdk, mock_scope, _ = _build_hook_with_mocks()
+        mock_sdk.get_current_span.return_value = None
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            # Should not raise.
+            hook.on_dispatch_start(_fake_method_info("foo"), AuthContext.anonymous(), {}, {})
+        # Scope tags still fire even without an active span.
+        tag_keys = {call[0][0] for call in mock_scope.set_tag.call_args_list}
+        assert "rpc.method" in tag_keys
+
+
+class TestStreamId:
+    """rpc.stream_id flows into span data only — never a scope tag."""
+
+    def test_stream_id_in_span_data(self) -> None:
+        """stream_id flows into span data and is NOT promoted to a scope tag."""
+        from vgi_rpc.rpc._common import _current_stream_id
+
+        hook, mock_sdk, mock_scope, mock_span = _build_hook_with_mocks()
+        token = _current_stream_id.set("ab12cd34")
+        try:
+            with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+                hook.on_dispatch_start(_fake_method_info("scan", "stream"), AuthContext.anonymous(), {}, {})
+        finally:
+            _current_stream_id.reset(token)
+        span_keys = {call[0][0]: call[0][1] for call in mock_span.set_data.call_args_list}
+        assert span_keys["rpc.stream_id"] == "ab12cd34"
+        # Must NOT appear as a scope tag — uuid per stream is unbounded cardinality.
+        tag_keys = {call[0][0] for call in mock_scope.set_tag.call_args_list}
+        assert "rpc.stream_id" not in tag_keys
+
+    def test_no_stream_id_when_unset(self) -> None:
+        """Empty contextvar means rpc.stream_id is omitted from span data."""
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks()
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(_fake_method_info("foo"), AuthContext.anonymous(), {}, {})
+        span_keys = {call[0][0] for call in mock_span.set_data.call_args_list}
+        assert "rpc.stream_id" not in span_keys
+
+
+class TestParamRecording:
+    """``rpc.param.<k>`` span attributes — opt-in via ``record_params``."""
+
+    def test_default_off(self) -> None:
+        """``record_params`` defaults to False — no rpc.param.* keys recorded."""
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks()
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(_fake_method_info("scan"), AuthContext.anonymous(), {}, {"table": "orders"})
+        span_keys = {call[0][0] for call in mock_span.set_data.call_args_list}
+        assert not any(k.startswith("rpc.param.") for k in span_keys)
+
+    def test_enabled_records_primitives(self) -> None:
+        """Strings, ints, bools, and floats round-trip as span attributes."""
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks(SentryConfig(record_params=True))
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {"table": "orders", "limit": 100, "include_archived": False, "ratio": 0.5},
+            )
+        keys = {call[0][0]: call[0][1] for call in mock_span.set_data.call_args_list}
+        assert keys["rpc.param.table"] == "orders"
+        assert keys["rpc.param.limit"] == 100
+        assert keys["rpc.param.include_archived"] is False
+        assert keys["rpc.param.ratio"] == 0.5
+
+    def test_default_redactor_filters_credentials(self) -> None:
+        """Default redactor strips kwargs whose names match the credentials regex."""
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks(SentryConfig(record_params=True))
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("auth"),
+                AuthContext.anonymous(),
+                {},
+                {"username": "alice", "password": "hunter2", "api_token": "xyz", "bearer_key": "abc"},
+            )
+        keys = {call[0][0] for call in mock_span.set_data.call_args_list}
+        assert "rpc.param.username" in keys
+        assert "rpc.param.password" not in keys
+        assert "rpc.param.api_token" not in keys
+        assert "rpc.param.bearer_key" not in keys
+
+    def test_custom_redactor_replaces_default(self) -> None:
+        """A user-supplied redactor fully replaces the default — no chaining."""
+
+        def drop_table(kw: Mapping[str, object]) -> Mapping[str, object]:
+            return {k: v for k, v in kw.items() if k != "table"}
+
+        config = SentryConfig(record_params=True, param_redactor=drop_table)
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks(config)
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {"table": "orders", "password": "should-pass-through"},
+            )
+        keys = {call[0][0] for call in mock_span.set_data.call_args_list}
+        # Custom redactor wins → password is NOT filtered (default redactor not run).
+        assert "rpc.param.password" in keys
+        assert "rpc.param.table" not in keys
+
+    def test_noop_redactor_disables_filtering(self) -> None:
+        """``noop_redactor`` is the documented escape hatch for trusted kwargs."""
+        from vgi_rpc.sentry import noop_redactor
+
+        config = SentryConfig(record_params=True, param_redactor=noop_redactor)
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks(config)
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("auth"),
+                AuthContext.anonymous(),
+                {},
+                {"password": "hunter2"},
+            )
+        keys = {call[0][0] for call in mock_span.set_data.call_args_list}
+        assert "rpc.param.password" in keys
+
+    def test_truncates_long_strings(self) -> None:
+        """Strings longer than max_param_value_bytes are clipped before recording."""
+        config = SentryConfig(record_params=True, max_param_value_bytes=16)
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks(config)
+        long_value = "x" * 100
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {"predicate": long_value},
+            )
+        keys = {call[0][0]: call[0][1] for call in mock_span.set_data.call_args_list}
+        assert keys["rpc.param.predicate"] == "x" * 16
+
+    def test_skips_non_primitive_types(self) -> None:
+        """Dicts/bytes/objects are silently dropped — EAP rejects them."""
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks(SentryConfig(record_params=True))
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {
+                    "ok_string": "x",
+                    "drop_dict": {"k": "v"},
+                    "drop_bytes": b"abc",
+                    "drop_object": object(),
+                },
+            )
+        keys = {call[0][0] for call in mock_span.set_data.call_args_list}
+        assert "rpc.param.ok_string" in keys
+        assert "rpc.param.drop_dict" not in keys
+        assert "rpc.param.drop_bytes" not in keys
+        assert "rpc.param.drop_object" not in keys
+
+    def test_homogeneous_lists_kept_mixed_dropped(self) -> None:
+        """Sentry's EAP indexer requires homogeneous element types in arrays."""
+        hook, mock_sdk, _, mock_span = _build_hook_with_mocks(SentryConfig(record_params=True))
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {
+                    "ok_strings": ["a", "b", "c"],
+                    "ok_ints": [1, 2, 3],
+                    "drop_mixed": [1, "two", 3],
+                },
+            )
+        keys = {call[0][0]: call[0][1] for call in mock_span.set_data.call_args_list}
+        assert keys["rpc.param.ok_strings"] == ["a", "b", "c"]
+        assert keys["rpc.param.ok_ints"] == [1, 2, 3]
+        assert "rpc.param.drop_mixed" not in keys
+
+
+class TestTagParams:
+    """Operator-curated whitelist of params duplicated as scope tags."""
+
+    def test_whitelisted_params_become_tags(self) -> None:
+        """Only params named in tag_params are duplicated to scope tags."""
+        config = SentryConfig(tag_params=("table", "format"))
+        hook, mock_sdk, mock_scope, _ = _build_hook_with_mocks(config)
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {"table": "orders", "format": "parquet", "predicate": "x = 1"},
+            )
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["rpc.param.table"] == "orders"
+        assert tag_calls["rpc.param.format"] == "parquet"
+        assert "rpc.param.predicate" not in tag_calls
+
+    def test_tag_value_clipped_to_200_chars(self) -> None:
+        """Sentry caps tag values at 200 chars; longer values must be clipped."""
+        config = SentryConfig(tag_params=("table",))
+        hook, mock_sdk, mock_scope, _ = _build_hook_with_mocks(config)
+        long_table = "t" * 500
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {"table": long_table},
+            )
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert len(tag_calls["rpc.param.table"]) == 200
+
+    def test_tag_skips_non_primitive(self) -> None:
+        """Whitelisted params with non-primitive values are not promoted to tags."""
+        config = SentryConfig(tag_params=("table",))
+        hook, mock_sdk, mock_scope, _ = _build_hook_with_mocks(config)
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(
+                _fake_method_info("scan"),
+                AuthContext.anonymous(),
+                {},
+                {"table": {"name": "orders"}},  # dict value — must not become a tag
+            )
+        tag_calls = {call[0][0] for call in mock_scope.set_tag.call_args_list}
+        assert "rpc.param.table" not in tag_calls
+
+
+class TestMethodScopeTags:
+    """rpc.method and rpc.method_type are always scope-tagged for Issues filtering."""
+
+    def test_method_tags_set(self) -> None:
+        """Method name and type are always available for Issues-side filtering."""
+        hook, mock_sdk, mock_scope, _ = _build_hook_with_mocks()
+        with patch("vgi_rpc.sentry.sentry_sdk", mock_sdk):
+            hook.on_dispatch_start(_fake_method_info("listUsers", "stream"), AuthContext.anonymous(), {}, {})
+        tag_calls = {call[0][0]: call[0][1] for call in mock_scope.set_tag.call_args_list}
+        assert tag_calls["rpc.method"] == "listUsers"
+        assert tag_calls["rpc.method_type"] == "stream"
+
+
+class TestParamRecordingEndToEnd:
+    """Verify kwargs flow through the dispatch path into the Sentry hook."""
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_unary_kwargs_reach_span_data(self, mock_sdk: MagicMock) -> None:
+        """Kwargs from a unary pipe call reach the dispatch hook as span data."""
+        mock_scope = MagicMock()
+        mock_span = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        mock_sdk.get_current_span.return_value = mock_span
+
+        config = SentryConfig(record_params=True)
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        result = _run_pipe_call(server, "add", kwargs={"a": 7, "b": 9})
+        assert result == 16
+
+        keys = {call[0][0]: call[0][1] for call in mock_span.set_data.call_args_list}
+        assert keys["rpc.param.a"] == 7
+        assert keys["rpc.param.b"] == 9
+        assert keys["rpc.method"] == "add"
+        assert keys["rpc.method_type"] == "unary"
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_stream_carries_stream_id(self, mock_sdk: MagicMock) -> None:
+        """A streaming call attaches a 32-hex stream id to span data."""
+        mock_scope = MagicMock()
+        mock_span = MagicMock()
+        mock_sdk.get_current_scope.return_value = mock_scope
+        mock_sdk.get_current_span.return_value = mock_span
+
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server)
+
+        client_transport, server_transport = make_pipe_pair()
+        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(SentryTestService, client_transport) as proxy:
+                list(proxy.generate())
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        keys = {call[0][0]: call[0][1] for call in mock_span.set_data.call_args_list}
+        assert keys["rpc.method"] == "generate"
+        assert keys["rpc.method_type"] == "stream"
+        assert "rpc.stream_id" in keys
+        assert isinstance(keys["rpc.stream_id"], str) and len(keys["rpc.stream_id"]) == 32
+
+
+# ---------------------------------------------------------------------------
 # Composite dispatch hook unit tests
 # ---------------------------------------------------------------------------
 
@@ -421,7 +775,7 @@ class TestCompositeDispatchHook:
         composite = _CompositeDispatchHook([hook_a, hook_b])
         info = MagicMock()
         auth = AuthContext.anonymous()
-        token = composite.on_dispatch_start(info, auth, {})
+        token = composite.on_dispatch_start(info, auth, {}, {})
 
         hook_a.on_dispatch_start.assert_called_once()
         hook_b.on_dispatch_start.assert_called_once()
@@ -442,7 +796,7 @@ class TestCompositeDispatchHook:
         auth = AuthContext.anonymous()
 
         # Should not raise
-        token = composite.on_dispatch_start(info, auth, {})
+        token = composite.on_dispatch_start(info, auth, {}, {})
         hook_b.on_dispatch_start.assert_called_once()
 
         # End should still call hook_b (hook_a wasn't in the token list)
@@ -462,7 +816,7 @@ class TestCompositeDispatchHook:
         composite = _CompositeDispatchHook([hook_a, hook_b])
         info = MagicMock()
         auth = AuthContext.anonymous()
-        token = composite.on_dispatch_start(info, auth, {})
+        token = composite.on_dispatch_start(info, auth, {}, {})
         composite.on_dispatch_end(token, info, None)
         assert call_order == ["b", "a"]
 

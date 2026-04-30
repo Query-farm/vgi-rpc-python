@@ -1045,6 +1045,8 @@ instrument_server_sentry(server, SentryConfig(custom_tags={"env": "prod"}, enabl
 
 Performance monitoring is off by default; enable per-call transactions via `SentryConfig(enable_performance=True)`. See [Sentry](docs/api/sentry.md) for `custom_tags`, `claim_tags`, `ignored_exceptions`.
 
+**Trace Explorer.** Every dispatch attaches `rpc.method`, `rpc.method_type`, `rpc.system`, and `rpc.service` as span attributes (and `rpc.stream_id` on streams). Transaction names default to `rpc {method}` (instead of Sentry's WSGI route template). Opt in to argument recording with `SentryConfig(record_params=True)` to expose kwargs as `rpc.param.<k>` span attributes — then Trace Explorer queries like `rpc.method:executeScan rpc.param.table:orders` charted as `p99(span.duration) GROUP BY rpc.param.predicate` work directly. Default redactor strips kwargs whose names match `password|token|secret|key|authorization`; supply `param_redactor=` for free-text PII. See [Sentry — RPC parameters and Trace Explorer](docs/api/sentry.md#rpc-parameters-and-trace-explorer) for the full caveat list.
+
 #### Logger hierarchy
 
 | Logger name | Purpose |

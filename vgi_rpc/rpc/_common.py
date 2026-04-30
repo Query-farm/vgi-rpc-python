@@ -473,6 +473,7 @@ class _DispatchHook(Protocol):
         info: RpcMethodInfo,
         auth: AuthContext,
         transport_metadata: Mapping[str, Any],
+        kwargs: Mapping[str, Any],
     ) -> HookToken:
         """Start observability for a dispatch and return an opaque token."""
         ...
@@ -508,12 +509,13 @@ class _CompositeDispatchHook:
         info: RpcMethodInfo,
         auth: AuthContext,
         transport_metadata: Mapping[str, Any],
+        kwargs: Mapping[str, Any],
     ) -> HookToken:
         """Delegate to all inner hooks and collect tokens."""
         tokens: list[tuple[_DispatchHook, HookToken]] = []
         for hook in self._hooks:
             try:
-                token = hook.on_dispatch_start(info, auth, transport_metadata)
+                token = hook.on_dispatch_start(info, auth, transport_metadata, kwargs)
                 tokens.append((hook, token))
             except Exception:
                 _logger.exception("Dispatch hook %r failed on start", hook)

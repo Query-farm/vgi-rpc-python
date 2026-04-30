@@ -132,7 +132,7 @@ def _run_unary_sync(
         hook_token: HookToken = None
         if hook is not None:
             try:
-                hook_token = hook.on_dispatch_start(info, auth, transport_metadata)
+                hook_token = hook.on_dispatch_start(info, auth, transport_metadata, kwargs)
             except Exception:
                 _logger.debug("Dispatch hook start failed", exc_info=True)
                 hook = None

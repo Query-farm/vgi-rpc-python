@@ -237,8 +237,15 @@ class _OtelDispatchHook:
         info: RpcMethodInfo,
         auth: AuthContext,
         transport_metadata: Mapping[str, Any],
+        kwargs: Mapping[str, Any],
     ) -> HookToken:
-        """Start a span and record the start time."""
+        """Start a span and record the start time.
+
+        ``kwargs`` is accepted for protocol compatibility with the dispatch
+        hook contract but is currently unused — OTel param recording is a
+        separate follow-up.
+        """
+        del kwargs
         start_time = time.monotonic()
         span: trace.Span | None = None
         otel_token: Token[Context] | None = None
