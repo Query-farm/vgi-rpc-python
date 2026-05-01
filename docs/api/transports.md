@@ -88,6 +88,46 @@ server_transport = ShmPipeTransport(server_pipe, shm)
 
 Falls back to normal pipe IPC for batches that exceed the segment size.
 
+## Transport awareness
+
+Workers can ask which transport they are bound to — useful for tailoring startup work, enabling transport-specific metrics, or branching per-call behaviour. Three things are exposed:
+
+- `RpcServer.transport_kind`: a `TransportKind` enum (`PIPE`, `HTTP`, `UNIX`) or `None` before serving begins.
+- `RpcServer.transport_capabilities`: a `frozenset[str]` of capability flags. Currently `{"shm"}` when bound to a `ShmPipeTransport`; empty otherwise.
+- `CallContext.kind`: per-call view of the same `TransportKind`, so methods that already accept `ctx` can branch without reaching for the server.
+
+For one-shot startup work, an implementation may define an `on_serve_start(self, kind)` method. The framework calls it once per process before the first request is dispatched:
+
+```python
+from vgi_rpc import CallContext, TransportKind
+
+
+class MyServiceImpl:
+    def on_serve_start(self, kind: TransportKind) -> None:
+        """Called once per process before the first request."""
+        if kind is TransportKind.HTTP:
+            self._cache = build_http_cache()
+        else:
+            self._cache = None
+
+    def fetch(self, key: str, ctx: CallContext) -> str:
+        if ctx.kind is TransportKind.HTTP and self._cache is not None:
+            return self._cache.get(key)
+        return load_from_disk(key)
+```
+
+The hook is duck-typed (no base class needed); a `ServeStartHook` Protocol is exported for users who want to type-hint their implementation. Hook exceptions propagate (and are logged via `logging.getLogger("vgi_rpc.rpc").exception` first), so a misconfigured worker dies loudly rather than serving in a broken state.
+
+For pipe / unix transports the hook fires inside `RpcServer.serve(transport)`. For HTTP it fires lazily on the first request handled in the current process — this is fork-safe under pre-fork WSGI servers (gunicorn, uwsgi), so each child worker runs its own startup logic. Subprocess workers report `PIPE` because they speak Arrow IPC over the parent's stdin/stdout.
+
+`SHM` availability is exposed via `transport_capabilities`, not the enum, so coarse transport-kind checks stay simple while workers that need zero-copy paths can still detect shared memory:
+
+```python
+def on_serve_start(self, kind: TransportKind) -> None:
+    if "shm" in self.server.transport_capabilities:
+        self._enable_zero_copy()
+```
+
 ## API Reference
 
 ### PipeTransport
@@ -105,6 +145,14 @@ Falls back to normal pipe IPC for batches that exceed the segment size.
 ### StderrMode
 
 ::: vgi_rpc.rpc.StderrMode
+
+### TransportKind
+
+::: vgi_rpc.rpc.TransportKind
+
+### ServeStartHook
+
+::: vgi_rpc.rpc.ServeStartHook
 
 ### Utility Functions
 

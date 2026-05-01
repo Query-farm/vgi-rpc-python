@@ -120,6 +120,7 @@ def _run_unary_sync(
                 server_id=server_id,
                 method_name=method_name,
                 protocol_name=protocol_name,
+                kind=app._server.transport_kind,
             )
 
         schema = info.result_schema

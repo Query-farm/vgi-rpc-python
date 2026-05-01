@@ -40,6 +40,7 @@ from ._middleware import (
     _DrainRequestMiddleware,
     _MaxRequestBytesMiddleware,
     _RequestIdMiddleware,
+    _TransportNotifyMiddleware,
 )
 from ._pages import (
     _build_describe_html,
@@ -240,7 +241,12 @@ def make_wsgi_app(
         token_ttl,
         max_externalized_response_bytes=max_externalized_response_bytes,
     )
-    middleware: list[Any] = [_DrainRequestMiddleware(), _RequestIdMiddleware(), _AccessLogContextMiddleware()]
+    middleware: list[Any] = [
+        _TransportNotifyMiddleware(server),
+        _DrainRequestMiddleware(),
+        _RequestIdMiddleware(),
+        _AccessLogContextMiddleware(),
+    ]
 
     # Enforce the advertised max_request_bytes cap server-side.  The
     # __upload_url__/init route (and capability-discovery routes) are

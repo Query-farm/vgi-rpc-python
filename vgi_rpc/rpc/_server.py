@@ -10,6 +10,7 @@ import contextlib
 import inspect
 import logging
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -28,6 +29,7 @@ from vgi_rpc.rpc._common import (
     HookToken,
     MethodType,
     RpcError,
+    TransportKind,
     VersionError,
     _access_logger,
     _current_call_stats,
@@ -43,7 +45,7 @@ from vgi_rpc.rpc._common import (
     _record_output,
 )
 from vgi_rpc.rpc._debug import wire_stream_logger
-from vgi_rpc.rpc._transport import RpcTransport, ShmPipeTransport
+from vgi_rpc.rpc._transport import PipeTransport, RpcTransport, ShmPipeTransport, UnixTransport
 from vgi_rpc.rpc._types import (
     AnnotatedBatch,
     OutputCollector,
@@ -252,6 +254,9 @@ class RpcServer:
         "_protocol_version",
         "_server_id",
         "_server_version",
+        "_transport_capabilities",
+        "_transport_kind",
+        "_transport_lock",
     )
 
     def __init__(
@@ -293,6 +298,9 @@ class RpcServer:
         self._external_config = external_location
         self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]
         self._dispatch_hook: _DispatchHook | None = None
+        self._transport_kind: TransportKind | None = None
+        self._transport_capabilities: frozenset[str] = frozenset()
+        self._transport_lock = threading.Lock()
         _validate_implementation(protocol, implementation, self._methods)
 
         # Compute protocol_hash regardless of describe flag — it is needed for
@@ -409,8 +417,66 @@ class RpcServer:
         """Validation level for incoming IPC batches."""
         return self._ipc_validation
 
+    @property
+    def transport_kind(self) -> TransportKind | None:
+        """Coarse identifier of the bound transport, or ``None`` before serving begins.
+
+        Set by the framework right before the first request is dispatched
+        (lazy on HTTP for fork-safety).  Workers may read this directly,
+        or rely on the ``on_serve_start`` lifecycle hook for one-shot
+        startup work.
+        """
+        return self._transport_kind
+
+    @property
+    def transport_capabilities(self) -> frozenset[str]:
+        """Capabilities advertised by the bound transport.
+
+        Currently includes ``"shm"`` when a :class:`ShmPipeTransport` is
+        bound.  Empty before a transport is bound and for kinds without
+        special capabilities.
+        """
+        return self._transport_capabilities
+
+    def _notify_transport(self, kind: TransportKind, capabilities: frozenset[str]) -> None:
+        """Bind the server to a transport and fire ``on_serve_start`` once.
+
+        Idempotent for the same ``(kind, capabilities)``.  Re-firing with a
+        different value (e.g. tests that exercise multiple transports
+        against the same server) updates the public attributes and calls
+        the hook again — it is **not** an error.
+
+        Hook exceptions are logged via ``_logger.exception`` and propagate.
+        """
+        with self._transport_lock:
+            if self._transport_kind == kind and self._transport_capabilities == capabilities:
+                return
+            self._transport_kind = kind
+            self._transport_capabilities = capabilities
+            hook = getattr(self._impl, "on_serve_start", None)
+        if callable(hook):
+            try:
+                hook(kind)
+            except Exception:
+                _logger.exception(
+                    "on_serve_start hook raised; aborting serve",
+                    extra={"server_id": self._server_id, "transport_kind": kind.value},
+                )
+                raise
+
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""
+        capabilities: frozenset[str] = frozenset()
+        if isinstance(transport, ShmPipeTransport):
+            kind = TransportKind.PIPE
+            capabilities = frozenset({"shm"})
+        elif isinstance(transport, UnixTransport):
+            kind = TransportKind.UNIX
+        elif isinstance(transport, PipeTransport):
+            kind = TransportKind.PIPE
+        else:
+            kind = TransportKind.PIPE
+        self._notify_transport(kind, capabilities)
         while True:
             try:
                 self.serve_one(transport)
@@ -517,6 +583,7 @@ class RpcServer:
                 server_id=self._server_id,
                 method_name=info.name,
                 protocol_name=self.protocol_name,
+                kind=self._transport_kind,
             )
         return sink, auth, transport_metadata
 
@@ -704,6 +771,7 @@ class RpcServer:
                                 server_id=self._server_id,
                                 method_name=info.name,
                                 protocol_name=protocol_name,
+                                kind=self._transport_kind,
                             )
                             try:
                                 state.on_cancel(cancel_ctx)
@@ -747,6 +815,7 @@ class RpcServer:
                             server_id=self._server_id,
                             method_name=info.name,
                             protocol_name=protocol_name,
+                            kind=self._transport_kind,
                         )
                         state.process(ab_in, out, process_ctx)
                         if not out.finished:

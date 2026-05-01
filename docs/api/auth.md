@@ -65,6 +65,20 @@ Over pipe/subprocess transport, `ctx.auth` is always `AuthContext.anonymous()`.
 
 `ctx.transport_metadata` provides transport-level information like `remote_addr` and `user_agent` (HTTP only). It's a read-only mapping populated by the transport layer.
 
+`ctx.kind` exposes the active `TransportKind` (`PIPE`, `HTTP`, or `UNIX`) so methods can branch per-call:
+
+```python
+from vgi_rpc import CallContext, TransportKind
+
+
+def fetch(self, key: str, ctx: CallContext) -> str:
+    if ctx.kind is TransportKind.HTTP:
+        return self._cached_lookup(key)
+    return self._direct_lookup(key)
+```
+
+For one-shot startup work driven by transport kind, see [`on_serve_start`](transports.md#transport-awareness) on the transports page.
+
 ## API Reference
 
 ### AuthContext

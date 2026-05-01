@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, MutableMapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import Enum, StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
@@ -32,6 +32,54 @@ _access_logger = logging.getLogger("vgi_rpc.access")
 
 ClientLog = Callable[[Message], None]
 """Callback type for emitting client-directed log messages from RPC method implementations."""
+
+
+# ---------------------------------------------------------------------------
+# TransportKind
+# ---------------------------------------------------------------------------
+
+
+class TransportKind(StrEnum):
+    """Coarse identifier of the transport binding an :class:`RpcServer`.
+
+    Workers (RPC implementations) read this via :attr:`RpcServer.transport_kind`
+    or the ``on_serve_start`` lifecycle hook to tailor startup behaviour
+    (skip HTTP-only caching, enable transport-specific metrics, etc.).
+    Members are :class:`StrEnum` so the value is wire/log-friendly.
+
+    Members:
+        PIPE: Stdio / ``PipeTransport`` / ``ShmPipeTransport``.  Subprocess
+            workers also report ``PIPE`` because they speak Arrow IPC over
+            the parent's stdin/stdout.
+        HTTP: WSGI / ``serve_http`` / ``make_wsgi_app``.
+        UNIX: ``UnixTransport`` (AF_UNIX socket).
+    """
+
+    PIPE = "pipe"
+    HTTP = "http"
+    UNIX = "unix"
+
+
+class ServeStartHook(Protocol):
+    """Optional lifecycle hook on the RPC implementation, fired once at startup.
+
+    If an implementation defines an ``on_serve_start(self, kind)`` method,
+    the framework calls it once per process before the first request is
+    dispatched.  The hook is duck-typed — defining this Protocol is **not**
+    required; it exists purely for users who want to type-hint their impl.
+
+    For HTTP, the hook fires on the first request handled in the current
+    process (lazy / fork-safe).  For pipe / unix transports, it fires
+    when ``RpcServer.serve(transport)`` begins.
+
+    A hook that raises propagates out of the serve path.  The exception
+    is logged via ``logging.getLogger("vgi_rpc.rpc").exception`` first so
+    the trace is visible even when stderr is captured.
+    """
+
+    def on_serve_start(self, kind: TransportKind) -> None:
+        """Run worker-side setup that depends on the transport binding."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +172,7 @@ class CallContext:
         "_server_id",
         "auth",
         "emit_client_log",
+        "kind",
         "transport_metadata",
     )
 
@@ -136,11 +185,13 @@ class CallContext:
         server_id: str = "",
         method_name: str = "",
         protocol_name: str = "",
+        kind: TransportKind | None = None,
     ) -> None:
         """Initialize with auth context, client-log callback, and optional server context fields."""
         self.auth = auth
         self.emit_client_log = emit_client_log
         self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
+        self.kind: TransportKind | None = kind
         self._server_id = server_id
         self._method_name = method_name
         self._protocol_name = protocol_name

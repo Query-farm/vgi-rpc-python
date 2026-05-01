@@ -29,18 +29,43 @@ import falcon
 
 from vgi_rpc.rpc import (
     AuthContext,
+    RpcServer,
     _current_request_id,
     _current_transport,
     _generate_request_id,
     _TransportContext,
 )
-from vgi_rpc.rpc._common import _ANONYMOUS, _current_request_batch, _current_stream_id
+from vgi_rpc.rpc._common import _ANONYMOUS, TransportKind, _current_request_batch, _current_stream_id
 
 from .._common import _ARROW_CONTENT_TYPE, _compress_body, _decompress_body
 
 _logger = logging.getLogger("vgi_rpc.http")
 
 _REQUEST_ID_HEADER = "X-Request-ID"
+
+
+class _TransportNotifyMiddleware:
+    """Fires :meth:`RpcServer._notify_transport` once per process, on the first request.
+
+    HTTP transport binding is announced lazily rather than at
+    ``make_wsgi_app`` time so that pre-fork servers (gunicorn, uwsgi)
+    correctly fire the worker's ``on_serve_start`` hook in each child
+    process — not in the master.  After the first request the check
+    becomes a single attribute load.
+
+    Thread-safety is delegated to ``_notify_transport`` (lock-protected).
+    """
+
+    __slots__ = ("_server",)
+
+    def __init__(self, server: RpcServer) -> None:
+        """Hold a reference to the server whose hook we fire."""
+        self._server = server
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Bind the server to ``HTTP`` on the first request handled here."""
+        if self._server.transport_kind is None:
+            self._server._notify_transport(TransportKind.HTTP, frozenset())
 
 
 class _MaxRequestBytesMiddleware:
