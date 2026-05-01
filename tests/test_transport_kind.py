@@ -366,7 +366,7 @@ class TestForkSafety:
 
         # Use a pipe to confirm the child fired the hook in its own process.
         r_fd, w_fd = os.pipe()
-        pid = os.fork()
+        pid = os.fork()  # type: ignore[attr-defined, unused-ignore]
         if pid == 0:
             # Child
             os.close(r_fd)
@@ -429,7 +429,7 @@ class TestUnixTransportRaw:
 
     def test_isinstance_dispatch(self) -> None:
         """A bare UnixTransport bound via serve() reports UNIX."""
-        s1, s2 = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        s1, s2 = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined, unused-ignore]
         client_transport = UnixTransport(s1)
         server_transport = UnixTransport(s2)
         impl = _RecordingImpl()
