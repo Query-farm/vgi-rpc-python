@@ -52,21 +52,67 @@ def _compress_body(data: bytes, level: int) -> bytes:
     return zstandard.ZstdCompressor(level=level).compress(data)
 
 
-def _decompress_body(data: bytes) -> bytes:
+def _decompress_body(data: bytes, *, max_output_size: int | None = None) -> bytes:
     """Decompress zstd-compressed *data*.
 
     A new ``ZstdDecompressor`` is created per call (cheap, thread-safe).
 
     Args:
         data: Zstd-compressed bytes.
+        max_output_size: Optional upper bound on the decompressed size.
+            Zstd frames carry the decompressed size in their header and
+            ``decompress()`` would otherwise trust it and allocate
+            eagerly — so a 3 KB compressed body claiming 100 MB output
+            would allocate 100 MB on the server (decompression-bomb
+            DoS).  When set, the frame's declared size is checked
+            against this cap *before* decompression begins; frames with
+            unknown content size fall back to streaming decompression
+            with the cap enforced as a hard ceiling.  ``None`` keeps
+            the historical unbounded behaviour for callers that have
+            already validated the source.
 
     Returns:
         Decompressed bytes.
 
+    Raises:
+        zstandard.ZstdError: If the frame's declared decompressed size
+            exceeds ``max_output_size`` (when set), or if decompression
+            otherwise fails.
+
     """
     import zstandard
 
-    return zstandard.ZstdDecompressor().decompress(data)
+    if max_output_size is None:
+        return zstandard.ZstdDecompressor().decompress(data)
+
+    # Refuse the frame up-front when the header claims more than allowed.
+    # This catches the ``unbounded allocation`` decompression-bomb case
+    # before any output buffer is allocated.
+    params = zstandard.get_frame_parameters(data)
+    if params.content_size != -1 and params.content_size > max_output_size:
+        raise zstandard.ZstdError(
+            f"Compressed frame declares decompressed size {params.content_size} bytes, "
+            f"which exceeds max_output_size={max_output_size}"
+        )
+
+    if params.content_size != -1:
+        # Header-known size and within the cap — safe to decompress in one shot.
+        return zstandard.ZstdDecompressor().decompress(data)
+
+    # Unknown size — stream and stop the moment we exceed the cap.
+    decompressor = zstandard.ZstdDecompressor()
+    chunks: list[bytes] = []
+    total = 0
+    with decompressor.stream_reader(data) as reader:
+        while True:
+            chunk = reader.read(min(65536, max_output_size - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_output_size:
+                raise zstandard.ZstdError(f"Decompressed output exceeds max_output_size={max_output_size}")
+            chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # ---------------------------------------------------------------------------

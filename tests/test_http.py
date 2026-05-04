@@ -1751,6 +1751,40 @@ class TestZstdCompression:
         # Verify the raw body starts with zstd magic bytes
         assert result.content[:4] == _ZSTD_MAGIC
 
+    def test_compressed_request_body_decompression_bomb_rejected(self) -> None:
+        """Regression: a tiny compressed body must not be allowed to decompress without bound.
+
+        ``_decompress_body`` previously called ``ZstdDecompressor().decompress(data)``
+        with no ``max_output_size``.  The zstd frame header carries the
+        decompressed size, which the decompressor trusts and allocates
+        eagerly — so a 3 KB compressed body could legitimately allocate
+        100 MB on the server (zip-bomb DoS).  The middleware's
+        ``max_request_bytes`` cap inspects ``Content-Length`` (the
+        compressed size), so the bomb sails past it.
+
+        Fix: ``_decompress_body`` accepts a ``max_output_size`` and the
+        compression middleware passes ``max_request_bytes`` through, so
+        any frame claiming more than the configured cap is rejected
+        before allocation.
+        """
+        from vgi_rpc.http._common import _compress_body, _decompress_body
+
+        bomb_raw = b"\x00" * (16 * 1024 * 1024)  # 16 MiB of zeros
+        bomb = _compress_body(bomb_raw, 3)
+        # Sanity: the frame is highly compressed.
+        assert len(bomb) < 64 * 1024, f"expected tiny compressed bomb, got {len(bomb)} bytes"
+
+        # With a 1 MiB cap, the bomb's claimed 16 MiB output must be refused
+        # rather than allocated.
+        with pytest.raises(Exception, match=r"max_output_size|exceeds|too large|cannot decompress"):
+            _decompress_body(bomb, max_output_size=1024 * 1024)
+
+        # Sanity: the same call without a cap *would* succeed (current bug).
+        # Run only at small size to keep the test cheap.
+        small = _compress_body(b"x" * 1024, 3)
+        out = _decompress_body(small, max_output_size=1024 * 1024)
+        assert out == b"x" * 1024
+
     def test_compressed_request_body_has_zstd_magic(self) -> None:
         """Verify client request body is actually zstd-compressed."""
         from vgi_rpc.http._common import _compress_body

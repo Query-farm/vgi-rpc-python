@@ -296,12 +296,17 @@ class _CompressionMiddleware:
     On responses: if the client sent ``Accept-Encoding`` containing ``zstd``
     and the response has Arrow content, the response body is compressed and
     ``Content-Encoding: zstd`` is set.
+
+    The decompression cap (``max_decompressed_request_bytes``) is checked
+    *before* allocation so a tiny compressed body claiming a huge
+    decompressed size cannot OOM the server (decompression-bomb DoS).
     """
 
-    __slots__ = ("_level",)
+    __slots__ = ("_level", "_max_decompressed_bytes")
 
-    def __init__(self, level: int) -> None:
+    def __init__(self, level: int, *, max_decompressed_bytes: int | None = None) -> None:
         self._level = level
+        self._max_decompressed_bytes = max_decompressed_bytes
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Decompress zstd request bodies; record client Accept-Encoding."""
@@ -316,7 +321,7 @@ class _CompressionMiddleware:
         if "zstd" in content_encoding:
             try:
                 compressed = req.bounded_stream.read()
-                decompressed = _decompress_body(compressed)
+                decompressed = _decompress_body(compressed, max_output_size=self._max_decompressed_bytes)
                 req.context.decompressed_stream = BytesIO(decompressed)
             except Exception as exc:
                 raise falcon.HTTPBadRequest(

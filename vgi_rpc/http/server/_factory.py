@@ -264,8 +264,17 @@ def make_wsgi_app(
 
     # Compression middleware decompresses request bodies and compresses
     # responses — must come before auth so handlers read plaintext bodies.
+    # Decompression cap is 16x the wire cap: generous enough for normal
+    # zstd ratios on Arrow IPC bodies, tight enough that a tiny
+    # compressed body cannot claim hundreds of MB and OOM the server.
     if compression_level is not None:
-        middleware.append(_CompressionMiddleware(compression_level))
+        max_decompressed_bytes = max_request_bytes * 16 if max_request_bytes is not None else None
+        middleware.append(
+            _CompressionMiddleware(
+                compression_level,
+                max_decompressed_bytes=max_decompressed_bytes,
+            )
+        )
 
     # OTel middleware must come before auth so spans cover the full request
     if otel_config is not None:
