@@ -1229,3 +1229,84 @@ class TestExternalOtel:
         assert _sanitize_url("https://storage.googleapis.com/b/o?token=secret") == (
             "https://storage.googleapis.com/b/o"
         )
+
+
+class TestOtelDispatchHookContextLeak:
+    """``on_dispatch_end`` must detach the otel context even if span finalisation raises.
+
+    Regression: ``span.end()`` and ``otel_context.detach`` lived in the same
+    ``if`` branch with no ``try/finally``.  An exporter failure inside
+    ``end()`` would leave the attached context token undetached, so the
+    next request handled on the same WSGI thread inherited a stale
+    parent-span context — silently breaking trace structure for the
+    rest of the worker's lifetime.
+    """
+
+    def test_detach_runs_even_when_span_end_raises(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """``on_dispatch_end`` propagates ``span.end()`` errors but always detaches."""
+        from typing import cast as _cast
+
+        from opentelemetry import context as otel_context
+
+        from vgi_rpc.otel import _OtelDispatchHook, _OtelHookToken
+        from vgi_rpc.rpc import MethodType as _MethodType
+        from vgi_rpc.rpc._common import AuthContext as _AuthContext
+        from vgi_rpc.rpc._types import RpcMethodInfo as _RpcMethodInfo
+
+        tracer_provider, meter_provider, _, _ = otel_providers
+        config = OtelConfig(
+            tracer_provider=tracer_provider,
+            meter_provider=_cast("MeterProvider", meter_provider),
+        )
+        hook = _OtelDispatchHook(config, protocol_name="Svc", server_id="srv")
+
+        baseline = otel_context.get_current()
+
+        info = _RpcMethodInfo(
+            name="boom",
+            method_type=_MethodType.UNARY,
+            param_types={},
+            params_schema=pa.schema([]),
+            result_schema=pa.schema([]),
+            result_type=int,
+            has_return=True,
+            doc=None,
+        )
+        raw_token = hook.on_dispatch_start(
+            info,
+            _AuthContext(domain=None, authenticated=False),
+            transport_metadata={},
+            kwargs={},
+        )
+        assert isinstance(raw_token, _OtelHookToken)
+        token = raw_token
+
+        # Inside dispatch the active context must differ from the baseline —
+        # the start hook attached a span context.
+        assert otel_context.get_current() is not baseline
+        assert token.span is not None
+
+        # Force ``span.end()`` to raise — emulates an exporter blowing up.
+        original_end = token.span.end
+        end_calls: list[bool] = []
+
+        def _bad_end(*a: object, **kw: object) -> None:
+            end_calls.append(True)
+            raise RuntimeError("exporter exploded")
+
+        token.span.end = _bad_end  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="exporter exploded"):
+            hook.on_dispatch_end(token, info, error=None, stats=None)
+
+        # The detach must have happened in ``finally`` — context restored.
+        assert end_calls == [True]
+        assert otel_context.get_current() is baseline, (
+            "otel context leaked: the dispatch's attach token was not detached"
+        )
+
+        # Restore so any other test sharing the tracer provider isn't affected.
+        token.span.end = original_end  # type: ignore[method-assign]

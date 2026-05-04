@@ -325,26 +325,31 @@ class _OtelDispatchHook:
         duration = time.monotonic() - token.start_time
         status = "error" if error is not None else "ok"
 
-        # Finalize span
-        if token.span is not None:
-            if error is not None:
-                token.span.set_status(StatusCode.ERROR, str(error))
-                token.span.set_attribute("rpc.vgi_rpc.error_type", type(error).__name__)
-                if self._config.record_exceptions:
-                    token.span.record_exception(error)
-            else:
-                token.span.set_status(StatusCode.OK)
-            if stats is not None:
-                token.span.set_attribute("rpc.vgi_rpc.input_batches", stats.input_batches)
-                token.span.set_attribute("rpc.vgi_rpc.output_batches", stats.output_batches)
-                token.span.set_attribute("rpc.vgi_rpc.input_rows", stats.input_rows)
-                token.span.set_attribute("rpc.vgi_rpc.output_rows", stats.output_rows)
-                token.span.set_attribute("rpc.vgi_rpc.input_bytes", stats.input_bytes)
-                token.span.set_attribute("rpc.vgi_rpc.output_bytes", stats.output_bytes)
-            token.span.end()
-
-        if token.otel_token is not None:
-            otel_context.detach(token.otel_token)
+        # Finalize span — wrap in try/finally so the otel context is detached
+        # even if span finalisation raises (e.g. an exporter error inside
+        # ``span.end()``).  Without this, a failure in the span path would
+        # leak the context token: subsequent requests on the same WSGI
+        # thread would inherit a stale parent span.
+        try:
+            if token.span is not None:
+                if error is not None:
+                    token.span.set_status(StatusCode.ERROR, str(error))
+                    token.span.set_attribute("rpc.vgi_rpc.error_type", type(error).__name__)
+                    if self._config.record_exceptions:
+                        token.span.record_exception(error)
+                else:
+                    token.span.set_status(StatusCode.OK)
+                if stats is not None:
+                    token.span.set_attribute("rpc.vgi_rpc.input_batches", stats.input_batches)
+                    token.span.set_attribute("rpc.vgi_rpc.output_batches", stats.output_batches)
+                    token.span.set_attribute("rpc.vgi_rpc.input_rows", stats.input_rows)
+                    token.span.set_attribute("rpc.vgi_rpc.output_rows", stats.output_rows)
+                    token.span.set_attribute("rpc.vgi_rpc.input_bytes", stats.input_bytes)
+                    token.span.set_attribute("rpc.vgi_rpc.output_bytes", stats.output_bytes)
+                token.span.end()
+        finally:
+            if token.otel_token is not None:
+                otel_context.detach(token.otel_token)
 
         # Record metrics
         if self._config.enable_metrics:
