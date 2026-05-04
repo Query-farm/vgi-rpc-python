@@ -12,6 +12,7 @@ No extra dependencies beyond ``falcon`` and ``vgi_rpc.rpc.AuthContext``.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import Callable, Mapping
 
 import falcon
@@ -59,6 +60,14 @@ def bearer_authenticate_static(
     Convenience wrapper around ``bearer_authenticate`` that looks up the
     token in a pre-built mapping.
 
+    The lookup uses :func:`hmac.compare_digest` against each known token
+    rather than a hash-table lookup so the comparison runs in constant
+    time relative to a single token.  ``dict.get`` would short-circuit
+    string comparison on the first mismatching byte and let a remote
+    attacker brute-force a valid token byte-by-byte through response
+    timing; this avoids that side channel at the cost of an O(n) scan
+    over the typically tiny token set.
+
     Args:
         tokens: Mapping from bearer token strings to ``AuthContext`` values.
 
@@ -67,12 +76,20 @@ def bearer_authenticate_static(
         ``make_wsgi_app(authenticate=...)``.
 
     """
+    # Pre-encode known tokens once so the hot path only does encode + compare.
+    encoded_tokens: list[tuple[bytes, AuthContext]] = [(k.encode("utf-8"), v) for k, v in tokens.items()]
 
     def validate(token: str) -> AuthContext:
-        ctx = tokens.get(token)
-        if ctx is None:
+        token_b = token.encode("utf-8")
+        match: AuthContext | None = None
+        for known, ctx in encoded_tokens:
+            # Always run compare_digest for every entry — short-circuiting
+            # on the first hit would re-introduce the timing side channel.
+            if hmac.compare_digest(token_b, known) and match is None:
+                match = ctx
+        if match is None:
             raise ValueError("Unknown bearer token")
-        return ctx
+        return match
 
     return bearer_authenticate(validate=validate)
 

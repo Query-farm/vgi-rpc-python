@@ -146,6 +146,55 @@ class TestBearerAuthenticateStatic:
         with pytest.raises(ValueError, match="Unknown bearer token"):
             auth_fn(req)
 
+    def test_lookup_uses_constant_time_comparison(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Token comparison must use ``hmac.compare_digest`` for every known token.
+
+        Regression: the previous implementation did ``tokens.get(token)``,
+        which routes through Python's hash table → string equality.  String
+        equality short-circuits on the first mismatching byte, exposing a
+        timing side channel that lets a remote attacker brute-force a
+        valid bearer token byte-by-byte by measuring response time.
+
+        Defends against that by asserting:
+
+        1. ``hmac.compare_digest`` is called once per known token (constant
+           total work — no early return on the first match).
+        2. ``dict.get``-style lookup is *not* used.
+        3. Both a valid token and a near-match (same first byte) are
+           still classified correctly.
+        """
+        import hmac as _hmac
+
+        calls: list[tuple[bytes, bytes]] = []
+        original = _hmac.compare_digest
+
+        def _spy(a: bytes, b: bytes) -> bool:
+            calls.append((bytes(a), bytes(b)))
+            return original(a, b)
+
+        # Patch the symbol the module captured at import time.  If the
+        # implementation hasn't bound ``hmac.compare_digest``, this raises
+        # AttributeError — which is itself a regression signal.
+        monkeypatch.setattr("vgi_rpc.http._bearer.hmac.compare_digest", _spy)
+
+        auth_fn = bearer_authenticate_static(tokens=_TOKENS)
+
+        # Valid token — must classify correctly *and* compare against every entry.
+        calls.clear()
+        auth = auth_fn(_make_req(authorization="Bearer token-alice"))
+        assert auth.principal == "alice"
+        assert len(calls) == len(_TOKENS), (
+            f"expected {len(_TOKENS)} compare_digest calls (one per known token, no early return), got {len(calls)}"
+        )
+
+        # Near-match (shares prefix with a real token) — must still reject.
+        calls.clear()
+        with pytest.raises(ValueError, match="Unknown bearer token"):
+            auth_fn(_make_req(authorization="Bearer token-aliceX"))
+        assert len(calls) == len(_TOKENS), (
+            "rejection path must also compare against every entry to avoid leaking match position"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestChainAuthenticate
