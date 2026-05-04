@@ -446,23 +446,28 @@ class RpcServer:
         against the same server) updates the public attributes and calls
         the hook again — it is **not** an error.
 
+        Bind state is committed only after the hook returns successfully,
+        so a transient hook failure on the first request leaves
+        ``transport_kind`` unset and the next request re-fires the hook
+        rather than silently skipping it.
+
         Hook exceptions are logged via ``_logger.exception`` and propagate.
         """
         with self._transport_lock:
             if self._transport_kind == kind and self._transport_capabilities == capabilities:
                 return
+            hook = getattr(self._impl, "on_serve_start", None)
+            if callable(hook):
+                try:
+                    hook(kind)
+                except Exception:
+                    _logger.exception(
+                        "on_serve_start hook raised; aborting serve",
+                        extra={"server_id": self._server_id, "transport_kind": kind.value},
+                    )
+                    raise
             self._transport_kind = kind
             self._transport_capabilities = capabilities
-            hook = getattr(self._impl, "on_serve_start", None)
-        if callable(hook):
-            try:
-                hook(kind)
-            except Exception:
-                _logger.exception(
-                    "on_serve_start hook raised; aborting serve",
-                    extra={"server_id": self._server_id, "transport_kind": kind.value},
-                )
-                raise
 
     def serve(self, transport: RpcTransport) -> None:
         """Serve RPC requests in a loop until the transport is closed."""

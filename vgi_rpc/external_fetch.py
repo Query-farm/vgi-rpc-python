@@ -524,12 +524,19 @@ async def _fetch_chunks_with_hedging(
 
             first_exc: BaseException | None = None
             for task in done:
-                # Clean up tracking for completed tasks
+                # Clean up tracking for completed tasks.  Capture chunk_idx
+                # before .result() so we can tell whether a failed task was
+                # for a chunk we already have data for.
                 task_start_times.pop(task, None)
-                task_to_chunk.pop(task, None)
+                chunk_idx = task_to_chunk.pop(task, None)
                 try:
                     idx, data = task.result()
                 except BaseException as exc:
+                    # Suppress hedge failures whose original (or earlier hedge)
+                    # already succeeded — the speculative duplicate was lost,
+                    # but the chunk's data is safely in `results`.
+                    if chunk_idx is not None and chunk_idx in results:
+                        continue
                     if first_exc is None:
                         first_exc = exc
                     continue

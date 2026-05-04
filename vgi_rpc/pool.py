@@ -370,6 +370,8 @@ class WorkerPool:
                     )
                     self._discards += 1
                     self._reuses -= 1
+                    with contextlib.suppress(Exception):
+                        transport.close()
                     # Fall through to spawn
                 else:
                     return transport
@@ -398,6 +400,8 @@ class WorkerPool:
             with self._lock:
                 self._active -= 1
                 self._discards += 1
+            with contextlib.suppress(Exception):
+                transport.close()
             return
 
         # Abandoned stream — transport has stale data, must discard

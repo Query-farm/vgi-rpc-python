@@ -319,6 +319,44 @@ class TestNotifyTransport:
         assert impl.fired
         assert any("on_serve_start hook raised" in record.message for record in caplog.records)
 
+    def test_hook_failure_allows_retry(self) -> None:
+        """A failed on_serve_start must leave bind state uncommitted so a retry re-fires.
+
+        Regression: previously, ``_notify_transport`` committed
+        ``_transport_kind`` before running the hook.  When the hook raised
+        (e.g. transient downstream failure on the first HTTP request), the
+        :class:`_TransportNotifyMiddleware` short-circuit
+        (``if transport_kind is None``) made every subsequent request skip
+        the hook entirely — silent loss of one-shot startup work.
+        """
+
+        class _FlakyImpl:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def on_serve_start(self, kind: TransportKind) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("transient")
+
+            def report_kind(self, ctx: CallContext) -> str:
+                return ctx.kind.value if ctx.kind is not None else "none"
+
+        impl = _FlakyImpl()
+        server = RpcServer(_KindService, impl)
+
+        with pytest.raises(RuntimeError, match="transient"):
+            server._notify_transport(TransportKind.PIPE, frozenset())
+
+        # Bind state must NOT be committed if the hook failed, otherwise the
+        # middleware's `transport_kind is None` guard skips the retry.
+        assert server.transport_kind is None
+        assert server.transport_capabilities == frozenset()
+
+        server._notify_transport(TransportKind.PIPE, frozenset())
+        assert impl.calls == 2, "hook must re-fire on retry after a prior failure"
+        assert server.transport_kind is TransportKind.PIPE
+
 
 # ---------------------------------------------------------------------------
 # Subprocess end-to-end — worker reports PIPE

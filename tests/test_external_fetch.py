@@ -593,6 +593,67 @@ class TestFetchHedging:
 
             assert result == data
 
+    def test_hedge_failure_after_original_succeeds_is_ignored(self) -> None:
+        """A hedge that errors after its original succeeded must not abort the fetch.
+
+        Regression test: previously, any task failure inside the collection
+        loop set ``first_exc`` and aborted the whole fetch — even if the
+        chunk's data had already been recorded by the original (or earlier
+        hedge) request.  Hedging is meant to *increase* reliability, so a
+        flaky speculative duplicate should be discarded, not surfaced.
+        """
+        chunk_size = 500
+        data = b"q" * 2000  # 4 chunks
+        url = "https://example.com/hedge-fail-after-success"
+        attempts: dict[int, int] = {}
+
+        with FetchConfig(
+            parallel_threshold_bytes=100,
+            chunk_size_bytes=chunk_size,
+            max_parallel_requests=8,
+            speculative_retry_multiplier=0.5,  # hedge anything > 0.5 * median
+        ) as config:
+
+            async def _callback(url_: Any, **kwargs: Any) -> CallbackResult:
+                headers = kwargs.get("headers", {})
+                range_header = headers.get("Range", "")
+                match = re.match(r"bytes=(\d+)-(\d+)", range_header)
+                assert match
+                start, end = int(match.group(1)), int(match.group(2))
+                chunk_idx = start // chunk_size
+                attempts[chunk_idx] = attempts.get(chunk_idx, 0) + 1
+                attempt_n = attempts[chunk_idx]
+
+                if chunk_idx == 2:
+                    if attempt_n == 1:
+                        # Original — slow enough to provoke a hedge, then succeed.
+                        await asyncio.sleep(0.2)
+                    else:
+                        # Hedge — fail *after* the original has recorded a result.
+                        await asyncio.sleep(0.4)
+                        return CallbackResult(status=500, reason="Internal Server Error", body=b"")
+                elif chunk_idx == 3:
+                    # Stay pending so the loop is still running when hedge-2 errors.
+                    await asyncio.sleep(0.6)
+
+                chunk = data[start : end + 1]
+                return CallbackResult(
+                    status=206,
+                    body=chunk,
+                    headers={
+                        "Content-Range": f"bytes {start}-{end}/{len(data)}",
+                        "Content-Length": str(len(chunk)),
+                    },
+                )
+
+            with aioresponses() as mock:
+                _register_head(mock, url, data)
+                mock.get(url, callback=_callback, repeat=True)
+                result = fetch_url(url, config)
+
+            assert result == data
+            assert attempts.get(2, 0) >= 2, "expected hedge to fire for chunk 2"
+
 
 class TestFetchErrors:
     """Tests for error propagation."""
