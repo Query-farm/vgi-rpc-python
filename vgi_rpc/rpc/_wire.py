@@ -355,6 +355,12 @@ def _read_request(
     """
     reader = ValidatedReader(ipc.open_stream(reader_stream), ipc_validation)
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+    # Drain past the request stream's EOS *before* any validation that
+    # might raise.  On pipe/subprocess transports the underlying reader
+    # is shared across requests, so a rejected request that left bytes
+    # in the IPC stream would corrupt the next request's framing and
+    # tear down the worker connection.
+    _drain_stream(reader)
     _current_request_metadata.set(custom_metadata)
     # Stash the raw request batch bytes for access log enrichment.
     # Cost is bounded by the request batch size (one row of parameters), not data batch size.
@@ -395,7 +401,6 @@ def _read_request(
         if ts is not None:
             headers["tracestate"] = ts if isinstance(ts, str) else ts.decode()
         _current_trace_headers.set(headers)
-    _drain_stream(reader)
     # If the outer batch is an external-location pointer, fetch the
     # referenced bytes and use the inner batch's columns for kwargs.
     # Dispatch metadata (method name, request version, traceparent) is

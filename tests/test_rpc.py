@@ -1707,6 +1707,62 @@ class TestRequestVersion:
         _drain_stream(reader)
         assert exc_info.value.error_type == "VersionError"
 
+    def test_serve_loop_continues_after_bad_version(self) -> None:
+        """After a bad-version request, the next request on the same pipe must succeed.
+
+        Regression: ``_read_request`` raised ``VersionError`` after reading the
+        request batch but *before* draining the IPC stream's EOS marker.  The
+        serve loop returned to handle the next request, but the underlying
+        reader was left mid-stream — so the next ``ipc.open_stream`` call read
+        leftover EOS bytes and tripped ``StopIteration``, killing the worker
+        connection after a single bad-version request.
+        """
+        from io import BytesIO
+
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _dispatch_log_or_error, _drain_stream
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        methods = rpc_methods(RpcFixtureService)
+        info = methods["add"]
+
+        # Two requests written back-to-back on the same input pipe: first has
+        # a bad version (rejected), second is a normal valid call.
+        bad_req = self._write_request_with_metadata(
+            "add",
+            info.params_schema,
+            {"a": 1.0, "b": 2.0},
+            pa.KeyValueMetadata({RPC_METHOD_KEY: b"add", REQUEST_VERSION_KEY: b"999"}),
+        )
+        good_req = self._write_request_with_metadata(
+            "add",
+            info.params_schema,
+            {"a": 3.0, "b": 4.0},
+            pa.KeyValueMetadata({RPC_METHOD_KEY: b"add", REQUEST_VERSION_KEY: REQUEST_VERSION}),
+        )
+        req_buf = BytesIO(bad_req + good_req)
+        resp_buf = BytesIO()
+        transport = PipeTransport(req_buf, resp_buf)
+
+        # First call: rejected as VersionError.  Second call must consume the
+        # following valid request and produce a real result, not StopIteration.
+        server.serve_one(transport)
+        server.serve_one(transport)
+
+        # First response: the VersionError; second response: 3.0 + 4.0 = 7.0.
+        resp_buf.seek(0)
+        reader = ValidatedReader(pa.ipc.open_stream(resp_buf), IpcValidation.NONE)
+        with pytest.raises(RpcError, match="Unsupported request version"):
+            while True:
+                batch, cm = reader.read_next_batch_with_custom_metadata()
+                _dispatch_log_or_error(batch, cm)
+        _drain_stream(reader)
+
+        reader = ValidatedReader(pa.ipc.open_stream(resp_buf), IpcValidation.NONE)
+        result_batch, _ = reader.read_next_batch_with_custom_metadata()
+        _drain_stream(reader)
+        assert result_batch.column(0)[0].as_py() == 7.0
+
 
 # ---------------------------------------------------------------------------
 # Tests: Invalid bidi state (HTTP transport)
