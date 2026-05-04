@@ -282,6 +282,33 @@ class TestLiveCapture:
         ids = {e["stream_id"] for e in stream_entries}
         assert len(ids) == 1, f"stream_id must be stable across continuations, got {ids}"
 
+    def test_http_unary_record_includes_protocol_version(self) -> None:
+        """Regression: HTTP unary access-log records must carry ``protocol_version``.
+
+        Every other ``_emit_access_log`` call site (pipe transport, HTTP
+        ``__describe__``, HTTP stream init/exchange/cancel, upload-URL
+        resource) passes ``protocol_version`` through.  The regular HTTP
+        unary path silently dropped it — so operators who configured a
+        ``protocol_version`` saw it on every record except their normal
+        unary calls, breaking dashboards keyed off the field.
+        """
+        from vgi_rpc.http import http_connect, make_sync_client
+        from vgi_rpc.rpc import RpcServer
+
+        def run() -> None:
+            server = RpcServer(_Svc, _Impl(), protocol_version="1.2.3")
+            client = make_sync_client(server, signing_key=b"test-key")
+            try:
+                with http_connect(_Svc, client=client) as proxy:
+                    proxy.greet(name="World")
+            finally:
+                client.close()
+
+        entries = self._capture(run)
+        unary = [e for e in entries if e["method"] == "greet"]
+        assert unary, "expected an access-log record for the unary call"
+        assert unary[0].get("protocol_version") == "1.2.3", f"expected protocol_version='1.2.3', got record={unary[0]}"
+
 
 class TestCli:
     """Smoke-test the CLI entry point."""
