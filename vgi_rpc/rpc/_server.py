@@ -208,13 +208,33 @@ def _emit_access_log(
         _logger.debug("Access log emission failed", exc_info=True)
 
 
-def _maybe_attach_shm(req_md: pa.KeyValueMetadata | None) -> ShmSegment | None:
+def _maybe_attach_shm(
+    req_md: pa.KeyValueMetadata | None,
+    transport_kind: TransportKind | None,
+) -> ShmSegment | None:
     """Attach to a client-owned SHM segment advertised in request metadata.
 
-    Returns ``None`` if the metadata doesn't contain SHM segment keys or
-    if the values are malformed.  The caller owns unlinking; the returned
-    segment uses ``track=False`` so the resource tracker won't interfere.
+    Only honoured for local pipe / Unix-socket transports where the
+    client and server share a kernel and the client legitimately owns
+    the named segment.  HTTP transport is explicitly rejected: a remote
+    client could otherwise supply an arbitrary POSIX shm name and have
+    the server attach to it, leading to information disclosure or
+    crashes on multi-tenant hosts.  HTTP dispatch does not currently
+    flow through ``serve_one``, so this guard is defence-in-depth
+    against future refactors that might wire it differently.
+
+    Returns ``None`` if the transport is HTTP, the metadata doesn't
+    contain SHM segment keys, or the values are malformed.  The caller
+    owns unlinking; the returned segment uses ``track=False`` so the
+    resource tracker won't interfere.
     """
+    if transport_kind == TransportKind.HTTP:
+        if req_md is not None and req_md.get(SHM_SEGMENT_NAME_KEY) is not None:
+            _logger.warning(
+                "Refusing dynamic SHM attach over HTTP transport (client supplied %r)",
+                req_md.get(SHM_SEGMENT_NAME_KEY),
+            )
+        return None
     if req_md is None:
         return None
     shm_name_bytes = req_md.get(SHM_SEGMENT_NAME_KEY)
@@ -554,10 +574,12 @@ class RpcServer:
                 _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
                 return
 
-            # Determine SHM segment: prefer transport-level, fall back to request metadata
+            # Determine SHM segment: prefer transport-level, fall back to request metadata.
+            # ``_maybe_attach_shm`` rejects the dynamic path for HTTP — defence-in-depth
+            # since HTTP doesn't currently invoke ``serve_one``.
             shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
             if shm is None:
-                dynamic_shm = _maybe_attach_shm(_current_request_metadata.get())
+                dynamic_shm = _maybe_attach_shm(_current_request_metadata.get(), self._transport_kind)
                 shm = dynamic_shm
 
             if info.method_type == MethodType.UNARY:

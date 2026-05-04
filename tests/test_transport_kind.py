@@ -358,6 +358,77 @@ class TestNotifyTransport:
         assert server.transport_kind is TransportKind.PIPE
 
 
+class TestDynamicShmAttachGuard:
+    """``_maybe_attach_shm`` must refuse the dynamic-attach path on HTTP transport.
+
+    The HTTP path doesn't currently flow through ``serve_one``, so this is
+    defence-in-depth: an HTTP client must never be able to make the server
+    attach to a remote-supplied POSIX shm name.  Doing so would let the
+    server read arbitrary cross-tenant shm segments on multi-tenant hosts
+    (info disclosure / DoS) and feed the bytes through Arrow IPC
+    deserialization as RPC parameters.
+    """
+
+    def test_http_transport_refuses_dynamic_shm(self, caplog: pytest.LogCaptureFixture) -> None:
+        """``_maybe_attach_shm(..., HTTP)`` returns None without calling ``ShmSegment.attach``."""
+        from unittest.mock import patch
+
+        import pyarrow as pa
+
+        from vgi_rpc.metadata import SHM_SEGMENT_NAME_KEY, SHM_SEGMENT_SIZE_KEY
+        from vgi_rpc.rpc._server import _maybe_attach_shm
+
+        md = pa.KeyValueMetadata(
+            {
+                SHM_SEGMENT_NAME_KEY: b"/some-victim-segment",
+                SHM_SEGMENT_SIZE_KEY: b"1024",
+            }
+        )
+
+        with (
+            caplog.at_level(logging.WARNING, logger="vgi_rpc.rpc"),
+            patch("vgi_rpc.rpc._server.ShmSegment.attach") as mock_attach,
+        ):
+            result = _maybe_attach_shm(md, TransportKind.HTTP)
+
+        assert result is None
+        assert not mock_attach.called, (
+            "ShmSegment.attach must NOT be called for HTTP transport — would let a "
+            "remote client name an arbitrary POSIX shm segment for the server to read"
+        )
+        assert any("Refusing dynamic SHM attach over HTTP transport" in r.message for r in caplog.records)
+
+    def test_pipe_transport_still_attempts_attach(self) -> None:
+        """Local pipe transport keeps the dynamic-attach path (regression guard)."""
+        from unittest.mock import patch
+
+        import pyarrow as pa
+
+        from vgi_rpc.metadata import SHM_SEGMENT_NAME_KEY, SHM_SEGMENT_SIZE_KEY
+        from vgi_rpc.rpc._server import _maybe_attach_shm
+
+        md = pa.KeyValueMetadata(
+            {
+                SHM_SEGMENT_NAME_KEY: b"/local-segment",
+                SHM_SEGMENT_SIZE_KEY: b"1024",
+            }
+        )
+
+        sentinel = object()
+        with patch("vgi_rpc.rpc._server.ShmSegment.attach", return_value=sentinel) as mock_attach:
+            result = _maybe_attach_shm(md, TransportKind.PIPE)
+
+        assert mock_attach.called, "PIPE transport must still attempt the attach"
+        assert result is sentinel
+
+    def test_no_metadata_returns_none_regardless_of_kind(self) -> None:
+        """Absent SHM metadata is silently a no-op for any transport kind."""
+        from vgi_rpc.rpc._server import _maybe_attach_shm
+
+        for kind in (TransportKind.HTTP, TransportKind.PIPE, TransportKind.UNIX, None):
+            assert _maybe_attach_shm(None, kind) is None
+
+
 # ---------------------------------------------------------------------------
 # Subprocess end-to-end — worker reports PIPE
 # ---------------------------------------------------------------------------
