@@ -100,12 +100,17 @@ def jwt_authenticate(
 
     def _get_key_set(force_refresh: bool = False) -> KeySet:
         nonlocal key_set
-        if key_set is None or force_refresh:
-            with lock:
-                if key_set is None or force_refresh:
-                    return _fetch_jwks()
-        assert key_set is not None
-        return key_set
+        # Capture the cache version we observed *before* taking the lock.
+        # If another thread refreshes while we wait, the cache identity
+        # changes and we return the new value instead of stampeding the
+        # JWKS endpoint with N concurrent re-fetches during key rotation.
+        seen = key_set
+        if seen is not None and not force_refresh:
+            return seen
+        with lock:
+            if key_set is not None and key_set is not seen:
+                return key_set
+            return _fetch_jwks()
 
     audiences = (audience,) if isinstance(audience, str) else audience
     if not audiences:

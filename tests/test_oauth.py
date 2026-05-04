@@ -891,6 +891,101 @@ class TestJwtAuthenticate:
         )
         assert callable(auth_fn)
 
+    def test_jwks_force_refresh_does_not_stampede(self) -> None:
+        """Concurrent force_refresh callers must not all re-fetch the JWKS endpoint.
+
+        Regression: ``_get_key_set(force_refresh=True)`` previously
+        re-fetched under the lock unconditionally, so N concurrent
+        requests hitting unknown-kid JWTs (typical during a key
+        rotation) each issued a separate JWKS GET.  The fix captures
+        the cache identity *before* taking the lock; late-arriving
+        threads notice that the cache changed and reuse the new value
+        instead of stampeding the auth server.
+        """
+        import threading
+        from typing import Any
+        from unittest.mock import patch
+
+        priv, pub = _make_rsa_key()
+        priv["kid"] = "good-kid"
+        pub["kid"] = "good-kid"
+        good_token = _mint_jwt(priv)
+
+        bad_priv, _bad_pub = _make_rsa_key()
+        bad_priv["kid"] = "rotated-kid"  # not present in JWKS we'll serve
+        bad_token = _mint_jwt(bad_priv, sub="rotated-user")
+
+        fetch_count = 0
+        fetch_count_lock = threading.Lock()
+
+        class _FakeResp:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict[str, Any]:
+                return {"keys": [pub]}
+
+        class _FakeClient:
+            def __enter__(self) -> _FakeClient:
+                return self
+
+            def __exit__(self, *a: object) -> None:
+                return None
+
+            def get(self, url: str, *args: object, **kwargs: object) -> _FakeResp:
+                nonlocal fetch_count
+                with fetch_count_lock:
+                    fetch_count += 1
+                # Widen the race window so concurrent callers all try to
+                # enter the lock while a refresh is in flight.
+                time.sleep(0.05)
+                return _FakeResp()
+
+        with patch("vgi_rpc.http._oauth_jwt.httpx.Client", _FakeClient):
+            auth_fn = jwt_authenticate(
+                issuer="https://auth.example.com",
+                audience="https://api.example.com/vgi",
+                jwks_uri="https://auth.example.com/jwks",
+            )
+
+            # Prime the JWKS cache with one valid request (one fetch).
+            req_good = falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {good_token}"})
+            auth_fn(req_good)
+            assert fetch_count == 1
+
+            # Burst N concurrent requests with bad-kid tokens.  Each will
+            # hit ``InvalidKeyIdError`` and try to refresh.  With the fix
+            # only one actual fetch happens; the rest see the updated
+            # cache identity and skip.
+            n_workers = 8
+            barrier = threading.Barrier(n_workers)
+            errors: list[BaseException] = []
+
+            def _worker() -> None:
+                barrier.wait()
+                try:
+                    auth_fn(falcon.testing.helpers.create_req(headers={"Authorization": f"Bearer {bad_token}"}))
+                except ValueError:
+                    pass  # expected — bad-kid still fails after refresh
+                except BaseException as exc:
+                    errors.append(exc)
+
+            workers = [threading.Thread(target=_worker) for _ in range(n_workers)]
+            for w in workers:
+                w.start()
+            for w in workers:
+                w.join(timeout=10)
+
+            assert not errors, f"unexpected errors: {errors}"
+            # Pre-burst fetch + at most a couple of refreshes during the burst.
+            # The unfixed code would issue n_workers + 1 = 9 fetches.
+            refreshes = fetch_count - 1
+            assert refreshes <= 2, (
+                f"expected ≤ 2 JWKS refreshes for {n_workers} concurrent bad-kid requests, got {refreshes}"
+            )
+
     def test_multiple_audiences_first_matches(self) -> None:
         """A JWT matching the first of multiple audiences is accepted."""
         priv, pub = _make_rsa_key()
