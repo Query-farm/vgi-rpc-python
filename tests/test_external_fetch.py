@@ -1049,3 +1049,41 @@ class TestFetchDecompression:
 
             with pytest.raises(RuntimeError, match="Failed to decompress zstd data"):
                 fetch_url(url, config)
+
+    def test_zstd_decompression_bomb_rejected(self) -> None:
+        """A zstd payload claiming massive decompressed size is refused before allocation.
+
+        Regression: ``fetch_url`` previously called
+        ``ZstdDecompressor().decompress(data)`` with no upper bound.  Zstd
+        frames carry the decompressed size in their header and the
+        decompressor allocates that much eagerly — so a malicious or
+        compromised storage backend could ship a tiny compressed body
+        claiming a huge decompressed size and OOM the client.
+
+        The cap is ``16 * max_fetch_bytes``: generous enough for normal
+        Arrow IPC ratios on legitimate payloads, tight enough that a
+        small compressed body cannot inflate to many GB.
+        """
+        # 16 MiB raw → highly compressible → ~3 KB compressed.
+        bomb_raw = b"\x00" * (16 * 1024 * 1024)
+        bomb = zstandard.ZstdCompressor().compress(bomb_raw)
+        url = "https://example.com/zstd-bomb"
+
+        # Pick max_fetch_bytes such that 16 * max_fetch_bytes < 16 MiB so
+        # the bomb's declared decompressed size exceeds the cap.
+        with (
+            FetchConfig(parallel_threshold_bytes=10_000_000, max_fetch_bytes=512 * 1024) as config,
+            aioresponses() as mock,
+        ):
+            mock.head(
+                url,
+                headers={"Content-Length": str(len(bomb)), "Content-Encoding": "zstd"},
+            )
+            mock.get(
+                url,
+                body=bomb,
+                headers={"Content-Length": str(len(bomb)), "Content-Encoding": "zstd"},
+            )
+
+            with pytest.raises(RuntimeError, match=r"Failed to decompress zstd data"):
+                fetch_url(url, config)

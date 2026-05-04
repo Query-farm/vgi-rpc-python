@@ -327,12 +327,42 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
             resp.raise_for_status()
             data = await _read_response_body(resp, config)
 
-    # Decompress if the server indicates zstd Content-Encoding
+    # Decompress if the server indicates zstd Content-Encoding.  Cap the
+    # decompressed size at 16 * max_fetch_bytes so a small, highly
+    # compressible response (or a deliberately crafted bomb from a
+    # malicious / compromised storage backend) cannot OOM the client
+    # the way ``decompress(data)`` would by trusting the frame header's
+    # declared content_size and allocating eagerly.
     if "zstd" in content_encoding.lower():
         import zstandard
 
+        max_decompressed = config.max_fetch_bytes * 16
         try:
-            data = zstandard.ZstdDecompressor().decompress(data)
+            params = zstandard.get_frame_parameters(data)
+            if params.content_size != -1 and params.content_size > max_decompressed:
+                raise zstandard.ZstdError(
+                    f"Compressed frame declares decompressed size {params.content_size} bytes, "
+                    f"which exceeds 16 * max_fetch_bytes ({max_decompressed})"
+                )
+            if params.content_size != -1:
+                data = zstandard.ZstdDecompressor().decompress(data)
+            else:
+                # Unknown content size — stream and bail past the cap.
+                decompressor = zstandard.ZstdDecompressor()
+                chunks: list[bytes] = []
+                total = 0
+                with decompressor.stream_reader(data) as reader:
+                    while True:
+                        chunk = reader.read(min(65536, max_decompressed - total + 1))
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_decompressed:
+                            raise zstandard.ZstdError(
+                                f"Decompressed output exceeds 16 * max_fetch_bytes ({max_decompressed})"
+                            )
+                        chunks.append(chunk)
+                data = b"".join(chunks)
         except zstandard.ZstdError as exc:
             raise RuntimeError(f"Failed to decompress zstd data ({len(data)} compressed bytes) from {url}") from exc
 
