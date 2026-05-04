@@ -288,6 +288,67 @@ class TestServerErrorHeader:
         assert resp.status_code == 400
         assert resp.headers.get("x-vgi-rpc-error") is None
 
+    def test_stream_exchange_cap_overshoot_sets_error_header(self) -> None:
+        """Exchange overshooting ``max_response_bytes`` must set X-VGI-RPC-Error.
+
+        Regression: per CLAUDE.md, hard caps for unary and stream-exchange
+        surface as ``200 + X-VGI-RPC-Error: true + EXCEPTION batch``.
+        Implementation exceptions in the exchange path raise
+        ``_RpcHttpError`` and route through ``_set_error_response``, which
+        sets the header.  But cap overshoot returns the response stream
+        directly via ``_exchange_error_response``, bypassing
+        ``_set_http_status`` — so the header was missing.
+        """
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY, STATE_KEY
+
+        cap_client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            signing_key=b"test-key",
+            max_response_bytes=200,
+        )
+        try:
+            # /init for the transform exchange — small payload, fits the cap.
+            init_schema = pa.schema([pa.field("factor", pa.float64())])
+            init_req = BytesIO()
+            init_md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"transform", REQUEST_VERSION_KEY: REQUEST_VERSION})
+            with ipc.new_stream(init_req, init_schema) as writer:
+                writer.write_batch(
+                    pa.RecordBatch.from_pydict({"factor": [2.0]}, schema=init_schema),
+                    custom_metadata=init_md,
+                )
+            init_resp = cap_client.post(
+                f"{_BASE_URL}/transform/init",
+                content=init_req.getvalue(),
+                headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            )
+            assert init_resp.status_code == 200
+            init_reader = ValidatedReader(ipc.open_stream(BytesIO(init_resp.content)), IpcValidation.NONE)
+            _, init_cm = init_reader.read_next_batch_with_custom_metadata()
+            assert init_cm is not None
+            token = init_cm.get(STATE_KEY)
+            assert token is not None
+
+            # /exchange with a large input → output far exceeds the 200-byte cap.
+            ex_schema = pa.schema([pa.field("value", pa.float64())])
+            ex_req = BytesIO()
+            ex_md = pa.KeyValueMetadata({STATE_KEY: token})
+            big_batch = pa.RecordBatch.from_pydict({"value": [1.0] * 10_000}, schema=ex_schema)
+            with ipc.new_stream(ex_req, ex_schema) as writer:
+                writer.write_batch(big_batch, custom_metadata=ex_md)
+            ex_resp = cap_client.post(
+                f"{_BASE_URL}/transform/exchange",
+                content=ex_req.getvalue(),
+                headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            )
+            assert ex_resp.status_code == 200
+            assert ex_resp.headers.get("x-vgi-rpc-error") == "true", (
+                "Stream-exchange overshoot must set X-VGI-RPC-Error: true per spec"
+            )
+            err = _extract_rpc_error(ex_resp)
+            assert "max_response_bytes" in err.error_message
+        finally:
+            cap_client.close()
+
 
 # ---------------------------------------------------------------------------
 # Tests: Resumable producer stream over HTTP

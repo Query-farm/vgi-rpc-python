@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+from contextvars import ContextVar
 from http import HTTPStatus
 from io import BytesIO, IOBase
 
@@ -16,6 +17,13 @@ from pyarrow import ipc
 from vgi_rpc.rpc import _EMPTY_SCHEMA, _write_error_batch
 
 from .._common import _ARROW_CONTENT_TYPE, RPC_ERROR_HEADER, _RpcHttpError
+
+# Set by stream-dispatch paths that emit an in-band EXCEPTION batch instead
+# of raising ``_RpcHttpError`` (cap-overshoot for stream-exchange and the
+# producer external-channel cap).  The resource layer reads this on each
+# request to translate a 500 into 200 + ``X-VGI-RPC-Error: true`` so the
+# response shape matches the documented contract for hard caps.
+_current_response_status: ContextVar[HTTPStatus] = ContextVar("vgi_rpc_response_status", default=HTTPStatus.OK)
 
 
 def _vgi_version() -> str:

@@ -58,7 +58,7 @@ from vgi_rpc.rpc._common import (
 from vgi_rpc.utils import ValidatedReader, empty_batch
 
 from .._common import _RpcHttpError
-from ._responses import _enforce_response_budgets
+from ._responses import _current_response_status, _enforce_response_budgets
 from ._state_token import (
     _derive_signing_key,
     _mint_continuation_token,
@@ -714,6 +714,9 @@ def _exchange_error_response(
     outcome.status = "error"
     outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
     outcome.error_message = _truncate_error_message(exc)
+    # Signal the resource layer to surface this as 200 + X-VGI-RPC-Error: true
+    # so the documented hard-cap contract holds for stream-exchange.
+    _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
     resp_buf = BytesIO()
     with ipc.new_stream(resp_buf, output_schema) as err_writer:
         _write_error_batch(err_writer, output_schema, exc, server_id=server_id)
@@ -861,6 +864,9 @@ def _run_http_producer_turn(
                         outcome.status = "error"
                         outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
                         outcome.error_message = _truncate_error_message(overshoot)
+                        # Hard cap (external channel has no escape valve) — signal
+                        # the resource layer to flip 200 → 200 + X-VGI-RPC-Error: true.
+                        _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
                         _write_error_batch(writer, schema, overshoot, server_id=server_id)
                         break
                 cumulative_external_bytes += _flush_collector(writer, out, app._server.external_config)

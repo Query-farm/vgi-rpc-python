@@ -38,6 +38,7 @@ from .._common import (
 )
 from ._responses import (
     _check_content_type,
+    _current_response_status,
     _get_request_stream,
     _set_error_response,
     _set_http_status,
@@ -133,25 +134,32 @@ class _StreamInitResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle stream initialization (both producer and exchange)."""
+        status_token = _current_response_status.set(HTTPStatus.OK)
         try:
-            info = self._app._resolve_method(req, method)
-            if info.method_type != MethodType.STREAM:
-                raise _RpcHttpError(
-                    TypeError(f"Method '{method}' is not a stream"),
-                    status_code=HTTPStatus.BAD_REQUEST,
+            try:
+                info = self._app._resolve_method(req, method)
+                if info.method_type != MethodType.STREAM:
+                    raise _RpcHttpError(
+                        TypeError(f"Method '{method}' is not a stream"),
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                result_stream = self._app._stream_init_sync(method, info, _get_request_stream(req))
+            except _RpcHttpError as e:
+                _set_error_response(
+                    resp,
+                    e.cause,
+                    status_code=e.status_code,
+                    schema=e.schema,
+                    server_id=self._app._server.server_id,
                 )
-            result_stream = self._app._stream_init_sync(method, info, _get_request_stream(req))
-        except _RpcHttpError as e:
-            _set_error_response(
-                resp,
-                e.cause,
-                status_code=e.status_code,
-                schema=e.schema,
-                server_id=self._app._server.server_id,
-            )
-            return
-        resp.content_type = _ARROW_CONTENT_TYPE
-        resp.stream = result_stream
+                return
+            resp.content_type = _ARROW_CONTENT_TYPE
+            resp.stream = result_stream
+            # In-band errors (cap overshoots) flip the contextvar; translate
+            # to 200 + X-VGI-RPC-Error: true to match the documented contract.
+            _set_http_status(resp, _current_response_status.get())
+        finally:
+            _current_response_status.reset(status_token)
 
 
 class _ExchangeResource:
@@ -162,25 +170,32 @@ class _ExchangeResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle stream exchange or producer continuation."""
+        status_token = _current_response_status.set(HTTPStatus.OK)
         try:
-            info = self._app._resolve_method(req, method)
-            if info.method_type != MethodType.STREAM:
-                raise _RpcHttpError(
-                    TypeError(f"Method '{method}' does not support /exchange"),
-                    status_code=HTTPStatus.BAD_REQUEST,
+            try:
+                info = self._app._resolve_method(req, method)
+                if info.method_type != MethodType.STREAM:
+                    raise _RpcHttpError(
+                        TypeError(f"Method '{method}' does not support /exchange"),
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                result_stream = self._app._stream_exchange_sync(method, _get_request_stream(req))
+            except _RpcHttpError as e:
+                _set_error_response(
+                    resp,
+                    e.cause,
+                    status_code=e.status_code,
+                    schema=e.schema,
+                    server_id=self._app._server.server_id,
                 )
-            result_stream = self._app._stream_exchange_sync(method, _get_request_stream(req))
-        except _RpcHttpError as e:
-            _set_error_response(
-                resp,
-                e.cause,
-                status_code=e.status_code,
-                schema=e.schema,
-                server_id=self._app._server.server_id,
-            )
-            return
-        resp.content_type = _ARROW_CONTENT_TYPE
-        resp.stream = result_stream
+                return
+            resp.content_type = _ARROW_CONTENT_TYPE
+            resp.stream = result_stream
+            # In-band errors (cap overshoots) flip the contextvar; translate
+            # to 200 + X-VGI-RPC-Error: true to match the documented contract.
+            _set_http_status(resp, _current_response_status.get())
+        finally:
+            _current_response_status.reset(status_token)
 
 
 class _UploadUrlResource:
