@@ -174,10 +174,22 @@ def _emit_access_log(
             extra["request_id"] = request_id
         if http_status is not None:
             extra["http_status"] = http_status
-        # Raw request batch bytes (set by _read_request for unary/stream-init)
+        # Raw request batch bytes (set by _read_request for unary/stream-init).
+        # Only emit the full base64 payload when the access logger is at
+        # DEBUG. At INFO this field is by far the heaviest in the record
+        # (an init RPC commonly logs 8+ KiB of base64 per call), and audit
+        # consumers rarely need the bytes — they care about who/what/when.
+        # When omitted, mark the record `truncated: true` and surface the
+        # original size so the access-log schema's "unary requires
+        # request_data unless truncated" invariant holds.
         request_data = _current_request_batch.get()
         if request_data is not None:
-            extra["request_data"] = base64.b64encode(request_data).decode()
+            encoded = base64.b64encode(request_data).decode()
+            if _access_logger.isEnabledFor(logging.DEBUG):
+                extra["request_data"] = encoded
+            else:
+                extra["original_request_bytes"] = len(encoded)
+                extra["truncated"] = True
         # Stream correlation ID
         stream_id = _current_stream_id.get()
         if stream_id:
@@ -185,11 +197,18 @@ def _emit_access_log(
         # Auth claims
         if auth.claims:
             extra["claims"] = dict(auth.claims)
-        # State tokens (HTTP transport only)
-        if request_state is not None:
-            extra["request_state"] = base64.b64encode(request_state).decode()
-        if response_state is not None:
-            extra["response_state"] = base64.b64encode(response_state).decode()
+        # State tokens (HTTP transport only). Same DEBUG-gating as
+        # request_data above: these are base64'd opaque blobs encoding the
+        # worker's serialized cross-POST context — typically 8-12 KiB per
+        # record on streaming methods. Useful for replay/audit at DEBUG;
+        # at INFO they dominate the log volume without giving operators
+        # anything they can read. Schema makes both fields optional, so we
+        # can simply omit (no truncated marker needed).
+        if _access_logger.isEnabledFor(logging.DEBUG):
+            if request_state is not None:
+                extra["request_state"] = base64.b64encode(request_state).decode()
+            if response_state is not None:
+                extra["response_state"] = base64.b64encode(response_state).decode()
         if stats is not None:
             extra["input_batches"] = stats.input_batches
             extra["output_batches"] = stats.output_batches
