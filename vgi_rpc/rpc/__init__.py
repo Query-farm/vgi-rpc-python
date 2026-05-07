@@ -370,7 +370,40 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
 
     """
     parser = argparse.ArgumentParser(description="vgi-rpc server")
-    parser.add_argument("--http", action="store_true", default=False, help="Serve over HTTP instead of stdin/stdout")
+    transport_mode = parser.add_mutually_exclusive_group()
+    transport_mode.add_argument(
+        "--http", action="store_true", default=False, help="Serve over HTTP instead of stdin/stdout"
+    )
+    transport_mode.add_argument(
+        "--unix",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Bind to this Unix domain socket path instead of stdin/stdout. "
+            "Mutually exclusive with --http.  When set, --threaded defaults to True "
+            "and --idle-timeout governs self-shutdown."
+        ),
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=float(os.environ.get("VGI_RPC_IDLE_TIMEOUT", "300")),
+        help=(
+            "Self-terminate after this many seconds with zero active connections. "
+            "Only meaningful with --unix.  A startup-grace period of max(idle_timeout, 60) "
+            "protects against shutdown before the first client.  0 disables.  "
+            "Env: VGI_RPC_IDLE_TIMEOUT (default 300)."
+        ),
+    )
+    parser.add_argument(
+        "--threaded",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Serve each Unix-socket connection in a separate daemon thread "
+            "(only meaningful with --unix; default True when --unix is set)."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=0, help="HTTP port (default: auto-select)")
     parser.add_argument(
@@ -459,6 +492,20 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     if args.access_log_max_bytes and args.access_log_when:
         raise SystemExit("--access-log-max-bytes and --access-log-when are mutually exclusive")
 
+    if args.unix is not None:
+        http_only_violations: list[str] = []
+        if args.access_log:
+            http_only_violations.append("--access-log")
+        if args.max_response_bytes is not None:
+            http_only_violations.append("--max-response-bytes")
+        if args.max_externalized_response_bytes is not None:
+            http_only_violations.append("--max-externalized-response-bytes")
+        if http_only_violations:
+            raise SystemExit(
+                f"{', '.join(http_only_violations)} {'are' if len(http_only_violations) > 1 else 'is'} "
+                "HTTP-only and cannot be combined with --unix"
+            )
+
     if isinstance(protocol_or_server, RpcServer):
         if implementation is not None:
             raise TypeError("implementation must be None when passing an RpcServer")
@@ -492,6 +539,24 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             port=args.port,
             max_response_bytes=args.max_response_bytes,
             max_externalized_response_bytes=args.max_externalized_response_bytes,
+        )
+    elif args.unix is not None:
+        threaded = True if args.threaded is None else args.threaded
+        idle_timeout: float | None = args.idle_timeout if args.idle_timeout > 0 else None
+        absolute_path = os.path.abspath(args.unix)
+
+        def _emit_discovery_line(bound_path: str) -> None:
+            # Mirrors the PORT:<n> convention used by the HTTP transport.  After
+            # this line the worker MUST NOT write further data to stdout — see
+            # the cross-language launcher contract.
+            print(f"UNIX:{bound_path}", flush=True)
+
+        serve_unix(
+            server,
+            absolute_path,
+            threaded=threaded,
+            idle_timeout=idle_timeout,
+            on_bound=_emit_discovery_line,
         )
     else:
         serve_stdio(server)

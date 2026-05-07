@@ -185,6 +185,44 @@ def unix_threaded_socket_server() -> Iterator[str]:
         proc.wait(timeout=5)
 
 
+_LAUNCHER_CONFORMANCE_RUNNER = str(Path(__file__).parent / "_launcher_conformance_run_server.py")
+
+
+@pytest.fixture(scope="session")
+def conformance_unix_launcher_path() -> Iterator[str]:
+    """Bring up a conformance worker via ``vgi_rpc.launcher.launch``.
+
+    Exercises the full launcher path (flock coordination, deterministic
+    socket path, ``run_server --unix`` flag, ``UNIX:<path>`` discovery line,
+    idle-timeout supervision) through the existing conformance test matrix.
+    """
+    import shutil
+    import tempfile
+    import uuid
+
+    from vgi_rpc.launcher import LaunchConfig, launch
+
+    state_dir = Path(tempfile.gettempdir()) / f"vgi-conf-launcher-{uuid.uuid4().hex[:8]}"
+    state_dir.mkdir(mode=0o700)
+    config = LaunchConfig(
+        worker_argv=(sys.executable, _LAUNCHER_CONFORMANCE_RUNNER),
+        # Long enough to outlast the conformance suite session, short enough
+        # that a forgotten worker eventually self-cleans.
+        idle_timeout=600.0,
+        connect_timeout=15.0,
+        worker_startup_timeout=30.0,
+        state_dir=str(state_dir),
+    )
+    path = launch(config)
+    _wait_for_unix(path)
+    try:
+        yield path
+    finally:
+        # The launched worker self-terminates via idle timeout once we stop
+        # connecting; we don't need to track its PID.  Clean up the state dir.
+        shutil.rmtree(state_dir, ignore_errors=True)
+
+
 @pytest.fixture(scope="session")
 def conformance_unix_threaded_path() -> Iterator[str]:
     """Spawn a threaded conformance Unix socket server for the session."""
@@ -525,6 +563,7 @@ def conformance_subprocess() -> Iterator[SubprocessTransport]:
         "http_externalize_always",
         pytest.param("unix", marks=_SKIP_UNIX),
         pytest.param("unix_threaded", marks=_SKIP_UNIX),
+        pytest.param("unix_launcher", marks=_SKIP_UNIX),
     ]
 )
 def conformance_conn(
@@ -534,7 +573,8 @@ def conformance_conn(
 ) -> ConnFactory:
     """Return a factory for conformance service connections.
 
-    Parametrized over pipe, subprocess, http, unix, and unix_threaded transports.
+    Parametrized over pipe, subprocess, http, unix, unix_threaded, and
+    unix_launcher transports.
     """
     from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
     from vgi_rpc.http import http_connect
@@ -558,6 +598,9 @@ def conformance_conn(
             return unix_connect(ConformanceService, path, on_log=on_log)
         elif request.param == "unix_threaded":
             path = request.getfixturevalue("conformance_unix_threaded_path")
+            return unix_connect(ConformanceService, path, on_log=on_log)
+        elif request.param == "unix_launcher":
+            path = request.getfixturevalue("conformance_unix_launcher_path")
             return unix_connect(ConformanceService, path, on_log=on_log)
         elif request.param == "http_roundrobin":
             ports: tuple[int, int] = request.getfixturevalue("conformance_http_two_servers")

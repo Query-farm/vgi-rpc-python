@@ -24,10 +24,12 @@ import logging
 import select
 import shlex
 import sys
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from io import BytesIO, IOBase, TextIOWrapper
+from pathlib import Path
 from typing import Annotated, Protocol, cast
 
 import pyarrow as pa
@@ -719,6 +721,114 @@ def loggers(
             {"name": name, "description": desc, "scenario": scenario} for name, desc, scenario in _KNOWN_LOGGERS
         ]
         typer.echo(_format_table(rows))
+
+
+# ---------------------------------------------------------------------------
+# launch subcommand
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help=(
+        "Spawn or reuse a long-running Unix-socket worker.  "
+        "Pass the worker command after `--`: vgi-rpc launch -- python -m my_worker.\n\n"
+        "Same (cmd, args, cwd, VGI_RPC_*-env) → same socket → warm worker reuse.  "
+        "Workers self-shutdown after --idle-timeout seconds idle.  "
+        "Coordination is via per-hash flock; concurrent first-callers serialise so "
+        "exactly one worker is spawned."
+    ),
+)
+def launch(
+    ctx: typer.Context,
+    socket: Annotated[str | None, typer.Option("--socket", help="Explicit socket path; skips hash machinery")] = None,
+    idle_timeout: Annotated[
+        float, typer.Option("--idle-timeout", help="Worker self-shutdown after N seconds idle (default 300)")
+    ] = 300.0,
+    connect_timeout: Annotated[
+        float, typer.Option("--connect-timeout", help="Max seconds to wait for the per-hash flock (default 30)")
+    ] = 30.0,
+    worker_startup_timeout: Annotated[
+        float,
+        typer.Option(
+            "--worker-startup-timeout",
+            help="Max seconds to wait for worker UNIX:<path> line (default 60; JVM-friendly)",
+        ),
+    ] = 60.0,
+    worker_stderr: Annotated[
+        str | None, typer.Option("--worker-stderr", help="Append worker stderr to this file (default: discard)")
+    ] = None,
+    state_dir: Annotated[str | None, typer.Option("--state-dir", help="Override default state directory")] = None,
+    status: Annotated[
+        bool,
+        typer.Option(
+            "--status",
+            help="List known workers in the state dir and exit (no spawning)",
+        ),
+    ] = False,
+    gc: Annotated[
+        bool,
+        typer.Option(
+            "--gc",
+            help="Remove stale lock/socket/meta entries from the state dir and exit",
+        ),
+    ] = False,
+) -> None:
+    """Discover-or-spawn a Unix-socket worker.
+
+    The actual worker command (and its args) come after ``--`` on the command
+    line — typer doesn't see them; they're collected from ``ctx.args``.
+    """
+    from vgi_rpc import launcher as _launcher
+
+    if status and gc:
+        raise typer.BadParameter("--status and --gc are mutually exclusive")
+
+    resolved_state_dir = Path(state_dir) if state_dir is not None else _launcher.default_state_dir()
+
+    if status:
+        rows = _launcher.status_rows(resolved_state_dir)
+        if not rows:
+            typer.echo(f"(no workers tracked in {resolved_state_dir})")
+            return
+        for row in rows:
+            cmd_repr = " ".join(shlex.quote(p) for p in row.cmd) if row.cmd else "(unknown)"
+            alive = "alive" if row.alive else "dead"
+            started = f"{(time.time() - row.started_at) / 60:.1f}m ago" if row.started_at is not None else "?"
+            typer.echo(f"{row.hash_id}  {alive:>5}  started {started:<12}  {cmd_repr}")
+        return
+
+    if gc:
+        result = _launcher.gc_state_dir(resolved_state_dir)
+        if result.cleaned:
+            typer.echo(f"cleaned {len(result.cleaned)}: {', '.join(result.cleaned)}")
+        if result.skipped_in_use:
+            typer.echo(f"skipped {len(result.skipped_in_use)} (in use): {', '.join(result.skipped_in_use)}")
+        if not result.cleaned and not result.skipped_in_use:
+            typer.echo("(nothing to clean)")
+        return
+
+    worker_argv = list(ctx.args)
+    if not worker_argv:
+        raise typer.BadParameter(
+            "missing worker command — pass it after `--`, e.g. `vgi-rpc launch -- python -m my_worker`"
+        )
+
+    config = _launcher.LaunchConfig(
+        worker_argv=tuple(worker_argv),
+        socket_path=socket,
+        idle_timeout=idle_timeout,
+        connect_timeout=connect_timeout,
+        worker_startup_timeout=worker_startup_timeout,
+        worker_stderr=worker_stderr,
+        state_dir=str(resolved_state_dir) if state_dir is not None else None,
+    )
+    try:
+        path = _launcher.launch(config)
+    except (RuntimeError, ValueError) as exc:
+        typer.echo(f"vgi-rpc launch: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"UNIX:{path}")
 
 
 # ---------------------------------------------------------------------------

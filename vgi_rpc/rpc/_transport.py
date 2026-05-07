@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from enum import Enum
 from io import IOBase
 from typing import TYPE_CHECKING, BinaryIO, Protocol, cast, runtime_checkable
@@ -380,12 +381,32 @@ def make_unix_pair() -> tuple[UnixTransport, UnixTransport]:
     return UnixTransport(s1), UnixTransport(s2)
 
 
+def _check_no_existing_listener(path: str) -> None:
+    """Raise ``RuntimeError`` if another process is already listening on *path*.
+
+    Best-effort defense-in-depth — between this probe and the caller's bind,
+    another process could still claim the socket.  The launcher coordinates
+    via flock at a higher layer; this guards against accidental misuse where
+    two workers are pointed at the same path.
+    """
+    test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        test_sock.connect(path)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return
+    finally:
+        test_sock.close()
+    raise RuntimeError(f"another process is already listening on {path}")
+
+
 def serve_unix(
     server: RpcServer,
     path: str,
     *,
     threaded: bool = False,
     max_connections: int | None = None,
+    idle_timeout: float | None = None,
+    on_bound: Callable[[str], None] | None = None,
 ) -> None:
     """Serve RPC on a Unix domain socket, accepting connections in a loop.
 
@@ -409,12 +430,44 @@ def serve_unix(
             Only meaningful when *threaded* is ``True``; ignored otherwise.
             Excess connections are accepted but queued until a slot is free.
             ``None`` means unlimited.
+        idle_timeout: When set, the worker self-terminates after this many
+            seconds with zero active connections.  Only meaningful when
+            *threaded* is ``True``; raises ``ValueError`` otherwise.  A
+            startup-grace timer of ``max(idle_timeout, 60)`` seconds protects
+            the worker from shutting down before the first client arrives
+            (e.g. during slow JVM cold-start).  ``None`` (default) keeps the
+            accept loop running indefinitely.
+        on_bound: Optional callback invoked once the socket is bound and
+            listening, before the accept loop runs.  Used by ``run_server``
+            to emit the ``UNIX:<path>`` discovery line on stdout only after
+            bind has succeeded.  Exceptions raised by the callback propagate
+            and abort the serve.
+
+    Raises:
+        RuntimeError: If another process is already listening on *path*.
+        ValueError: If *idle_timeout* is set but *threaded* is ``False``.
 
     """
+    if idle_timeout is not None and not threaded:
+        raise ValueError("idle_timeout requires threaded=True")
+    _check_no_existing_listener(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    with contextlib.suppress(FileNotFoundError):
+    # Best-effort cleanup of any stale socket file.  Broad ``OSError`` catch
+    # because Windows can raise ``ERROR_SHARING_VIOLATION`` (a ``PermissionError``
+    # subclass) if the kernel still considers the file in use.
+    with contextlib.suppress(OSError):
         os.unlink(path)
-    sock.bind(path)
+    # Bind under a restrictive umask so the socket dirent is owner-only.  On
+    # Windows ``os.umask`` is a no-op for AF_UNIX permissions, so we follow
+    # up with an explicit chmod (also a belt-and-suspenders on POSIX in case
+    # the caller had a relaxed umask in scope before us).
+    saved_umask = os.umask(0o077)
+    try:
+        sock.bind(path)
+    finally:
+        os.umask(saved_umask)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
     # Even in sequential mode the listen backlog only governs the kernel's
     # pending-connection queue; it does *not* affect how many connections we
     # service at once.  ``listen(1)`` is fragile on macOS, where the backlog
@@ -424,20 +477,23 @@ def serve_unix(
     sock.listen(128 if threaded else 16)
     if wire_transport_logger.isEnabledFor(logging.DEBUG):
         wire_transport_logger.debug(
-            "serve_unix: server_id=%s, protocol=%s, path=%s, threaded=%s",
+            "serve_unix: server_id=%s, protocol=%s, path=%s, threaded=%s, idle_timeout=%s",
             server.server_id,
             server.protocol_name,
             path,
             threaded,
+            idle_timeout,
         )
+    if on_bound is not None:
+        on_bound(path)
     try:
         if threaded:
-            _serve_unix_threaded(server, sock, max_connections)
+            _serve_unix_threaded(server, sock, max_connections, idle_timeout)
         else:
             _serve_unix_sequential(server, sock)
     finally:
         sock.close()
-        with contextlib.suppress(FileNotFoundError):
+        with contextlib.suppress(OSError):
             os.unlink(path)
 
 
@@ -461,15 +517,54 @@ def _serve_unix_threaded(
     server: RpcServer,
     sock: socket.socket,
     max_connections: int | None,
+    idle_timeout: float | None,
 ) -> None:
-    """Accept connections and serve each in a daemon thread."""
+    """Accept connections in daemon threads, optionally idle-shutdown.
+
+    With ``idle_timeout`` set, a startup-grace timer of ``max(idle_timeout, 60)``
+    seconds is armed at bind; once the first client connects, subsequent idle
+    periods (zero active connections) re-arm the idle timer.  When the timer
+    fires it re-checks the connection count under the state lock before closing
+    the listening socket — closing causes the accept loop's ``OSError`` branch
+    to unwind cleanly so the surrounding ``finally`` can unlink the path.
+    """
     semaphore: threading.Semaphore | None = None
     if max_connections is not None:
         semaphore = threading.Semaphore(max_connections)
     active: set[threading.Thread] = set()
-    lock = threading.Lock()
+    state_lock = threading.Lock()
+    conn_count = 0
+    timer: threading.Timer | None = None
+
+    def _close_listener_if_idle() -> None:
+        nonlocal timer
+        with state_lock:
+            timer = None
+            if conn_count != 0:
+                return
+        with contextlib.suppress(OSError):
+            sock.close()
+
+    def _arm_timer_locked(seconds: float) -> None:
+        nonlocal timer
+        if timer is not None:
+            timer.cancel()
+        timer = threading.Timer(seconds, _close_listener_if_idle)
+        timer.daemon = True
+        timer.start()
+
+    def _cancel_timer_locked() -> None:
+        nonlocal timer
+        if timer is not None:
+            timer.cancel()
+            timer = None
+
+    if idle_timeout is not None:
+        with state_lock:
+            _arm_timer_locked(max(idle_timeout, 60.0))
 
     def _handle(conn: socket.socket) -> None:
+        nonlocal conn_count
         if semaphore is not None:
             semaphore.acquire()
         transport = UnixTransport(conn)
@@ -481,7 +576,10 @@ def _serve_unix_threaded(
             transport.close()
             if semaphore is not None:
                 semaphore.release()
-            with lock:
+            with state_lock:
+                conn_count -= 1
+                if conn_count == 0 and idle_timeout is not None:
+                    _arm_timer_locked(idle_timeout)
                 active.discard(threading.current_thread())
 
     try:
@@ -490,17 +588,21 @@ def _serve_unix_threaded(
                 conn, _ = sock.accept()
             except OSError:
                 break
+            with state_lock:
+                conn_count += 1
+                _cancel_timer_locked()
             t = threading.Thread(
                 target=_handle,
                 args=(conn,),
                 daemon=True,
                 name=f"vgi-unix-{conn.fileno()}",
             )
-            with lock:
+            with state_lock:
                 active.add(t)
             t.start()
     finally:
-        with lock:
+        with state_lock:
+            _cancel_timer_locked()
             snapshot = list(active)
         for t in snapshot:
             t.join(timeout=10)

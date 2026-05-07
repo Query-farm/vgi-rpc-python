@@ -2387,6 +2387,7 @@ dependencies = [
 
 [package.optional-dependencies]
 cli = [
+    { name = "filelock" },
     { name = "httpx" },
     { name = "typer" },
 ]
@@ -2430,6 +2431,7 @@ dev = [
     { name = "boto3" },
     { name = "cryptography" },
     { name = "falcon" },
+    { name = "filelock" },
     { name = "google-cloud-storage" },
     { name = "httpx" },
     { name = "joserfc" },
@@ -2472,6 +2474,7 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'mtls'", specifier = ">=41.0" },
     { name = "docstring-parser", specifier = ">=0.16" },
     { name = "falcon", marker = "extra == 'http'", specifier = ">=3.0" },
+    { name = "filelock", marker = "extra == 'cli'", specifier = ">=3.13" },
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.10" },
     { name = "httpx", marker = "extra == 'cli'", specifier = ">=0.24" },
     { name = "httpx", marker = "extra == 'http'", specifier = ">=0.24" },
@@ -2496,6 +2499,7 @@ dev = [
     { name = "boto3", specifier = ">=1.28" },
     { name = "cryptography", specifier = ">=41.0" },
     { name = "falcon", specifier = ">=3.0" },
+    { name = "filelock", specifier = ">=3.13" },
     { name = "google-cloud-storage", specifier = ">=2.10" },
     { name = "httpx", specifier = ">=0.24" },
     { name = "joserfc", specifier = ">=1.0" },
