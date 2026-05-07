@@ -336,7 +336,19 @@ class _CompressionMiddleware:
         resource: object,
         req_succeeded: bool,
     ) -> None:
-        """Compress Arrow IPC response bodies with zstd when client supports it."""
+        """Compress Arrow IPC response bodies with zstd when client supports it.
+
+        Uses zstd's streaming compressor to avoid materializing the full
+        uncompressed body as an intermediate ``bytes`` object. The previous
+        ``stream.read()`` + ``_compress_body(body)`` path held the response
+        BytesIO's internal buffer, the ``body`` bytes copy returned by
+        ``read()``, AND the compressed output simultaneously — peak ~2× the
+        body size per concurrent compression. For an N-thread WSGI server
+        emitting M-byte Arrow IPC responses, that's ~2 × N × M of avoidable
+        peak; under typical kafka_consume tuning (64 MiB/tick, 16 threads)
+        it's ~2 GiB on the 2 GiB Fly VM. The streaming path keeps only one
+        copy in memory (the compressed output) plus a 64 KiB read buffer.
+        """
         if not getattr(req.context, "client_accepts_zstd", False):
             return
         if resp.content_type != _ARROW_CONTENT_TYPE:
@@ -347,11 +359,53 @@ class _CompressionMiddleware:
         if not isinstance(stream, IOBase):
             return
 
-        body = stream.read()
-        if not body:
+        # Determine remaining bytes without buffering: seek-to-end / tell /
+        # seek-back. Required because zstd's streaming compressor needs the
+        # content_size up front to write a self-describing frame header
+        # (``ZstdDecompressor.decompress`` rejects frames without it). For
+        # non-seekable streams we fall back to the buffer-then-compress
+        # path so frame format stays identical to the historical behaviour.
+        size: int | None = None
+        if hasattr(stream, "seek") and hasattr(stream, "tell"):
+            cur = stream.tell()
+            try:
+                stream.seek(0, 2)
+                end = stream.tell()
+                stream.seek(cur)
+                size = end - cur
+            except (OSError, ValueError):
+                size = None
+        if size == 0:
             return
 
-        compressed = _compress_body(body, self._level)
+        import zstandard
+
+        cctx = zstandard.ZstdCompressor(level=self._level)
+        if size is None:
+            # Non-seekable: fall back to one-shot compression so the frame
+            # carries content_size for ``ZstdDecompressor.decompress``.
+            # This is the rare path; seekable streams (BytesIO from the
+            # framework's response builders) hit the streaming path above.
+            body = stream.read()
+            if not body:
+                return
+            compressed = cctx.compress(body)
+            del body
+        else:
+            # Streaming path: avoid the duplicate ``body = stream.read()``
+            # bytes object. ``stream_writer(size=N)`` writes the content
+            # size into the frame header so the eager decompressor still
+            # accepts the frame. ``closefd=False`` keeps ``out`` open.
+            out = BytesIO()
+            with cctx.stream_writer(out, size=size, closefd=False) as writer:
+                while True:
+                    chunk = stream.read(65536)
+                    if not chunk:
+                        break
+                    writer.write(chunk)
+            compressed = out.getvalue()
+            del out
+
         resp.data = compressed
         resp.stream = None
         if getattr(req.context, "use_custom_encoding_header", False):
