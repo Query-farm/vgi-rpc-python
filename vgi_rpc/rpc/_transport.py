@@ -535,15 +535,20 @@ def _serve_unix_threaded(
     state_lock = threading.Lock()
     conn_count = 0
     timer: threading.Timer | None = None
+    shutdown_requested = False
+
+    # Linux does not wake a blocked accept() when another thread closes the
+    # socket, so the timer cannot reliably tear down the listener directly.
+    # Drive accept on a short timeout and check a shutdown flag instead.
+    sock.settimeout(0.5)
 
     def _close_listener_if_idle() -> None:
-        nonlocal timer
+        nonlocal timer, shutdown_requested
         with state_lock:
             timer = None
             if conn_count != 0:
                 return
-        with contextlib.suppress(OSError):
-            sock.close()
+            shutdown_requested = True
 
     def _arm_timer_locked(seconds: float) -> None:
         nonlocal timer
@@ -586,8 +591,14 @@ def _serve_unix_threaded(
         while True:
             try:
                 conn, _ = sock.accept()
+            except TimeoutError:
+                with state_lock:
+                    if shutdown_requested:
+                        break
+                continue
             except OSError:
                 break
+            conn.settimeout(None)  # accepted connections must be blocking
             with state_lock:
                 conn_count += 1
                 _cancel_timer_locked()
