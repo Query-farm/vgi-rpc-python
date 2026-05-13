@@ -91,6 +91,8 @@ def _worker_argv() -> list[str]:
 
 def _connect_and_close(path: str) -> None:
     """Probe a Unix socket; raise if not accepting."""
+    if sys.platform == "win32":  # pragma: no cover - tests skip on Windows
+        raise RuntimeError("AF_UNIX is not available on Windows")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         s.connect(path)
@@ -172,6 +174,8 @@ def test_defensive_bind_refuses_existing_listener() -> None:
     base = Path(tempfile.gettempdir()) / f"vgi-bind-{uuid.uuid4().hex[:8]}"
     base.mkdir(mode=0o700)
     path = str(base / "occupied.sock")
+    if sys.platform == "win32":  # pragma: no cover - test is skipped on Windows
+        pytest.skip("AF_UNIX is not available on Windows")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         listener.bind(path)
@@ -357,4 +361,6 @@ def test_default_state_dir_is_per_user() -> None:
     """``default_state_dir`` returns an existing, owned directory."""
     d = default_state_dir()
     assert d.is_dir()
+    if sys.platform == "win32":  # pragma: no cover - test is skipped on Windows
+        pytest.skip("os.geteuid is not available on Windows")
     assert d.stat().st_uid == os.geteuid()
