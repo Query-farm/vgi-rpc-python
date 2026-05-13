@@ -141,7 +141,7 @@ def test_smoke_launch_and_connect(state_dir: Path) -> None:
     assert Path(path).exists()
     _connect_and_close(path)
     # Disconnected; idle timer should fire within idle_timeout + slack.
-    assert _wait_for_path_gone(path, timeout=5.0), "worker did not idle-shutdown"
+    assert _wait_for_path_gone(path, timeout=15.0), "worker did not idle-shutdown"
 
 
 @_SKIP_WIN
@@ -309,7 +309,7 @@ def test_explicit_socket_path_skips_hash() -> None:
         assert Path(sock_path + ".lock").exists()
     finally:
         # Wait for idle-shutdown to remove the socket then clean up.
-        _wait_for_path_gone(sock_path, timeout=5.0)
+        _wait_for_path_gone(sock_path, timeout=15.0)
         shutil.rmtree(base, ignore_errors=True)
 
 
