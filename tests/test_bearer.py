@@ -114,7 +114,7 @@ class TestBearerAuthenticate:
         server = RpcServer(_IdentityService, _IdentityImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             default_headers={"Authorization": "Bearer secret-key"},
         )
@@ -309,7 +309,7 @@ class TestChainAuthenticate:
         # Test with JWT token
         client_jwt = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=chain,
             default_headers={"Authorization": f"Bearer {jwt_token}"},
         )
@@ -319,7 +319,7 @@ class TestChainAuthenticate:
         # Test with API key
         client_key = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=chain,
             default_headers={"Authorization": "Bearer api-key-123"},
         )
@@ -335,7 +335,7 @@ class TestChainAuthenticate:
         server = RpcServer(_IdentityService, _IdentityImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=chain,
             default_headers={"Authorization": "Bearer totally-invalid"},
         )

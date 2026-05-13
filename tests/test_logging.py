@@ -730,7 +730,7 @@ class TestHttpAccessLog:
 
         server = RpcServer(LoggingService, LoggingServiceImpl(), server_id="http_srv")
         with caplog.at_level(logging.DEBUG, logger="vgi_rpc.http"):
-            make_wsgi_app(server, signing_key=b"testtesttesttesttesttesttesttest")
+            make_wsgi_app(server, token_key=b"testtesttesttesttesttesttesttest")
 
         http_records = [r for r in caplog.records if r.name == "vgi_rpc.http" and "WSGI app created" in r.message]
         assert len(http_records) == 1
@@ -743,7 +743,7 @@ class TestHttpAccessLog:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(LoggingService, LoggingServiceImpl(), server_id="http_srv2")
-        client = make_sync_client(server, signing_key=b"testtesttesttesttesttesttesttest")
+        client = make_sync_client(server, token_key=b"testtesttesttesttesttesttesttest")
 
         with (
             caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"),
@@ -770,7 +770,7 @@ class TestHttpAccessLog:
         server = RpcServer(LoggingService, LoggingServiceImpl(), server_id="auth_srv")
         client = make_sync_client(
             server,
-            signing_key=b"testtesttesttesttesttesttesttest",
+            token_key=b"testtesttesttesttesttesttesttest",
             authenticate=bad_auth,
         )
 
@@ -921,7 +921,7 @@ class TestHttpServerStreamAccessLog:
         # Small max_response_bytes to force continuation
         client = make_sync_client(
             server,
-            signing_key=b"testtesttesttesttesttesttesttest",
+            token_key=b"testtesttesttesttesttesttesttest",
             max_response_bytes=1,
         )
 
@@ -945,7 +945,7 @@ class TestHttpServerStreamAccessLog:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_FailStreamService, _FailStreamServiceImpl(), server_id="fail_srv")
-        client = make_sync_client(server, signing_key=b"testtesttesttesttesttesttesttest")
+        client = make_sync_client(server, token_key=b"testtesttesttesttesttesttesttest")
 
         with (
             caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"),

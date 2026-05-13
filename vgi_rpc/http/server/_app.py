@@ -4,7 +4,7 @@
 """The internal ``_HttpRpcApp`` — state holder for HTTP dispatch.
 
 This class holds the configuration shared between the unary and stream
-request paths (the ``RpcServer``, signing key, per-method state-type
+request paths (the ``RpcServer``, AEAD token key, per-method state-type
 index, size/time limits, upload-url provider, token TTL).  The heavy
 per-request logic lives in :mod:`_app_unary` and :mod:`_app_stream`,
 which take the app as their first argument; the methods on this class
@@ -36,8 +36,8 @@ class _HttpRpcApp:
         "_max_response_bytes",
         "_max_upload_bytes",
         "_server",
-        "_signing_key",
         "_state_types",
+        "_token_key",
         "_token_ttl",
         "_upload_url_provider",
     )
@@ -45,7 +45,7 @@ class _HttpRpcApp:
     def __init__(
         self,
         server: RpcServer,
-        signing_key: bytes,
+        token_key: bytes,
         max_response_bytes: int | None = None,
         max_request_bytes: int | None = None,
         upload_url_provider: UploadUrlProvider | None = None,
@@ -54,7 +54,7 @@ class _HttpRpcApp:
         max_externalized_response_bytes: int | None = None,
     ) -> None:
         self._server = server
-        self._signing_key = signing_key
+        self._token_key = token_key
         self._state_types = _resolve_state_types(server)
         self._max_response_bytes = max_response_bytes
         self._max_externalized_response_bytes = max_externalized_response_bytes

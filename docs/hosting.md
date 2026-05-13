@@ -27,7 +27,7 @@ server = RpcServer(MyProtocol, MyServiceImpl())
 
 app = make_wsgi_app(
     server,
-    signing_key=os.environ["VGI_SIGNING_KEY"].encode(),
+    token_key=os.environ["VGI_TOKEN_KEY"].encode(),
 )
 ```
 
@@ -35,7 +35,7 @@ app = make_wsgi_app(
 
 | Parameter | Purpose | Default |
 |-----------|---------|---------|
-| `signing_key` | HMAC-SHA256 key for stream state tokens | Random per-process (breaks multi-worker!) |
+| `token_key` | XChaCha20-Poly1305 AEAD key for stream state tokens | Random per-process (breaks multi-worker!) |
 | `prefix` | URL path prefix for RPC endpoints | `/vgi` |
 | `max_request_bytes` | Advertised request size limit | None (unlimited) |
 | `max_response_bytes` | HTTP body cap (every method).  Soft for producer streams (continuation tokens); hard for unary + exchange (200 + EXCEPTION batch on overshoot) | None (unlimited) |
@@ -50,8 +50,8 @@ app = make_wsgi_app(
 | `enable_landing_page` | HTML landing page at `GET {prefix}` | `True` |
 | `enable_describe_page` | HTML describe page at `GET {prefix}/describe` | `True` (requires `enable_describe=True`) |
 
-!!! warning "Signing key in multi-worker deployments"
-    Stream state tokens are signed with HMAC-SHA256. If each worker generates its own random key, a token signed by worker A is rejected by worker B. **Always provide a shared `signing_key`** from environment variables or a secrets manager.
+!!! warning "Token key in multi-worker deployments"
+    Stream state tokens are sealed with XChaCha20-Poly1305 (AEAD). If each worker generates its own random key, a token sealed by worker A cannot be opened by worker B. **Always provide a shared `token_key`** from environment variables or a secrets manager.
 
     If using gunicorn with `--preload`, the app (and its random key) is shared across workers via fork. Without `--preload`, each worker creates its own app — you **must** provide an explicit key.
 
@@ -192,7 +192,7 @@ For large **inputs** (client → server), enable upload URL vending so clients c
 ```python
 app = make_wsgi_app(
     server,
-    signing_key=signing_key,
+    token_key=token_key,
     upload_url_provider=storage,      # S3Storage/GCSStorage implement this
     max_upload_bytes=500_000_000,     # 500 MB
 )
@@ -233,7 +233,7 @@ server = RpcServer(
 
 app = make_wsgi_app(
     server,
-    signing_key=os.environ["VGI_SIGNING_KEY"].encode(),
+    token_key=os.environ["VGI_TOKEN_KEY"].encode(),
 )
 ```
 
@@ -248,14 +248,14 @@ CMD ["gunicorn", "app:app", "-b", "0.0.0.0:8080", "-w", "4", "--timeout", "600"]
 ```
 
 ```bash title="Deploy"
-# Store signing key in Secret Manager (recommended over env vars)
+# Store token key in Secret Manager (recommended over env vars)
 echo -n "$(openssl rand -hex 32)" | \
-  gcloud secrets create vgi-signing-key --data-file=-
+  gcloud secrets create vgi-token-key --data-file=-
 
 gcloud run deploy my-vgi-service \
   --source . \
   --set-env-vars "GCS_BUCKET=my-bucket" \
-  --set-secrets "VGI_SIGNING_KEY=vgi-signing-key:latest" \
+  --set-secrets "VGI_TOKEN_KEY=vgi-token-key:latest" \
   --allow-unauthenticated \
   --timeout 600 \
   --memory 1Gi
@@ -297,7 +297,7 @@ server = RpcServer(
 
 app = make_wsgi_app(
     server,
-    signing_key=os.environ["VGI_SIGNING_KEY"].encode(),
+    token_key=os.environ["VGI_TOKEN_KEY"].encode(),
     max_request_bytes=5_000_000,  # 5 MB (leave room for headers)
     upload_url_provider=storage,
 )
@@ -313,7 +313,7 @@ handler = make_lambda_handler(app)
 
 - Set `externalize_threshold_bytes` well below the payload limit (512 KB is a good starting point) to leave headroom for log batches and metadata
 - Use zstd compression — it reduces S3 storage and fetch time
-- Store the signing key in AWS Secrets Manager and cache it in the Lambda init phase
+- Store the token key in AWS Secrets Manager and cache it in the Lambda init phase
 - For producer streams, set `max_response_bytes` to split large streaming responses across multiple HTTP turns; the server mints continuation tokens at the cap and the client transparently resumes
 
 ### Cloudflare Workers
@@ -357,7 +357,7 @@ server = RpcServer(MyProtocol, MyServiceImpl(), enable_describe=True)
 
 wsgi_app = make_wsgi_app(
     server,
-    signing_key=os.environ["VGI_SIGNING_KEY"].encode(),
+    token_key=os.environ["VGI_TOKEN_KEY"].encode(),
     max_request_bytes=200_000_000,
 )
 
@@ -384,12 +384,12 @@ CMD ["gunicorn", "app:app", "-b", "0.0.0.0:8080", "-w", "4", "--timeout", "300"]
 
 ```bash title="Deploy to Fly.io"
 fly launch
-fly secrets set VGI_SIGNING_KEY=$(openssl rand -hex 32)
+fly secrets set VGI_TOKEN_KEY=$(openssl rand -hex 32)
 ```
 
 ```bash title="Deploy to Railway"
 railway up
-railway variables set VGI_SIGNING_KEY=$(openssl rand -hex 32)
+railway variables set VGI_TOKEN_KEY=$(openssl rand -hex 32)
 ```
 
 These platforms are a good fit when:

@@ -225,7 +225,7 @@ class TestHttpTransport:
 
         impl = _RecordingImpl()
         server = RpcServer(_KindService, impl)
-        client = make_sync_client(server, signing_key=b"k")
+        client = make_sync_client(server, token_key=b"k")
 
         # The WSGI app is built but no request has been served yet.
         assert server.transport_kind is None
@@ -244,7 +244,7 @@ class TestHttpTransport:
 
         impl = _RecordingImpl()
         server = RpcServer(_KindService, impl)
-        client = make_sync_client(server, signing_key=b"k")
+        client = make_sync_client(server, token_key=b"k")
         with http_connect(_KindService, client=client) as svc:
             svc.report_kind()
             svc.report_kind()
@@ -270,7 +270,7 @@ class TestCallContextKind:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_KindService, _RecordingImpl())
-        client = make_sync_client(server, signing_key=b"k")
+        client = make_sync_client(server, token_key=b"k")
         with http_connect(_KindService, client=client) as svc:
             assert svc.report_kind() == "http"
 
@@ -470,7 +470,7 @@ class TestForkSafety:
         impl = _RecordingImpl()
         server = RpcServer(_KindService, impl)
         # Build the app in the parent — this MUST NOT fire the hook.
-        client = make_sync_client(server, signing_key=b"k")
+        client = make_sync_client(server, token_key=b"k")
         assert server.transport_kind is None
 
         # Use a pipe to confirm the child fired the hook in its own process.

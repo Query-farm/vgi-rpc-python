@@ -96,9 +96,9 @@ def _is_jwt_expired(token: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _derive_session_key(signing_key: bytes) -> bytes:
+def _derive_session_key(token_key: bytes) -> bytes:
     """Derive a separate HMAC key for OAuth session cookies."""
-    return hmac.new(signing_key, b"oauth-pkce-session", hashlib.sha256).digest()
+    return hmac.new(token_key, b"oauth-pkce-session", hashlib.sha256).digest()
 
 
 # ---------------------------------------------------------------------------

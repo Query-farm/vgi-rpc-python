@@ -183,7 +183,7 @@ def _python_server(idp_url: str) -> Iterator[str]:
     app = make_wsgi_app(
         server,
         prefix=PREFIX,
-        signing_key=b"test-signing-key-32-bytes-long!!",
+        token_key=b"test-signing-key-32-bytes-long!!",
         authenticate=_reject_auth,
         oauth_resource_metadata=OAuthResourceMetadata(
             resource=resource,

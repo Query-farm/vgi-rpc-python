@@ -84,7 +84,7 @@ _BASE_URL = "http://test"
 def client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
     """Create a sync Falcon test client with proper cleanup, tested with both empty and /vgi prefix."""
     prefix: str = request.param
-    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), signing_key=b"test-key", prefix=prefix)
+    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), token_key=b"test-key", prefix=prefix)
     yield c
     c.close()
 
@@ -95,7 +95,7 @@ def resumable_client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient
     prefix: str = request.param
     c = make_sync_client(
         RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-        signing_key=b"test-key",
+        token_key=b"test-key",
         max_response_bytes=200,
         prefix=prefix,
     )
@@ -114,7 +114,7 @@ class TestMakeWsgiApp:
     def test_returns_falcon_app(self) -> None:
         """make_wsgi_app returns a Falcon application."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test-key")
+        app = make_wsgi_app(server, token_key=b"test-key")
         assert isinstance(app, falcon.App)
 
 
@@ -303,7 +303,7 @@ class TestServerErrorHeader:
 
         cap_client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             max_response_bytes=200,
         )
         try:
@@ -426,39 +426,24 @@ class TestResumableServerStream:
         assert "token" in err.error_message.lower() or "Malformed" in err.error_message
 
     def test_wrong_token_version_400(self, resumable_client: _SyncTestClient) -> None:
-        """Token with an unsupported version byte returns 400."""
+        """Token with an unsupported version byte returns 400 before crypto work."""
         import base64
-        import hashlib
-        import hmac as hmac_mod
         import struct
-        import time
 
         import pyarrow as pa
 
+        from vgi_rpc.http.server._state_token import _NONCE_LEN, _TAG_LEN
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
-        # Build a structurally valid v3 token with a wrong version byte
+        # Build a token whose envelope size satisfies the minimum-length check
+        # but whose version byte is unsupported.
         bad_version = 99
-        state_bytes = schema_bytes = input_bytes = stream_id_bytes = b""
-        payload = (
-            struct.pack("B", bad_version)
-            + struct.pack("<Q", int(time.time()))
-            + struct.pack("<I", len(state_bytes))
-            + state_bytes
-            + struct.pack("<I", len(schema_bytes))
-            + schema_bytes
-            + struct.pack("<I", len(input_bytes))
-            + input_bytes
-            + struct.pack("<I", len(stream_id_bytes))
-            + stream_id_bytes
-        )
-        from vgi_rpc.http.server._state_token import _derive_signing_key
-
-        derived_key = _derive_signing_key(b"test-key", None)
-        mac = hmac_mod.new(derived_key, payload, hashlib.sha256).digest()
-        token = base64.b64encode(payload + mac)
+        # version + nonce + (tag bytes' worth of zero ciphertext) is enough
+        # bytes to clear ``_MIN_TOKEN_LEN`` so the cheap version check fires.
+        envelope = struct.pack("B", bad_version) + b"\x00" * (_NONCE_LEN + _TAG_LEN)
+        token = base64.b64encode(envelope)
 
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: token})
@@ -478,7 +463,7 @@ class TestResumableServerStream:
         """A stream with one batch doesn't need continuation even with small limit."""
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             max_response_bytes=200,
         )
         with http_connect(RpcFixtureService, client=c) as proxy:
@@ -513,39 +498,25 @@ class TestStateTokenStateEncoding:
 
     def test_expired_token_400(self) -> None:
         """Token with a timestamp 2 hours in the past is rejected as expired."""
-        import base64
-        import hashlib
-        import hmac as hmac_mod
-        import struct
         import time
 
         import pyarrow as pa
 
-        from vgi_rpc.http.server._state_token import _TOKEN_VERSION
+        from vgi_rpc.http.server._state_token import _compute_aad, _seal_state_token
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
-        # Build a valid v3 token with a timestamp 2 hours in the past
+        key = b"\x01" * 32
         old_time = int(time.time()) - 7200
-        state_bytes = schema_bytes = input_bytes = stream_id_bytes = b""
-        payload = (
-            struct.pack("B", _TOKEN_VERSION)
-            + struct.pack("<Q", old_time)
-            + struct.pack("<I", len(state_bytes))
-            + state_bytes
-            + struct.pack("<I", len(schema_bytes))
-            + schema_bytes
-            + struct.pack("<I", len(input_bytes))
-            + input_bytes
-            + struct.pack("<I", len(stream_id_bytes))
-            + stream_id_bytes
+        token = _seal_state_token(
+            state_bytes=b"",
+            schema_bytes=b"",
+            input_schema_bytes=b"",
+            token_key=key,
+            aad=_compute_aad(None),
+            created_at=old_time,
         )
-        from vgi_rpc.http.server._state_token import _derive_signing_key
-
-        derived_key = _derive_signing_key(b"test-key", None)
-        mac = hmac_mod.new(derived_key, payload, hashlib.sha256).digest()
-        token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: token})
@@ -554,7 +525,7 @@ class TestStateTokenStateEncoding:
 
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=key,
             max_response_bytes=200,
             token_ttl=3600,
         )
@@ -570,42 +541,28 @@ class TestStateTokenStateEncoding:
 
     def test_token_ttl_zero_disables_expiry(self) -> None:
         """Token with old timestamp is accepted when token_ttl=0."""
-        import base64
-        import hashlib
-        import hmac as hmac_mod
-        import struct
         import time
 
         import pyarrow as pa
 
-        from vgi_rpc.http.server._state_token import _TOKEN_VERSION
+        from vgi_rpc.http.server._state_token import _compute_aad, _seal_state_token
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
-        # Build a valid v3 token with a very old timestamp
+        key = b"\x02" * 32
         old_time = int(time.time()) - 86400  # 24 hours ago
         state_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
         schema_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
         input_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
-        stream_id_bytes = b""
-        payload = (
-            struct.pack("B", _TOKEN_VERSION)
-            + struct.pack("<Q", old_time)
-            + struct.pack("<I", len(state_bytes))
-            + state_bytes
-            + struct.pack("<I", len(schema_bytes))
-            + schema_bytes
-            + struct.pack("<I", len(input_bytes))
-            + input_bytes
-            + struct.pack("<I", len(stream_id_bytes))
-            + stream_id_bytes
+        token = _seal_state_token(
+            state_bytes=state_bytes,
+            schema_bytes=schema_bytes,
+            input_schema_bytes=input_bytes,
+            token_key=key,
+            aad=_compute_aad(None),
+            created_at=old_time,
         )
-        from vgi_rpc.http.server._state_token import _derive_signing_key
-
-        derived_key = _derive_signing_key(b"test-key", None)
-        mac = hmac_mod.new(derived_key, payload, hashlib.sha256).digest()
-        token = base64.b64encode(payload + mac)
 
         req_buf = BytesIO()
         state_md = pa.KeyValueMetadata({STATE_KEY: token})
@@ -614,7 +571,7 @@ class TestStateTokenStateEncoding:
 
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=key,
             max_response_bytes=200,
             token_ttl=0,
         )
@@ -631,33 +588,134 @@ class TestStateTokenStateEncoding:
             assert "expired" not in err.error_message.lower()
         c.close()
 
-    def test_pack_token_is_valid_utf8(self) -> None:
-        """Packed state token is valid UTF-8 (base64-encoded)."""
-        from vgi_rpc.http.server._state_token import _pack_state_token
+    def test_seal_token_is_valid_utf8(self) -> None:
+        """Sealed state token is valid UTF-8 (base64-encoded)."""
+        from vgi_rpc.http.server._state_token import _compute_aad, _seal_state_token
 
-        # Use bytes with high bytes that are invalid UTF-8 on their own
-        token = _pack_state_token(b"\x00\xff\xfe", b"\x80\x81", b"\x90\x91", b"key", 0)
+        token = _seal_state_token(
+            state_bytes=b"\x00\xff\xfe",
+            schema_bytes=b"\x80\x81",
+            input_schema_bytes=b"\x90\x91",
+            token_key=b"\x03" * 32,
+            aad=_compute_aad(None),
+            created_at=0,
+        )
         # Token must be valid UTF-8 (base64 produces only ASCII)
         token.decode("utf-8")  # Should not raise
 
-    def test_pack_unpack_roundtrip_with_base64(self) -> None:
-        """Pack and unpack produce consistent results through base64 encoding."""
-        from vgi_rpc.http.server._state_token import _pack_state_token, _unpack_state_token
+    def test_seal_open_roundtrip_with_base64(self) -> None:
+        """Seal and open produce consistent results through base64 encoding."""
+        from vgi_rpc.http.server._state_token import (
+            _compute_aad,
+            _open_state_token,
+            _seal_state_token,
+        )
 
         state = b"test-state-data"
         schema = b"test-schema-data"
         input_schema = b"test-input-schema"
-        key = b"signing-key"
+        key = b"\x04" * 32
+        aad = _compute_aad(None)
 
-        token = _pack_state_token(state, schema, input_schema, key, 1000)
+        token = _seal_state_token(state, schema, input_schema, key, aad, 1000)
         # Verify it's valid UTF-8
         token.decode("utf-8")
 
-        s, sch, inp, sid = _unpack_state_token(token, key)
+        s, sch, inp, sid = _open_state_token(token, key, aad)
         assert s == state
         assert sch == schema
         assert inp == input_schema
         assert sid == ""
+
+    def test_tampered_nonce_fails_decrypt(self) -> None:
+        """Flipping a byte in the nonce makes AEAD authentication fail."""
+        import base64
+
+        from vgi_rpc.http.server._state_token import (
+            _TOKEN_VERSION_LEN,
+            _compute_aad,
+            _open_state_token,
+            _seal_state_token,
+        )
+
+        key = b"\x05" * 32
+        aad = _compute_aad(None)
+        token = _seal_state_token(b"s", b"sch", b"is", key, aad, 1000)
+
+        raw = bytearray(base64.b64decode(token))
+        # Flip a bit in the nonce (right after the version byte)
+        raw[_TOKEN_VERSION_LEN] ^= 0x01
+        tampered = base64.b64encode(bytes(raw))
+
+        with pytest.raises(Exception, match="signature verification failed"):
+            _open_state_token(tampered, key, aad)
+
+    def test_tampered_ciphertext_fails_decrypt(self) -> None:
+        """Flipping a byte in the ciphertext makes the Poly1305 tag check fail."""
+        import base64
+
+        from vgi_rpc.http.server._state_token import (
+            _compute_aad,
+            _open_state_token,
+            _seal_state_token,
+        )
+
+        key = b"\x06" * 32
+        aad = _compute_aad(None)
+        token = _seal_state_token(b"state", b"schema", b"input", key, aad, 1000)
+
+        raw = bytearray(base64.b64decode(token))
+        # Flip a bit deep in the ciphertext (well past version+nonce).
+        raw[-1] ^= 0x01
+        tampered = base64.b64encode(bytes(raw))
+
+        with pytest.raises(Exception, match="signature verification failed"):
+            _open_state_token(tampered, key, aad)
+
+    def test_cross_principal_replay_fails(self) -> None:
+        """A token minted for principal A cannot be opened with principal B's AAD."""
+        from vgi_rpc.http.server._state_token import (
+            _compute_aad,
+            _open_state_token,
+            _seal_state_token,
+        )
+        from vgi_rpc.rpc import AuthContext
+
+        key = b"\x07" * 32
+        alice = AuthContext(domain="d", authenticated=True, principal="alice")
+        bob = AuthContext(domain="d", authenticated=True, principal="bob")
+
+        token = _seal_state_token(b"s", b"sch", b"is", key, _compute_aad(alice), 1000)
+
+        # Alice's own AAD round-trips fine.
+        s, sch, inp, sid = _open_state_token(token, key, _compute_aad(alice))
+        assert (s, sch, inp, sid) == (b"s", b"sch", b"is", "")
+
+        # Bob cannot open Alice's token (same domain, different principal).
+        with pytest.raises(Exception, match="signature verification failed"):
+            _open_state_token(token, key, _compute_aad(bob))
+
+        # Authenticated identity cannot impersonate anonymous either.
+        with pytest.raises(Exception, match="signature verification failed"):
+            _open_state_token(token, key, _compute_aad(None))
+
+    def test_malformed_base64_returns_400(self) -> None:
+        """A token whose body is not valid base64 surfaces as 400."""
+        from vgi_rpc.http.server._state_token import _compute_aad, _open_state_token
+
+        # ``!`` is not part of the standard base64 alphabet.
+        with pytest.raises(Exception, match="Malformed state token"):
+            _open_state_token(b"!!!!not-base64!!!!", b"\x08" * 32, _compute_aad(None))
+
+    def test_too_short_token_returns_400(self) -> None:
+        """A token shorter than the minimum envelope size surfaces as 400."""
+        import base64
+
+        from vgi_rpc.http.server._state_token import _compute_aad, _open_state_token
+
+        too_short = base64.b64encode(b"\x04short")
+        with pytest.raises(Exception, match="Malformed state token"):
+            _open_state_token(too_short, b"\x09" * 32, _compute_aad(None))
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +738,7 @@ class TestHttpExternalStorage:
     def _make_client(self, config: ExternalLocationConfig) -> _SyncTestClient:
         """Create a _SyncTestClient wrapping an RpcServer with external storage."""
         server = RpcServer(_ExternalService, _ExternalServiceImpl(), external_location=config)
-        return make_sync_client(server, signing_key=b"test-key")
+        return make_sync_client(server, token_key=b"test-key")
 
     def _mock_aio_dynamic(self, storage: MockStorage, mock: aioresponses_ctx) -> None:
         """Register pattern-based HEAD + GET callbacks that serve from MockStorage dynamically."""
@@ -849,7 +907,7 @@ class TestHttpExternalSHA256:
     def _make_client(self, config: ExternalLocationConfig) -> _SyncTestClient:
         """Create a _SyncTestClient wrapping an RpcServer with external storage."""
         server = RpcServer(_ExternalService, _ExternalServiceImpl(), external_location=config)
-        return make_sync_client(server, signing_key=b"test-key")
+        return make_sync_client(server, token_key=b"test-key")
 
     def _mock_aio_dynamic(self, storage: MockStorage, mock: aioresponses_ctx) -> None:
         """Register pattern-based HEAD + GET callbacks."""
@@ -1076,7 +1134,7 @@ def _make_auth_client(
     default_headers = {"Authorization": f"Bearer {principal}"} if principal is not None else None
     return make_sync_client(
         server,
-        signing_key=b"auth-test-key",
+        token_key=b"auth-test-key",
         authenticate=authenticate,
         default_headers=default_headers,
     )
@@ -1209,7 +1267,7 @@ class TestAuthentication:
         server = RpcServer(MetaService, MetaServiceImpl())
         client = make_sync_client(
             server,
-            signing_key=b"test",
+            token_key=b"test",
             authenticate=always_auth,
             default_headers={"Authorization": "Bearer test"},
         )
@@ -1223,7 +1281,7 @@ class TestAuthentication:
     def test_no_auth_middleware_when_authenticate_is_none(self) -> None:
         """Without authenticate parameter, no auth middleware is added."""
         server = RpcServer(_AuthService, _AuthServiceImpl())
-        client = make_sync_client(server, signing_key=b"test")
+        client = make_sync_client(server, token_key=b"test")
         # whoami should work — ctx.auth will be anonymous
         with http_connect(_AuthService, client=client) as proxy:
             result = proxy.whoami()
@@ -1235,7 +1293,7 @@ class TestAuthentication:
         server = RpcServer(_AuthService, _AuthServiceImpl())
         app = make_wsgi_app(
             server,
-            signing_key=b"test",
+            token_key=b"test",
             cors_origins="*",
             authenticate=_test_authenticate,
         )
@@ -1257,7 +1315,7 @@ class TestCors:
     def test_cors_wildcard_adds_headers(self) -> None:
         """cors_origins='*' adds Access-Control-Allow-Origin to responses."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-allow-origin") == "*"
@@ -1265,7 +1323,7 @@ class TestCors:
     def test_cors_specific_origin(self) -> None:
         """cors_origins with a specific origin only allows that origin."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="http://example.com")
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="http://example.com")
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-allow-origin") == "http://example.com"
@@ -1273,7 +1331,7 @@ class TestCors:
     def test_cors_exposes_standard_headers(self) -> None:
         """CORS always exposes WWW-Authenticate, X-Request-ID, and X-VGI-Content-Encoding."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         expose = resp.headers.get("access-control-expose-headers", "")
@@ -1285,7 +1343,7 @@ class TestCors:
     def test_no_cors_by_default(self) -> None:
         """Without cors_origins, no CORS headers are added."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test")
+        app = make_wsgi_app(server, token_key=b"test")
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert "access-control-allow-origin" not in resp.headers
@@ -1293,7 +1351,7 @@ class TestCors:
     def test_cors_max_age_default(self) -> None:
         """OPTIONS responses include Access-Control-Max-Age: 7200 by default."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-max-age") == "7200"
@@ -1301,7 +1359,7 @@ class TestCors:
     def test_cors_max_age_custom(self) -> None:
         """cors_max_age overrides the default value."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*", cors_max_age=3600)
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*", cors_max_age=3600)
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-max-age") == "3600"
@@ -1309,7 +1367,7 @@ class TestCors:
     def test_cors_max_age_none_omits_header(self) -> None:
         """cors_max_age=None omits the Access-Control-Max-Age header."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*", cors_max_age=None)
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*", cors_max_age=None)
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert "access-control-max-age" not in resp.headers
@@ -1317,7 +1375,7 @@ class TestCors:
     def test_cors_max_age_not_on_post(self) -> None:
         """Access-Control-Max-Age is only set on OPTIONS, not regular requests."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*")
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_get("/", headers={"Origin": "http://example.com"})
         assert "access-control-max-age" not in resp.headers
@@ -1335,7 +1393,7 @@ class TestMaxRequestBytes:
         """POST response includes VGI-Max-Request-Bytes when configured."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
             max_request_bytes=10_000_000,
         )
         resp = client.post(
@@ -1351,7 +1409,7 @@ class TestMaxRequestBytes:
         """POST response does not include VGI-Max-Request-Bytes by default."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
         )
         resp = client.post(
             f"{_BASE_URL}/add",
@@ -1366,7 +1424,7 @@ class TestMaxRequestBytes:
         """OPTIONS response includes VGI-Max-Request-Bytes when configured."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
             max_request_bytes=5_000_000,
         )
         resp = client.options(f"{_BASE_URL}/__capabilities__")
@@ -1376,7 +1434,7 @@ class TestMaxRequestBytes:
     def test_cors_exposes_header(self) -> None:
         """With cors_origins, VGI-Max-Request-Bytes is in Access-Control-Expose-Headers."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test", cors_origins="*", max_request_bytes=1_000_000)
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*", max_request_bytes=1_000_000)
         tc = falcon.testing.TestClient(app)
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         expose = resp.headers.get("access-control-expose-headers", "")
@@ -1395,7 +1453,7 @@ class TestHttpCapabilities:
         """http_capabilities() reads VGI-Max-Request-Bytes from OPTIONS response."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
             max_request_bytes=8_000_000,
         )
         caps = http_capabilities(client=client)
@@ -1407,7 +1465,7 @@ class TestHttpCapabilities:
         """http_capabilities() returns None max_request_bytes when not set."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
         )
         caps = http_capabilities(client=client)
         assert caps.max_request_bytes is None
@@ -1418,7 +1476,7 @@ class TestHttpCapabilities:
         storage = MockStorage()
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
             upload_url_provider=storage,
         )
         caps = http_capabilities(client=client)
@@ -1430,7 +1488,7 @@ class TestHttpCapabilities:
         storage = MockStorage()
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
             upload_url_provider=storage,
             max_upload_bytes=50_000_000,
         )
@@ -1442,7 +1500,7 @@ class TestHttpCapabilities:
         """http_capabilities() returns upload_url_support=False when not configured."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
         )
         caps = http_capabilities(client=client)
         assert caps.upload_url_support is False
@@ -1468,7 +1526,7 @@ class TestUploadUrlEndpoint:
         """Create a test client with upload URL support."""
         return make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test",
+            token_key=b"test",
             upload_url_provider=storage,
             max_upload_bytes=max_upload_bytes,
             authenticate=authenticate,
@@ -1637,7 +1695,7 @@ class TestZstdCompression:
         """Unary call works with compression on both client and server."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             compression_level=3,
         )
         with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:
@@ -1649,7 +1707,7 @@ class TestZstdCompression:
         """Stream init + exchange round-trip with compression."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             compression_level=3,
         )
         with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:
@@ -1669,7 +1727,7 @@ class TestZstdCompression:
         """Producer stream with continuation works under compression."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             max_response_bytes=200,
             compression_level=3,
         )
@@ -1685,7 +1743,7 @@ class TestZstdCompression:
         """Full round-trip with compression_level=None on both sides."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             compression_level=None,
         )
         with http_connect(RpcFixtureService, client=client, compression_level=None) as proxy:
@@ -1701,7 +1759,7 @@ class TestZstdCompression:
         """
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             compression_level=3,
         )
         with http_connect(RpcFixtureService, client=client, compression_level=None) as proxy:
@@ -1713,7 +1771,7 @@ class TestZstdCompression:
         """Server with compression middleware handles uncompressed requests fine."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             compression_level=3,
         )
         # Client does NOT compress requests (compression_level=None)
@@ -1727,7 +1785,7 @@ class TestZstdCompression:
     def test_compressed_response_has_content_encoding_header(self) -> None:
         """Verify Content-Encoding: zstd header is present on compressed responses."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test-key", compression_level=3)
+        app = make_wsgi_app(server, token_key=b"test-key", compression_level=3)
         falcon_client = falcon.testing.TestClient(app)
 
         # Build a minimal unary request
@@ -1812,7 +1870,7 @@ class TestZstdCompression:
         """
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
         )
         # Default compression_level=3 on both sides
         with http_connect(RpcFixtureService, client=client) as proxy:
@@ -1824,7 +1882,7 @@ class TestZstdCompression:
         """Stream exchange works without compression."""
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             compression_level=None,
         )
         with http_connect(RpcFixtureService, client=client, compression_level=None) as proxy:
@@ -1849,7 +1907,7 @@ class TestZstdCompression:
                 return super().post(url, content=content, headers=headers)
 
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test-key", compression_level=3)
+        app = make_wsgi_app(server, token_key=b"test-key", compression_level=3)
         test_client = _CapturingClient(app)
 
         with http_connect(RpcFixtureService, client=test_client, compression_level=3) as proxy:
@@ -1869,7 +1927,7 @@ class TestZstdCompression:
                 return super().post(url, content=content, headers=headers)
 
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        app = make_wsgi_app(server, signing_key=b"test-key", compression_level=None)
+        app = make_wsgi_app(server, token_key=b"test-key", compression_level=None)
         test_client = _CapturingClient(app)
 
         with http_connect(RpcFixtureService, client=test_client, compression_level=None) as proxy:
@@ -1933,7 +1991,7 @@ class TestNotFoundHtmlPage:
         """When enable_not_found_page=False, Falcon's default 404 is used."""
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             enable_not_found_page=False,
         )
         resp = c._client.simulate_get("/no/such/path")
@@ -1957,7 +2015,7 @@ class TestLandingPage:
         prefix: str = request.param
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             prefix=prefix,
         )
         yield c
@@ -1977,7 +2035,7 @@ class TestLandingPage:
     def test_server_id_in_landing(self) -> None:
         """Server ID appears in the landing page."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), server_id="test-id-abc")
-        c = make_sync_client(server, signing_key=b"test-key")
+        c = make_sync_client(server, token_key=b"test-key")
         resp = c._client.simulate_get("/")
         assert "test-id-abc" in resp.text
         c.close()
@@ -2004,7 +2062,7 @@ class TestLandingPage:
         """Repo URL appears as a link when provided."""
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             repo_url="https://github.com/example/my-service",
         )
         resp = c._client.simulate_get("/")
@@ -2015,7 +2073,7 @@ class TestLandingPage:
     def test_describe_link_when_enabled(self) -> None:
         """Landing page contains describe link when describe is enabled on server."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
-        c = make_sync_client(server, signing_key=b"test-key")
+        c = make_sync_client(server, token_key=b"test-key")
         resp = c._client.simulate_get("/")
         assert "/describe" in resp.text
         assert "View service API" in resp.text
@@ -2029,7 +2087,7 @@ class TestLandingPage:
     def test_no_describe_link_when_page_disabled(self) -> None:
         """Landing page omits describe link when enable_describe_page=False."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
-        c = make_sync_client(server, signing_key=b"test-key", enable_describe_page=False)
+        c = make_sync_client(server, token_key=b"test-key", enable_describe_page=False)
         resp = c._client.simulate_get("/")
         assert "/describe" not in resp.text
         c.close()
@@ -2038,7 +2096,7 @@ class TestLandingPage:
         """When enable_landing_page=False, GET {prefix} returns non-200."""
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             enable_landing_page=False,
         )
         resp = c._client.simulate_get("/")
@@ -2073,7 +2131,7 @@ class TestDescribeHtmlPage:
     def describe_client(self) -> Iterator[_SyncTestClient]:
         """Client with describe page enabled."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
-        c = make_sync_client(server, signing_key=b"test-key")
+        c = make_sync_client(server, token_key=b"test-key")
         yield c
         c.close()
 
@@ -2135,7 +2193,7 @@ class TestDescribeHtmlPage:
     def test_disabled_via_parameter(self) -> None:
         """When enable_describe_page=False, GET /describe is not served."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
-        c = make_sync_client(server, signing_key=b"test-key", enable_describe_page=False)
+        c = make_sync_client(server, token_key=b"test-key", enable_describe_page=False)
         resp = c._client.simulate_get("/describe")
         # Falls through to {prefix}/{method} route which only has on_post → 405
         assert resp.status_code == 405
@@ -2149,7 +2207,7 @@ class TestDescribeHtmlPage:
     def test_disabled_when_describe_not_enabled(self) -> None:
         """When enable_describe=False on server, GET /describe is not served."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
-        c = make_sync_client(server, signing_key=b"test-key")
+        c = make_sync_client(server, token_key=b"test-key")
         resp = c._client.simulate_get("/describe")
         # Falls through to {prefix}/{method} route which only has on_post → 405
         assert resp.status_code == 405
@@ -2170,7 +2228,7 @@ class TestHealthEndpoint:
         prefix: str = request.param
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             prefix=prefix,
         )
         yield c
@@ -2192,7 +2250,7 @@ class TestHealthEndpoint:
         server = RpcServer(_AuthService, _AuthServiceImpl())
         c = make_sync_client(
             server,
-            signing_key=b"health-test-key",
+            token_key=b"health-test-key",
             authenticate=_test_authenticate,
         )
         # No Authorization header — would normally get 401, but health is exempt
@@ -2206,7 +2264,7 @@ class TestHealthEndpoint:
         """When enable_health_endpoint=False, GET /health is not served."""
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             enable_health_endpoint=False,
         )
         resp = c._client.simulate_get("/health")
@@ -2217,7 +2275,7 @@ class TestHealthEndpoint:
     def test_health_server_id_matches(self) -> None:
         """Health response server_id matches the RpcServer's server_id."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), server_id="abcdef123456")
-        c = make_sync_client(server, signing_key=b"test-key")
+        c = make_sync_client(server, token_key=b"test-key")
         resp = c._client.simulate_get("/health")
         body = resp.json
         assert body["server_id"] == "abcdef123456"
@@ -2338,7 +2396,7 @@ def _build_unary_request(method: str) -> bytes:
 
 def _cookie_app() -> falcon.App[falcon.Request, falcon.Response]:
     """Build a Falcon WSGI app exposing ``_CookieService``."""
-    return make_wsgi_app(RpcServer(_CookieService, _CookieServiceImpl()), signing_key=b"test-key")
+    return make_wsgi_app(RpcServer(_CookieService, _CookieServiceImpl()), token_key=b"test-key")
 
 
 class TestCookiesServerSide:
@@ -2348,7 +2406,7 @@ class TestCookiesServerSide:
         """ctx.cookies surfaces the request's Cookie header values."""
         client = make_sync_client(
             RpcServer(_CookieService, _CookieServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
             default_headers={"Cookie": "sid=abc"},
         )
         with http_connect(_CookieService, client=client) as proxy:
@@ -2359,7 +2417,7 @@ class TestCookiesServerSide:
         """With no Cookie header, ctx.cookies is an empty mapping."""
         client = make_sync_client(
             RpcServer(_CookieService, _CookieServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
         )
         with http_connect(_CookieService, client=client) as proxy:
             assert proxy.whoami_cookie() == ""
@@ -2437,7 +2495,7 @@ class TestCookiesServerSide:
         """Calling ctx.set_cookie from a streaming method surfaces as an RpcError."""
         client = make_sync_client(
             RpcServer(_CookieService, _CookieServiceImpl()),
-            signing_key=b"test-key",
+            token_key=b"test-key",
         )
         with http_connect(_CookieService, client=client) as proxy, pytest.raises(RpcError) as exc_info:
             list(proxy.stream_sets_cookie(count=2))
@@ -2606,7 +2664,7 @@ class TestCookiesRealServer:
         except ImportError:
             pytest.skip("waitress not installed")
 
-        app = make_wsgi_app(RpcServer(_CookieService, _CookieServiceImpl()), signing_key=b"test-key")
+        app = make_wsgi_app(RpcServer(_CookieService, _CookieServiceImpl()), token_key=b"test-key")
 
         # Pick a free port, then hand it to waitress.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

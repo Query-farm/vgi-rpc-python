@@ -75,8 +75,8 @@ These fields appear on HTTP transports only.
 |---|---|---|
 | `http_status` | integer | The HTTP response status code (e.g. 200, 401, 404, 500). |
 | `request_id` | string | Per-request correlation ID. Implementations SHOULD propagate inbound `X-Request-ID` if present, otherwise mint a UUID. |
-| `request_state` | string | Base64 of the inbound state-token bytes on stream continuations (the bytes the client supplied). Absent on `init`. State-token format is implementation-internal and HMAC-signed; consumers MUST treat the decoded bytes as opaque. |
-| `response_state` | string | Base64 of the outbound state-token bytes on stream `init` and continuations that produce a continuation token. Absent on the terminal continuation that closes the stream and on unary calls. |
+| `request_state` | string | Base64 of the **decrypted** stream state's Arrow IPC payload on stream continuations. Absent on `init`. The on-wire token is an opaque AEAD ciphertext; servers MUST log the plaintext state bytes (or an envelope thereof for union-tagged states), not the ciphertext, so log readers can decode the state without holding the server's `token_key`. |
+| `response_state` | string | Base64 of the **decrypted** outbound state's Arrow IPC payload on stream `init` and continuations that produce a continuation token. Absent on the terminal continuation that closes the stream and on unary calls. Symmetric with `request_state`: log readers see plaintext, not the AEAD ciphertext that travels on the wire. |
 
 ### 4.5 Server identity & auth
 

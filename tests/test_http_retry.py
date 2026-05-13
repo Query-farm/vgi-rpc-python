@@ -172,7 +172,7 @@ def real_client() -> Iterator[_SyncTestClient]:
     """Create a sync Falcon test client."""
     c = make_sync_client(
         RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True),
-        signing_key=b"test-key",
+        token_key=b"test-key",
     )
     yield c
     c.close()

@@ -149,7 +149,7 @@ class TestOAuthResourceMetadata:
     def test_well_known_returns_metadata_json(self) -> None:
         """GET /.well-known/oauth-protected-resource returns correct JSON."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA)
         resp = client.get("/.well-known/oauth-protected-resource")
         assert resp.status_code == 200
         body = json.loads(resp.content)
@@ -161,7 +161,7 @@ class TestOAuthResourceMetadata:
     def test_well_known_path_variant(self) -> None:
         """GET /.well-known/oauth-protected-resource/vgi works with prefix."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", prefix="/vgi", oauth_resource_metadata=_METADATA)
+        client = make_sync_client(server, token_key=b"k", prefix="/vgi", oauth_resource_metadata=_METADATA)
         resp = client.get("/.well-known/oauth-protected-resource/vgi")
         assert resp.status_code == 200
         body = json.loads(resp.content)
@@ -213,7 +213,7 @@ class TestOAuthResourceMetadata:
         # No default Authorization header — should still access well-known
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -227,7 +227,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -249,7 +249,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
         )
         resp = client.post(
@@ -264,7 +264,7 @@ class TestOAuthResourceMetadata:
     def test_client_discovery(self) -> None:
         """http_oauth_metadata() discovers server metadata."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA)
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert isinstance(meta, OAuthResourceMetadataResponse)
@@ -276,14 +276,14 @@ class TestOAuthResourceMetadata:
     def test_client_discovery_returns_none_on_404(self) -> None:
         """http_oauth_metadata() returns None when no metadata is configured."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k")
+        client = make_sync_client(server, token_key=b"k")
         meta = http_oauth_metadata(client=client)
         assert meta is None
 
     def test_cache_control_header(self) -> None:
         """Well-known response includes Cache-Control header."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA)
         resp = client.get("/.well-known/oauth-protected-resource")
         assert resp.status_code == 200
         cache = resp.headers.get("cache-control", "")
@@ -292,7 +292,7 @@ class TestOAuthResourceMetadata:
     def test_backwards_compatible(self) -> None:
         """Server without oauth_resource_metadata still works normally."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k")
+        client = make_sync_client(server, token_key=b"k")
         with http_connect(_EchoService, client=client) as svc:
             assert svc.echo(message="hello") == "hello"
 
@@ -326,7 +326,7 @@ class TestOAuthResourceMetadata:
     def test_client_id_in_well_known_json(self) -> None:
         """client_id appears in well-known JSON when set."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_ID)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_ID)
         resp = client.get("/.well-known/oauth-protected-resource")
         body = json.loads(resp.content)
         assert body["client_id"] == "my-client-id"
@@ -338,7 +338,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA_WITH_CLIENT_ID,
         )
@@ -358,7 +358,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -388,7 +388,7 @@ class TestOAuthResourceMetadata:
     def test_client_discovery_round_trip_with_client_id(self) -> None:
         """Client discovers client_id set on server."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_ID)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_ID)
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert meta.client_id == "my-client-id"
@@ -411,7 +411,7 @@ class TestOAuthResourceMetadata:
     def test_client_secret_in_well_known_json(self) -> None:
         """client_secret appears in well-known JSON when set."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET)
         resp = client.get("/.well-known/oauth-protected-resource")
         body = json.loads(resp.content)
         assert body["client_secret"] == "my-client-secret"
@@ -423,7 +423,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET,
         )
@@ -443,7 +443,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -473,7 +473,7 @@ class TestOAuthResourceMetadata:
     def test_client_discovery_round_trip_with_client_secret(self) -> None:
         """Client discovers client_secret set on server."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_CLIENT_SECRET)
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert meta.client_secret == "my-client-secret"
@@ -481,7 +481,7 @@ class TestOAuthResourceMetadata:
     def test_use_id_token_as_bearer_in_well_known_json_when_true(self) -> None:
         """use_id_token_as_bearer appears in well-known JSON when True."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_ID_TOKEN)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_ID_TOKEN)
         resp = client.get("/.well-known/oauth-protected-resource")
         body = json.loads(resp.content)
         assert body["use_id_token_as_bearer"] is True
@@ -498,7 +498,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA_WITH_ID_TOKEN,
         )
@@ -518,7 +518,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -548,7 +548,7 @@ class TestOAuthResourceMetadata:
     def test_client_discovery_round_trip_with_use_id_token_as_bearer(self) -> None:
         """Client discovers use_id_token_as_bearer set on server."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_ID_TOKEN)
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_ID_TOKEN)
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert meta.use_id_token_as_bearer is True
@@ -571,9 +571,7 @@ class TestOAuthResourceMetadata:
     def test_device_code_client_id_in_well_known_json(self) -> None:
         """device_code_client_id appears in well-known JSON when set."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(
-            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID
-        )
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID)
         resp = client.get("/.well-known/oauth-protected-resource")
         body = json.loads(resp.content)
         assert body["device_code_client_id"] == "device-client-id"
@@ -585,7 +583,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID,
         )
@@ -605,7 +603,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -635,9 +633,7 @@ class TestOAuthResourceMetadata:
     def test_client_discovery_round_trip_with_device_code_client_id(self) -> None:
         """Client discovers device_code_client_id set on server."""
         server = RpcServer(_EchoService, _EchoImpl())
-        client = make_sync_client(
-            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID
-        )
+        client = make_sync_client(server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_ID)
         meta = http_oauth_metadata(client=client)
         assert meta is not None
         assert meta.device_code_client_id == "device-client-id"
@@ -661,7 +657,7 @@ class TestOAuthResourceMetadata:
         """device_code_client_secret appears in well-known JSON when set."""
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
-            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET
+            server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET
         )
         resp = client.get("/.well-known/oauth-protected-resource")
         body = json.loads(resp.content)
@@ -674,7 +670,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET,
         )
@@ -694,7 +690,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -725,7 +721,7 @@ class TestOAuthResourceMetadata:
         """Client discovers device_code_client_secret set on server."""
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
-            server, signing_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET
+            server, token_key=b"k", oauth_resource_metadata=_METADATA_WITH_DEVICE_CODE_CLIENT_SECRET
         )
         meta = http_oauth_metadata(client=client)
         assert meta is not None
@@ -738,7 +734,7 @@ class TestOAuthResourceMetadata:
         server = RpcServer(_EchoService, _EchoImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             oauth_resource_metadata=_METADATA,
         )
@@ -873,7 +869,7 @@ class TestJwtAuthenticate:
         server = RpcServer(_IdentityService, _IdentityImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             default_headers={"Authorization": f"Bearer {token}"},
             oauth_resource_metadata=_METADATA,

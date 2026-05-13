@@ -26,7 +26,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = RpcServer(ConformanceService, ConformanceServiceImpl())
-    app = make_wsgi_app(server, signing_key=bytes.fromhex(args.key))
+    app = make_wsgi_app(server, token_key=bytes.fromhex(args.key))
 
     print(f"PORT:{args.port}", flush=True)
     waitress.serve(app, host="127.0.0.1", port=args.port, _quiet=True)

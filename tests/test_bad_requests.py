@@ -39,7 +39,7 @@ _CT = {"Content-Type": _ARROW_CONTENT_TYPE}
 @pytest.fixture
 def client() -> Iterator[_SyncTestClient]:
     """Create a sync Falcon test client."""
-    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), signing_key=b"test-key")
+    c = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), token_key=b"test-key")
     yield c
     c.close()
 

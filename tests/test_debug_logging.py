@@ -308,7 +308,7 @@ class TestDebugLoggingHttp:
         from vgi_rpc.rpc import RpcServer
 
         server = RpcServer(_DebugProtocol, _DebugImpl())
-        client = make_sync_client(server, signing_key=b"test-key")
+        client = make_sync_client(server, token_key=b"test-key")
 
         with caplog.at_level(logging.DEBUG, logger="vgi_rpc.wire"), http_connect(_DebugProtocol, client=client) as svc:
             result = svc.add(a=1.0, b=2.0)
@@ -325,7 +325,7 @@ class TestDebugLoggingHttp:
         from vgi_rpc.rpc import RpcServer
 
         server = RpcServer(_DebugProtocol, _DebugImpl())
-        client = make_sync_client(server, signing_key=b"test-key")
+        client = make_sync_client(server, token_key=b"test-key")
 
         with caplog.at_level(logging.DEBUG, logger="vgi_rpc.wire"), http_connect(_DebugProtocol, client=client) as svc:
             batches = list(svc.count(n=2))

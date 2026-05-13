@@ -621,32 +621,72 @@ exposing it to application code.
 
 ### State token binary format
 
-The state token is an opaque signed blob, base64-encoded for UTF-8 safe
-metadata storage. After base64-decoding, the binary wire format (v2) is:
+The state token is an opaque AEAD-sealed blob, base64-encoded for UTF-8
+safe metadata storage. The envelope is XChaCha20-Poly1305 (libsodium
+IETF variant) — confidential (state is not visible to anything between
+client and server) and authenticated (any tampering, including
+cross-principal replay, fails decryption).
+
+After base64-decoding, the wire layout (v4) is:
 
 ```
 Offset      Size     Field
-0           1        version: uint8 (currently 2)
-1           8        created_at: uint64 LE (seconds since Unix epoch)
-9           4        state_len: uint32 LE
-13          N        state_bytes: Arrow IPC stream of the StreamState dataclass
-13+N        4        schema_len: uint32 LE
-17+N        M        schema_bytes: serialized output pa.Schema
-17+N+M      4        input_schema_len: uint32 LE
-21+N+M      P        input_schema_bytes: serialized input pa.Schema
-21+N+M+P    32       HMAC-SHA256(signing_key, all preceding bytes)
+0           1        version: uint8 (currently 4)
+1           24       nonce: random per-token (XChaCha20-Poly1305 NPUB)
+25          ...      ciphertext: AEAD(plaintext, AAD) — includes the 16-byte
+                     Poly1305 tag at the end
 ```
 
-- **`created_at`**: Token creation time as seconds since the Unix epoch. Used by the server to enforce a configurable TTL (`token_ttl`). When `token_ttl > 0`, tokens older than `token_ttl` seconds are rejected with HTTP 400 ("State token expired"). Set `token_ttl` to `0` to disable expiry checking. The default TTL is 3600 seconds (1 hour).
-- **`state_bytes`**: The stream state dataclass serialized as a complete Arrow IPC stream (schema + 1-row batch + EOS).
-- **`schema_bytes`**: The output Arrow schema serialized via `pa.Schema.serialize()`.
-- **`input_schema_bytes`**: The input Arrow schema serialized via `pa.Schema.serialize()`. For producer streams, this is the serialized empty schema.
-- **HMAC**: SHA-256 HMAC over the entire payload (version byte through input_schema_bytes), using the server's signing key.
+The plaintext (encrypted, never on the wire) is laid out as:
 
-**Verification order**: The HMAC MUST be verified **before** inspecting any
-payload fields (including the version byte and timestamp) to prevent
-information leakage. TTL enforcement happens **after** HMAC verification
-and version check.
+```
+Offset      Size     Field
+0           8        created_at: uint64 LE (seconds since Unix epoch)
+8           4        state_len: uint32 LE
+12          N        state_bytes: Arrow IPC stream of the StreamState dataclass
+12+N        4        schema_len: uint32 LE
+16+N        M        schema_bytes: serialized output pa.Schema
+16+N+M      4        input_schema_len: uint32 LE
+20+N+M      P        input_schema_bytes: serialized input pa.Schema
+20+N+M+P    4        stream_id_len: uint32 LE
+24+N+M+P    Q        stream_id_bytes: UTF-8 chain-correlation id
+```
+
+The AEAD AAD (authenticated, not encrypted) is:
+
+```
+b"vgi_rpc.state.v4\x00" || identity_tail
+```
+
+where `identity_tail` is `b"\x01" || domain || b"\x00" || principal` for
+authenticated requests and the literal `b"\x00anonymous"` otherwise.
+This binds every token to its issuing identity: a token sealed for one
+principal cannot be opened with another principal's AAD even if both
+share the master `token_key`.
+
+- **`version`**: Format selector. Not part of the AAD; mismatches are
+  rejected before doing crypto work, but tampering with the byte to
+  point at a different algorithm still fails the subsequent decrypt
+  because the server uses the format-fixed algorithm constants.
+- **`created_at`**: Token creation time as seconds since the Unix epoch.
+  Used by the server to enforce a configurable TTL (`token_ttl`). When
+  `token_ttl > 0`, tokens older than `token_ttl` seconds are rejected
+  with HTTP 400 ("State token expired"). Set `token_ttl` to `0` to
+  disable expiry checking. The default TTL is 3600 seconds (1 hour).
+- **`state_bytes`**: The stream state dataclass serialized as a complete
+  Arrow IPC stream (schema + 1-row batch + EOS).
+- **`schema_bytes`**: The output Arrow schema serialized via
+  `pa.Schema.serialize()`.
+- **`input_schema_bytes`**: The input Arrow schema serialized via
+  `pa.Schema.serialize()`. For producer streams, this is the serialized
+  empty schema.
+
+**Verification order**: The version byte is checked first (cheap
+rejection), then the AEAD `decrypt` is attempted. Any authenticity
+failure (bad key, bad AAD, tampered nonce or ciphertext) surfaces as a
+uniform HTTP 400 "State token signature verification failed". TTL
+enforcement only runs after authenticity is established — the timestamp
+is inside the ciphertext, so it cannot be tampered with independently.
 
 ### Authentication (HTTP)
 

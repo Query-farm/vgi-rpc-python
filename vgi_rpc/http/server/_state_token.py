@@ -1,19 +1,24 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""Signed state token helpers for the HTTP streaming protocol.
+"""Encrypted state token helpers for the HTTP streaming protocol.
 
 Streaming is stateless on the wire: each exchange carries the serialized
-``StreamState`` inside an HMAC-signed token in Arrow custom metadata.
-This module handles packing, unpacking, and resolving the concrete
-``StreamState`` subclass from server introspection.
+``StreamState`` inside an authenticated-encrypted (AEAD) token in Arrow
+custom metadata. Tokens are sealed with XChaCha20-Poly1305 — confidential
+(state bytes are opaque to anything between client and server) and
+authenticated (tampering or cross-principal replay fails decryption).
+
+The single master ``token_key`` is paired with per-token random nonces;
+``(domain, principal)`` is carried in AAD so a token minted for one user
+cannot be replayed by another.  Plaintext payload framing lives entirely
+inside the ciphertext, including the creation timestamp.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import struct
 import time
 import types as _types
@@ -21,86 +26,114 @@ from http import HTTPStatus
 from typing import get_args, get_origin, get_type_hints
 
 import pyarrow as pa
+from nacl import bindings as _nacl
+from nacl.exceptions import CryptoError
 
 from vgi_rpc.rpc import AuthContext, MethodType, RpcServer, Stream, StreamState
 
 from .._common import _RpcHttpError
 
+# Algorithm constants (XChaCha20-Poly1305 IETF).
+_KEY_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_KEYBYTES  # 32
+_NONCE_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES  # 24
+_TAG_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_ABYTES  # 16
 
-def _derive_signing_key(signing_key: bytes, auth: AuthContext | None) -> bytes:
-    """Derive a per-principal signing key for stream state tokens.
+_HEADER_LEN = 4  # uint32 LE prefix for each plaintext segment
+_TOKEN_VERSION = 4  # bump when the token wire format changes (v4: AEAD encrypted)
+_TOKEN_VERSION_LEN = 1  # single byte
+_TIMESTAMP_LEN = 8  # uint64 LE, seconds since epoch (inside ciphertext)
+_MIN_PLAINTEXT_LEN = _TIMESTAMP_LEN + _HEADER_LEN * 4  # version-byte + nonce + tag carried separately
+_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _NONCE_LEN + _TAG_LEN  # an empty ciphertext would still need this
 
-    Binds the effective HMAC key to the authenticated identity so a state
-    token issued to one user cannot be replayed by another user who has
-    obtained a copy of the opaque token. Unauthenticated requests share a
-    common ``anonymous`` derivation — there is no identity to cross, so
-    this preserves the pre-existing behavior for the pipe/anonymous path.
+
+def _normalize_key(token_key: bytes) -> bytes:
+    """Stretch or compress the operator-supplied key to the AEAD key length.
+
+    XChaCha20-Poly1305 requires exactly 32 bytes; operators may supply
+    keys of any length (including the random 32-byte default produced
+    by ``os.urandom(32)``).  Hashing through SHA-256 yields a 32-byte
+    pseudo-random key for any input — collision-resistant, deterministic,
+    and indistinguishable from a directly-supplied 32-byte key from the
+    point of view of an attacker who never sees the operator's input.
+    """
+    if len(token_key) == _KEY_LEN:
+        return token_key
+    return hashlib.sha256(token_key).digest()
+
+
+def _compute_aad(auth: AuthContext | None) -> bytes:
+    r"""Build the AAD that binds a state token to its issuing principal.
+
+    Wire format::
+
+        b"vgi_rpc.state.v4\x00" || domain_bytes || b"\x00" || principal_bytes
+
+    For anonymous requests, the identity tail is the literal
+    ``b"\x00anonymous"`` — matching the convention used elsewhere in the
+    framework.  Including the version-tagged prefix prevents AAD reuse if
+    the token format ever changes; the leading prefix is fixed-length and
+    therefore prefix-unambiguous with respect to the variable-length
+    identity tail.
 
     Args:
-        signing_key: The master HMAC key configured on the server.
         auth: The authentication context for the current request.
 
     Returns:
-        A 32-byte derived key specific to ``(domain, principal)``.
+        Associated-data bytes for the AEAD seal/open call.
 
     """
+    prefix = b"vgi_rpc.state.v4\x00"
     if auth is None or not auth.authenticated:
-        identity = b"\x00anonymous"
-    else:
-        domain = (auth.domain or "").encode()
-        principal = (auth.principal or "").encode()
-        identity = b"\x01" + domain + b"\x00" + principal
-    return hmac.new(signing_key, b"vgi_rpc.stream_state:" + identity, hashlib.sha256).digest()
+        return prefix + b"\x00anonymous"
+    domain = (auth.domain or "").encode()
+    principal = (auth.principal or "").encode()
+    return prefix + b"\x01" + domain + b"\x00" + principal
 
 
-_HMAC_LEN = 32  # SHA-256 digest size
-_HEADER_LEN = 4  # uint32 LE prefix for each segment
-_TOKEN_VERSION = 3  # bump when the token wire format changes (v3: added stream_id)
-_TOKEN_VERSION_LEN = 1  # single byte
-_TIMESTAMP_LEN = 8  # uint64 LE, seconds since epoch
-_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _TIMESTAMP_LEN + _HEADER_LEN * 4 + _HMAC_LEN
-
-
-def _pack_state_token(
+def _seal_state_token(
     state_bytes: bytes,
     schema_bytes: bytes,
     input_schema_bytes: bytes,
-    signing_key: bytes,
+    token_key: bytes,
+    aad: bytes,
     created_at: int,
     stream_id: str = "",
 ) -> bytes:
-    """Pack state, output schema, input schema, and stream_id into a signed token.
+    """Seal state, schemas, and stream_id into an AEAD-encrypted token.
 
-    Wire format (v3)::
+    Wire format (v4)::
 
-        [1 byte:  version=3          (uint8)]
-        [8 bytes: created_at         (uint64 LE, seconds since epoch)]
-        [4 bytes: state_len          (uint32 LE)]
-        [state_len bytes: state_bytes]
-        [4 bytes: schema_len         (uint32 LE)]
-        [schema_len bytes: schema_bytes]
-        [4 bytes: input_schema_len   (uint32 LE)]
-        [input_schema_len bytes: input_schema_bytes]
-        [4 bytes: stream_id_len      (uint32 LE)]
-        [stream_id_len bytes: stream_id_bytes (UTF-8)]
-        [32 bytes: HMAC-SHA256(key, all above)]
+        version=4 (1B) || nonce (24B) || ciphertext+tag
+
+    Plaintext (encrypted before transport)::
+
+        [8 bytes : created_at  (uint64 LE, seconds since epoch)]
+        [4 bytes : state_len   (uint32 LE)] [state_bytes]
+        [4 bytes : schema_len  (uint32 LE)] [schema_bytes]
+        [4 bytes : input_len   (uint32 LE)] [input_schema_bytes]
+        [4 bytes : sid_len     (uint32 LE)] [stream_id_bytes  (UTF-8)]
+
+    The token's ``version`` byte is not authenticated as AAD — it acts
+    purely as a format selector; a tampered version byte still fails
+    decryption because we use the matching algorithm constant on the
+    decrypt path.
 
     Args:
-        state_bytes: Serialized state (Arrow IPC).
+        state_bytes: Serialized state (Arrow IPC or tagged union envelope).
         schema_bytes: Serialized output ``pa.Schema``.
         input_schema_bytes: Serialized input ``pa.Schema``.
-        signing_key: HMAC signing key.
+        token_key: 32-byte master AEAD key.
+        aad: Associated data binding the token to its principal.
         created_at: Token creation time as seconds since epoch.
-        stream_id: Stream correlation ID (hex UUID).
+        stream_id: Stream correlation ID (hex UUID), empty for legacy paths.
 
     Returns:
-        The opaque signed token, base64-encoded for UTF-8 safe metadata.
+        The opaque sealed token, base64-encoded for UTF-8 safe metadata.
 
     """
     stream_id_bytes = stream_id.encode()
-    payload = (
-        struct.pack("B", _TOKEN_VERSION)
-        + struct.pack("<Q", created_at)
+    plaintext = (
+        struct.pack("<Q", created_at)
         + struct.pack("<I", len(state_bytes))
         + state_bytes
         + struct.pack("<I", len(schema_bytes))
@@ -110,16 +143,25 @@ def _pack_state_token(
         + struct.pack("<I", len(stream_id_bytes))
         + stream_id_bytes
     )
-    mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
-    return base64.b64encode(payload + mac)
+    nonce = _nacl.randombytes(_NONCE_LEN)
+    ciphertext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_encrypt(
+        plaintext, aad, nonce, _normalize_key(token_key)
+    )
+    return base64.b64encode(struct.pack("B", _TOKEN_VERSION) + nonce + ciphertext)
 
 
-def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) -> tuple[bytes, bytes, bytes, str]:
-    """Unpack and verify a signed state token.
+def _open_state_token(
+    token: bytes,
+    token_key: bytes,
+    aad: bytes,
+    token_ttl: int = 0,
+) -> tuple[bytes, bytes, bytes, str]:
+    """Open and verify an AEAD state token.
 
     Args:
-        token: The opaque token produced by ``_pack_state_token``.
-        signing_key: HMAC signing key (must match the one used to pack).
+        token: The opaque token produced by ``_seal_state_token``.
+        token_key: 32-byte master AEAD key (must match the one used to seal).
+        aad: Associated data — must match the AAD used at seal time.
         token_ttl: Maximum token age in seconds.  ``0`` disables expiry
             checking.
 
@@ -127,7 +169,10 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
         ``(state_bytes, schema_bytes, input_schema_bytes, stream_id)``
 
     Raises:
-        _RpcHttpError: On malformed, tampered, or expired tokens (HTTP 400).
+        _RpcHttpError: On malformed, tampered, expired, or cross-principal
+            tokens (HTTP 400).  The underlying ``CryptoError`` is caught
+            and re-raised so we do not leak nacl exception types to the
+            wire.
 
     """
     try:
@@ -144,6 +189,37 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
             status_code=HTTPStatus.BAD_REQUEST,
         )
 
+    # Cheap version-byte rejection before doing crypto work.  The version
+    # byte is informational (not AAD); if it disagrees with our format we
+    # know decryption with the v4 algorithm cannot succeed.
+    version = token[0]
+    if version != _TOKEN_VERSION:
+        raise _RpcHttpError(
+            RuntimeError(f"Unsupported state token version {version} (expected {_TOKEN_VERSION})"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    nonce = token[_TOKEN_VERSION_LEN : _TOKEN_VERSION_LEN + _NONCE_LEN]
+    ciphertext = token[_TOKEN_VERSION_LEN + _NONCE_LEN :]
+    try:
+        plaintext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_decrypt(
+            ciphertext, aad, nonce, _normalize_key(token_key)
+        )
+    except CryptoError as exc:
+        # Map every authenticity failure (bad tag, wrong key, wrong AAD —
+        # i.e. cross-principal replay) to a single uniform 400 so callers
+        # cannot distinguish failure modes via timing or message.
+        raise _RpcHttpError(
+            RuntimeError("State token signature verification failed"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        ) from exc
+
+    if len(plaintext) < _MIN_PLAINTEXT_LEN:
+        raise _RpcHttpError(
+            RuntimeError("Malformed state token"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
     def _read_segment(data: bytes, pos: int) -> tuple[bytes, int]:
         if pos + _HEADER_LEN > len(data):
             raise _RpcHttpError(RuntimeError("Malformed state token"), status_code=HTTPStatus.BAD_REQUEST)
@@ -153,39 +229,21 @@ def _unpack_state_token(token: bytes, signing_key: bytes, token_ttl: int = 0) ->
             raise _RpcHttpError(RuntimeError("Malformed state token"), status_code=HTTPStatus.BAD_REQUEST)
         return data[pos + _HEADER_LEN : seg_end], seg_end
 
-    segments_start = _TOKEN_VERSION_LEN + _TIMESTAMP_LEN
-    state_bytes, pos = _read_segment(token, segments_start)
-    schema_bytes, pos = _read_segment(token, pos)
-    input_schema_bytes, pos = _read_segment(token, pos)
-    stream_id_bytes, payload_end = _read_segment(token, pos)
+    state_bytes, pos = _read_segment(plaintext, _TIMESTAMP_LEN)
+    schema_bytes, pos = _read_segment(plaintext, pos)
+    input_schema_bytes, pos = _read_segment(plaintext, pos)
+    stream_id_bytes, payload_end = _read_segment(plaintext, pos)
 
-    if payload_end + _HMAC_LEN != len(token):
+    if payload_end != len(plaintext):
         raise _RpcHttpError(
             RuntimeError("Malformed state token"),
             status_code=HTTPStatus.BAD_REQUEST,
         )
 
-    # Verify HMAC before inspecting any payload fields (including version)
-    # to avoid leaking information about the token format to unauthenticated callers.
-    payload = token[:payload_end]
-    received_mac = token[payload_end:]
-    expected_mac = hmac.new(signing_key, payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(received_mac, expected_mac):
-        raise _RpcHttpError(
-            RuntimeError("State token signature verification failed"),
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
-
-    version = token[0]
-    if version != _TOKEN_VERSION:
-        raise _RpcHttpError(
-            RuntimeError(f"Unsupported state token version {version} (expected {_TOKEN_VERSION})"),
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
-
-    # Enforce token TTL when configured
+    # TTL check runs after authenticity is established — the timestamp is
+    # inside the ciphertext so it cannot be tampered with independently.
     if token_ttl > 0:
-        created_at = struct.unpack_from("<Q", token, _TOKEN_VERSION_LEN)[0]
+        created_at = struct.unpack_from("<Q", plaintext, 0)[0]
         if int(time.time()) - created_at > token_ttl:
             raise _RpcHttpError(
                 RuntimeError("State token expired"),
@@ -208,13 +266,13 @@ def _mint_continuation_token(
     state_info: _StateInfo,
     output_schema: pa.Schema,
     input_schema: pa.Schema,
-    signing_key: bytes,
+    token_key: bytes,
     auth: AuthContext | None,
     stream_id: str,
     *,
     now: int | None = None,
 ) -> tuple[bytes, bytes]:
-    """Serialize state + schemas + stream_id into a signed continuation token.
+    """Serialize state + schemas + stream_id into an encrypted continuation token.
 
     Centralises the per-turn token packaging shared by:
 
@@ -230,8 +288,8 @@ def _mint_continuation_token(
             :func:`_serialize_state_bytes` to pick the wire format.
         output_schema: Per-stream output schema (frozen at init).
         input_schema: Per-stream input schema (frozen at init).
-        signing_key: Master HMAC key from the server config.
-        auth: Authenticated identity for per-principal key derivation.
+        token_key: Master AEAD key from the server config.
+        auth: Authenticated identity for AAD binding.
         stream_id: Chain-correlation id; threaded through every turn so
             access-log and tracing observers can correlate continuations.
         now: Override for the timestamp baked into the token; default is
@@ -239,20 +297,22 @@ def _mint_continuation_token(
             reference point.
 
     Returns:
-        ``(token, state_bytes)`` — the signed token (suitable for the
-        ``vgi_rpc.stream_state#b64`` metadata key) and the raw state
-        bytes (passed separately to the access log's ``response_state``
-        field; the token itself is opaque/HMAC-protected).
+        ``(token, state_bytes)`` — the sealed token (suitable for the
+        ``vgi_rpc.stream_state#b64`` metadata key) and the raw plaintext
+        state bytes (passed separately to the access log's
+        ``response_state`` field so the on-disk record stores decrypted
+        state regardless of how the wire envelope evolves).
 
     """
     state_bytes = _serialize_state_bytes(state, state_info)
     schema_bytes = output_schema.serialize().to_pybytes()
     input_schema_bytes = input_schema.serialize().to_pybytes()
-    token = _pack_state_token(
+    token = _seal_state_token(
         state_bytes,
         schema_bytes,
         input_schema_bytes,
-        _derive_signing_key(signing_key, auth),
+        token_key,
+        _compute_aad(auth),
         int(time.time()) if now is None else now,
         stream_id=stream_id,
     )

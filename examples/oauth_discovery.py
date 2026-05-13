@@ -125,7 +125,7 @@ def main() -> None:
 
     client = make_sync_client(
         server,
-        signing_key=b"example-oauth-key",
+        token_key=b"example-oauth-key",
         authenticate=_local_authenticate,
         default_headers={"Authorization": f"Bearer {token}"},
         oauth_resource_metadata=metadata,

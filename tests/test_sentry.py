@@ -943,7 +943,7 @@ class TestHttpSentry:
         mock_sdk.get_current_scope.return_value = mock_scope
         server = RpcServer(SentryTestService, SentryTestServiceImpl(), server_id="http-sentry")
         config = SentryConfig()
-        client = make_sync_client(server, signing_key=b"test-key", sentry_config=config)
+        client = make_sync_client(server, token_key=b"test-key", sentry_config=config)
         with http_connect(SentryTestService, "http://test", client=client) as proxy:
             result = proxy.add(a=10, b=20)
             assert result == 30
@@ -955,7 +955,7 @@ class TestHttpSentry:
         mock_sdk.get_current_scope.return_value = MagicMock()
         server = RpcServer(SentryTestService, SentryTestServiceImpl())
         config = SentryConfig()
-        client = make_sync_client(server, signing_key=b"test-key", sentry_config=config)
+        client = make_sync_client(server, token_key=b"test-key", sentry_config=config)
         with (
             http_connect(SentryTestService, "http://test", client=client) as proxy,
             pytest.raises(Exception, match="intentional error"),

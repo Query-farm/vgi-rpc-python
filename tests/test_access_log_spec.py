@@ -297,7 +297,7 @@ class TestLiveCapture:
 
         def run() -> None:
             server = RpcServer(_Svc, _Impl(), protocol_version="1.2.3")
-            client = make_sync_client(server, signing_key=b"test-key")
+            client = make_sync_client(server, token_key=b"test-key")
             try:
                 with http_connect(_Svc, client=client) as proxy:
                     proxy.greet(name="World")

@@ -91,7 +91,7 @@ def make_sync_client(
     server: RpcServer,
     *,
     prefix: str = "",
-    signing_key: bytes | None = None,
+    token_key: bytes | None = None,
     max_response_bytes: int | None = None,
     max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
@@ -118,7 +118,7 @@ def make_sync_client(
     Args:
         server: The RpcServer to test.
         prefix: URL prefix for RPC endpoints (default ``""`` — root).
-        signing_key: HMAC key for signing state tokens (see
+        token_key: AEAD key for sealing stream state tokens (see
             ``make_wsgi_app`` for details).
         max_response_bytes: See ``make_wsgi_app``.
         max_externalized_response_bytes: See ``make_wsgi_app``.
@@ -147,7 +147,7 @@ def make_sync_client(
     app = make_wsgi_app(
         server,
         prefix=prefix,
-        signing_key=signing_key,
+        token_key=token_key,
         max_response_bytes=max_response_bytes,
         max_externalized_response_bytes=max_externalized_response_bytes,
         max_stream_response_bytes=max_stream_response_bytes,

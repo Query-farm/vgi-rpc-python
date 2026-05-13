@@ -384,7 +384,7 @@ class TestHttpStats:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_StatsService, _StatsServiceImpl())
-        client = make_sync_client(server, signing_key=b"testtesttesttesttesttesttesttest")
+        client = make_sync_client(server, token_key=b"testtesttesttesttesttesttesttest")
 
         with (
             caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"),
@@ -405,7 +405,7 @@ class TestHttpStats:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_StatsService, _StatsServiceImpl())
-        client = make_sync_client(server, signing_key=b"testtesttesttesttesttesttesttest")
+        client = make_sync_client(server, token_key=b"testtesttesttesttesttesttesttest")
 
         with (
             caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"),
@@ -425,7 +425,7 @@ class TestHttpStats:
         from vgi_rpc.http import http_introspect, make_sync_client
 
         server = RpcServer(_StatsService, _StatsServiceImpl(), enable_describe=True)
-        client = make_sync_client(server, signing_key=b"testtesttesttesttesttesttesttest")
+        client = make_sync_client(server, token_key=b"testtesttesttesttesttesttesttest")
 
         with caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"):
             desc = http_introspect("http://test", client=client)
@@ -442,7 +442,7 @@ class TestHttpStats:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_StatsService, _StatsServiceImpl())
-        client = make_sync_client(server, signing_key=b"testtesttesttesttesttesttesttest")
+        client = make_sync_client(server, token_key=b"testtesttesttesttesttesttesttest")
 
         with (
             caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"),
@@ -474,7 +474,7 @@ class TestHttpStats:
         # Small max to force continuation
         client = make_sync_client(
             server,
-            signing_key=b"testtesttesttesttesttesttesttest",
+            token_key=b"testtesttesttesttesttesttesttest",
             max_response_bytes=1,
         )
 

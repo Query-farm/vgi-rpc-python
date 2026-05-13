@@ -473,7 +473,7 @@ class TestIntrospectPipe:
 def describe_http_client() -> Iterator[_SyncTestClient]:
     """Create a sync HTTP client with introspection enabled."""
     server = RpcServer(_TestProto, _TestProtoImpl(), enable_describe=True)
-    c = make_sync_client(server, signing_key=b"test-key")
+    c = make_sync_client(server, token_key=b"test-key")
     yield c
     c.close()
 
@@ -482,7 +482,7 @@ def describe_http_client() -> Iterator[_SyncTestClient]:
 def describe_http_client_disabled() -> Iterator[_SyncTestClient]:
     """Create a sync HTTP client with introspection disabled."""
     server = RpcServer(_TestProto, _TestProtoImpl(), enable_describe=False)
-    c = make_sync_client(server, signing_key=b"test-key")
+    c = make_sync_client(server, token_key=b"test-key")
     yield c
     c.close()
 
@@ -519,7 +519,7 @@ class TestHttpIntrospect:
             raise ValueError("Unauthorized")
 
         server = RpcServer(_TestProto, _TestProtoImpl(), enable_describe=True)
-        c = make_sync_client(server, signing_key=b"test-key", authenticate=_authenticate)
+        c = make_sync_client(server, token_key=b"test-key", authenticate=_authenticate)
         try:
             with pytest.raises(RpcError, match="AuthenticationError"):
                 http_introspect(client=c)
@@ -529,7 +529,7 @@ class TestHttpIntrospect:
     def test_with_fixture_service(self) -> None:
         """HTTP introspection works with the full RpcFixtureService."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
-        c = make_sync_client(server, signing_key=b"test-key")
+        c = make_sync_client(server, token_key=b"test-key")
         try:
             desc = http_introspect(client=c)
             assert desc.protocol_name == "RpcFixtureService"

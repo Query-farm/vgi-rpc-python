@@ -63,7 +63,7 @@ def make_wsgi_app(
     server: RpcServer,
     *,
     prefix: str = "",
-    signing_key: bytes | None = None,
+    token_key: bytes | None = None,
     max_response_bytes: int | None = None,
     max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
@@ -89,11 +89,12 @@ def make_wsgi_app(
     Args:
         server: The RpcServer instance to serve.
         prefix: URL prefix for all RPC endpoints (default ``""`` — root).
-        signing_key: HMAC key for signing state tokens.  When ``None``
-            (the default), a random 32-byte key is generated **per process**.
-            This means state tokens issued by one worker are invalid in
-            another — you **must** provide a shared key for multi-process
-            deployments (e.g. gunicorn with multiple workers).
+        token_key: AEAD (XChaCha20-Poly1305) master key for sealing stream
+            state tokens.  When ``None`` (the default), a random 32-byte
+            key is generated **per process**.  This means state tokens
+            issued by one worker are invalid in another — you **must**
+            provide a shared key for multi-process deployments (e.g.
+            gunicorn with multiple workers).
         max_response_bytes: HTTP body cap.  Measured against the on-wire
             body size only (``resp_buf.tell()``); externalised payloads
             are governed by the separate ``max_externalized_response_bytes``
@@ -207,14 +208,14 @@ def make_wsgi_app(
         )
         max_response_bytes = max_stream_response_bytes
 
-    if signing_key is None:
+    if token_key is None:
         warnings.warn(
-            "No signing_key provided; generating a random per-process key. "
+            "No token_key provided; generating a random per-process AEAD key. "
             "State tokens will be invalid across workers — pass a shared key "
             "for multi-process deployments.",
             stacklevel=2,
         )
-        signing_key = os.urandom(32)
+        token_key = os.urandom(32)
     # OpenTelemetry instrumentation (optional)
     if otel_config is not None:
         from vgi_rpc.otel import OtelConfig, _OtelFalconMiddleware, instrument_server
@@ -233,7 +234,7 @@ def make_wsgi_app(
 
     app_handler = _HttpRpcApp(
         server,
-        signing_key,
+        token_key,
         max_response_bytes,
         max_request_bytes,
         upload_url_provider,
@@ -361,7 +362,7 @@ def make_wsgi_app(
 
         _pkce_issuer = _validated_oauth_metadata.authorization_servers[0]
         _pkce_oidc_discovery = _create_oidc_discovery(_pkce_issuer)
-        _pkce_session_key = _derive_session_key(signing_key)
+        _pkce_session_key = _derive_session_key(token_key)
         _pkce_resource_parsed = _urlparse(_validated_oauth_metadata.resource)
         _pkce_secure = _pkce_resource_parsed.scheme == "https"
         _pkce_redirect_uri = f"{_pkce_resource_parsed.scheme}://{_pkce_resource_parsed.netloc}{prefix}/_oauth/callback"

@@ -203,7 +203,7 @@ class TestMtlsAuthenticate:
         server = RpcServer(_IdentityService, _IdentityImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=auth_fn,
             default_headers={"X-SSL-Client-Cert": _cert_to_header(cert)},
         )
@@ -528,7 +528,7 @@ class TestMtlsWithChain:
         server = RpcServer(_IdentityService, _IdentityImpl())
         client = make_sync_client(
             server,
-            signing_key=b"k",
+            token_key=b"k",
             authenticate=chain,
             default_headers={"X-SSL-Client-Cert": _cert_to_header(cert)},
         )

@@ -382,7 +382,7 @@ def _make_test_app(
     app = make_wsgi_app(
         server,
         prefix=prefix,
-        signing_key=_SIGNING_KEY,
+        token_key=_SIGNING_KEY,
         authenticate=authenticate,
         oauth_resource_metadata=oauth_metadata,
         compression_level=None,

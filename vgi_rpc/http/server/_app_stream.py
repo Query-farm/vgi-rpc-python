@@ -60,11 +60,11 @@ from vgi_rpc.utils import ValidatedReader, empty_batch
 from .._common import _RpcHttpError
 from ._responses import _current_response_status, _enforce_response_budgets
 from ._state_token import (
-    _derive_signing_key,
+    _compute_aad,
     _mint_continuation_token,
+    _open_state_token,
     _resolve_state_cls,
     _StateInfo,
-    _unpack_state_token,
 )
 
 if TYPE_CHECKING:
@@ -356,7 +356,7 @@ def _run_http_exchange_init(
             state_info,
             output_schema,
             input_schema,
-            app._signing_key,
+            app._token_key,
             auth,
             stream_id,
         )
@@ -434,12 +434,18 @@ def _run_stream_exchange_sync(
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
-        # Resolve auth up front: the state token is signed with a key derived
-        # from the caller's identity, so we need auth to verify it.
+        # Resolve auth up front: the state token's AAD is bound to the
+        # caller's identity, so we need auth to open it.
         auth, transport_metadata = _get_auth_and_metadata()
 
-        # Unpack and verify the signed token, recover state + schema + input_schema
-        state_obj, output_schema, input_schema, stream_id = _unpack_and_recover_state(app, token, state_info, auth)
+        # Open and verify the AEAD token, recover state + schemas + plaintext bytes.
+        (
+            state_obj,
+            output_schema,
+            input_schema,
+            stream_id,
+            request_state_bytes,
+        ) = _unpack_and_recover_state(app, token, state_info, auth)
 
         is_producer = input_schema == _EMPTY_SCHEMA
 
@@ -458,9 +464,9 @@ def _run_stream_exchange_sync(
         # telemetry shell deliberately, not because info is missing.
         info = app._server.methods.get(method_name)
 
-        # Token comes from Arrow custom-metadata (always ``bytes``) and we
-        # already rejected the None case above, so no defensive coercion.
-        request_state_bytes = token
+        # ``request_state_bytes`` holds the *decrypted plaintext* state — so
+        # the access log records a useful audit artifact (and not the
+        # opaque AEAD ciphertext the client supplied on the wire).
 
         if cancel_flag:
             # Cancel is not a method dispatch — pass info=None to suppress
@@ -646,7 +652,7 @@ def _run_http_exchange_turn(
             state_info,
             output_schema,
             input_schema,
-            app._signing_key,
+            app._token_key,
             auth,
             stream_id,
         )
@@ -892,7 +898,7 @@ def _run_http_producer_turn(
                         state_info,
                         schema,
                         input_schema,
-                        app._signing_key,
+                        app._token_key,
                         auth,
                         stream_id,
                     )
@@ -916,35 +922,39 @@ def _unpack_and_recover_state(
     token: bytes,
     state_info: _StateInfo,
     auth: AuthContext | None,
-) -> tuple[StreamState, pa.Schema, pa.Schema, str]:
-    """Unpack a signed state token and recover state, output schema, and input schema.
+) -> tuple[StreamState, pa.Schema, pa.Schema, str, bytes]:
+    """Open an AEAD state token and recover state, output schema, and input schema.
 
     Args:
-        app: The HTTP app providing signing key, TTL, and server implementation.
-        token: The signed state token bytes.
+        app: The HTTP app providing the AEAD key, TTL, and server implementation.
+        token: The sealed state token bytes.
         state_info: A single concrete state class, or an ordered tuple of
             concrete classes for union types.  When a tuple is provided, the
             concrete class is resolved from the numeric tag embedded in
             ``state_bytes``.
-        auth: Authenticated identity for the current request.  The token
-            signing key is derived from this identity so state tokens
-            cannot be replayed across users.
+        auth: Authenticated identity for the current request.  The AEAD AAD
+            binds tokens to their issuing principal so state tokens cannot
+            be replayed across users.
 
     Returns:
-        Tuple of ``(state_object, output_schema, input_schema, stream_id)``.
+        ``(state_object, output_schema, input_schema, stream_id, state_bytes)``.
         ``stream_id`` carries the chain identifier from the unpacked token
         and must be threaded back into the next continuation token by
         callers; the contextvar ``_current_stream_id`` is also updated as
         a convenience for ambient telemetry observers (logger formatters,
-        OTel hooks).
+        OTel hooks).  ``state_bytes`` is the decrypted plaintext state
+        payload — returned so callers can surface it to the access log
+        (decrypted, opaque-envelope-independent) rather than the
+        on-the-wire ciphertext token.
 
     Raises:
         _RpcHttpError: On malformed tokens, expired tokens, failed
-            deserialization, or signature verification failure.
+            deserialization, or AEAD authenticity failure (which covers
+            both tampering and cross-principal replay).
 
     """
-    state_bytes, schema_bytes, input_schema_bytes, stream_id = _unpack_state_token(
-        token, _derive_signing_key(app._signing_key, auth), app._token_ttl
+    state_bytes, schema_bytes, input_schema_bytes, stream_id = _open_state_token(
+        token, app._token_key, _compute_aad(auth), app._token_ttl
     )
     if stream_id:
         _current_stream_id.set(stream_id)
@@ -975,4 +985,4 @@ def _unpack_and_recover_state(
             status_code=HTTPStatus.BAD_REQUEST,
         ) from exc
 
-    return state_obj, output_schema, input_schema, stream_id
+    return state_obj, output_schema, input_schema, stream_id, state_bytes

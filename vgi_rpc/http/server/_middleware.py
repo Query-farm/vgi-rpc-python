@@ -37,7 +37,7 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.rpc._common import _ANONYMOUS, TransportKind, _current_request_batch, _current_stream_id
 
-from .._common import _ARROW_CONTENT_TYPE, _compress_body, _decompress_body
+from .._common import _ARROW_CONTENT_TYPE, _decompress_body
 
 _logger = logging.getLogger("vgi_rpc.http")
 
@@ -342,9 +342,9 @@ class _CompressionMiddleware:
         uncompressed body as an intermediate ``bytes`` object. The previous
         ``stream.read()`` + ``_compress_body(body)`` path held the response
         BytesIO's internal buffer, the ``body`` bytes copy returned by
-        ``read()``, AND the compressed output simultaneously — peak ~2× the
+        ``read()``, AND the compressed output simultaneously — peak ~2x the
         body size per concurrent compression. For an N-thread WSGI server
-        emitting M-byte Arrow IPC responses, that's ~2 × N × M of avoidable
+        emitting M-byte Arrow IPC responses, that's ~2 x N x M of avoidable
         peak; under typical kafka_consume tuning (64 MiB/tick, 16 threads)
         it's ~2 GiB on the 2 GiB Fly VM. The streaming path keeps only one
         copy in memory (the compressed output) plus a 64 KiB read buffer.

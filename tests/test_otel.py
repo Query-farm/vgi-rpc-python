@@ -785,7 +785,7 @@ class TestHttpOtel:
             meter_provider=cast("MeterProvider", meter_provider),
         )
         server = RpcServer(OtelTestService, OtelTestServiceImpl(), server_id="http123")
-        client = make_sync_client(server, signing_key=b"test-key", otel_config=config)
+        client = make_sync_client(server, token_key=b"test-key", otel_config=config)
         with http_connect(OtelTestService, "http://test", client=client) as proxy:
             result = proxy.add(a=10, b=20)
             assert result == 30
@@ -814,7 +814,7 @@ class TestHttpOtel:
             meter_provider=cast("MeterProvider", meter_provider),
         )
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
-        client = make_sync_client(server, signing_key=b"test-key", otel_config=config)
+        client = make_sync_client(server, token_key=b"test-key", otel_config=config)
         with http_connect(OtelTestService, "http://test", client=client) as proxy:
             batches = list(proxy.generate())
             assert len(batches) == 3
@@ -848,7 +848,7 @@ class TestHttpOtel:
 
             # Use the sync test client with injected headers
             client_with_headers = make_sync_client(
-                server, signing_key=b"test-key", otel_config=config, default_headers=headers
+                server, token_key=b"test-key", otel_config=config, default_headers=headers
             )
             with http_connect(OtelTestService, "http://test", client=client_with_headers) as proxy:
                 proxy.add(a=1, b=2)
@@ -870,7 +870,7 @@ class TestHttpOtel:
             meter_provider=cast("MeterProvider", meter_provider),
         )
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
-        client = make_sync_client(server, signing_key=b"test-key", otel_config=config)
+        client = make_sync_client(server, token_key=b"test-key", otel_config=config)
         with (
             http_connect(OtelTestService, "http://test", client=client) as proxy,
             pytest.raises(Exception, match="intentional error"),
@@ -908,7 +908,7 @@ class TestAuthFailureCounter:
             raise ValueError("bad token")
 
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
-        client = make_sync_client(server, signing_key=b"test-key", otel_config=config, authenticate=_bad_auth)
+        client = make_sync_client(server, token_key=b"test-key", otel_config=config, authenticate=_bad_auth)
         with (
             pytest.raises(RpcError, match="bad token"),
             http_connect(OtelTestService, "http://test", client=client) as proxy,
@@ -953,7 +953,7 @@ class TestAuthFailureCounter:
             raise PermissionError("forbidden")
 
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
-        client = make_sync_client(server, signing_key=b"test-key", otel_config=config, authenticate=_alternating_auth)
+        client = make_sync_client(server, token_key=b"test-key", otel_config=config, authenticate=_alternating_auth)
 
         # Make two failing calls
         for _ in range(2):
@@ -986,7 +986,7 @@ class TestAuthFailureCounter:
             raise ValueError("bad token")
 
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
-        client = make_sync_client(server, signing_key=b"test-key", authenticate=_bad_auth)
+        client = make_sync_client(server, token_key=b"test-key", authenticate=_bad_auth)
         with (
             pytest.raises(RpcError, match="bad token"),
             http_connect(OtelTestService, "http://test", client=client) as proxy,
@@ -1010,7 +1010,7 @@ class TestAuthFailureCounter:
             raise ValueError("bad token")
 
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
-        client = make_sync_client(server, signing_key=b"test-key", otel_config=config, authenticate=_bad_auth)
+        client = make_sync_client(server, token_key=b"test-key", otel_config=config, authenticate=_bad_auth)
         with (
             pytest.raises(RpcError, match="bad token"),
             http_connect(OtelTestService, "http://test", client=client) as proxy,

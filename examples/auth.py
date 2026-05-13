@@ -98,7 +98,7 @@ def main() -> None:
 
     client = make_sync_client(
         server,
-        signing_key=b"example-signing-key",
+        token_key=b"example-signing-key",
         authenticate=authenticate,
         default_headers={"Authorization": "Bearer alice"},
     )
