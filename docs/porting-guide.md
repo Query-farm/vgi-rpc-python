@@ -77,10 +77,12 @@ In order, smallest-blast-radius first:
 
 ### Conformance status
 
-- **Go**: fully aligned for pipe and HTTP transports. `stream_id` is stable across continuation records — HTTP threads it through the signed state token. `request_data`, `protocol`, `remote_addr` (HTTP), and `cancelled` are emitted. `http_status`, `request_state`, and `response_state` are still optional in the spec and not plumbed; pure-conformance gates pass without them.
-- **TypeScript**: aligned for the stdio transport (120 access-log entries validate). HTTP transport (`examples/conformance-http.ts`) does not yet wire the access-log hook; stream_id stability across HTTP continuations is a follow-up.
-- **Java**: aligned for the stdio transport (120 access-log entries validate). HTTP transport does not yet wire the dispatch hook; stream_id stability across HTTP continuations is a follow-up — see `vgi-rpc-go` for the reference state-token plumbing.
-- **Rust**: aligned for the stdio transport (120 access-log entries validate). HTTP transport does not yet wire the new DispatchInfo fields (remote_addr, request_data, stable stream_id via state-token round-trip) — see `vgi-rpc-go` for reference plumbing.
+All four ports (Go, TypeScript, Java, Rust) implement HTTP transport with stream-state token plumbing. Snapshot of how each port differs from the Python reference today:
+
+- **Go**: fully aligned for pipe, HTTP, Unix, and shared-memory transports. 866 / 866 conformance tests pass. State tokens are AEAD-sealed (XChaCha20-Poly1305) over a gob-encoded payload. `stream_id` stable across continuations.
+- **TypeScript**: HTTP + pipe transports implemented. State tokens are AEAD-sealed (XChaCha20-Poly1305 via `@noble/ciphers`) over a pluggable serializer (default JSON + BigInt). Token wire-format v4 envelope matches Python.
+- **Java**: HTTP + pipe + Unix transports implemented. State tokens are AEAD-sealed (ChaCha20-Poly1305 via JDK 21 native `javax.crypto.Cipher`, 12-byte nonce) over a CBOR-encoded payload (or caller-supplied via `PortableStreamState`).
+- **Rust**: HTTP + pipe + Unix transports implemented. State tokens are AEAD-sealed (XChaCha20-Poly1305 via the `chacha20poly1305` crate) over a length-prefixed envelope matching Python.
 
 ## HTTP response-cap conformance
 
@@ -185,5 +187,5 @@ ignore the budget.
 
 - **Arrow dictionary encoding.** Across language Arrow libraries, the placement of dictionary messages in IPC streams differs. The schema's `request_data` round-trip rule was chosen specifically to absorb this — don't try to byte-match Python.
 - **Custom metadata key ordering.** Some Arrow libraries do not preserve insertion order. Test your reader against batches produced by Python.
-- **HTTP state-token format.** Tokens are HMAC-signed and opaque to clients but their internal layout MUST match across implementations so a load-balanced HTTP fleet can coexist. See `vgi_rpc/http/server/_state_token.py` for the reference layout.
+- **HTTP state-token format.** Tokens are AEAD-sealed (XChaCha20-Poly1305 or ChaCha20-Poly1305, depending on what's available natively in the target language). Each port is free to choose its own plaintext encoding — Python uses length-prefixed Arrow IPC, Go uses gob, TypeScript uses JSON+BigInt, Java uses CBOR, Rust uses length-prefixed bytes — because tokens are not expected to round-trip across language ports. The behavioral contract is per-port: round-trip integrity, cross-principal replay protection (via AEAD AAD or per-principal key derivation), and TTL enforcement after authenticity. See `vgi_rpc/http/server/_state_token.py` for the Python reference.
 - **Per-process server identity.** `server_id` is generated once per process lifetime, NOT per call. The same string must appear in every log record from the same instance.
