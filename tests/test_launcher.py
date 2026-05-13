@@ -130,18 +130,22 @@ def _wait_for_no_listener(path: str, timeout: float) -> bool:
 @_SKIP_WIN
 def test_smoke_launch_and_connect(state_dir: Path) -> None:
     """Launch a worker, connect over the returned socket, then let it idle out."""
+    stderr_path = state_dir / "worker.stderr"
     config = LaunchConfig(
         worker_argv=tuple(_worker_argv()),
         idle_timeout=2.0,
         connect_timeout=10.0,
         worker_startup_timeout=15.0,
         state_dir=str(state_dir),
+        worker_stderr=str(stderr_path),
     )
     path = launch(config)
     assert Path(path).exists()
     _connect_and_close(path)
     # Disconnected; idle timer should fire within idle_timeout + slack.
-    assert _wait_for_path_gone(path, timeout=15.0), "worker did not idle-shutdown"
+    if not _wait_for_path_gone(path, timeout=15.0):
+        stderr_text = stderr_path.read_text(errors="replace") if stderr_path.exists() else "(no stderr file)"
+        raise AssertionError(f"worker did not idle-shutdown\n--- worker stderr ---\n{stderr_text}")
 
 
 @_SKIP_WIN

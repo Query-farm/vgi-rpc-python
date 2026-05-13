@@ -7,12 +7,20 @@ Calls :func:`vgi_rpc.rpc.run_server` so tests exercise the new ``--unix`` /
 ``--idle-timeout`` argparse path end-to-end.
 """
 
+import faulthandler
+import sys
+
 from tests._fixture_service import RpcFixtureService, RpcFixtureServiceImpl
 from vgi_rpc.rpc import run_server
 
 
 def main() -> None:
     """Entry point — argparse flags come from ``sys.argv``."""
+    # If something hangs, dump every thread stack to stderr so the test can
+    # surface it.  Safe in production-style tests because the worker is
+    # expected to exit well before this fires.
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(20.0, repeat=False, file=sys.stderr, exit=False)
     run_server(RpcFixtureService, RpcFixtureServiceImpl())
 
 
