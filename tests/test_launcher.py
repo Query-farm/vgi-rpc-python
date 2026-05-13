@@ -144,6 +144,8 @@ def test_smoke_launch_and_connect(state_dir: Path) -> None:
     _connect_and_close(path)
     # Disconnected; idle timer should fire within idle_timeout + slack.
     if not _wait_for_path_gone(path, timeout=15.0):
+        # Give faulthandler a moment to flush its periodic stack dumps.
+        time.sleep(1.0)
         stderr_text = stderr_path.read_text(errors="replace") if stderr_path.exists() else "(no stderr file)"
         raise AssertionError(f"worker did not idle-shutdown\n--- worker stderr ---\n{stderr_text}")
 

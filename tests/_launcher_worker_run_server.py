@@ -20,7 +20,10 @@ def main() -> None:
     # surface it.  Safe in production-style tests because the worker is
     # expected to exit well before this fires.
     faulthandler.enable()
-    faulthandler.dump_traceback_later(20.0, repeat=False, file=sys.stderr, exit=False)
+    # Dump every 4 seconds while alive — once the test starts waiting for
+    # idle-shutdown we should see at most one or two dumps before the worker
+    # exits cleanly, but several dumps if it hangs.
+    faulthandler.dump_traceback_later(4.0, repeat=True, file=sys.stderr, exit=False)
     run_server(RpcFixtureService, RpcFixtureServiceImpl())
 
 
