@@ -1233,6 +1233,53 @@ class TestErrorRecovery:
 
 
 # ---------------------------------------------------------------------------
+# Connection Reuse
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionReuse:
+    """Many calls over a single connection.
+
+    On a persistent transport (pipe / subprocess / Unix socket) one connection
+    carries every call, each framed as its own Arrow IPC stream
+    ``[schema][batch...][EOS]``. A client must fully consume each response —
+    through its trailing EOS marker — before issuing the next call, or the
+    next call's reader sees the stale EOS and fails (e.g. "Unexpected end of
+    input. Missing schema"). The first call always succeeds; a client that
+    skips the drain fails on the second. These tests pin that requirement.
+    """
+
+    def test_many_sequential_unary_calls(self, conformance_conn: ConnFactory) -> None:
+        """A long run of consecutive unary calls on one connection all succeed."""
+        with conformance_conn() as proxy:
+            for i in range(25):
+                assert proxy.echo_string(value=f"call-{i}") == f"call-{i}"
+                assert proxy.echo_int(value=i) == i
+                assert proxy.add_floats(a=float(i), b=0.5) == pytest.approx(i + 0.5)
+                assert proxy.echo_point(point=Point(x=float(i), y=-float(i))) == Point(
+                    x=float(i), y=-float(i)
+                )
+
+    def test_optional_absence_round_trips_repeatedly(
+        self, conformance_conn: ConnFactory
+    ) -> None:
+        """Absent optionals stay absent across many reused-connection calls.
+
+        A correct client round-trips an absent optional as the language's
+        "absent" value (Python ``None``) every time — never degrading to a
+        present-but-empty value, and never poisoning a later call.
+        """
+        with conformance_conn() as proxy:
+            for i in range(15):
+                assert proxy.echo_optional_string(value=None) is None
+                assert proxy.echo_optional_string(value=f"v{i}") == f"v{i}"
+                assert proxy.echo_optional_int(value=None) is None
+                assert proxy.echo_optional_int(value=i) == i
+            # A trailing plain unary call must still work after the run.
+            assert proxy.echo_string(value="done") == "done"
+
+
+# ---------------------------------------------------------------------------
 # Cancellation
 # ---------------------------------------------------------------------------
 
