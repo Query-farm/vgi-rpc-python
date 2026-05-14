@@ -175,24 +175,13 @@ def empty_batch(schema: pa.Schema) -> pa.RecordBatch:
 def _empty_array(arrow_type: pa.DataType) -> "pa.Array[Any]":
     """Build a zero-length array of ``arrow_type``.
 
-    pyarrow's ``pa.array([], type=...)`` constructor doesn't support
-    union types — it raises ``ArrowNotImplementedError``. Build those
-    via ``Array.from_buffers`` from empty children + an empty type-codes
-    buffer (plus an empty offsets buffer for dense unions).
+    ``pa.array([], type=...)`` raises ``ArrowNotImplementedError`` for union
+    types and for extension types (including extension types nested inside
+    map/list/struct). ``pa.nulls(0, type=...)`` has no such gaps — a
+    length-0 array carries no actual nulls, so it is exactly an empty array
+    of the type — and it handles arbitrarily nested types uniformly.
     """
-    if pa.types.is_union(arrow_type):
-        union_type = cast(pa.UnionType, arrow_type)
-        children = [pa.array([], type=field.type) for field in union_type]
-        # buffers()[1] is the data buffer; for an empty primitive array it's
-        # always present, but the type stub says Buffer | None. The leading
-        # None stands in for the validity bitmap that union arrays don't
-        # carry (nulls live in the children).
-        type_codes_buf = cast(pa.Buffer, pa.array([], type=pa.int8()).buffers()[1])
-        buffers: list[pa.Buffer | None] = [None, type_codes_buf]
-        if union_type.mode == "dense":
-            buffers.append(cast(pa.Buffer, pa.array([], type=pa.int32()).buffers()[1]))
-        return pa.Array.from_buffers(arrow_type, 0, cast(list[pa.Buffer], buffers), children=children)
-    return pa.array([], type=arrow_type)
+    return pa.nulls(0, type=arrow_type)
 
 
 def serialize_record_batch(
