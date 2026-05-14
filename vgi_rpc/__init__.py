@@ -54,6 +54,7 @@ from vgi_rpc.rpc import (
     TransportKind,
     VersionError,
     connect,
+    current_auth,
     describe_rpc,
     make_pipe_pair,
     rpc_methods,
@@ -154,6 +155,7 @@ __all__ = [
     # Convenience
     "run_server",
     "connect",
+    "current_auth",
     "serve_pipe",
     # Transports
     "PipeTransport",

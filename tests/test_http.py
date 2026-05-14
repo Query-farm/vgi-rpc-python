@@ -432,17 +432,18 @@ class TestResumableServerStream:
 
         import pyarrow as pa
 
-        from vgi_rpc.http.server._state_token import _NONCE_LEN, _TAG_LEN
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
         # Build a token whose envelope size satisfies the minimum-length check
-        # but whose version byte is unsupported.
+        # but whose version byte is unsupported. ``vgi_rpc.crypto.open_bytes``
+        # rejects the version byte before doing any decryption work; the
+        # failure surfaces as the uniform 400 used for every bad-token case.
         bad_version = 99
-        # version + nonce + (tag bytes' worth of zero ciphertext) is enough
-        # bytes to clear ``_MIN_TOKEN_LEN`` so the cheap version check fires.
-        envelope = struct.pack("B", bad_version) + b"\x00" * (_NONCE_LEN + _TAG_LEN)
+        # version (1) + nonce (24) + tag (16) = 41 bytes clears the minimum
+        # envelope length so the cheap version check is what fires.
+        envelope = struct.pack("B", bad_version) + b"\x00" * (24 + 16)
         token = base64.b64encode(envelope)
 
         req_buf = BytesIO()
@@ -457,7 +458,7 @@ class TestResumableServerStream:
         )
         assert resp.status_code == 400
         err = _extract_rpc_error(resp)
-        assert "version" in err.error_message.lower()
+        assert "verification failed" in err.error_message.lower()
 
     def test_single_batch_no_continuation(self) -> None:
         """A stream with one batch doesn't need continuation even with small limit."""
@@ -632,7 +633,6 @@ class TestStateTokenStateEncoding:
         import base64
 
         from vgi_rpc.http.server._state_token import (
-            _TOKEN_VERSION_LEN,
             _compute_aad,
             _open_state_token,
             _seal_state_token,
@@ -643,8 +643,8 @@ class TestStateTokenStateEncoding:
         token = _seal_state_token(b"s", b"sch", b"is", key, aad, 1000)
 
         raw = bytearray(base64.b64decode(token))
-        # Flip a bit in the nonce (right after the version byte)
-        raw[_TOKEN_VERSION_LEN] ^= 0x01
+        # Flip a bit in the nonce (right after the single version byte).
+        raw[1] ^= 0x01
         tampered = base64.b64encode(bytes(raw))
 
         with pytest.raises(Exception, match="signature verification failed"):
@@ -708,13 +708,18 @@ class TestStateTokenStateEncoding:
             _open_state_token(b"!!!!not-base64!!!!", b"\x08" * 32, _compute_aad(None))
 
     def test_too_short_token_returns_400(self) -> None:
-        """A token shorter than the minimum envelope size surfaces as 400."""
+        """A token shorter than the minimum envelope size surfaces as 400.
+
+        ``vgi_rpc.crypto.open_bytes`` rejects under-length envelopes the same
+        way it rejects every other bad token, so this maps to the uniform
+        "verification failed" 400 rather than a distinct "malformed" message.
+        """
         import base64
 
         from vgi_rpc.http.server._state_token import _compute_aad, _open_state_token
 
         too_short = base64.b64encode(b"\x04short")
-        with pytest.raises(Exception, match="Malformed state token"):
+        with pytest.raises(Exception, match="signature verification failed"):
             _open_state_token(too_short, b"\x09" * 32, _compute_aad(None))
 
 

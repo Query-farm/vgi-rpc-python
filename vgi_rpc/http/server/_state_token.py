@@ -18,7 +18,6 @@ inside the ciphertext, including the creation timestamp.
 from __future__ import annotations
 
 import base64
-import hashlib
 import struct
 import time
 import types as _types
@@ -26,39 +25,19 @@ from http import HTTPStatus
 from typing import get_args, get_origin, get_type_hints
 
 import pyarrow as pa
-from nacl import bindings as _nacl
-from nacl.exceptions import CryptoError
 
+from vgi_rpc import crypto
 from vgi_rpc.rpc import AuthContext, MethodType, RpcServer, Stream, StreamState
 
 from .._common import _RpcHttpError
 
-# Algorithm constants (XChaCha20-Poly1305 IETF).
-_KEY_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_KEYBYTES  # 32
-_NONCE_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES  # 24
-_TAG_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_ABYTES  # 16
-
+# The AEAD envelope (version byte, nonce, ciphertext+tag) is handled by
+# ``vgi_rpc.crypto``. The constants here describe only the *plaintext*
+# payload framing that lives inside the ciphertext.
 _HEADER_LEN = 4  # uint32 LE prefix for each plaintext segment
 _TOKEN_VERSION = 4  # bump when the token wire format changes (v4: AEAD encrypted)
-_TOKEN_VERSION_LEN = 1  # single byte
 _TIMESTAMP_LEN = 8  # uint64 LE, seconds since epoch (inside ciphertext)
-_MIN_PLAINTEXT_LEN = _TIMESTAMP_LEN + _HEADER_LEN * 4  # version-byte + nonce + tag carried separately
-_MIN_TOKEN_LEN = _TOKEN_VERSION_LEN + _NONCE_LEN + _TAG_LEN  # an empty ciphertext would still need this
-
-
-def _normalize_key(token_key: bytes) -> bytes:
-    """Stretch or compress the operator-supplied key to the AEAD key length.
-
-    XChaCha20-Poly1305 requires exactly 32 bytes; operators may supply
-    keys of any length (including the random 32-byte default produced
-    by ``os.urandom(32)``).  Hashing through SHA-256 yields a 32-byte
-    pseudo-random key for any input — collision-resistant, deterministic,
-    and indistinguishable from a directly-supplied 32-byte key from the
-    point of view of an attacker who never sees the operator's input.
-    """
-    if len(token_key) == _KEY_LEN:
-        return token_key
-    return hashlib.sha256(token_key).digest()
+_MIN_PLAINTEXT_LEN = _TIMESTAMP_LEN + _HEADER_LEN * 4
 
 
 def _compute_aad(auth: AuthContext | None) -> bytes:
@@ -143,11 +122,8 @@ def _seal_state_token(
         + struct.pack("<I", len(stream_id_bytes))
         + stream_id_bytes
     )
-    nonce = _nacl.randombytes(_NONCE_LEN)
-    ciphertext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_encrypt(
-        plaintext, aad, nonce, _normalize_key(token_key)
-    )
-    return base64.b64encode(struct.pack("B", _TOKEN_VERSION) + nonce + ciphertext)
+    sealed = crypto.seal_bytes(plaintext, token_key, aad=aad, version=_TOKEN_VERSION)
+    return base64.b64encode(sealed)
 
 
 def _open_state_token(
@@ -170,45 +146,25 @@ def _open_state_token(
 
     Raises:
         _RpcHttpError: On malformed, tampered, expired, or cross-principal
-            tokens (HTTP 400).  The underlying ``CryptoError`` is caught
-            and re-raised so we do not leak nacl exception types to the
+            tokens (HTTP 400).  The underlying ``crypto.SealError`` is caught
+            and re-raised so we do not leak crypto exception types to the
             wire.
 
     """
     try:
-        token = base64.b64decode(token, validate=True)
+        raw = base64.b64decode(token, validate=True)
     except Exception as exc:
         raise _RpcHttpError(
             RuntimeError("Malformed state token"),
             status_code=HTTPStatus.BAD_REQUEST,
         ) from exc
 
-    if len(token) < _MIN_TOKEN_LEN:
-        raise _RpcHttpError(
-            RuntimeError("Malformed state token"),
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
-
-    # Cheap version-byte rejection before doing crypto work.  The version
-    # byte is informational (not AAD); if it disagrees with our format we
-    # know decryption with the v4 algorithm cannot succeed.
-    version = token[0]
-    if version != _TOKEN_VERSION:
-        raise _RpcHttpError(
-            RuntimeError(f"Unsupported state token version {version} (expected {_TOKEN_VERSION})"),
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
-
-    nonce = token[_TOKEN_VERSION_LEN : _TOKEN_VERSION_LEN + _NONCE_LEN]
-    ciphertext = token[_TOKEN_VERSION_LEN + _NONCE_LEN :]
     try:
-        plaintext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_decrypt(
-            ciphertext, aad, nonce, _normalize_key(token_key)
-        )
-    except CryptoError as exc:
-        # Map every authenticity failure (bad tag, wrong key, wrong AAD —
-        # i.e. cross-principal replay) to a single uniform 400 so callers
-        # cannot distinguish failure modes via timing or message.
+        plaintext: bytes = crypto.open_bytes(raw, token_key, aad=aad, version=_TOKEN_VERSION)
+    except crypto.SealError as exc:
+        # Map every failure mode — malformed, wrong version, bad tag, wrong
+        # key, wrong AAD (cross-principal replay) — to a single uniform 400
+        # so callers cannot distinguish them via timing or message.
         raise _RpcHttpError(
             RuntimeError("State token signature verification failed"),
             status_code=HTTPStatus.BAD_REQUEST,

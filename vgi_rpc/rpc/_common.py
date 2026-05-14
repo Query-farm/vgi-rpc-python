@@ -379,6 +379,18 @@ def _get_auth_and_metadata() -> tuple[AuthContext, Mapping[str, Any]]:
     return _ANONYMOUS, _EMPTY_TRANSPORT_METADATA
 
 
+def current_auth() -> AuthContext:
+    """Return the :class:`AuthContext` for the request currently being dispatched.
+
+    Reads the transport contextvar set by the transport layer before method
+    dispatch. Lets code that is not a direct RPC method handler (and therefore
+    has no ``CallContext`` parameter) still reach the caller's identity —
+    e.g. catalog opaque-data sealing in VGI. Returns the anonymous context
+    when called outside a dispatch (pipe transport, or no transport active).
+    """
+    return _get_auth_and_metadata()[0]
+
+
 # ---------------------------------------------------------------------------
 # Per-request correlation ID
 # ---------------------------------------------------------------------------

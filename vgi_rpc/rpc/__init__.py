@@ -115,6 +115,7 @@ from vgi_rpc.rpc._common import (
     _record_input,
     _record_output,
     _TransportContext,
+    current_auth,
 )
 from vgi_rpc.rpc._server import (
     RpcServer,
@@ -209,6 +210,7 @@ __all__ = [
     "UnixTransport",
     "VersionError",
     "connect",
+    "current_auth",
     "describe_rpc",
     "make_pipe_pair",
     "make_unix_pair",
