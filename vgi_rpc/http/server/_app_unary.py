@@ -121,6 +121,7 @@ def _run_unary_sync(
                 method_name=method_name,
                 protocol_name=protocol_name,
                 kind=app._server.transport_kind,
+                implementation=app._server.implementation,
             )
 
         schema = info.result_schema

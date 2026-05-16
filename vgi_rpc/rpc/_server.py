@@ -630,6 +630,7 @@ class RpcServer:
                 method_name=info.name,
                 protocol_name=self.protocol_name,
                 kind=self._transport_kind,
+                implementation=self._impl,
             )
         return sink, auth, transport_metadata
 
@@ -818,6 +819,7 @@ class RpcServer:
                                 method_name=info.name,
                                 protocol_name=protocol_name,
                                 kind=self._transport_kind,
+                                implementation=self._impl,
                             )
                             try:
                                 state.on_cancel(cancel_ctx)
@@ -862,6 +864,7 @@ class RpcServer:
                             method_name=info.name,
                             protocol_name=protocol_name,
                             kind=self._transport_kind,
+                            implementation=self._impl,
                         )
                         state.process(ab_in, out, process_ctx)
                         if not out.finished:

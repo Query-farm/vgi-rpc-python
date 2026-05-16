@@ -172,6 +172,7 @@ class CallContext:
         "_server_id",
         "auth",
         "emit_client_log",
+        "implementation",
         "kind",
         "transport_metadata",
     )
@@ -186,12 +187,24 @@ class CallContext:
         method_name: str = "",
         protocol_name: str = "",
         kind: TransportKind | None = None,
+        implementation: Any = None,
     ) -> None:
-        """Initialize with auth context, client-log callback, and optional server context fields."""
+        """Initialize with auth context, client-log callback, and optional server context fields.
+
+        Args:
+            implementation: The protocol implementation object the
+                RpcServer was constructed with. Surfaced on the context so
+                producer-mode stream states (and other framework-driven
+                callbacks that lack direct access to the implementation
+                instance) can dispatch helper calls back through the
+                public protocol surface — including any meta-worker
+                dispatching the top-level RpcServer is fronting.
+        """
         self.auth = auth
         self.emit_client_log = emit_client_log
         self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
         self.kind: TransportKind | None = kind
+        self.implementation: Any = implementation
         self._server_id = server_id
         self._method_name = method_name
         self._protocol_name = protocol_name

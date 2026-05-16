@@ -225,6 +225,7 @@ def _run_stream_init_sync(
                 method_name=method_name,
                 protocol_name=protocol_name,
                 kind=app._server.transport_kind,
+                implementation=app._server.implementation,
             )
 
         # The chain-correlation id for all HTTP turns of this stream.  Carried
@@ -492,6 +493,7 @@ def _run_stream_exchange_sync(
                     method_name=method_name,
                     protocol_name=protocol_name,
                     kind=app._server.transport_kind,
+                    implementation=app._server.implementation,
                 )
                 try:
                     state_obj.on_cancel(cancel_ctx)
@@ -641,6 +643,7 @@ def _run_http_exchange_turn(
             method_name=method_name,
             protocol_name=protocol_name,
             kind=app._server.transport_kind,
+            implementation=app._server.implementation,
         )
         state.process(ab_in, out, process_ctx)
         if not out.finished:
@@ -831,6 +834,7 @@ def _run_http_producer_turn(
             method_name=method_name,
             protocol_name=protocol_name,
             kind=app._server.transport_kind,
+            implementation=app._server.implementation,
         )
         try:
             while True:
