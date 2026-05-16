@@ -28,9 +28,10 @@ if TYPE_CHECKING:
 class _SyncTestResponse:
     """Minimal response object matching what _HttpProxy expects from httpx.Response.
 
-    Transparently decompresses ``Content-Encoding: zstd`` response bodies,
-    mirroring httpx's built-in ``ZStandardDecoder`` behaviour so that the
-    test client and a real httpx client behave identically.
+    Transparently decompresses ``Content-Encoding`` response bodies for
+    any codec the runtime can handle (zstd, gzip), mirroring httpx's
+    built-in decoders so the test client and a real httpx client behave
+    identically.
     """
 
     __slots__ = ("content", "headers", "status_code")
@@ -38,11 +39,15 @@ class _SyncTestResponse:
     def __init__(self, status_code: int, content: bytes, headers: dict[str, str] | None = None) -> None:
         self.status_code = status_code
         self.headers: dict[str, str] = headers or {}
-        encoding = self.headers.get("content-encoding", "")
-        if "zstd" in encoding:
-            from vgi_rpc.http._common import _decompress_body
+        encoding = (self.headers.get("content-encoding", "") or "").strip().lower()
+        if encoding:
+            from vgi_rpc._codec import Encoding as _CodecEncoding
+            from vgi_rpc._codec import decompress as _codec_decompress
 
-            content = _decompress_body(content)
+            for enc in _CodecEncoding:
+                if enc.value == encoding:
+                    content = _codec_decompress(enc, content)
+                    break
         self.content = content
 
 

@@ -26,7 +26,10 @@ from .._common import (
     MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
     RPC_ERROR_HEADER,
+    SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
+    Encoding,
+    available_encodings,
 )
 from ._app import _HttpRpcApp
 from ._errors import _error_serializer, _make_not_found_sink
@@ -160,8 +163,14 @@ def make_wsgi_app(
             (1 hour).  Set to ``0`` to disable expiry checking.
         compression_level: Zstandard compression level for HTTP request/
             response bodies.  ``3`` (the default) installs
-            ``_CompressionMiddleware`` at level 3.  Valid range is 1-22.
-            ``None`` disables compression entirely.
+            ``_CompressionMiddleware`` at zstd level 3 *and* gzip level 6
+            so peers without zstd support negotiate gzip transparently.
+            Valid zstd range is 1-22.  ``None`` disables compression
+            entirely (no codec is advertised, and bodies travel
+            uncompressed).  Set ``VGI_HTTP_DISABLE_ZSTD=1`` in the
+            environment to drop zstd from the advertised set even when
+            ``zstandard`` is installed — useful for testing the
+            gzip-fallback path.
         enable_not_found_page: When ``True`` (the default), requests to
             paths that do not match any RPC route receive a friendly HTML
             404 page.  Set to ``False`` to use Falcon's default 404
@@ -266,16 +275,39 @@ def make_wsgi_app(
     # Compression middleware decompresses request bodies and compresses
     # responses — must come before auth so handlers read plaintext bodies.
     # Decompression cap is 16x the wire cap: generous enough for normal
-    # zstd ratios on Arrow IPC bodies, tight enough that a tiny
+    # compression ratios on Arrow IPC bodies, tight enough that a tiny
     # compressed body cannot claim hundreds of MB and OOM the server.
+    #
+    # ``compression_level`` (the historical int knob) sets the zstd level;
+    # gzip is always offered at level 6 alongside it so peers that can't
+    # do zstd (browsers without a polyfill, Python aiohttp without
+    # ``zstandard``) can still negotiate compression.  ``VGI_HTTP_DISABLE_ZSTD=1``
+    # drops zstd from the advertised set even when ``zstandard`` is
+    # importable — used by tests that need to exercise the gzip path
+    # without uninstalling the package.
+    enabled_encodings: tuple[Encoding, ...] = ()
     if compression_level is not None:
         max_decompressed_bytes = max_request_bytes * 16 if max_request_bytes is not None else None
-        middleware.append(
-            _CompressionMiddleware(
-                compression_level,
-                max_decompressed_bytes=max_decompressed_bytes,
+        codec_levels: dict[Encoding, int] = {
+            Encoding.ZSTD: compression_level,
+            Encoding.GZIP: 6,
+        }
+        if os.environ.get("VGI_HTTP_DISABLE_ZSTD") == "1":
+            codec_levels.pop(Encoding.ZSTD, None)
+        # available_encodings() drops codecs whose runtime support is missing
+        # (e.g. zstd when zstandard isn't installed) — keep the factory and
+        # middleware in lockstep so the advertised list matches what we
+        # actually accept.
+        runtime = set(available_encodings())
+        codec_levels = {enc: lvl for enc, lvl in codec_levels.items() if enc in runtime}
+        enabled_encodings = tuple(codec_levels)
+        if codec_levels:
+            middleware.append(
+                _CompressionMiddleware(
+                    codec_levels,
+                    max_decompressed_bytes=max_decompressed_bytes,
+                )
             )
-        )
 
     # OTel middleware must come before auth so spans cover the full request
     if otel_config is not None:
@@ -310,6 +342,13 @@ def make_wsgi_app(
         if max_upload_bytes is not None:
             capability_headers[MAX_UPLOAD_BYTES_HEADER] = str(max_upload_bytes)
             cors_expose.append(MAX_UPLOAD_BYTES_HEADER)
+    # Advertise the compression codecs we actually accept on the wire.  A
+    # client compares this against its own codec set and picks the first
+    # mutually supported one for its request body.  Absent header ⇒
+    # ``{zstd}`` (back-compat with pre-gzip servers).
+    if enabled_encodings:
+        capability_headers[SUPPORTED_ENCODINGS_HEADER] = ", ".join(e.value for e in enabled_encodings)
+        cors_expose.append(SUPPORTED_ENCODINGS_HEADER)
 
     # OAuth resource metadata (RFC 9728)
     from vgi_rpc.http._oauth import OAuthResourceMetadata as _OAuthMeta

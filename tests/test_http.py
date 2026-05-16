@@ -1901,7 +1901,7 @@ class TestZstdCompression:
         client.close()
 
     def test_client_sends_accept_encoding_zstd(self) -> None:
-        """Client sends Accept-Encoding: zstd when compression is enabled."""
+        """Client advertises every codec it can decode in Accept-Encoding when compression is enabled."""
         captured_headers: list[dict[str, str]] = []
 
         class _CapturingClient(_SyncTestClient):
@@ -1917,7 +1917,10 @@ class TestZstdCompression:
 
         with http_connect(RpcFixtureService, client=test_client, compression_level=3) as proxy:
             proxy.greet(name="ZstdAccept")
-        assert any(h.get("Accept-Encoding") == "zstd" for h in captured_headers)
+        # Advertise both codecs we can decode; order is preference (zstd first).
+        accept_values = [h.get("Accept-Encoding") for h in captured_headers]
+        assert any("zstd" in (v or "") for v in accept_values), accept_values
+        assert any("gzip" in (v or "") for v in accept_values), accept_values
         test_client.close()
 
     def test_client_omits_accept_encoding_without_compression(self) -> None:
@@ -1939,6 +1942,162 @@ class TestZstdCompression:
             proxy.greet(name="NoZstd")
         assert all("Accept-Encoding" not in h for h in captured_headers)
         test_client.close()
+
+
+# ---------------------------------------------------------------------------
+# Codec negotiation (zstd + gzip)
+# ---------------------------------------------------------------------------
+
+
+class TestCompressionNegotiation:
+    """Tests for the multi-codec ``_CompressionMiddleware`` negotiation."""
+
+    def test_gzip_request_decompressed(self) -> None:
+        """Server decompresses a gzip-encoded request body and routes it."""
+        import zlib
+
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=3,
+        )
+        # Build a plain (uncompressed) Arrow IPC request, then gzip it
+        # ourselves and POST with Content-Encoding: gzip.
+        from io import BytesIO
+
+        from pyarrow import ipc
+
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        req_buf = BytesIO()
+        md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"greet", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
+
+        co = zlib.compressobj(6, zlib.DEFLATED, 31)
+        gz_body = co.compress(req_buf.getvalue()) + co.flush(zlib.Z_FINISH)
+
+        resp = client.post(
+            f"{_BASE_URL}{client.prefix}/greet",
+            content=gz_body,
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                "Content-Encoding": "gzip",
+                "Accept-Encoding": "gzip",
+            },
+        )
+        # Server responds — content may or may not be gzip depending on
+        # whether the framework had a streamable response body to compress.
+        # The key invariant: the request was *decoded* (no 415 from middleware).
+        assert resp.status_code != 415, resp.content[:200]
+        client.close()
+
+    def test_bzip2_request_returns_415(self) -> None:
+        """Unknown Content-Encoding tokens are rejected by the middleware."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=3,
+        )
+        resp = client.post(
+            f"{_BASE_URL}{client.prefix}/greet",
+            content=b"\x42\x5a\x68\x39",  # 'BZh9' — bzip2 magic, but we don't speak it
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, "Content-Encoding": "bzip2"},
+        )
+        assert resp.status_code == 415
+        assert b"Content-Encoding" in resp.content
+        client.close()
+
+    def test_server_advertises_supported_encodings_header(self) -> None:
+        """``VGI-Supported-Encodings`` is stamped on every response."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=3,
+        )
+        # Any GET returns capability headers via _CapabilitiesMiddleware.
+        resp = client._client.simulate_get(f"{client.prefix}/health")
+        header = resp.headers.get("VGI-Supported-Encodings") or resp.headers.get("vgi-supported-encodings")
+        assert header is not None
+        offered = [t.strip() for t in header.split(",")]
+        assert "zstd" in offered
+        assert "gzip" in offered
+        client.close()
+
+    def test_zstd_disabled_via_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``VGI_HTTP_DISABLE_ZSTD=1`` drops zstd from the advertised set and rejects zstd requests."""
+        import zstandard
+
+        monkeypatch.setenv("VGI_HTTP_DISABLE_ZSTD", "1")
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=3,
+        )
+        health_resp = client._client.simulate_get(f"{client.prefix}/health")
+        header = health_resp.headers.get("VGI-Supported-Encodings") or health_resp.headers.get(
+            "vgi-supported-encodings"
+        )
+        assert header is not None
+        offered = [t.strip() for t in header.split(",")]
+        assert offered == ["gzip"], offered
+
+        # A zstd-encoded request should now be rejected as unsupported.
+        zs_body = zstandard.ZstdCompressor(level=3).compress(b"some bytes")
+        post_resp = client.post(
+            f"{_BASE_URL}{client.prefix}/greet",
+            content=zs_body,
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, "Content-Encoding": "zstd"},
+        )
+        assert post_resp.status_code == 415
+        assert b"is not enabled" in post_resp.content or b"zstd" in post_resp.content
+        client.close()
+
+    def test_no_overlap_returns_uncompressed_response(self) -> None:
+        """Client offering only an unknown codec gets an uncompressed response."""
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=3,
+        )
+        # Send an uncompressed Arrow IPC body but advertise Accept-Encoding: br
+        # (which the server can't produce).  The response must arrive uncompressed.
+        from io import BytesIO
+
+        from pyarrow import ipc
+
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        req_buf = BytesIO()
+        md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"greet", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
+        resp = client.post(
+            f"{_BASE_URL}{client.prefix}/greet",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, "Accept-Encoding": "br"},
+        )
+        # Response should not carry any Content-Encoding the client can't decode.
+        ce = resp.headers.get("Content-Encoding") or resp.headers.get("X-VGI-Content-Encoding")
+        assert ce is None or ce == "", ce
+        client.close()
+
+    def test_gzip_only_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """End-to-end client/server with zstd disabled — only gzip negotiates."""
+        monkeypatch.setenv("VGI_HTTP_DISABLE_ZSTD", "1")
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=3,
+        )
+        with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:
+            result = proxy.greet(name="GzipOnly")
+        assert result == "Hello, GzipOnly!"
+        client.close()
 
 
 # ---------------------------------------------------------------------------

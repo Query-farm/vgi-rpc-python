@@ -77,6 +77,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 import pyarrow as pa
 from pyarrow import ipc
 
+from vgi_rpc._codec import Encoding as _CodecEncoding, compress as _codec_compress
 from vgi_rpc.external_fetch import FetchConfig, fetch_url
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import (
@@ -293,13 +294,19 @@ class Compression:
     """Compression settings for externalized data.
 
     Attributes:
-        algorithm: Compression algorithm.  Currently only ``"zstd"``
-            is supported.
-        level: Compression level (1-22 for zstd).
+        algorithm: Compression algorithm.  ``"zstd"`` (default) needs
+            ``zstandard`` on both the writer and the reader; ``"gzip"``
+            uses stdlib ``zlib`` and is the right choice when consumers
+            (e.g. browsers without a zstd polyfill, generic HTTP
+            tooling) can't do zstd.
+        level: Compression level.  Codec-specific — 1-22 for zstd
+            (default 3), 1-9 for gzip (default 6 when ``level`` is left
+            at the zstd-shaped default of 3, since gzip-3 produces
+            noticeably worse ratios).
 
     """
 
-    algorithm: Literal["zstd"] = "zstd"
+    algorithm: Literal["zstd", "gzip"] = "zstd"
     level: int = 3
 
 
@@ -730,11 +737,10 @@ def maybe_externalize_collector(
 
     content_encoding: str | None = None
     if config.compression is not None:
-        import zstandard
-
+        codec = _CodecEncoding(config.compression.algorithm)
         original_bytes = len(ipc_bytes)
-        ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
-        content_encoding = config.compression.algorithm
+        ipc_bytes = _codec_compress(codec, ipc_bytes, level=config.compression.level)
+        content_encoding = codec.value
 
     raw_size = original_bytes if original_bytes is not None else len(ipc_bytes)
     url = _traced_upload(
@@ -816,11 +822,10 @@ def maybe_externalize_batch(
 
     content_encoding: str | None = None
     if config.compression is not None:
-        import zstandard
-
+        codec = _CodecEncoding(config.compression.algorithm)
         original_bytes = len(ipc_bytes)
-        ipc_bytes = zstandard.ZstdCompressor(level=config.compression.level).compress(ipc_bytes)
-        content_encoding = config.compression.algorithm
+        ipc_bytes = _codec_compress(codec, ipc_bytes, level=config.compression.level)
+        content_encoding = codec.value
 
     raw_size = original_bytes if original_bytes is not None else len(ipc_bytes)
     url = _traced_upload(

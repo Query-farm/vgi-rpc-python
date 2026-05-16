@@ -11,7 +11,7 @@ Each middleware is a thin wrapper around Falcon's ``process_request`` /
 * per-request correlation IDs (``_RequestIdMiddleware``)
 * access-log contextvar reset (``_AccessLogContextMiddleware``)
 * authentication + transport metadata (``_AuthMiddleware``)
-* transparent zstd compression (``_CompressionMiddleware``)
+* transparent content compression (zstd / gzip, ``_CompressionMiddleware``)
 * CORS ``Access-Control-Max-Age`` (``_CorsMaxAgeMiddleware``)
 * capability headers (``_CapabilitiesMiddleware``)
 """
@@ -37,7 +37,14 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.rpc._common import _ANONYMOUS, TransportKind, _current_request_batch, _current_stream_id
 
-from .._common import _ARROW_CONTENT_TYPE, _decompress_body
+from .._common import (
+    _ARROW_CONTENT_TYPE,
+    Encoding,
+    available_encodings,
+    compress as _compress_with_encoding,
+    decompress as _decompress_with_encoding,
+    parse_encoding_list,
+)
 
 _logger = logging.getLogger("vgi_rpc.http")
 
@@ -287,47 +294,92 @@ class _AuthMiddleware:
 
 
 class _CompressionMiddleware:
-    """Falcon middleware for transparent zstd request/response compression.
+    """Falcon middleware for transparent codec request/response compression.
 
-    On requests: if ``Content-Encoding: zstd`` is present, the request body
-    is decompressed and stored in ``req.context.decompressed_stream`` so that
-    resource handlers read uncompressed data.
+    On requests: if ``Content-Encoding`` names a supported codec (zstd or
+    gzip), the request body is decompressed and stored in
+    ``req.context.decompressed_stream`` so resource handlers read
+    uncompressed data.  An unknown codec triggers 415.
 
-    On responses: if the client sent ``Accept-Encoding`` containing ``zstd``
-    and the response has Arrow content, the response body is compressed and
-    ``Content-Encoding: zstd`` is set.
+    On responses: pick the first codec from the client's
+    ``Accept-Encoding`` / ``X-VGI-Accept-Encoding`` that we can produce
+    (``levels`` keys), compress an Arrow IPC body with it, and stamp
+    the chosen codec on ``Content-Encoding`` (or ``X-VGI-Content-Encoding``
+    if the client used the custom header).  No overlap → uncompressed.
 
-    The decompression cap (``max_decompressed_request_bytes``) is checked
-    *before* allocation so a tiny compressed body claiming a huge
-    decompressed size cannot OOM the server (decompression-bomb DoS).
+    The decompression cap (``max_decompressed_bytes``) bounds output to
+    block decompression-bomb DoS regardless of codec.  zstd uses its
+    frame-header pre-check; gzip uses a bounded streaming loop.
     """
 
-    __slots__ = ("_level", "_max_decompressed_bytes")
+    __slots__ = ("_levels", "_available", "_max_decompressed_bytes")
 
-    def __init__(self, level: int, *, max_decompressed_bytes: int | None = None) -> None:
-        self._level = level
+    def __init__(
+        self,
+        levels: dict[Encoding, int] | int,
+        *,
+        max_decompressed_bytes: int | None = None,
+    ) -> None:
+        if isinstance(levels, int):
+            # Back-compat: old factories passed a single int (zstd level).
+            levels = {Encoding.ZSTD: levels}
+        # Only keep codecs the runtime can actually produce.
+        runtime = set(available_encodings())
+        self._levels: dict[Encoding, int] = {enc: lvl for enc, lvl in levels.items() if enc in runtime}
+        self._available: tuple[Encoding, ...] = tuple(self._levels)
         self._max_decompressed_bytes = max_decompressed_bytes
 
-    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
-        """Decompress zstd request bodies; record client Accept-Encoding."""
-        # Check if the client accepts zstd responses (standard or custom header)
-        accept_encoding = req.get_header("Accept-Encoding") or ""
-        custom_accept = req.get_header("X-VGI-Accept-Encoding") or ""
-        req.context.client_accepts_zstd = "zstd" in accept_encoding or "zstd" in custom_accept
-        req.context.use_custom_encoding_header = "zstd" in custom_accept
+    def _pick_response_encoding(self, req: falcon.Request) -> tuple[Encoding | None, bool]:
+        """Return (chosen, used_custom_header) for the response codec.
 
-        # Decompress request body if Content-Encoding: zstd
-        content_encoding = req.get_header("Content-Encoding") or ""
-        if "zstd" in content_encoding:
-            try:
-                compressed = req.bounded_stream.read()
-                decompressed = _decompress_body(compressed, max_output_size=self._max_decompressed_bytes)
-                req.context.decompressed_stream = BytesIO(decompressed)
-            except Exception as exc:
-                raise falcon.HTTPBadRequest(
-                    title="Decompression Error",
-                    description=f"Failed to decompress zstd request body: {exc}",
-                ) from exc
+        Returns ``(None, _)`` when no overlap exists between what the
+        client offered and what we can produce.
+        """
+        standard = parse_encoding_list(req.get_header("Accept-Encoding") or "")
+        custom = parse_encoding_list(req.get_header("X-VGI-Accept-Encoding") or "")
+        # Honour the client's preference order; custom header takes precedence
+        # only in deciding which response header to stamp later.
+        for enc in standard + [e for e in custom if e not in standard]:
+            if enc in self._levels:
+                return enc, enc in custom and enc not in standard
+        return None, bool(custom)
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Decompress codec request bodies; record client response codec choice."""
+        chosen, used_custom = self._pick_response_encoding(req)
+        req.context.response_encoding = chosen
+        req.context.use_custom_encoding_header = used_custom
+
+        content_encoding = (req.get_header("Content-Encoding") or "").strip().lower()
+        if not content_encoding:
+            return
+        # Unknown codec → 415; do not fall through to identity, since the
+        # body would be garbage to the resource handler.
+        req_enc = next((e for e in Encoding if e.value == content_encoding), None)
+        if req_enc is None:
+            raise falcon.HTTPUnsupportedMediaType(
+                title="Unsupported Content-Encoding",
+                description=f"Content-Encoding {content_encoding!r} is not supported by this server",
+            )
+        if req_enc not in self._levels:
+            raise falcon.HTTPUnsupportedMediaType(
+                title="Unsupported Content-Encoding",
+                description=(
+                    f"Content-Encoding {content_encoding!r} is not enabled on this server; "
+                    f"supported: {', '.join(e.value for e in self._available) or 'none'}"
+                ),
+            )
+        try:
+            compressed = req.bounded_stream.read()
+            decompressed = _decompress_with_encoding(
+                req_enc, compressed, max_output_size=self._max_decompressed_bytes
+            )
+            req.context.decompressed_stream = BytesIO(decompressed)
+        except Exception as exc:
+            raise falcon.HTTPBadRequest(
+                title="Decompression Error",
+                description=f"Failed to decompress {req_enc.value} request body: {exc}",
+            ) from exc
 
     def process_response(
         self,
@@ -336,20 +388,18 @@ class _CompressionMiddleware:
         resource: object,
         req_succeeded: bool,
     ) -> None:
-        """Compress Arrow IPC response bodies with zstd when client supports it.
+        """Compress Arrow IPC response bodies with the negotiated codec.
 
-        Uses zstd's streaming compressor to avoid materializing the full
-        uncompressed body as an intermediate ``bytes`` object. The previous
-        ``stream.read()`` + ``_compress_body(body)`` path held the response
-        BytesIO's internal buffer, the ``body`` bytes copy returned by
-        ``read()``, AND the compressed output simultaneously — peak ~2x the
-        body size per concurrent compression. For an N-thread WSGI server
-        emitting M-byte Arrow IPC responses, that's ~2 x N x M of avoidable
-        peak; under typical kafka_consume tuning (64 MiB/tick, 16 threads)
-        it's ~2 GiB on the 2 GiB Fly VM. The streaming path keeps only one
-        copy in memory (the compressed output) plus a 64 KiB read buffer.
+        zstd uses its streaming ``stream_writer`` to keep the frame's
+        content_size header (required by the eager
+        ``ZstdDecompressor.decompress`` on the client).  gzip uses
+        ``zlib.compressobj(wbits=31)`` — also streaming, no
+        content_size analog (gzip's ISIZE footer is mod 2^32 anyway).
+        Both paths keep ~64 KiB of read buffer + the compressed output
+        in memory; the historical peak-2x problem is avoided.
         """
-        if not getattr(req.context, "client_accepts_zstd", False):
+        encoding: Encoding | None = getattr(req.context, "response_encoding", None)
+        if encoding is None:
             return
         if resp.content_type != _ARROW_CONTENT_TYPE:
             return
@@ -359,12 +409,6 @@ class _CompressionMiddleware:
         if not isinstance(stream, IOBase):
             return
 
-        # Determine remaining bytes without buffering: seek-to-end / tell /
-        # seek-back. Required because zstd's streaming compressor needs the
-        # content_size up front to write a self-describing frame header
-        # (``ZstdDecompressor.decompress`` rejects frames without it). For
-        # non-seekable streams we fall back to the buffer-then-compress
-        # path so frame format stays identical to the historical behaviour.
         size: int | None = None
         if hasattr(stream, "seek") and hasattr(stream, "tell"):
             cur = stream.tell()
@@ -378,40 +422,60 @@ class _CompressionMiddleware:
         if size == 0:
             return
 
-        import zstandard
+        level = self._levels[encoding]
 
-        cctx = zstandard.ZstdCompressor(level=self._level)
-        if size is None:
-            # Non-seekable: fall back to one-shot compression so the frame
-            # carries content_size for ``ZstdDecompressor.decompress``.
-            # This is the rare path; seekable streams (BytesIO from the
-            # framework's response builders) hit the streaming path above.
-            body = stream.read()
-            if not body:
-                return
-            compressed = cctx.compress(body)
-            del body
-        else:
-            # Streaming path: avoid the duplicate ``body = stream.read()``
-            # bytes object. ``stream_writer(size=N)`` writes the content
-            # size into the frame header so the eager decompressor still
-            # accepts the frame. ``closefd=False`` keeps ``out`` open.
-            out = BytesIO()
-            with cctx.stream_writer(out, size=size, closefd=False) as writer:
+        if encoding is Encoding.ZSTD:
+            import zstandard
+
+            cctx = zstandard.ZstdCompressor(level=level)
+            if size is None:
+                body = stream.read()
+                if not body:
+                    return
+                compressed = cctx.compress(body)
+                del body
+            else:
+                out = BytesIO()
+                with cctx.stream_writer(out, size=size, closefd=False) as writer:
+                    while True:
+                        chunk = stream.read(65536)
+                        if not chunk:
+                            break
+                        writer.write(chunk)
+                compressed = out.getvalue()
+                del out
+        elif encoding is Encoding.GZIP:
+            import zlib
+
+            co = zlib.compressobj(level, zlib.DEFLATED, 31)
+            if size is None:
+                body = stream.read()
+                if not body:
+                    return
+                compressed = co.compress(body) + co.flush(zlib.Z_FINISH)
+                del body
+            else:
+                pieces: list[bytes] = []
                 while True:
                     chunk = stream.read(65536)
                     if not chunk:
                         break
-                    writer.write(chunk)
-            compressed = out.getvalue()
-            del out
+                    out_chunk = co.compress(chunk)
+                    if out_chunk:
+                        pieces.append(out_chunk)
+                tail = co.flush(zlib.Z_FINISH)
+                if tail:
+                    pieces.append(tail)
+                compressed = b"".join(pieces)
+        else:  # pragma: no cover — _levels keys are filtered by available_encodings
+            return
 
         resp.data = compressed
         resp.stream = None
         if getattr(req.context, "use_custom_encoding_header", False):
-            resp.set_header("X-VGI-Content-Encoding", "zstd")
+            resp.set_header("X-VGI-Content-Encoding", encoding.value)
         else:
-            resp.set_header("Content-Encoding", "zstd")
+            resp.set_header("Content-Encoding", encoding.value)
 
 
 class _CorsMaxAgeMiddleware:

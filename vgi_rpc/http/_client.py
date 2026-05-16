@@ -64,8 +64,13 @@ from ._common import (
     MAX_REQUEST_BYTES_HEADER,
     MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
+    SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
+    Encoding,
     _compress_body,
+    available_encodings,
+    compress as _compress_with_encoding,
+    parse_encoding_list,
 )
 from ._retry import HttpRetryConfig, _options_with_retry, _post_with_retry
 
@@ -73,6 +78,54 @@ if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
 
     from ._testing import _SyncTestClient, _SyncTestResponse
+
+
+def _client_offered_encodings() -> tuple[Encoding, ...]:
+    """Encodings the client can both produce *and* decode.
+
+    httpx auto-decompresses gzip and deflate; for zstd it transparently
+    decompresses if ``zstandard`` is importable.  We therefore advertise
+    whatever ``available_encodings()`` reports — runtime presence of the
+    libraries is the same gate on both ends.
+    """
+    return available_encodings()
+
+
+def _choose_request_encoding(caps: HttpServerCapabilities | None) -> Encoding:
+    """Pick the codec for outgoing request bodies.
+
+    Honours the client's own preference order (zstd before gzip when
+    both are available) intersected with the server's advertised set
+    on ``HttpServerCapabilities.supported_encodings``.  Defaults to
+    zstd when caps are not yet discovered — every existing server can
+    decode zstd, so this is the safe back-compat choice.
+    """
+    client_set = _client_offered_encodings()
+    if not client_set:
+        # No codec we can produce; caller should fall back to identity.
+        return Encoding.ZSTD  # placeholder; caller checks compression_level
+    server_set: tuple[Encoding, ...] = caps.supported_encodings if caps is not None else (Encoding.ZSTD,)
+    for enc in client_set:
+        if enc in server_set:
+            return enc
+    # No overlap.  Send zstd and let the server respond 415 — the
+    # caller is expected to surface that as a clear "server doesn't
+    # speak any of our codecs" error.
+    return client_set[0]
+
+
+def _prepare_request_body(
+    content: bytes,
+    *,
+    encoding: Encoding | None,
+    compression_level: int | None,
+) -> bytes:
+    """Compress *content* with the resolved codec (or return as-is)."""
+    if encoding is None:
+        return content
+    # zstd honours the user-configured level; gzip uses its codec default.
+    level = compression_level if encoding is Encoding.ZSTD else None
+    return _compress_with_encoding(encoding, content, level=level)
 
 
 def _externalize_via_upload_url(
@@ -306,19 +359,38 @@ class HttpStreamSession:
             raise TypeError(f"Header type mismatch: expected {header_type.__name__}, got {type(self._header).__name__}")
         return self._header
 
+    def _resolve_request_encoding(self) -> Encoding | None:
+        """Choose a codec for the request body based on cached caps.
+
+        Stable across both ``_build_headers`` and ``_prepare_body`` so
+        the two stay in lockstep regardless of which gets called first
+        (Python evaluates ``kwargs`` left-to-right, so ``prepare_body``
+        may run before ``build_headers`` in some call sites).
+        """
+        if self._compression_level is None:
+            return None
+        client_set = _client_offered_encodings()
+        if not client_set:
+            return None
+        return _choose_request_encoding(self._capabilities)
+
     def _build_headers(self) -> dict[str, str]:
-        """Build HTTP headers, adding ``Content-Encoding`` and ``Accept-Encoding`` when compression is enabled."""
+        """Build HTTP headers, advertising codecs and selecting one for the body when compression is enabled."""
+        encoding = self._resolve_request_encoding()
         headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
-        if self._compression_level is not None:
-            headers["Content-Encoding"] = "zstd"
-            headers["Accept-Encoding"] = "zstd"
+        if encoding is not None:
+            headers["Content-Encoding"] = encoding.value
+            headers["Accept-Encoding"] = ", ".join(e.value for e in _client_offered_encodings())
         return headers
 
     def _prepare_body(self, content: bytes) -> bytes:
-        """Compress *content* when compression is enabled."""
-        if self._compression_level is not None:
-            return _compress_body(content, self._compression_level)
-        return content
+        """Compress *content* with the codec resolved from cached caps."""
+        encoding = self._resolve_request_encoding()
+        return _prepare_request_body(
+            content,
+            encoding=encoding,
+            compression_level=self._compression_level,
+        )
 
     def exchange(self, input_batch: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch and receive the output batch.
@@ -833,19 +905,63 @@ class _HttpProxy:
             capabilities=self._capabilities,
         )
 
+    def _resolve_request_encoding(self) -> Encoding | None:
+        """Choose a codec for the request body based on cached caps.
+
+        Stable across both ``_build_headers`` and ``_prepare_body`` so
+        the two stay in lockstep regardless of which gets called first
+        (Python evaluates ``kwargs`` left-to-right, so ``prepare_body``
+        may run before ``build_headers`` in some call sites).
+        """
+        if self._compression_level is None:
+            return None
+        client_set = _client_offered_encodings()
+        if not client_set:
+            return None
+        return _choose_request_encoding(self._capabilities)
+
     def _build_headers(self) -> dict[str, str]:
-        """Build HTTP headers, adding ``Content-Encoding`` and ``Accept-Encoding`` when compression is enabled."""
+        """Build HTTP headers, advertising codecs and selecting one for the body when compression is enabled."""
+        encoding = self._resolve_request_encoding()
         headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
-        if self._compression_level is not None:
-            headers["Content-Encoding"] = "zstd"
-            headers["Accept-Encoding"] = "zstd"
+        if encoding is not None:
+            headers["Content-Encoding"] = encoding.value
+            headers["Accept-Encoding"] = ", ".join(e.value for e in _client_offered_encodings())
         return headers
 
     def _prepare_body(self, content: bytes) -> bytes:
-        """Compress *content* when compression is enabled."""
-        if self._compression_level is not None:
-            return _compress_body(content, self._compression_level)
-        return content
+        """Compress *content* with the codec resolved from cached caps."""
+        encoding = self._resolve_request_encoding()
+        return _prepare_request_body(
+            content,
+            encoding=encoding,
+            compression_level=self._compression_level,
+        )
+
+    def _refresh_supported_encodings_from_response(
+        self, resp: httpx.Response | _SyncTestResponse
+    ) -> tuple[Encoding, ...] | None:
+        """Harvest ``VGI-Supported-Encodings`` from a response and cache it.
+
+        ``_CapabilitiesMiddleware`` stamps the header on every response,
+        including 415s — so the moment we see *any* response from the
+        server, we can refine the cached codec set without an OPTIONS
+        probe.  Returns the parsed list when present, else ``None``.
+        """
+        raw = resp.headers.get(SUPPORTED_ENCODINGS_HEADER) or resp.headers.get(SUPPORTED_ENCODINGS_HEADER.lower())
+        if not raw:
+            return None
+        parsed = tuple(parse_encoding_list(raw))
+        if not parsed:
+            return None
+        # Replace or augment the cached caps with the fresh codec list.
+        if self._capabilities is None:
+            self._capabilities = HttpServerCapabilities(supported_encodings=parsed)
+        else:
+            from dataclasses import replace
+
+            self._capabilities = replace(self._capabilities, supported_encodings=parsed)
+        return parsed
 
     def __getattr__(self, name: str) -> Any:
         """Resolve RPC method names to callable proxies, caching on first access.
@@ -877,6 +993,7 @@ class _HttpProxy:
         retry_cfg = self._retry_config
         build_headers = self._build_headers
         prepare_body = self._prepare_body
+        refresh_supported = self._refresh_supported_encodings_from_response
 
         maybe_externalize = self._maybe_externalize_request
         externalize = self._externalize_request_body
@@ -895,6 +1012,18 @@ class _HttpProxy:
                 headers=build_headers(),
                 config=retry_cfg,
             )
+            # 415 fallback: codec we picked isn't enabled on this server.
+            # The response carries ``VGI-Supported-Encodings`` (stamped on
+            # every response by ``_CapabilitiesMiddleware``); refresh caps
+            # and retry once with a codec the server actually accepts.
+            if resp.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE and refresh_supported(resp) is not None:
+                resp = _post_with_retry(
+                    client,
+                    f"{url_prefix}/{info.name}",
+                    content=prepare_body(body),
+                    headers=build_headers(),
+                    config=retry_cfg,
+                )
             # 413 fallback: server raised its-cap-changed-since-discovery
             # error; externalize and retry once.
             if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
@@ -929,6 +1058,7 @@ class _HttpProxy:
         build_headers = self._build_headers
         prepare_body = self._prepare_body
         compression_level = self._compression_level
+        refresh_supported = self._refresh_supported_encodings_from_response
 
         maybe_externalize = self._maybe_externalize_request
         externalize = self._externalize_request_body
@@ -948,6 +1078,14 @@ class _HttpProxy:
                 headers=build_headers(),
                 config=retry_cfg,
             )
+            if resp.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE and refresh_supported(resp) is not None:
+                resp = _post_with_retry(
+                    client,
+                    f"{url_prefix}/{info.name}/init",
+                    content=prepare_body(body),
+                    headers=build_headers(),
+                    config=retry_cfg,
+                )
             if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
                 body = externalize(body)
                 resp = _post_with_retry(
@@ -1028,6 +1166,12 @@ class HttpServerCapabilities:
             ``__upload_url__/init`` for client-vended pointer-batch uploads.
         max_upload_bytes: Maximum upload size the server advertises for
             client-vended URLs, or ``None`` if not advertised.
+        supported_encodings: Content-encoding codecs the server can
+            decompress on request bodies and re-encode for responses.
+            Parsed from the ``VGI-Supported-Encodings`` response header;
+            falls back to ``(Encoding.ZSTD,)`` when the header is
+            missing — matches the pre-gzip server, which only ever
+            accepted zstd.
         cache_expires_at: Monotonic timestamp (``time.monotonic()``) at
             which this snapshot of the capabilities should be re-probed.
             ``None`` means no expiry hint was given.
@@ -1040,6 +1184,7 @@ class HttpServerCapabilities:
     externalization_enabled: bool = False
     upload_url_support: bool = False
     max_upload_bytes: int | None = None
+    supported_encodings: tuple[Encoding, ...] = (Encoding.ZSTD,)
     cache_expires_at: float | None = None
 
 
@@ -1124,6 +1269,15 @@ def http_capabilities(
             with contextlib.suppress(ValueError):
                 max_upload = int(upload_bytes_raw)
 
+        supported_raw = headers.get(SUPPORTED_ENCODINGS_HEADER) or headers.get(SUPPORTED_ENCODINGS_HEADER.lower())
+        if supported_raw:
+            parsed = tuple(parse_encoding_list(supported_raw))
+            # Empty parse (e.g. server advertised codecs we don't recognise)
+            # falls back to zstd-only — the historical behaviour.
+            supported_encodings = parsed if parsed else (Encoding.ZSTD,)
+        else:
+            supported_encodings = (Encoding.ZSTD,)
+
         # Honour Cache-Control: max-age=N for refresh scheduling.
         cache_expires_at: float | None = None
         cc = headers.get("Cache-Control") or headers.get("cache-control")
@@ -1142,6 +1296,7 @@ def http_capabilities(
             externalization_enabled=ext_enabled,
             upload_url_support=upload_support,
             max_upload_bytes=max_upload,
+            supported_encodings=supported_encodings,
             cache_expires_at=cache_expires_at,
         )
     finally:

@@ -10,7 +10,24 @@ from typing import Any
 
 import pyarrow as pa
 
+from vgi_rpc._codec import (
+    DecompressionError,
+    Encoding,
+    available_encodings,
+    compress,
+    decompress,
+    parse_encoding_list,
+)
 from vgi_rpc.rpc import _EMPTY_SCHEMA
+
+__all__ = [
+    "DecompressionError",
+    "Encoding",
+    "available_encodings",
+    "compress",
+    "decompress",
+    "parse_encoding_list",
+]
 
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes"
@@ -20,6 +37,7 @@ EXTERNALIZATION_ENABLED_HEADER = "VGI-Externalization-Enabled"
 RPC_ERROR_HEADER = "X-VGI-RPC-Error"
 UPLOAD_URL_HEADER = "VGI-Upload-URL-Support"
 MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes"
+SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings"
 
 _MAX_UPLOAD_URL_COUNT = 100
 
@@ -34,85 +52,15 @@ _upload_url_fields: list[pa.Field[Any]] = [
 _UPLOAD_URL_SCHEMA = pa.schema(_upload_url_fields)
 
 
+# Backwards-compatible aliases — older call sites import these names.
 def _compress_body(data: bytes, level: int) -> bytes:
-    """Compress *data* using zstd at the given level.
-
-    A new ``ZstdCompressor`` is created per call (cheap, thread-safe).
-
-    Args:
-        data: Raw bytes to compress.
-        level: Zstandard compression level (1-22).
-
-    Returns:
-        Compressed bytes.
-
-    """
-    import zstandard
-
-    return zstandard.ZstdCompressor(level=level).compress(data)
+    """Compress *data* using zstd at the given level (legacy entry point)."""
+    return compress(Encoding.ZSTD, data, level=level)
 
 
 def _decompress_body(data: bytes, *, max_output_size: int | None = None) -> bytes:
-    """Decompress zstd-compressed *data*.
-
-    A new ``ZstdDecompressor`` is created per call (cheap, thread-safe).
-
-    Args:
-        data: Zstd-compressed bytes.
-        max_output_size: Optional upper bound on the decompressed size.
-            Zstd frames carry the decompressed size in their header and
-            ``decompress()`` would otherwise trust it and allocate
-            eagerly — so a 3 KB compressed body claiming 100 MB output
-            would allocate 100 MB on the server (decompression-bomb
-            DoS).  When set, the frame's declared size is checked
-            against this cap *before* decompression begins; frames with
-            unknown content size fall back to streaming decompression
-            with the cap enforced as a hard ceiling.  ``None`` keeps
-            the historical unbounded behaviour for callers that have
-            already validated the source.
-
-    Returns:
-        Decompressed bytes.
-
-    Raises:
-        zstandard.ZstdError: If the frame's declared decompressed size
-            exceeds ``max_output_size`` (when set), or if decompression
-            otherwise fails.
-
-    """
-    import zstandard
-
-    if max_output_size is None:
-        return zstandard.ZstdDecompressor().decompress(data)
-
-    # Refuse the frame up-front when the header claims more than allowed.
-    # This catches the ``unbounded allocation`` decompression-bomb case
-    # before any output buffer is allocated.
-    params = zstandard.get_frame_parameters(data)
-    if params.content_size != -1 and params.content_size > max_output_size:
-        raise zstandard.ZstdError(
-            f"Compressed frame declares decompressed size {params.content_size} bytes, "
-            f"which exceeds max_output_size={max_output_size}"
-        )
-
-    if params.content_size != -1:
-        # Header-known size and within the cap — safe to decompress in one shot.
-        return zstandard.ZstdDecompressor().decompress(data)
-
-    # Unknown size — stream and stop the moment we exceed the cap.
-    decompressor = zstandard.ZstdDecompressor()
-    chunks: list[bytes] = []
-    total = 0
-    with decompressor.stream_reader(data) as reader:
-        while True:
-            chunk = reader.read(min(65536, max_output_size - total + 1))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_output_size:
-                raise zstandard.ZstdError(f"Decompressed output exceeds max_output_size={max_output_size}")
-            chunks.append(chunk)
-    return b"".join(chunks)
+    """Decompress zstd-compressed *data* with optional output cap (legacy entry point)."""
+    return decompress(Encoding.ZSTD, data, max_output_size=max_output_size)
 
 
 # ---------------------------------------------------------------------------
