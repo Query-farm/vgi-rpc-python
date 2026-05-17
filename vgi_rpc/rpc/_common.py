@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, cast
 
 import pyarrow as pa
 
@@ -460,6 +460,22 @@ class RpcError(Exception):
 
 class VersionError(Exception):
     """Raised when a request has a missing or incompatible protocol version."""
+
+
+class MethodNotImplementedError(AttributeError):
+    """Raised server-side when no handler is registered for the requested RPC method.
+
+    Subclass of ``AttributeError`` so existing ``except AttributeError`` callers
+    keep working. Carries a stable ``error_kind`` class attribute that the
+    wire serializer surfaces as a top-level ``vgi_rpc.error_kind`` metadata
+    key on the EXCEPTION-level error batch, so clients can pattern-match on
+    the kind rather than substring-searching the message text.
+
+    Used by callers that want to detect "old server doesn't know this method"
+    cleanly (e.g. capability detection + fallback to a legacy RPC method).
+    """
+
+    error_kind: ClassVar[str] = "method_not_implemented"
 
 
 # ---------------------------------------------------------------------------

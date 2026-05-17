@@ -17,6 +17,8 @@ import pyarrow as pa
 __all__ = [
     "CANCEL_KEY",
     "DESCRIBE_VERSION_KEY",
+    "ERROR_KIND_KEY",
+    "ERROR_KIND_METHOD_NOT_IMPLEMENTED",
     "LOCATION_FETCH_MS_KEY",
     "LOCATION_KEY",
     "LOCATION_SHA256_KEY",
@@ -57,6 +59,16 @@ CANCEL_KEY = b"vgi_rpc.cancel"
 LOG_LEVEL_KEY = b"vgi_rpc.log_level"
 LOG_MESSAGE_KEY = b"vgi_rpc.log_message"
 LOG_EXTRA_KEY = b"vgi_rpc.log_extra"
+
+# Typed error categorisation on EXCEPTION-level batches. Open enum — values
+# beyond the well-known tokens below are valid and should be treated as
+# unknown kinds by clients. Lets callers pattern-match on a stable
+# identifier instead of substring-searching the exception message.
+ERROR_KIND_KEY = b"vgi_rpc.error_kind"
+
+# Well-known error_kind value: the server has no handler for the requested
+# RPC method (old server vs. new client, or method removed).
+ERROR_KIND_METHOD_NOT_IMPLEMENTED = b"method_not_implemented"
 REQUEST_VERSION_KEY = b"vgi_rpc.request_version"
 REQUEST_VERSION = b"1"
 

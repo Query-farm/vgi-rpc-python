@@ -20,7 +20,7 @@ from io import BytesIO, IOBase
 import falcon
 
 from vgi_rpc.external import UploadUrlProvider
-from vgi_rpc.rpc import RpcMethodInfo, RpcServer
+from vgi_rpc.rpc import MethodNotImplementedError, RpcMethodInfo, RpcServer
 
 from .._common import _RpcHttpError
 from ._responses import _check_content_type
@@ -75,7 +75,9 @@ class _HttpRpcApp:
         if info is None:
             available = sorted(self._server.methods.keys())
             raise _RpcHttpError(
-                AttributeError(f"Unknown method: '{method}'. Available methods: {available}"),
+                MethodNotImplementedError(
+                    f"Unknown method: '{method}'. Available methods: {available}"
+                ),
                 status_code=HTTPStatus.NOT_FOUND,
             )
         return info

@@ -150,7 +150,12 @@ class TestHttpErrorCases:
         )
         assert resp.status_code == 404
         err = _extract_rpc_error(resp)
-        assert err.error_type == "AttributeError"
+        # Server signals unknown-method via the typed MethodNotImplementedError
+        # (a subclass of AttributeError so existing `except AttributeError`
+        # callers keep working). RpcError.error_type carries the concrete
+        # class name; clients should pattern-match on the metadata key
+        # vgi_rpc.error_kind=method_not_implemented when available.
+        assert err.error_type == "MethodNotImplementedError"
         assert "nonexistent" in err.error_message
 
     def test_non_stream_on_init_endpoint_400(self, client: _SyncTestClient) -> None:
