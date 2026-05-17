@@ -43,7 +43,7 @@ import traceback
 from enum import Enum
 from typing import ClassVar
 
-from vgi_rpc.metadata import LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY
+from vgi_rpc.metadata import ERROR_KIND_KEY, LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY
 
 __all__ = [
     "Level",
@@ -190,6 +190,12 @@ class Message:
         if self.extra:
             extra_key: str = LOG_EXTRA_KEY.decode()
             result[extra_key] = json.dumps(self.extra)
+            # Hoist error_kind (when set by from_exception()) to a top-level
+            # metadata key so clients can pattern-match on the stable token
+            # without parsing the log_extra JSON blob. See metadata.ERROR_KIND_KEY.
+            kind = self.extra.get("error_kind")
+            if isinstance(kind, str):
+                result[ERROR_KIND_KEY.decode()] = kind
         return result
 
     @classmethod
@@ -234,6 +240,14 @@ class Message:
             }
             for f in tb_exc.stack[-cls.MAX_TRACEBACK_FRAMES :]
         ]
+
+        # Typed marker exceptions advertise an `error_kind` class attribute
+        # (open-enum string) that we surface as a first-class metadata key
+        # on the wire (see metadata.ERROR_KIND_KEY). Callers can then
+        # pattern-match on the stable token rather than message text.
+        kind = getattr(exc, "error_kind", None)
+        if isinstance(kind, str):
+            extra["error_kind"] = kind
 
         return cls(
             Level.EXCEPTION,

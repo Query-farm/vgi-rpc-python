@@ -28,6 +28,7 @@ from vgi_rpc.metadata import encode_metadata
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     CallContext,
+    MethodNotImplementedError,
     MethodType,
     OutputCollector,
     PipeTransport,
@@ -1109,6 +1110,57 @@ class TestServeOneServerErrors:
         server = RpcServer(P, Impl())
         with pytest.raises(RpcError, match="Unknown method: 'bogus'"):
             _serve_one_roundtrip(server, "bogus", pa.schema([]), {})
+
+    def test_unknown_method_error_carries_error_kind_metadata(self) -> None:
+        """Unknown-method error batch carries vgi_rpc.error_kind=method_not_implemented.
+
+        Lets clients pattern-match on the stable kind token rather than
+        substring-searching the message text. Used by the C++ VGI extension's
+        capability-detection fallback (try new RPC method, catch
+        MethodNotImplementedError, fall back to legacy RPC).
+        """
+
+        class P(Protocol):
+            """Protocol."""
+
+            def real(self) -> str: ...
+
+        class Impl:
+            """Implementation."""
+
+            def real(self) -> str:
+                """Return ok."""
+                return "ok"
+
+        server = RpcServer(P, Impl())
+        req_buf = BytesIO()
+        _write_request(req_buf, "bogus", pa.schema([]), {})
+        req_buf.seek(0)
+        resp_buf = BytesIO()
+        server.serve_one(PipeTransport(req_buf, resp_buf))
+        resp_buf.seek(0)
+        reader = ipc.open_stream(resp_buf)
+        _batch, md = reader.read_next_batch_with_custom_metadata()
+        assert md is not None
+        md_dict = dict(md.to_pydict()) if hasattr(md, "to_pydict") else {bytes(k): bytes(v) for k, v in md.items()}
+        # The metadata may use either bytes or str keys depending on how the
+        # underlying Arrow library returns it; normalise to bytes for the check.
+        normalised: dict[bytes, bytes] = {}
+        for k, v in md_dict.items():
+            kb = k if isinstance(k, bytes) else k.encode()
+            vb = v if isinstance(v, bytes) else v.encode()
+            normalised[kb] = vb
+        assert normalised.get(b"vgi_rpc.error_kind") == b"method_not_implemented", (
+            f"expected vgi_rpc.error_kind=method_not_implemented; got metadata keys "
+            f"{sorted(normalised.keys())}"
+        )
+
+    def test_method_not_implemented_error_class_carries_kind(self) -> None:
+        """MethodNotImplementedError exposes a stable error_kind attribute."""
+        exc = MethodNotImplementedError("test")
+        assert exc.error_kind == "method_not_implemented"
+        # Subclass of AttributeError so existing `except AttributeError` works.
+        assert isinstance(exc, AttributeError)
 
     def test_validate_params_none_for_required(self) -> None:
         """serve_one returns RpcError when a required param is None."""

@@ -27,6 +27,7 @@ from vgi_rpc.rpc._common import (
     CallContext,
     CallStatistics,
     HookToken,
+    MethodNotImplementedError,
     MethodType,
     RpcError,
     TransportKind,
@@ -579,7 +580,9 @@ class RpcServer:
                 _write_error_stream(
                     transport.writer,
                     _EMPTY_SCHEMA,
-                    AttributeError(f"Unknown method: '{method_name}'. Available methods: {available}"),
+                    MethodNotImplementedError(
+                        f"Unknown method: '{method_name}'. Available methods: {available}"
+                    ),
                     server_id=self._server_id,
                 )
                 return
