@@ -103,3 +103,17 @@ vgi-rpc-test --cmd "python -m tests.serve_conformance_pipe"
 ```
 
 For wire protocol details, see [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md).
+
+## Capability-gated test groups
+
+Some conformance tests target opt-in HTTP features. They run only when the server's `OPTIONS /health` capability headers advertise the feature, and skip cleanly otherwise — so a port that doesn't implement the feature stays fully conformant on the core wire surface while the dedicated suite verifies anyone who does opt in.
+
+| Capability header | Test group | Spec |
+|---|---|---|
+| `VGI-Sticky-Enabled: true` | `Sticky::*` | [sticky-sessions-spec.md](sticky-sessions-spec.md) |
+
+Filter for one group with `--filter`:
+
+```bash
+vgi-rpc-test --url http://<server> --filter "Sticky::*"
+```

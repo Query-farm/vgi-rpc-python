@@ -75,9 +75,7 @@ class _HttpRpcApp:
         if info is None:
             available = sorted(self._server.methods.keys())
             raise _RpcHttpError(
-                MethodNotImplementedError(
-                    f"Unknown method: '{method}'. Available methods: {available}"
-                ),
+                MethodNotImplementedError(f"Unknown method: '{method}'. Available methods: {available}"),
                 status_code=HTTPStatus.NOT_FOUND,
             )
         return info

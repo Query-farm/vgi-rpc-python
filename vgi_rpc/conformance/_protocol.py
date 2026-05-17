@@ -480,3 +480,37 @@ class ConformanceService(Protocol):
 
         """
         ...
+
+    # ------------------------------------------------------------------
+    # Sticky Sessions (HTTP-only; capability-gated tests)
+    # ------------------------------------------------------------------
+    #
+    # Wire-protocol exercise for the sticky-session feature.  The three
+    # methods together prove the open / resume / close lifecycle: a
+    # client calls ``open_counter`` to register a server-side counter,
+    # repeatedly calls ``increment_counter`` to mutate it through the
+    # session token, and finally calls ``close_counter`` to tear it
+    # down.  Servers without sticky support raise an appropriate
+    # exception when ``ctx.open_session`` is invoked, and the
+    # capability-gated ``TestSticky`` group skips them.
+
+    def open_counter(self, initial: int) -> int:
+        """Open a sticky session holding a counter; return its initial value.
+
+        The implementation calls ``ctx.open_session`` so subsequent
+        ``increment_counter`` / ``close_counter`` calls running in the
+        same session see the same counter state. Returns ``initial``.
+        """
+        ...
+
+    def increment_counter(self, by: int) -> int:
+        """Increment the sticky session's counter; return the post-increment value.
+
+        Requires a session opened by ``open_counter``; surfaces the
+        framework's ``SessionLostError`` if no session is bound.
+        """
+        ...
+
+    def close_counter(self) -> int:
+        """Close the sticky session; return the counter's final value before close."""
+        ...

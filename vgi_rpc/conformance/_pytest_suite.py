@@ -1256,13 +1256,9 @@ class TestConnectionReuse:
                 assert proxy.echo_string(value=f"call-{i}") == f"call-{i}"
                 assert proxy.echo_int(value=i) == i
                 assert proxy.add_floats(a=float(i), b=0.5) == pytest.approx(i + 0.5)
-                assert proxy.echo_point(point=Point(x=float(i), y=-float(i))) == Point(
-                    x=float(i), y=-float(i)
-                )
+                assert proxy.echo_point(point=Point(x=float(i), y=-float(i))) == Point(x=float(i), y=-float(i))
 
-    def test_optional_absence_round_trips_repeatedly(
-        self, conformance_conn: ConnFactory
-    ) -> None:
+    def test_optional_absence_round_trips_repeatedly(self, conformance_conn: ConnFactory) -> None:
         """Absent optionals stay absent across many reused-connection calls.
 
         A correct client round-trips an absent optional as the language's
@@ -1643,10 +1639,10 @@ class TestDescribeConformance:
 
     def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
-        # Bumped to 76 in 2026-04 when the HTTP-only response-cap conformance
-        # methods were added (oversized_unary, produce_oversized_batch,
-        # exchange_oversized).
-        assert len(service_description.methods) == 76
+        # 76 + 3 sticky methods (open_counter / increment_counter /
+        # close_counter) added 2026-05 alongside the Sticky.* conformance
+        # group.
+        assert len(service_description.methods) == 79
         assert service_description.protocol_name == "ConformanceService"
         echo_str = service_description.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY
@@ -1895,3 +1891,165 @@ class TestHttpResponseCapSoftWire:
             # the data batch + a continuation token + trailing finish, but
             # the client-visible batches are: 1 data batch.
             assert sum(b.batch.num_rows for b in batches) == target_rows
+
+
+# ---------------------------------------------------------------------------
+# Sticky session conformance (HTTP-only, capability-gated)
+# ---------------------------------------------------------------------------
+
+
+class TestSticky:
+    """Canonical wire-protocol conformance for HTTP sticky sessions.
+
+    Capability-gated: every test calls :meth:`_skip_unless_sticky` first,
+    which probes ``OPTIONS /health`` for ``VGI-Sticky-Enabled: true`` and
+    skips otherwise. Cross-language ports without sticky support are
+    automatically skipped here; ports that implement sticky must pass.
+
+    The contract under test is the wire shape described in
+    ``docs/sticky-sessions-spec.md`` plus the porting-guide section on
+    sticky sessions. Tests exercise ``open_counter`` / ``increment_counter``
+    / ``close_counter`` on the conformance service which themselves use
+    the runtime API ``ctx.open_session`` / ``ctx.session`` / ``ctx.close_session``.
+    """
+
+    def _skip_unless_sticky(self, port: int) -> None:
+        """Skip the calling test when the server doesn't advertise sticky support."""
+        from vgi_rpc.http import http_capabilities
+
+        caps = http_capabilities(base_url=f"http://127.0.0.1:{port}")
+        if not caps.sticky_enabled:
+            pytest.skip("server does not advertise VGI-Sticky-Enabled — sticky conformance N/A")
+
+    def _connect(self, port: int) -> Any:
+        """Open an HTTP connection to the sticky-enabled conformance worker."""
+        from vgi_rpc.http import http_connect
+
+        return http_connect(ConformanceService, f"http://127.0.0.1:{port}")
+
+    def test_open_and_resume(self, conformance_http_port: int) -> None:
+        """A session opened on one call is visible to subsequent calls echoing its token."""
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as sess:
+            initial = sess.open_counter(initial=7)
+            assert initial == 7
+            assert sess.current_session_token() is not None, "server must mint a VGI-Session token"
+            after = sess.increment_counter(by=10)
+            assert after == 17, "session state must survive the second call"
+            # Multiple increments observe accumulating state — proof we hit
+            # the same backend worker across calls.
+            assert sess.increment_counter(by=10) == 27
+            assert sess.increment_counter(by=10) == 37
+
+    def test_explicit_close(self, conformance_http_port: int) -> None:
+        """``close_counter`` evicts the session and clears the client's token."""
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=1)
+            final = sess.close_counter()
+            assert final == 1
+            # After close: server emitted VGI-Session-Close: true, so the
+            # client's tracking view dropped the token. Without a token on
+            # the next call there's no session to bind; the method's own
+            # guard raises "no sticky counter bound". The registry-eviction
+            # path is exercised separately by test_session_lost_after_explicit_close,
+            # which re-presents the stale token to surface SessionLostError.
+            assert sess.current_session_token() is None
+            with pytest.raises(RpcError):
+                sess.increment_counter(by=1)
+
+    def test_open_requires_accept_header(self, conformance_http_port: int) -> None:
+        """``ctx.open_session`` raises when the request lacks ``VGI-Session-Accept: true``."""
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy:
+            # Calling open_counter outside any with_session_token() block →
+            # no VGI-Session-Accept header → server rejects.
+            with pytest.raises(RpcError) as excinfo:
+                proxy.open_counter(initial=1)
+            assert excinfo.value.error_type == "RuntimeError"
+            assert "VGI-Session-Accept" in str(excinfo.value)
+
+    def test_session_lost_on_invalid_token(self, conformance_http_port: int) -> None:
+        """Presenting a malformed / forged token returns ``SessionLostError`` on the next call."""
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy:
+            with proxy.with_session_token(token="not-a-real-token") as sess, pytest.raises(RpcError) as excinfo:
+                sess.increment_counter(by=1)
+            assert excinfo.value.error_type == "SessionLostError"
+
+    def test_session_lost_after_explicit_close(self, conformance_http_port: int) -> None:
+        """A previously-valid token rejected after close — proves the registry actually evicted."""
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy:
+            stash: str | None = None
+            with proxy.with_session_token() as sess:
+                sess.open_counter(initial=99)
+                stash = sess.current_session_token()
+                sess.close_counter()
+            assert stash is not None
+            # Re-present the (now-stale) token via a new with_session_token() block.
+            with (
+                proxy.with_session_token(token=stash) as sess2,
+                pytest.raises(RpcError) as excinfo,
+            ):
+                sess2.increment_counter(by=1)
+            assert excinfo.value.error_type == "SessionLostError"
+
+    def test_delete_session_endpoint_idempotent_no_token(self, conformance_http_port: int) -> None:
+        """``DELETE /vgi/__session__`` with no token returns 200 (idempotent no-op)."""
+        self._skip_unless_sticky(conformance_http_port)
+        import httpx
+
+        resp = httpx.delete(f"http://127.0.0.1:{conformance_http_port}/__session__", timeout=5.0)
+        assert resp.status_code == 200
+
+    def test_delete_session_endpoint_idempotent_on_garbage_token(self, conformance_http_port: int) -> None:
+        """``DELETE /vgi/__session__`` with a garbage token returns 200 (no info leak)."""
+        self._skip_unless_sticky(conformance_http_port)
+        import httpx
+
+        resp = httpx.delete(
+            f"http://127.0.0.1:{conformance_http_port}/__session__",
+            headers={"VGI-Session": "garbage"},
+            timeout=5.0,
+        )
+        assert resp.status_code == 200
+
+    def test_describe_unchanged(self) -> None:
+        """Enabling sticky must NOT change ``DESCRIBE_VERSION`` or the protocol payload shape.
+
+        Builds an in-process pipe-transport conformance server with
+        ``enable_describe=True`` and verifies the describe payload — runs
+        regardless of which HTTP fixtures the runner provides (so other-
+        language ports without a Python sticky HTTP fixture can still skip
+        via :meth:`_skip_unless_sticky` but exercise this contract).
+        """
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+        thread.start()
+        try:
+            desc = introspect(client_transport)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+        # PR1 contract: __describe__ wire format is untouched by sticky
+        # support. Future changes to DESCRIBE_VERSION should be a
+        # deliberate bump with a corresponding cross-language port update.
+        assert desc.describe_version == "4"
+        # The 3 sticky conformance methods must be visible (since the
+        # conformance service defines them) but `is_sticky` is not a
+        # describe field — methods look just like normal unary methods.
+        for name in ("open_counter", "increment_counter", "close_counter"):
+            assert name in desc.methods, f"sticky conformance method '{name}' must appear in __describe__"
+            assert desc.methods[name].method_type == MethodType.UNARY
+
+    def test_capabilities_advertised(self, conformance_http_port: int) -> None:
+        """``OPTIONS /health`` advertises ``VGI-Sticky-Enabled: true`` and a default TTL."""
+        self._skip_unless_sticky(conformance_http_port)
+        from vgi_rpc.http import http_capabilities
+
+        caps = http_capabilities(base_url=f"http://127.0.0.1:{conformance_http_port}")
+        assert caps.sticky_enabled is True
+        # Default TTL is operator-tunable. Conformance just requires it be advertised as a positive int.
+        assert caps.sticky_default_ttl is not None and caps.sticky_default_ttl > 0

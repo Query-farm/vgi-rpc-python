@@ -41,9 +41,10 @@ from .._common import (
     _ARROW_CONTENT_TYPE,
     Encoding,
     available_encodings,
-    compress as _compress_with_encoding,
-    decompress as _decompress_with_encoding,
     parse_encoding_list,
+)
+from .._common import (
+    decompress as _decompress_with_encoding,
 )
 
 _logger = logging.getLogger("vgi_rpc.http")
@@ -312,7 +313,7 @@ class _CompressionMiddleware:
     frame-header pre-check; gzip uses a bounded streaming loop.
     """
 
-    __slots__ = ("_levels", "_available", "_max_decompressed_bytes")
+    __slots__ = ("_available", "_levels", "_max_decompressed_bytes")
 
     def __init__(
         self,
@@ -371,9 +372,7 @@ class _CompressionMiddleware:
             )
         try:
             compressed = req.bounded_stream.read()
-            decompressed = _decompress_with_encoding(
-                req_enc, compressed, max_output_size=self._max_decompressed_bytes
-            )
+            decompressed = _decompress_with_encoding(req_enc, compressed, max_output_size=self._max_decompressed_bytes)
             req.context.decompressed_stream = BytesIO(decompressed)
         except Exception as exc:
             raise falcon.HTTPBadRequest(

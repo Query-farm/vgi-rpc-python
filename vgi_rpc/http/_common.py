@@ -39,6 +39,21 @@ UPLOAD_URL_HEADER = "VGI-Upload-URL-Support"
 MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes"
 SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings"
 
+# Sticky session header conventions (HTTP-only). The cookie equivalent
+# (Set-Cookie / vgi-session) is intentionally out of scope for v1 — headers
+# multiplex cleanly across concurrent sessions, cookies do not.
+SESSION_HEADER = "VGI-Session"
+SESSION_ACCEPT_HEADER = "VGI-Session-Accept"
+SESSION_CLOSE_HEADER = "VGI-Session-Close"
+STICKY_ENABLED_HEADER = "VGI-Sticky-Enabled"
+STICKY_DEFAULT_TTL_HEADER = "VGI-Sticky-Default-TTL"
+
+# Framework-managed sticky session teardown endpoint. Parallel to the
+# synthetic __describe__ method but served by a dedicated Falcon resource;
+# DELETE /vgi/__session__ idempotently closes the session referenced by
+# the request's VGI-Session header.
+_SESSION_ENDPOINT = "__session__"
+
 _MAX_UPLOAD_URL_COUNT = 100
 
 _UPLOAD_URL_METHOD = "__upload_url__"

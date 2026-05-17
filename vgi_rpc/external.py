@@ -77,7 +77,8 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 import pyarrow as pa
 from pyarrow import ipc
 
-from vgi_rpc._codec import Encoding as _CodecEncoding, compress as _codec_compress
+from vgi_rpc._codec import Encoding as _CodecEncoding
+from vgi_rpc._codec import compress as _codec_compress
 from vgi_rpc.external_fetch import FetchConfig, fetch_url
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import (

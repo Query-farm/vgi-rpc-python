@@ -1151,8 +1151,7 @@ class TestServeOneServerErrors:
             vb = v if isinstance(v, bytes) else v.encode()
             normalised[kb] = vb
         assert normalised.get(b"vgi_rpc.error_kind") == b"method_not_implemented", (
-            f"expected vgi_rpc.error_kind=method_not_implemented; got metadata keys "
-            f"{sorted(normalised.keys())}"
+            f"expected vgi_rpc.error_kind=method_not_implemented; got metadata keys {sorted(normalised.keys())}"
         )
 
     def test_method_not_implemented_error_class_carries_kind(self) -> None:

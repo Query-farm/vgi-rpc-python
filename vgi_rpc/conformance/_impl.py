@@ -523,3 +523,53 @@ class ConformanceServiceImpl:
             input_schema=_SCALE_INPUT_SCHEMA,
             header=build_rich_header(seed),
         )
+
+    # ------------------------------------------------------------------
+    # Sticky Sessions
+    # ------------------------------------------------------------------
+    #
+    # The state object is a plain ``_StickyCounter`` (defined below) — no
+    # threading guards needed because the framework's per-session RLock
+    # already serializes concurrent requests on the same session.
+
+    def open_counter(self, initial: int, ctx: CallContext) -> int:
+        """Register a counter in a new sticky session; return its initial value."""
+        ctx.open_session(_StickyCounter(value=initial))
+        return initial
+
+    def increment_counter(self, by: int, ctx: CallContext) -> int:
+        """Mutate the bound session's counter; return the post-increment value."""
+        counter = ctx.session
+        if not isinstance(counter, _StickyCounter):
+            # No session bound — surface a clear server-side message; the
+            # framework returns this as an RpcError to the client.
+            raise RuntimeError("no sticky counter bound to this request")
+        counter.value += by
+        return counter.value
+
+    def close_counter(self, ctx: CallContext) -> int:
+        """Read the counter, close the session, return the final value."""
+        counter = ctx.session
+        if not isinstance(counter, _StickyCounter):
+            raise RuntimeError("no sticky counter bound to this request")
+        final = counter.value
+        ctx.close_session()
+        return final
+
+
+class _StickyCounter:
+    """State object for the conformance sticky session methods.
+
+    Exposes ``close()`` so the registry's reaper / drain / explicit close
+    can observe and verify the cleanup contract from Python tests.
+    """
+
+    __slots__ = ("closed", "value")
+
+    def __init__(self, value: int) -> None:
+        self.value = value
+        self.closed = False
+
+    def close(self) -> None:
+        """Mark the counter closed — used by Python-only tests to verify eviction."""
+        self.closed = True

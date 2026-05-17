@@ -495,6 +495,8 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `max_upload_bytes` | `None` | Advertise max upload size via `VGI-Max-Upload-Bytes` header (requires `upload_url_provider`) |
 | `otel_config` | `None` | `OtelConfig` for OpenTelemetry instrumentation |
 | `token_ttl` | `3600` | Maximum age (seconds) for stream state tokens |
+| `enable_sticky` | `False` | Enable HTTP [sticky sessions](docs/sticky-sessions-spec.md) — `ctx.open_session(state)` binds a Python object to the worker for the session token's lifetime |
+| `sticky_default_ttl` | `300.0` | Default session TTL in seconds for sticky sessions; overridable per-call via `ctx.open_session(state, ttl=...)` |
 
 ### CORS (browser clients)
 
