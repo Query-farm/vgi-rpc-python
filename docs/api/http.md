@@ -155,6 +155,8 @@ Generic API (for non-Fly platforms): pass any `dict[str, str]` as `sticky_echo_h
 
 ::: vgi_rpc.http.make_wsgi_app
 
+::: vgi_rpc.http.serve_http
+
 ### Client
 
 ::: vgi_rpc.http.http_connect
@@ -172,6 +174,20 @@ Generic API (for non-Fly platforms): pass any `dict[str, str]` as `sticky_echo_h
 ### Stream Session
 
 ::: vgi_rpc.http.HttpStreamSession
+
+### Sticky Sessions
+
+::: vgi_rpc.http.DrainHandle
+
+::: vgi_rpc.http.drain_handle
+
+#### Fly.io quickstart
+
+::: vgi_rpc.http.fly.FLY_MACHINE_ID
+
+::: vgi_rpc.http.fly.auto_server_id
+
+::: vgi_rpc.http.fly.fly_sticky_echo_headers
 
 ### Testing
 

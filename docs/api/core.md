@@ -48,6 +48,19 @@ For more control, use `RpcServer` and `RpcConnection` directly.
 
 ::: vgi_rpc.rpc.VersionError
 
+### Typed marker errors
+
+These exception classes carry a stable `error_kind` class attribute that
+the wire serializer surfaces as the `vgi_rpc.error_kind` metadata key on
+the EXCEPTION-level batch. Clients can pattern-match the kind instead of
+substring-searching the error message.
+
+::: vgi_rpc.rpc.MethodNotImplementedError
+
+::: vgi_rpc.rpc.SessionLostError
+
+::: vgi_rpc.rpc.ServerDrainingError
+
 See also [`IPCError`](serialization.md#vgi_rpc.utils.IPCError) in the Serialization module.
 
 ## CallStatistics
