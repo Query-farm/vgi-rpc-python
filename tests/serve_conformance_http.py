@@ -20,10 +20,54 @@ import argparse
 import socket
 import sys
 
+import falcon
+
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
 from vgi_rpc.external import Compression, ExternalLocationConfig
-from vgi_rpc.http import make_wsgi_app, serve_http
+from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
 from vgi_rpc.rpc import RpcServer
+
+
+class _TestDrainResource:
+    """Test-only admin endpoint at ``/__test_drain__``.
+
+    Lets the canonical ``TestSticky::test_drain_rejects_new_opens`` test
+    flip the sticky registry's drain flag over the wire (without sending
+    SIGTERM, which would kill the subprocess fixture). NOT installed in
+    production :func:`vgi_rpc.http.make_wsgi_app` — this is purely a
+    conformance-fixture concern.
+
+    Supports:
+    * ``POST`` — set the drain flag (subsequent ``open_session`` calls raise ``ServerDrainingError``).
+    * ``DELETE`` — clear the drain flag (so subsequent tests in the same fixture session aren't poisoned).
+
+    Both are idempotent and return 204.
+    No-op if the server isn't sticky-enabled.
+    """
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, handle: DrainHandle | None) -> None:
+        self._handle = handle
+
+    def on_post(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Set the drain flag; idempotent."""
+        if self._handle is not None:
+            self._handle.drain()
+        resp.status = falcon.HTTP_204
+
+    def on_delete(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Clear the drain flag; idempotent."""
+        # Reach through the handle's drain closure to find the registry.
+        # The DrainHandle dataclass exposes is_draining + drain + shutdown
+        # but not set_draining(False) — that's a deliberate operator-API
+        # choice (production deployments only ever drain, never undrain).
+        # Tests need the reverse so they don't poison the fixture.
+        if self._handle is not None:
+            # Walk to the underlying _SessionRegistry via the bound shutdown method.
+            registry = self._handle.shutdown.__self__  # type: ignore[attr-defined]
+            registry.set_draining(False)
+        resp.status = falcon.HTTP_204
 
 
 def main() -> None:
@@ -113,6 +157,9 @@ def main() -> None:
             enable_sticky=True,
             sticky_echo_headers=sticky_echo_headers,
         )
+        # Test-only admin endpoint so canonical conformance tests can
+        # trigger drain over the wire without sending SIGTERM.
+        app.add_route("/__test_drain__", _TestDrainResource(drain_handle(app)))
         try:
             import waitress
         except ImportError:
@@ -157,6 +204,8 @@ def main() -> None:
         enable_sticky=enable_sticky,
         sticky_echo_headers=sticky_echo_headers,
     )
+    # Test-only admin endpoint (see _TestDrainResource for rationale).
+    app.add_route("/__test_drain__", _TestDrainResource(drain_handle(app)))
 
     try:
         import waitress

@@ -37,6 +37,8 @@ from vgi_rpc.rpc._common import (
     _current_request_batch,
     _current_request_id,
     _current_request_metadata,
+    _current_session_id,
+    _current_sticky_action,
     _current_stream_id,
     _DispatchHook,
     _generate_request_id,
@@ -195,6 +197,19 @@ def _emit_access_log(
         stream_id = _current_stream_id.get()
         if stream_id:
             extra["stream_id"] = stream_id
+        # Sticky session lifecycle (HTTP-only; both fields absent when the
+        # request didn't touch sticky machinery). session_id is tracked
+        # independently of _current_session_context so it survives
+        # close_session() clearing the context-var — the access log still
+        # reports the id of the just-closed session. session_action comes
+        # from _current_sticky_action — overridden by open_session /
+        # close_session if either was called this request.
+        session_id = _current_session_id.get()
+        if session_id is not None:
+            extra["session_id"] = session_id
+        session_action = _current_sticky_action.get()
+        if session_action is not None:
+            extra["session_action"] = session_action
         # Auth claims
         if auth.claims:
             extra["claims"] = dict(auth.claims)

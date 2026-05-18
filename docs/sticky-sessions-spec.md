@@ -110,11 +110,43 @@ Cross-language clients MUST recognize `error_kind="session_lost"` and `error_kin
 
 ## 7. Graceful drain
 
-`RpcServer.drain()` sets a process-local flag. While drained:
+The framework exposes a per-worker drain flag via the operator-facing :func:`vgi_rpc.http.drain_handle` helper:
+
+```python
+from vgi_rpc.http import drain_handle, make_wsgi_app
+
+app = make_wsgi_app(server, enable_sticky=True)
+handle = drain_handle(app)  # returns None when sticky is disabled
+if handle is not None:
+    handle.drain()       # flip the drain flag
+    # ... wait for in-flight sessions to complete ...
+    handle.shutdown()    # invoke state.close() on every live session
+```
+
+While the flag is set:
 
 - `ctx.open_session` raises `ServerDrainingError`. Existing-session calls continue to serve until TTL or explicit close.
-- A graceful shutdown SHOULD call `drain()` first, wait for in-flight requests to complete (operator-controlled timeout), then tear the WSGI app down.
-- WSGI app teardown invokes `state.close()` on every live registry entry.
+- `handle.shutdown()` invokes `state.close()` on every live registry entry — used by operators when their grace period elapses.
+
+`serve_http` ships with a built-in graceful-shutdown handler that wires SIGTERM / SIGINT to this flow automatically. Pass `drain_grace_seconds=30.0` (default) to control how long the framework waits between flipping the flag and forcibly exiting. A second signal during grace skips the wait and exits immediately.
+
+For pre-fork servers (gunicorn, uwsgi) operators wire their own hook against `drain_handle(app)`:
+
+```python
+# gunicorn config (gunicorn.conf.py)
+import time
+from vgi_rpc.http import drain_handle
+
+def worker_exit(server, worker):
+    """gunicorn calls this when a worker is being retired."""
+    handle = drain_handle(worker.app.callable)  # the WSGI app
+    if handle is not None:
+        handle.drain()
+        time.sleep(30)  # grace period — tune for your workload
+        handle.shutdown()
+```
+
+The drain flag is per-worker process (it lives in the per-worker `_SessionRegistry`); pre-fork deployments effectively get one drain cycle per worker.
 
 ## 8. Crash semantics
 

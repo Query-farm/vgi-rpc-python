@@ -415,6 +415,10 @@ class CallContext:
         if _current_session_context.get() is not None:
             raise RuntimeError("a sticky session is already active for this request")
         sink.open(state, ttl)
+        # Override middleware-set action with "open" for the access log.
+        # If close_session was already called this request (unusual but possible
+        # via reopens), it'll be overridden again to "close" below.
+        _current_sticky_action.set("open")
 
     def close_session(self) -> None:
         """Invalidate the sticky session bound to this request.
@@ -433,6 +437,7 @@ class CallContext:
         if sink is None:
             raise RuntimeError("sticky sessions not available on this transport")
         sink.close()
+        _current_sticky_action.set("close")
 
 
 @dataclass(frozen=True)
@@ -519,6 +524,28 @@ _current_sticky_sink: ContextVar[_StickySinkProtocol | None] = ContextVar(
 )
 _current_session_context: ContextVar[_SessionContext | None] = ContextVar(
     "vgi_rpc_session_context",
+    default=None,
+)
+
+# Sticky-session lifecycle action observed during dispatch — surfaced on
+# the access-log record. Set by the sticky middleware (``none`` /
+# ``resume``) and overridden by ``CallContext.open_session`` / ``close_session``
+# (``open`` / ``close``). Read by ``_emit_access_log``; ``None`` (default)
+# means "no sticky machinery touched this request" and the field is
+# omitted from the access-log line. Middleware-short-circuit cases
+# (lost / expired) currently do not produce access-log records — they
+# short-circuit before dispatch and are documented as a gap in
+# ``docs/access-log-spec.md``.
+_current_sticky_action: ContextVar[str | None] = ContextVar(
+    "vgi_rpc_sticky_action",
+    default=None,
+)
+
+# Session ID separately tracked so it survives ``close_session()`` clearing
+# the session-context contextvar. The access log reads this so a "close"
+# record still carries the id of the just-closed session.
+_current_session_id: ContextVar[str | None] = ContextVar(
+    "vgi_rpc_session_id",
     default=None,
 )
 

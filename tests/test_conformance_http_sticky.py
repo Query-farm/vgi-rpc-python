@@ -540,3 +540,169 @@ class TestFlyHelper:
         from vgi_rpc.http import fly
 
         assert set(fly.__all__) == {"FLY_MACHINE_ID", "auto_server_id", "fly_sticky_echo_headers"}
+
+
+# ---------------------------------------------------------------------------
+# Drain (PR3)
+# ---------------------------------------------------------------------------
+
+
+class TestDrainHandle:
+    """``vgi_rpc.http.drain_handle`` API + drain semantics."""
+
+    def test_drain_handle_returns_none_for_non_sticky(self) -> None:
+        """``drain_handle(app)`` returns ``None`` when sticky isn't enabled."""
+        from vgi_rpc.http import drain_handle
+
+        server = RpcServer(ConformanceService, ConformanceServiceImpl())
+        client = make_sync_client(server)  # no enable_sticky
+        try:
+            assert drain_handle(client._client.app) is None
+        finally:
+            client.close()
+
+    def test_drain_handle_methods(self, sticky_client: _SyncTestClient) -> None:
+        """``drain_handle(app).drain()`` / ``is_draining()`` / ``shutdown()`` behave as documented."""
+        from vgi_rpc.http import drain_handle
+
+        handle = drain_handle(sticky_client._client.app)
+        assert handle is not None
+        assert handle.is_draining() is False
+        handle.drain()
+        assert handle.is_draining() is True
+        # drain() is idempotent.
+        handle.drain()
+        assert handle.is_draining() is True
+
+    def test_drain_blocks_new_opens_existing_serves(self, sticky_client: _SyncTestClient) -> None:
+        """During drain, new opens raise ``ServerDrainingError``; existing sessions keep serving."""
+        from vgi_rpc.http import drain_handle
+
+        handle = drain_handle(sticky_client._client.app)
+        assert handle is not None
+
+        with _connect(sticky_client) as proxy, proxy.with_session_token() as existing:
+            existing.open_counter(initial=100)
+            # Flip drain — existing session still works.
+            handle.drain()
+            assert existing.increment_counter(by=1) == 101, "drain must not disturb existing sessions"
+
+            # New session opens are rejected with ServerDrainingError.
+            with proxy.with_session_token() as new_sess, pytest.raises(RpcError) as excinfo:
+                new_sess.open_counter(initial=1)
+            assert excinfo.value.error_type == "ServerDrainingError"
+
+            existing.close_counter()
+
+    def test_shutdown_invokes_state_close_on_live_sessions(self, sticky_client: _SyncTestClient) -> None:
+        """``handle.shutdown()`` calls ``state.close()`` on every live session — the WSGI-teardown contract."""
+        from vgi_rpc.http import drain_handle
+        from vgi_rpc.http.server._sticky import _SessionRegistry
+
+        handle = drain_handle(sticky_client._client.app)
+        assert handle is not None
+
+        # Directly populate the registry with sentinel counters whose
+        # ``close()`` flips a flag we can assert on. Going through the
+        # public open_counter path would also work but adds two HTTP
+        # round-trips; the direct registry interaction is simpler.
+        registry: _SessionRegistry = handle.shutdown.__self__  # type: ignore[attr-defined]
+        counters = [_StickyCounter(value=i) for i in range(3)]
+        for c in counters:
+            registry.open(c, ttl=None, principal_key="anon")
+        handle.shutdown()
+        assert all(c.closed for c in counters), "shutdown must close every live session"
+        assert len(registry) == 0, "shutdown must clear the registry"
+
+
+class TestAccessLogSessionFields:
+    """``session_id`` + ``session_action`` fields on the ``vgi_rpc.access`` log."""
+
+    @pytest.fixture
+    def captured_access_records(self) -> Iterator[list[dict[str, object]]]:
+        """Capture access-log records during the test."""
+        import logging
+
+        records: list[dict[str, object]] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record.__dict__.copy())
+
+        handler = _Capture()
+        handler.setLevel(logging.INFO)
+        logger = logging.getLogger("vgi_rpc.access")
+        prior_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        try:
+            yield records
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(prior_level)
+
+    def test_non_sticky_call_no_session_fields(
+        self,
+        sticky_client: _SyncTestClient,
+        captured_access_records: list[dict[str, object]],
+    ) -> None:
+        """Calls that don't touch sticky machinery have no session fields."""
+        with _connect(sticky_client) as proxy:
+            proxy.echo_int(value=42)
+        # echo_int went through sticky middleware (sticky enabled on the
+        # fixture client) but didn't open a session — action should be "none".
+        assert captured_access_records, "test must produce at least one access record"
+        last = captured_access_records[-1]
+        assert last.get("method") == "echo_int"
+        assert last.get("session_action") == "none", (
+            f"non-sticky call should have session_action='none'; got {last.get('session_action')!r}"
+        )
+        assert last.get("session_id") is None, (
+            f"non-sticky call should have no session_id; got {last.get('session_id')!r}"
+        )
+
+    def test_full_lifecycle_actions(
+        self,
+        sticky_client: _SyncTestClient,
+        captured_access_records: list[dict[str, object]],
+    ) -> None:
+        """Open → resume → close emit the expected access-log actions with consistent session_id."""
+        with _connect(sticky_client) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=7)
+            sess.increment_counter(by=1)
+            sess.close_counter()
+
+        # Find the records for our methods in order.
+        ours = [
+            r
+            for r in captured_access_records
+            if r.get("method") in ("open_counter", "increment_counter", "close_counter")
+        ]
+        assert len(ours) >= 3, f"expected at least 3 records, got {len(ours)}"
+        open_rec, resume_rec, close_rec = ours[-3], ours[-2], ours[-1]
+        assert open_rec["session_action"] == "open"
+        assert resume_rec["session_action"] == "resume"
+        assert close_rec["session_action"] == "close"
+        # All three records carry the SAME session_id — proves the contract
+        # that close records still surface the id of the just-closed session.
+        ids = {open_rec["session_id"], resume_rec["session_id"], close_rec["session_id"]}
+        assert len(ids) == 1, f"all three lifecycle records must share one session_id; got {ids!r}"
+        assert isinstance(open_rec["session_id"], str) and len(open_rec["session_id"]) == 24, (
+            f"session_id must be a 24-char hex string; got {open_rec['session_id']!r}"
+        )
+
+    def test_non_sticky_server_omits_fields(
+        self,
+        captured_access_records: list[dict[str, object]],
+    ) -> None:
+        """A non-sticky server emits no session_id / session_action fields at all."""
+        server = RpcServer(ConformanceService, ConformanceServiceImpl())
+        client = make_sync_client(server)  # no enable_sticky
+        try:
+            with _connect(client) as proxy:
+                proxy.echo_int(value=1)
+        finally:
+            client.close()
+        last = captured_access_records[-1]
+        assert "session_id" not in last
+        assert "session_action" not in last
