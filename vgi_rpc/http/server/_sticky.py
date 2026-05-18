@@ -63,6 +63,7 @@ from vgi_rpc.rpc import (
 from vgi_rpc.rpc._common import ServerDrainingError
 
 from .._common import (
+    ECHO_HEADER_PREFIX,
     SESSION_ACCEPT_HEADER,
     SESSION_CLOSE_HEADER,
     SESSION_HEADER,
@@ -71,7 +72,7 @@ from ._responses import _set_error_response
 from ._state_token import _compute_aad
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 _logger = logging.getLogger("vgi_rpc.sticky")
 
@@ -398,6 +399,7 @@ class _StickyMiddleware:
     """
 
     __slots__ = (
+        "_echo_headers",
         "_exempt_prefixes",
         "_reaper",
         "_reaper_lock",
@@ -411,10 +413,14 @@ class _StickyMiddleware:
         token_key: bytes,
         *,
         exempt_prefixes: tuple[str, ...] = (),
+        echo_headers: Mapping[str, str] | None = None,
     ) -> None:
         self._registry = registry
         self._token_key = token_key
         self._exempt_prefixes = exempt_prefixes
+        # Frozen snapshot so per-response emission doesn't re-read a mutable
+        # operator dict mid-request. Empty dict ⇒ no echo headers emitted.
+        self._echo_headers: tuple[tuple[str, str], ...] = tuple(echo_headers.items()) if echo_headers else ()
         self._reaper: _ReaperThread | None = None
         self._reaper_lock = threading.Lock()
 
@@ -576,6 +582,14 @@ class _StickyMiddleware:
         if sink is not None:
             if sink.mint_token is not None:
                 resp.set_header(SESSION_HEADER, sink.mint_token)
+                # Tell the client to echo these headers on every subsequent
+                # request in this session. Used for client-driven routing
+                # (fly-force-instance-id on Fly.io, similar mechanisms
+                # elsewhere). Emitted only on session-opening responses;
+                # the client captures and replays them for the lifetime of
+                # the session view, no need to repeat.
+                for name, value in self._echo_headers:
+                    resp.set_header(f"{ECHO_HEADER_PREFIX}{name}", value)
             if sink.closed:
                 resp.set_header(SESSION_CLOSE_HEADER, "true")
         # Release the per-session lock if dispatch held it and close_session

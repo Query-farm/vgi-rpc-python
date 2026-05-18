@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
 
@@ -363,3 +363,180 @@ def test_session_header_constants_exist() -> None:
     """Sanity: the session-header constants exported from ``vgi_rpc.http._common`` are stable strings."""
     assert SESSION_HEADER == "VGI-Session"
     assert SESSION_ACCEPT_HEADER == "VGI-Session-Accept"
+
+
+# ---------------------------------------------------------------------------
+# Echo headers (PR2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def echo_sticky_client() -> Iterator[_SyncTestClient]:
+    """Sticky-enabled client configured with a marker echo header.
+
+    Used for tests that exercise the server emission + client capture/
+    replay round-trip end-to-end. The marker name is intentionally
+    multi-token so case-insensitivity bugs surface.
+    """
+    server = RpcServer(ConformanceService, ConformanceServiceImpl())
+    client = make_sync_client(
+        server,
+        enable_sticky=True,
+        sticky_default_ttl=10.0,
+        sticky_echo_headers={"x-test-echo-marker": "captured-by-client"},
+    )
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+class TestEchoHeadersServer:
+    """Server-side echo-header emission contract."""
+
+    def test_emitted_on_session_open(self, echo_sticky_client: _SyncTestClient) -> None:
+        """Server emits ``VGI-Echo-<name>: <value>`` on the session-opening response."""
+        from vgi_rpc.http._common import ECHO_HEADER_PREFIX
+
+        seen_echo_headers: list[dict[str, str]] = []
+        # Patch the capture callback so we can inspect what the inner test
+        # client returned BEFORE the view consumes the response.
+        from vgi_rpc.http import _client as _hc
+
+        orig_capture = _hc._SessionTrackingClient._capture
+
+        def patched(self: _hc._SessionTrackingClient, resp: Any) -> None:
+            seen_echo_headers.append(
+                {
+                    k[len(ECHO_HEADER_PREFIX) :]: v
+                    for k, v in resp.headers.items()
+                    if k.lower().startswith(ECHO_HEADER_PREFIX.lower())
+                }
+            )
+            orig_capture(self, resp)
+
+        _hc._SessionTrackingClient._capture = patched  # type: ignore[method-assign]
+        try:
+            with _connect(echo_sticky_client) as proxy, proxy.with_session_token() as sess:
+                sess.open_counter(initial=1)
+                sess.increment_counter(by=1)  # follow-up response should NOT carry echo
+        finally:
+            _hc._SessionTrackingClient._capture = orig_capture  # type: ignore[method-assign]
+        # First captured response is the open: must have the echo header.
+        assert seen_echo_headers[0] == {"x-test-echo-marker": "captured-by-client"}, (
+            f"open response must carry VGI-Echo-x-test-echo-marker; saw {seen_echo_headers[0]!r}"
+        )
+        # Subsequent responses do NOT carry the echo header (once-only emission).
+        assert seen_echo_headers[1] == {}, (
+            f"subsequent responses must NOT carry VGI-Echo-* (echo is once-only); saw {seen_echo_headers[1]!r}"
+        )
+
+    def test_absent_when_unconfigured(self, sticky_client: _SyncTestClient) -> None:
+        """Server with no ``sticky_echo_headers`` emits no ``VGI-Echo-*`` headers and no capability advert."""
+        caps = http_capabilities(client=sticky_client)
+        got = caps.sticky_echo_headers
+        assert got == (), f"sticky-enabled-but-no-echo server must advertise empty echo-headers tuple; got {got!r}"
+
+    def test_capability_lists_configured_names(self, echo_sticky_client: _SyncTestClient) -> None:
+        """``VGI-Sticky-Echo-Headers`` lists the configured header names; surfaces in capabilities."""
+        caps = http_capabilities(client=echo_sticky_client)
+        assert caps.sticky_echo_headers == ("x-test-echo-marker",)
+
+
+class TestEchoHeadersClient:
+    """Client-side capture + replay contract."""
+
+    def test_current_echo_headers_populated_after_open(self, echo_sticky_client: _SyncTestClient) -> None:
+        """After ``open_counter``, ``view.current_echo_headers()`` returns the marker dict."""
+        with _connect(echo_sticky_client) as proxy, proxy.with_session_token() as sess:
+            assert dict(sess.current_echo_headers()) == {}, (
+                "no echo headers should be captured before the first session-opening call"
+            )
+            sess.open_counter(initial=1)
+            assert dict(sess.current_echo_headers()) == {"x-test-echo-marker": "captured-by-client"}
+
+    def test_replay_on_subsequent_requests(self, echo_sticky_client: _SyncTestClient) -> None:
+        """Captured echo headers ride on every subsequent request inside the same block."""
+        captured_request_headers: list[dict[str, str]] = []
+
+        from vgi_rpc.http import _client as _hc
+
+        orig_merge = _hc._SessionTrackingClient._merge_headers
+
+        def patched(self: _hc._SessionTrackingClient, headers: dict[str, str] | None) -> dict[str, str]:
+            merged = orig_merge(self, headers)
+            captured_request_headers.append(dict(merged))
+            return merged
+
+        _hc._SessionTrackingClient._merge_headers = patched  # type: ignore[method-assign]
+        try:
+            with _connect(echo_sticky_client) as proxy, proxy.with_session_token() as sess:
+                sess.open_counter(initial=1)
+                sess.increment_counter(by=1)
+                sess.increment_counter(by=1)
+        finally:
+            _hc._SessionTrackingClient._merge_headers = orig_merge  # type: ignore[method-assign]
+        # Open call has no echo header on the way out (it's the FIRST call;
+        # the server's echo header lands on the *response*).
+        assert "x-test-echo-marker" not in captured_request_headers[0]
+        # Every subsequent request carries the captured echo header.
+        for i, hdrs in enumerate(captured_request_headers[1:], start=1):
+            assert hdrs.get("x-test-echo-marker") == "captured-by-client", (
+                f"request #{i} must carry the captured echo header; got {hdrs!r}"
+            )
+
+    def test_close_clears_echo_headers(self, echo_sticky_client: _SyncTestClient) -> None:
+        """``VGI-Session-Close: true`` from the server clears the captured echo headers too."""
+        with _connect(echo_sticky_client) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=1)
+            assert dict(sess.current_echo_headers()) == {"x-test-echo-marker": "captured-by-client"}
+            sess.close_counter()
+            assert dict(sess.current_echo_headers()) == {}, (
+                "close_session must clear captured echo headers alongside the token"
+            )
+
+    def test_current_echo_headers_returns_readonly_snapshot(self, echo_sticky_client: _SyncTestClient) -> None:
+        """``current_echo_headers()`` returns a read-only mapping; caller can't mutate view state."""
+        with _connect(echo_sticky_client) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=1)
+            snapshot = sess.current_echo_headers()
+            # MappingProxyType is read-only — writing raises TypeError.
+            with pytest.raises(TypeError):
+                # Cast to ignore the type-system disagreement; the runtime
+                # behaviour is what's being verified.
+                cast("dict[str, str]", snapshot)["x-test-echo-marker"] = "modified"
+            # Inner state unaffected.
+            assert dict(sess.current_echo_headers()) == {"x-test-echo-marker": "captured-by-client"}
+
+
+class TestFlyHelper:
+    """``vgi_rpc.http.fly`` quickstart helpers."""
+
+    def test_auto_server_id_off_fly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``auto_server_id()`` returns ``None`` when ``FLY_MACHINE_ID`` is unset."""
+        monkeypatch.delenv("FLY_MACHINE_ID", raising=False)
+        # Force reimport so module-level FLY_MACHINE_ID is recomputed.
+        import importlib
+
+        from vgi_rpc.http import fly
+
+        importlib.reload(fly)
+        assert fly.auto_server_id() is None
+        assert fly.fly_sticky_echo_headers() is None
+
+    def test_auto_server_id_on_fly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``auto_server_id()`` returns the machine ID when ``FLY_MACHINE_ID`` is set."""
+        monkeypatch.setenv("FLY_MACHINE_ID", "machine-test-abc123")
+        import importlib
+
+        from vgi_rpc.http import fly
+
+        importlib.reload(fly)
+        assert fly.auto_server_id() == "machine-test-abc123"
+        assert fly.fly_sticky_echo_headers() == {"fly-force-instance-id": "machine-test-abc123"}
+
+    def test_module_exports(self) -> None:
+        """``vgi_rpc.http.fly.__all__`` lists the documented surface."""
+        from vgi_rpc.http import fly
+
+        assert set(fly.__all__) == {"FLY_MACHINE_ID", "auto_server_id", "fly_sticky_echo_headers"}

@@ -65,9 +65,27 @@ def main() -> None:
         default=False,
         help="Disable sticky sessions. Default: enabled, so TestSticky conformance group runs.",
     )
+    parser.add_argument(
+        "--no-sticky-echo",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the canonical sticky-echo-header advertisement. "
+            "Default: enabled with a fixed marker header so TestSticky::"
+            "test_echo_header_round_trip exercises the contract."
+        ),
+    )
     args = parser.parse_args()
 
     enable_sticky = not args.no_sticky
+    # Fixed marker the canonical TestSticky::test_echo_header_round_trip
+    # captures + replays. Operators wiring up real deployments use
+    # vgi_rpc.http.fly.fly_sticky_echo_headers() or their own mapping —
+    # this constant exists only to give the conformance group a stable
+    # contract to exercise.
+    sticky_echo_headers: dict[str, str] | None = (
+        None if args.no_sticky_echo or not enable_sticky else {"x-vgi-conformance-echo": "conformance-fixed-marker"}
+    )
 
     if not args.fake_storage:
         # Plain HTTP server, no external storage.
@@ -90,7 +108,11 @@ def main() -> None:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind((args.host, 0))
                 port = int(s.getsockname()[1])
-        app = make_wsgi_app(server, enable_sticky=True)
+        app = make_wsgi_app(
+            server,
+            enable_sticky=True,
+            sticky_echo_headers=sticky_echo_headers,
+        )
         try:
             import waitress
         except ImportError:
@@ -133,6 +155,7 @@ def main() -> None:
         max_request_bytes=max_request_bytes,
         max_upload_bytes=64 * 1024 * 1024,
         enable_sticky=enable_sticky,
+        sticky_echo_headers=sticky_echo_headers,
     )
 
     try:

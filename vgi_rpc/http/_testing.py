@@ -9,7 +9,7 @@ Provides ``_SyncTestClient`` and ``make_sync_client`` which use
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -145,6 +145,7 @@ def make_sync_client(
     oauth_resource_metadata: OAuthResourceMetadata | None = None,
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
+    sticky_echo_headers: Mapping[str, str] | None = None,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -176,6 +177,7 @@ def make_sync_client(
         oauth_resource_metadata: See ``make_wsgi_app``.
         enable_sticky: See ``make_wsgi_app``.
         sticky_default_ttl: See ``make_wsgi_app``.
+        sticky_echo_headers: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -204,5 +206,6 @@ def make_sync_client(
         oauth_resource_metadata=oauth_resource_metadata,
         enable_sticky=enable_sticky,
         sticky_default_ttl=sticky_default_ttl,
+        sticky_echo_headers=sticky_echo_headers,
     )
     return _SyncTestClient(app, default_headers=default_headers, prefix=prefix)

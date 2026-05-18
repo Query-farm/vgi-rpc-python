@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -21,6 +21,7 @@ from vgi_rpc.rpc import AuthContext, RpcServer
 
 from .._common import (
     _SESSION_ENDPOINT,
+    ECHO_HEADER_PREFIX,
     EXTERNALIZATION_ENABLED_HEADER,
     MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER,
     MAX_REQUEST_BYTES_HEADER,
@@ -30,6 +31,7 @@ from .._common import (
     SESSION_CLOSE_HEADER,
     SESSION_HEADER,
     STICKY_DEFAULT_TTL_HEADER,
+    STICKY_ECHO_HEADERS_HEADER,
     STICKY_ENABLED_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
@@ -99,6 +101,7 @@ def make_wsgi_app(
     max_stream_response_bytes: int | None = None,
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
+    sticky_echo_headers: Mapping[str, str] | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -227,6 +230,19 @@ def make_wsgi_app(
             ``300.0`` (5 minutes) by default.  Methods can override
             per-session via ``ctx.open_session(state, ttl=60)``.  Only
             meaningful when ``enable_sticky=True``.
+        sticky_echo_headers: Optional mapping of headers the server tells
+            the client to echo on every subsequent request inside a
+            ``with_session_token()`` block.  Emitted as ``VGI-Echo-<name>:
+            <value>`` on session-opening responses; the client strips the
+            prefix and replays the inner header on later requests.  Used
+            for client-driven routing — e.g. on Fly.io, pass
+            ``{"fly-force-instance-id": FLY_MACHINE_ID}`` so subsequent
+            requests inside the session carry ``fly-force-instance-id``
+            and fly-proxy routes directly to the owning Machine.  Names
+            are also advertised in the ``VGI-Sticky-Echo-Headers`` capability
+            header so clients/LBs can introspect the contract via
+            ``OPTIONS /health``.  See ``vgi_rpc/http/fly.py`` for a Fly-
+            specific helper.  Only meaningful when ``enable_sticky=True``.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -394,6 +410,14 @@ def make_wsgi_app(
         cors_expose.append(STICKY_DEFAULT_TTL_HEADER)
         cors_expose.append(SESSION_HEADER)
         cors_expose.append(SESSION_CLOSE_HEADER)
+        # Echo headers (PR2): advertise the names a client must replay on
+        # subsequent session requests so clients/LBs can discover the
+        # contract via OPTIONS /health. Each VGI-Echo-<name> response
+        # header is also CORS-exposed so browser clients can read it.
+        if sticky_echo_headers:
+            capability_headers[STICKY_ECHO_HEADERS_HEADER] = ", ".join(sticky_echo_headers.keys())
+            cors_expose.append(STICKY_ECHO_HEADERS_HEADER)
+            cors_expose.extend(f"{ECHO_HEADER_PREFIX}{name}" for name in sticky_echo_headers)
 
     # OAuth resource metadata (RFC 9728)
     from vgi_rpc.http._oauth import OAuthResourceMetadata as _OAuthMeta
@@ -508,6 +532,7 @@ def make_wsgi_app(
                     f"{prefix}/health",
                     f"{prefix}/{_SESSION_ENDPOINT}",
                 ),
+                echo_headers=sticky_echo_headers,
             )
         )
     if authenticate is not None and _pkce_active:

@@ -13,11 +13,11 @@ import contextlib
 import json
 import logging
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO
-from types import TracebackType
+from types import MappingProxyType, TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -60,6 +60,7 @@ from ._common import (
     _SESSION_ENDPOINT,
     _UPLOAD_URL_METHOD,
     _UPLOAD_URL_PARAMS_SCHEMA,
+    ECHO_HEADER_PREFIX,
     EXTERNALIZATION_ENABLED_HEADER,
     MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER,
     MAX_REQUEST_BYTES_HEADER,
@@ -69,6 +70,7 @@ from ._common import (
     SESSION_CLOSE_HEADER,
     SESSION_HEADER,
     STICKY_DEFAULT_TTL_HEADER,
+    STICKY_ECHO_HEADERS_HEADER,
     STICKY_ENABLED_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
@@ -1230,15 +1232,23 @@ class _SessionTrackingClient:
         return getattr(self._inner, name)
 
     def _merge_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
-        """Add session opt-in + token headers to a per-request header dict."""
+        """Add session opt-in + token + replayed echo headers to a per-request header dict."""
         merged: dict[str, str] = dict(headers or {})
         merged[SESSION_ACCEPT_HEADER] = "true"
         if self._view._token is not None:
             merged[SESSION_HEADER] = self._view._token
+        # Replay every echo header the server told us to carry through.
+        # The dict is populated lazily on the session-opening response;
+        # before that it's empty and the loop is a no-op.
+        for name, value in self._view._echo_headers.items():
+            # Caller-supplied headers take precedence — operators MAY override
+            # an echo header per-call via the explicit headers kwarg if they
+            # have a reason to. The normal path leaves them untouched.
+            merged.setdefault(name, value)
         return merged
 
     def _capture(self, resp: Any) -> None:
-        """Update the view's session state from response headers."""
+        """Update the view's session state and captured echo headers from response headers."""
         try:
             hdrs = resp.headers
         except AttributeError:
@@ -1246,9 +1256,19 @@ class _SessionTrackingClient:
         token = hdrs.get(SESSION_HEADER) or hdrs.get(SESSION_HEADER.lower())
         if token:
             self._view._token = token
+        # Capture VGI-Echo-* on every response (cheap; only emitted on session
+        # open, so subsequent responses are no-ops). httpx headers are
+        # case-insensitive but _SyncTestResponse stores lowercase — iterate
+        # over items() so we hit both shapes uniformly.
+        prefix_lower = ECHO_HEADER_PREFIX.lower()
+        for hname, hvalue in hdrs.items():
+            name_lower = hname.lower()
+            if name_lower.startswith(prefix_lower):
+                self._view._echo_headers[hname[len(ECHO_HEADER_PREFIX) :]] = hvalue
         close_flag = hdrs.get(SESSION_CLOSE_HEADER) or hdrs.get(SESSION_CLOSE_HEADER.lower())
         if (close_flag or "").strip().lower() == "true":
             self._view._token = None
+            self._view._echo_headers.clear()
             self._view._closed = True
 
     def post(self, url: str, **kwargs: Any) -> Any:
@@ -1303,12 +1323,17 @@ class _SessionView:
     :meth:`current_session_token` for stashing across processes.
     """
 
-    __slots__ = ("_closed", "_outer", "_proxy", "_token", "_tracking_client")
+    __slots__ = ("_closed", "_echo_headers", "_outer", "_proxy", "_token", "_tracking_client")
 
     def __init__(self, outer: _HttpProxy, initial_token: str | None) -> None:
         self._outer = outer
         self._token = initial_token
         self._closed = False
+        # Headers the server told us to echo on subsequent requests in this
+        # session. Populated by ``_SessionTrackingClient._capture`` from
+        # ``VGI-Echo-*`` response headers on the session-opening response.
+        # Caller-readable via :meth:`current_echo_headers`.
+        self._echo_headers: dict[str, str] = {}
         self._tracking_client = _SessionTrackingClient(outer._client, self)
         # The tracking client implements the same duck-typed surface that
         # _HttpProxy uses (post/get/options/delete/put + close + base_url
@@ -1335,6 +1360,23 @@ class _SessionView:
         the stashed token resolves to a live registry entry.
         """
         return self._token
+
+    def current_echo_headers(self) -> Mapping[str, str]:
+        """Return a read-only snapshot of headers the server told the client to echo.
+
+        Populated by the server's ``VGI-Echo-<name>: <value>`` response
+        headers on the session-opening response — used for client-driven
+        routing (e.g. ``fly-force-instance-id`` on Fly.io). Empty before
+        the first session-opening call returns, and empty again after the
+        server emits ``VGI-Session-Close: true``.
+
+        Callers stashing a token for later resumption SHOULD also stash
+        this mapping; without the echo headers the resumed session may
+        misroute on platforms that depend on client-supplied routing
+        (no `Set-Cookie` analogue exists for headers).
+        """
+        # Return a copy so callers can't mutate our internal state.
+        return MappingProxyType(dict(self._echo_headers))
 
     def detach(self) -> str | None:
         """Hand the session token off to the caller; suppress the exit-time DELETE.
@@ -1431,6 +1473,17 @@ class HttpServerCapabilities:
     """Whether the server has ``enable_sticky=True`` and supports ``VGI-Session``."""
     sticky_default_ttl: int | None = None
     """Default session TTL in seconds when ``open_session`` is called without an explicit TTL."""
+    sticky_echo_headers: tuple[str, ...] = ()
+    """Header names the server tells the client to echo on every subsequent session request.
+
+    Parsed from the comma-separated ``VGI-Sticky-Echo-Headers`` capability
+    header. Empty tuple when the server is sticky-enabled but has no
+    echo-header config (the default), or when the server is non-sticky.
+    Concrete values land on the ``_SessionView`` via captured
+    ``VGI-Echo-<name>`` response headers on the session-opening response;
+    this field exposes the *names* for introspection (LB configuration,
+    cross-language client implementations).
+    """
 
 
 def http_capabilities(
@@ -1543,6 +1596,13 @@ def http_capabilities(
             with contextlib.suppress(ValueError):
                 sticky_ttl = int(sticky_ttl_raw)
 
+        sticky_echo_raw = headers.get(STICKY_ECHO_HEADERS_HEADER) or headers.get(STICKY_ECHO_HEADERS_HEADER.lower())
+        sticky_echo: tuple[str, ...]
+        if sticky_echo_raw:
+            sticky_echo = tuple(name.strip() for name in sticky_echo_raw.split(",") if name.strip())
+        else:
+            sticky_echo = ()
+
         return HttpServerCapabilities(
             max_request_bytes=max_req,
             max_response_bytes=max_resp,
@@ -1554,6 +1614,7 @@ def http_capabilities(
             cache_expires_at=cache_expires_at,
             sticky_enabled=sticky_enabled,
             sticky_default_ttl=sticky_ttl,
+            sticky_echo_headers=sticky_echo,
         )
     finally:
         if own_client:
