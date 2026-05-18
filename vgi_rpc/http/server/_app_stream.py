@@ -20,7 +20,7 @@ from pyarrow import ipc
 
 from vgi_rpc.external import predict_externalize_bytes_for_collector, resolve_external_location
 from vgi_rpc.log import Message
-from vgi_rpc.metadata import CANCEL_KEY, STATE_KEY, strip_keys
+from vgi_rpc.metadata import CANCEL_KEY, PROTOCOL_VERSION_KEY, STATE_KEY, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     _TICK_BATCH,
@@ -50,6 +50,7 @@ from vgi_rpc.rpc._common import (
     CallStatistics,
     HookToken,
     _current_call_stats,
+    _current_request_metadata,
     _current_stream_id,
     _DispatchHook,
     _record_input,
@@ -205,6 +206,14 @@ def _run_stream_init_sync(
                     f"Method name mismatch: URL path has '{method_name}' but Arrow IPC "
                     f"custom_metadata 'vgi_rpc.method' has '{ipc_method}'. These must match."
                 )
+            # Application-protocol-version gate (mirror of RpcServer.serve_one). HTTP
+            # stream init dispatches directly here; the check has to be wired in
+            # independently. Stream methods include no synthetic ``__describe__``,
+            # but the same exemption is kept for consistency with the unary path.
+            # Server opts out by not declaring ``protocol_version`` on its Protocol.
+            if app._server._protocol_version_parts is not None and method_name != "__describe__":
+                md = _current_request_metadata.get()
+                app._server._check_protocol_version(md.get(PROTOCOL_VERSION_KEY) if md is not None else None)
             _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:

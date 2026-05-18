@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from decimal import Decimal
-from typing import Annotated, Protocol
+from typing import Annotated, ClassVar, Protocol
 
 import pyarrow as pa
 
@@ -35,7 +35,15 @@ from ._types import (
 
 
 class ConformanceService(Protocol):
-    """Wire-protocol conformance service exercising all framework capabilities."""
+    """Wire-protocol conformance service exercising all framework capabilities.
+
+    Declares ``protocol_version`` so cross-language conformant implementations
+    must support the per-request ``vgi_rpc.protocol_version`` metadata key
+    that vgi-rpc enforces at the dispatch boundary. Bump major when adding
+    or removing methods; bump minor for additive parameter changes.
+    """
+
+    protocol_version: ClassVar[str] = "1.0.0"
 
     # ------------------------------------------------------------------
     # Unary: Scalar Echo

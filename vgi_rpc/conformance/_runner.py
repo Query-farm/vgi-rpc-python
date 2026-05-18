@@ -1820,6 +1820,67 @@ def _test_desc_protocol_hash_format(desc: ServiceDescription) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Application-protocol-version tests
+# ---------------------------------------------------------------------------
+# The mismatch / directional-error scenarios for protocol_version don't fit
+# the single-proxy-per-transport shape of the conformance runner — they require
+# spawning two servers at different versions. Those cases live in
+# ``tests/test_protocol_version.py`` (which now covers pipe AND HTTP). The
+# conformance tests below cover the wire-shape contract every transport must
+# satisfy: describe surfaces the field, request batches carry the metadata key,
+# and matched-version dispatch succeeds across all transports.
+
+
+@_describe_test(category="describe_protocol_version", name="surfaces_declared_version")
+def _test_desc_protocol_version_surfaces(desc: ServiceDescription) -> None:
+    """ConformanceService declares protocol_version, so describe must surface it.
+
+    Round-trip through ``__describe__`` response custom_metadata to
+    ``ServiceDescription.protocol_version``. Cross-language ports that
+    don't yet read the ``vgi_rpc.protocol_version`` key fail this test,
+    which is the intended forcing function.
+    """
+    assert desc.protocol_version, "protocol_version must be present in describe response"
+    # ConformanceService.protocol_version is "1.0.0"; the field is the source
+    # of truth, so don't hardcode the value here — fetch it.
+    from vgi_rpc.conformance._protocol import ConformanceService
+
+    expected = vars(ConformanceService).get("protocol_version")
+    assert desc.protocol_version == expected, (
+        f"describe surfaced protocol_version={desc.protocol_version!r}, "
+        f"expected {expected!r} from ConformanceService.protocol_version"
+    )
+
+
+@_describe_test(category="describe_protocol_version", name="format")
+def _test_desc_protocol_version_format(desc: ServiceDescription) -> None:
+    """The protocol_version field must be canonical semver MAJOR.MINOR.PATCH."""
+    parts = desc.protocol_version.split(".")
+    assert len(parts) == 3, f"expected MAJOR.MINOR.PATCH, got {desc.protocol_version!r}"
+    for component in parts:
+        assert component.isdigit(), f"non-numeric semver component in {desc.protocol_version!r}"
+        # No leading zeros except literal "0".
+        assert component == "0" or not component.startswith("0"), (
+            f"leading zero in semver component of {desc.protocol_version!r}"
+        )
+
+
+@_conformance_test(category="protocol_version", name="matched_dispatch_succeeds")
+def _test_proto_version_matched_dispatch(proxy: ConformanceService, logs: LogCollector) -> None:
+    """A normal dispatched RPC exercises the dispatch-boundary check on the matched-version path.
+
+    The conformance client and server are both built against the same
+    ConformanceService, so their declared protocol_version matches. A
+    successful echo proves the server's dispatch-boundary check accepted
+    the client's ``vgi_rpc.protocol_version`` metadata across whatever
+    transport the runner picked. (Mismatch scenarios live in unit tests —
+    see ``tests/test_protocol_version.py``.)
+    """
+    result = proxy.echo_string(value="versioned")
+    assert result == "versioned"
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 

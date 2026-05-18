@@ -387,3 +387,89 @@ class TestServerWireBehaviour:
         finally:
             client_t.close()
             server_t.close()
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport — the path external clients actually use.
+# ---------------------------------------------------------------------------
+
+
+class TestHttpTransportVersionCheck:
+    """HTTP unary and stream init must enforce the dispatch-boundary version check.
+
+    HTTP doesn't route through ``RpcServer.serve_one`` — it has its own
+    dispatch loop in ``vgi_rpc/http/server/_app_unary.py`` and ``_app_stream.py``.
+    Without an HTTP-specific check, a mismatched HTTP client would dispatch
+    straight to the worker handler with the wrong schemas, and the only
+    defense would be the Arrow column-count check (silent corruption in some
+    cases). These tests gate that HTTP-path regression.
+    """
+
+    def test_matched_versions_succeed(self) -> None:
+        """HTTP unary RPC succeeds when client and server speak the same protocol_version."""
+        from vgi_rpc.http import http_connect, make_sync_client
+
+        server = RpcServer(_ProtoV100, _Impl())
+        client = make_sync_client(server, token_key=b"test")
+        try:
+            with http_connect(_ProtoV100, client=client) as proxy:
+                assert proxy.greet(name="x") == "hi x"
+        finally:
+            client.close()
+
+    def test_mismatched_versions_raise_with_direction(self) -> None:
+        """HTTP unary RPC fails with directional message when versions mismatch.
+
+        The C++ extension's user-visible error path runs through this: a
+        DuckDB user issuing ``ATTACH`` against a worker on the wrong version
+        sees the directional text inline, not a generic 'request failed'.
+        """
+        from vgi_rpc.http import http_connect, make_sync_client
+
+        server = RpcServer(_ProtoV200, _Impl())
+        # Client built against the 1.0.0 Protocol talks to a 2.0.0 server.
+        client = make_sync_client(server, token_key=b"test")
+        try:
+            with http_connect(_ProtoV100, client=client) as proxy, pytest.raises(RpcError) as exc_info:
+                proxy.greet(name="x")
+            err_text = str(exc_info.value) + " " + exc_info.value.error_message
+            assert "Client: 1.0.0" in err_text
+            assert "Server: 2.0.0" in err_text
+            assert "upgrade the VGI extension/client" in err_text
+        finally:
+            client.close()
+
+    def test_describe_bypass_over_http(self) -> None:
+        """HTTP __describe__ must dispatch regardless of client/server version mismatch."""
+        from vgi_rpc.http import http_introspect, make_sync_client
+
+        server = RpcServer(_ProtoV200, _Impl(), enable_describe=True)
+        client = make_sync_client(server, token_key=b"test")
+        try:
+            # http_introspect is the framework-internal discovery path; like
+            # the pipe-transport introspect(), it doesn't carry a client
+            # protocol_version. The server must serve describe anyway so
+            # mismatched clients can introspect the expected version.
+            desc = http_introspect(client=client)
+            assert desc.protocol_name == "_ProtoV200"
+            assert desc.protocol_version == "2.0.0"
+        finally:
+            client.close()
+
+    def test_undeclared_server_does_not_check_over_http(self) -> None:
+        """Server without protocol_version -> HTTP path is opt-out too.
+
+        Symmetry with the pipe path. A Protocol that hasn't opted into
+        versioning must not gain the check just because the transport
+        happens to be HTTP.
+        """
+        from vgi_rpc.http import http_connect, make_sync_client
+
+        server = RpcServer(_ProtoNoVersion, _Impl())
+        # Client declares 2.0.0; server opts out → check doesn't fire.
+        client = make_sync_client(server, token_key=b"test")
+        try:
+            with http_connect(_ProtoV200, client=client) as proxy:
+                assert proxy.greet(name="x") == "hi x"
+        finally:
+            client.close()
