@@ -66,7 +66,7 @@ Echo headers carry no security guarantees beyond what the underlying transport p
 
 Each session token is an AEAD-sealed envelope binding the session ID to its issuing principal and worker. Both Python's stream token (`VGI-Stream-State`) and the session token share the same envelope construction.
 
-- **Algorithm.** XChaCha20-Poly1305 via [`vgi_rpc.crypto`](../vgi_rpc/crypto.py).
+- **Algorithm.** XChaCha20-Poly1305 via [`vgi_rpc.crypto`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/crypto.py).
 - **Master key.** The same `token_key` that `make_wsgi_app(token_key=...)` consumes for stream tokens. Generated per-process by default; MUST be shared across workers for multi-process deployments (otherwise tokens minted on worker A are unreadable on worker B even if the LB routes correctly).
 - **Envelope layout.** `version:u8 | nonce:bytes(24) | ciphertext+tag`. Version is currently `1`. The version byte is NOT authenticated as AAD — a tampered version byte still fails decryption because the recipient supplies the matching algorithm constant.
 - **Plaintext frame** (inside the ciphertext): `created_at:u64 LE | server_id_len:u8 | server_id_bytes | session_id:bytes(12) | expires_at:u64 LE`.
