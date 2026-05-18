@@ -113,9 +113,7 @@ def open_bytes(token: bytes, key: bytes, *, aad: bytes, version: int = 1) -> byt
     nonce = token[_VERSION_LEN : _VERSION_LEN + _NONCE_LEN]
     ciphertext = token[_VERSION_LEN + _NONCE_LEN :]
     try:
-        plaintext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_decrypt(
-            ciphertext, aad, nonce, normalize_key(key)
-        )
+        plaintext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_decrypt(ciphertext, aad, nonce, normalize_key(key))
     except CryptoError as exc:
         msg = "token verification failed"
         raise SealError(msg) from exc

@@ -88,6 +88,34 @@ class _SyncTestClient:
         result = self._client.simulate_options(path, headers=merged)
         return _SyncTestResponse(result.status_code, result.content, headers=dict(result.headers))
 
+    def delete(self, url: str, *, headers: dict[str, str] | None = None) -> _SyncTestResponse:
+        """Send a synchronous DELETE using the Falcon test client.
+
+        Mirrors :meth:`post` / :meth:`get` / :meth:`options` so the in-process
+        test client supports the framework-managed sticky-session teardown
+        endpoint (``DELETE /vgi/__session__``) without requiring a real
+        HTTP server.
+        """
+        merged = {**self._default_headers, **(headers or {})}
+        path = urlparse(url).path
+        result = self._client.simulate_delete(path, headers=merged)
+        return _SyncTestResponse(result.status_code, result.content, headers=dict(result.headers))
+
+    def put(self, url: str, **kwargs: object) -> _SyncTestResponse:
+        """Send a synchronous PUT — used by externalised upload paths.
+
+        Returns a 404 by default because the test client doesn't proxy
+        out to external storage; callers needing real PUT semantics
+        should use ``httpx.Client`` directly. This stub exists so the
+        sticky session-tracking client (which delegates PUT through
+        unchanged) keeps a uniform interface with httpx.
+        """
+        # No-op delegation — tests don't go through the test client for
+        # external uploads; they hit the FakeStorageBackend HTTP endpoint
+        # via real httpx. Returning a 404 surfaces clearly if anything
+        # accidentally routes here.
+        return _SyncTestResponse(404, b"", headers={})
+
     def close(self) -> None:
         """Close the client (no-op for test client)."""
 
@@ -115,6 +143,8 @@ def make_sync_client(
     enable_health_endpoint: bool = True,
     repo_url: str | None = None,
     oauth_resource_metadata: OAuthResourceMetadata | None = None,
+    enable_sticky: bool = False,
+    sticky_default_ttl: float = 300.0,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -144,6 +174,8 @@ def make_sync_client(
         enable_health_endpoint: See ``make_wsgi_app``.
         repo_url: See ``make_wsgi_app``.
         oauth_resource_metadata: See ``make_wsgi_app``.
+        enable_sticky: See ``make_wsgi_app``.
+        sticky_default_ttl: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -170,5 +202,7 @@ def make_sync_client(
         enable_health_endpoint=enable_health_endpoint,
         repo_url=repo_url,
         oauth_resource_metadata=oauth_resource_metadata,
+        enable_sticky=enable_sticky,
+        sticky_default_ttl=sticky_default_ttl,
     )
     return _SyncTestClient(app, default_headers=default_headers, prefix=prefix)

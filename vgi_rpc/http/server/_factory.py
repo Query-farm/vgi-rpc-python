@@ -20,12 +20,17 @@ from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, RpcServer
 
 from .._common import (
+    _SESSION_ENDPOINT,
     EXTERNALIZATION_ENABLED_HEADER,
     MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER,
     MAX_REQUEST_BYTES_HEADER,
     MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
     RPC_ERROR_HEADER,
+    SESSION_CLOSE_HEADER,
+    SESSION_HEADER,
+    STICKY_DEFAULT_TTL_HEADER,
+    STICKY_ENABLED_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
     Encoding,
@@ -58,6 +63,12 @@ from ._resources import (
     _StreamInitResource,
     _UploadUrlResource,
 )
+from ._sticky import (
+    _ServerIdEnvMiddleware,
+    _SessionRegistry,
+    _SessionResource,
+    _StickyMiddleware,
+)
 
 _logger = logging.getLogger("vgi_rpc.http")
 
@@ -86,6 +97,8 @@ def make_wsgi_app(
     repo_url: str | None = None,
     oauth_resource_metadata: OAuthResourceMetadata | None = None,
     max_stream_response_bytes: int | None = None,
+    enable_sticky: bool = False,
+    sticky_default_ttl: float = 300.0,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -199,6 +212,21 @@ def make_wsgi_app(
             ``max_response_bytes`` retained for backward compatibility.
             Emits a ``DeprecationWarning`` when set.  Will be removed
             in a future release.
+        enable_sticky: Master switch for HTTP sticky sessions.  When
+            ``True``, ``CallContext.open_session`` becomes available on
+            methods that opt in; the framework registers a per-worker
+            session registry, a daemon reaper thread that evicts on TTL,
+            the ``_StickyMiddleware`` that resolves the ``VGI-Session``
+            request header to a registry entry, and the
+            ``DELETE {prefix}/__session__`` framework-managed endpoint
+            for client-initiated teardown.  ``False`` (default) leaves
+            the framework byte-identical to the pre-sticky wire path —
+            no behavioral change for callers that don't use sticky.
+        sticky_default_ttl: Default session TTL in seconds applied by
+            ``ctx.open_session`` when its ``ttl`` argument is ``None``.
+            ``300.0`` (5 minutes) by default.  Methods can override
+            per-session via ``ctx.open_session(state, ttl=60)``.  Only
+            meaningful when ``enable_sticky=True``.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -257,6 +285,11 @@ def make_wsgi_app(
         _RequestIdMiddleware(),
         _AccessLogContextMiddleware(),
     ]
+    if enable_sticky:
+        # Pin the server_id into req.env so _StickyMiddleware can validate
+        # that incoming session tokens were minted by THIS worker. Must run
+        # before the sticky middleware itself.
+        middleware.append(_ServerIdEnvMiddleware(server.server_id))
 
     # Enforce the advertised max_request_bytes cap server-side.  The
     # __upload_url__/init route (and capability-discovery routes) are
@@ -349,6 +382,18 @@ def make_wsgi_app(
     if enabled_encodings:
         capability_headers[SUPPORTED_ENCODINGS_HEADER] = ", ".join(e.value for e in enabled_encodings)
         cors_expose.append(SUPPORTED_ENCODINGS_HEADER)
+    # Sticky session capability headers — advertised only when sticky is on
+    # so OPTIONS /health responses cleanly distinguish sticky-capable
+    # servers from non-sticky ones. The session response headers are
+    # exposed via CORS so browser clients inside with_session_token()
+    # can read VGI-Session / VGI-Session-Close from cross-origin responses.
+    if enable_sticky:
+        capability_headers[STICKY_ENABLED_HEADER] = "true"
+        capability_headers[STICKY_DEFAULT_TTL_HEADER] = str(int(sticky_default_ttl))
+        cors_expose.append(STICKY_ENABLED_HEADER)
+        cors_expose.append(STICKY_DEFAULT_TTL_HEADER)
+        cors_expose.append(SESSION_HEADER)
+        cors_expose.append(SESSION_CLOSE_HEADER)
 
     # OAuth resource metadata (RFC 9728)
     from vgi_rpc.http._oauth import OAuthResourceMetadata as _OAuthMeta
@@ -444,6 +489,27 @@ def make_wsgi_app(
             exempt_prefixes=tuple(_exempt_prefixes_list),
         )
     )
+    # Sticky middleware runs AFTER auth so AAD binding sees the authenticated
+    # principal. The health endpoint is exempt because it must remain
+    # cheap and auth-free even when sticky is on.
+    sticky_registry: _SessionRegistry | None = None
+    if enable_sticky:
+        sticky_registry = _SessionRegistry(default_ttl=sticky_default_ttl)
+        # The DELETE /__session__ resource does its own idempotent token
+        # validation (returns 200 on any failure to avoid info leak), so
+        # the middleware-level "session not found ⇒ EXCEPTION batch"
+        # behaviour must NOT run for that endpoint — otherwise stale
+        # DELETEs would surface as RpcError instead of clean 200s.
+        middleware.append(
+            _StickyMiddleware(
+                sticky_registry,
+                token_key,
+                exempt_prefixes=(
+                    f"{prefix}/health",
+                    f"{prefix}/{_SESSION_ENDPOINT}",
+                ),
+            )
+        )
     if authenticate is not None and _pkce_active:
         middleware.append(
             _OAuthPkceMiddleware(
@@ -483,6 +549,12 @@ def make_wsgi_app(
     app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))
     if upload_url_provider is not None:
         app.add_route(f"{prefix}/__upload_url__/init", _UploadUrlResource(app_handler))
+    if enable_sticky:
+        assert sticky_registry is not None  # guaranteed by the enable_sticky branch above
+        app.add_route(
+            f"{prefix}/{_SESSION_ENDPOINT}",
+            _SessionResource(sticky_registry, token_key),
+        )
 
     # OAuth PKCE callback and logout routes (must be before not-found sink)
     if _pkce_active:

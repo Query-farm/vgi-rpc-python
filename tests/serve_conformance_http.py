@@ -59,7 +59,15 @@ def main() -> None:
         default="none",
         help="Compression for externalized batches.",
     )
+    parser.add_argument(
+        "--no-sticky",
+        action="store_true",
+        default=False,
+        help="Disable sticky sessions. Default: enabled, so TestSticky conformance group runs.",
+    )
     args = parser.parse_args()
+
+    enable_sticky = not args.no_sticky
 
     if not args.fake_storage:
         # Plain HTTP server, no external storage.
@@ -68,7 +76,28 @@ def main() -> None:
             ConformanceServiceImpl(),
             enable_describe=args.describe,
         )
-        serve_http(server, host=args.host, port=args.port)
+        if not enable_sticky:
+            # serve_http() doesn't expose enable_sticky directly; fall through
+            # to the make_wsgi_app + waitress path below when sticky is on so
+            # the conformance default exercises the feature.
+            serve_http(server, host=args.host, port=args.port)
+            return
+        # Sticky-enabled default path. Mirrors the externalisation branch
+        # below but without storage, so the canonical TestSticky group has
+        # a server to talk to in every conformance run.
+        port = args.port
+        if port == 0:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((args.host, 0))
+                port = int(s.getsockname()[1])
+        app = make_wsgi_app(server, enable_sticky=True)
+        try:
+            import waitress
+        except ImportError:
+            print("HTTP transport requires waitress: pip install vgi-rpc[http]", file=sys.stderr)
+            sys.exit(1)
+        print(f"PORT:{port}", flush=True)
+        waitress.serve(app, host=args.host, port=port, _quiet=True)
         return
 
     # Externalization-enabled mode: wire both server-side externalization
@@ -103,6 +132,7 @@ def main() -> None:
         upload_url_provider=backend,
         max_request_bytes=max_request_bytes,
         max_upload_bytes=64 * 1024 * 1024,
+        enable_sticky=enable_sticky,
     )
 
     try:

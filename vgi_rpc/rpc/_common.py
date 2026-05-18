@@ -192,6 +192,13 @@ class CallContext:
         """Initialize with auth context, client-log callback, and optional server context fields.
 
         Args:
+            auth: Authentication context for the current request.
+            emit_client_log: Callback for emitting client-directed log messages.
+            transport_metadata: Transport-specific metadata (e.g. ``remote_addr``).
+            server_id: Stable identifier for the server instance.
+            method_name: Name of the RPC method being dispatched.
+            protocol_name: Name of the Protocol class being served.
+            kind: Active transport binding for this dispatch.
             implementation: The protocol implementation object the
                 RpcServer was constructed with. Surfaced on the context so
                 producer-mode stream states (and other framework-driven
@@ -199,6 +206,7 @@ class CallContext:
                 instance) can dispatch helper calls back through the
                 public protocol surface — including any meta-worker
                 dispatching the top-level RpcServer is fronting.
+
         """
         self.auth = auth
         self.emit_client_log = emit_client_log
@@ -344,6 +352,88 @@ class CallContext:
             )
         sink.append(CookieSpec(name=name, delete=True, path=path, domain=domain))
 
+    # --- Sticky sessions (HTTP-only) -----------------------------------
+
+    @property
+    def session(self) -> object | None:
+        """The live session state object, or ``None`` if no session is bound to this request.
+
+        Sticky sessions are HTTP-only. On other transports this is always
+        ``None`` because the middleware that populates the contextvar is
+        only installed on the HTTP WSGI app.
+        """
+        sc = _current_session_context.get()
+        return sc.state if sc is not None else None
+
+    @property
+    def session_id(self) -> str | None:
+        """The opaque 12-char session ID, or ``None`` if no session is bound to this request."""
+        sc = _current_session_context.get()
+        return sc.session_id if sc is not None else None
+
+    def open_session(self, state: object, ttl: float | None = None) -> None:
+        """Register a sticky session holding *state* for subsequent requests.
+
+        The framework mints a signed ``VGI-Session`` token and attaches it
+        to the response header; the client (inside a
+        ``with_session_token()`` block) echoes the header on subsequent
+        requests, and the framework restores *state* as ``ctx.session``.
+
+        The ``state`` object stays in the per-worker registry until the
+        method explicitly calls :meth:`close_session`, the session's TTL
+        elapses, or the server drains. If *state* has a ``close()`` method
+        it is invoked on eviction so cursors / file handles / model handles
+        get released promptly. The framework serializes concurrent calls
+        on the same session via a per-session RLock; different sessions
+        run in parallel.
+
+        Args:
+            state: The Python object to keep alive for the session.
+            ttl: Override the server's default session TTL in seconds.
+                ``None`` (the default) uses ``sticky_default_ttl`` from
+                ``make_wsgi_app``.
+
+        Raises:
+            RuntimeError: If sticky sessions are not available on the
+                current transport (anything other than HTTP, or HTTP
+                without ``enable_sticky=True``); if the client did not
+                opt in with ``VGI-Session-Accept: true`` (the client is
+                outside a ``with_session_token()`` block and would lose
+                the minted token); or if a session is already bound to
+                this request.
+
+        """
+        sink = _current_sticky_sink.get()
+        if sink is None:
+            raise RuntimeError("sticky sessions not available on this transport")
+        if not sink.accept_opens:
+            raise RuntimeError(
+                "client did not opt in to sticky sessions "
+                "(missing VGI-Session-Accept: true header — open the call inside "
+                "an HttpConnection.with_session_token() block)"
+            )
+        if _current_session_context.get() is not None:
+            raise RuntimeError("a sticky session is already active for this request")
+        sink.open(state, ttl)
+
+    def close_session(self) -> None:
+        """Invalidate the sticky session bound to this request.
+
+        Invokes ``state.close()`` if defined, removes the registry entry,
+        and asks the response middleware to emit ``VGI-Session-Close:
+        true`` so the client drops its stored token. Idempotent — calling
+        twice within the same request is a no-op on the second call.
+
+        Raises:
+            RuntimeError: If sticky sessions are not available on the
+                current transport.
+
+        """
+        sink = _current_sticky_sink.get()
+        if sink is None:
+            raise RuntimeError("sticky sessions not available on this transport")
+        sink.close()
+
 
 @dataclass(frozen=True)
 class CookieSpec:
@@ -382,6 +472,55 @@ _current_transport: ContextVar[_TransportContext | None] = ContextVar("vgi_rpc_t
 # non-unary or non-HTTP code paths — ``CallContext.set_cookie`` raises
 # in that case.
 _current_response_cookies: ContextVar[list[CookieSpec] | None] = ContextVar("vgi_rpc_response_cookies", default=None)
+
+
+# ---------------------------------------------------------------------------
+# Sticky session contextvars (HTTP-only)
+# ---------------------------------------------------------------------------
+
+
+class _StickySinkProtocol(Protocol):
+    """Internal interface bridging ``CallContext.open_session`` to the HTTP middleware.
+
+    Installed by ``_StickyMiddleware.process_request`` when sticky sessions
+    are enabled on the WSGI app. The middleware's concrete implementation
+    owns the per-worker registry, the AEAD token key, and the per-response
+    mint/close state. ``CallContext`` only sees this Protocol so the core
+    has no compile-time dependency on the HTTP module.
+    """
+
+    accept_opens: bool
+    """Whether the client opted in via the ``VGI-Session-Accept`` header."""
+
+    def open(self, state: object, ttl: float | None) -> str:
+        """Register a session, return the sealed token. Caller stores nothing."""
+        ...
+
+    def close(self) -> None:
+        """Close the session currently bound to this request, if any."""
+        ...
+
+
+@dataclass(frozen=True)
+class _SessionContext:
+    """Internal: per-request handle on the live sticky session.
+
+    Set by ``_StickyMiddleware`` when a valid ``VGI-Session`` token is
+    presented; read by ``CallContext.session`` / ``CallContext.session_id``.
+    """
+
+    state: object
+    session_id: str
+
+
+_current_sticky_sink: ContextVar[_StickySinkProtocol | None] = ContextVar(
+    "vgi_rpc_sticky_sink",
+    default=None,
+)
+_current_session_context: ContextVar[_SessionContext | None] = ContextVar(
+    "vgi_rpc_session_context",
+    default=None,
+)
 
 
 def _get_auth_and_metadata() -> tuple[AuthContext, Mapping[str, Any]]:
@@ -476,6 +615,35 @@ class MethodNotImplementedError(AttributeError):
     """
 
     error_kind: ClassVar[str] = "method_not_implemented"
+
+
+class SessionLostError(Exception):
+    """Raised server-side when a sticky session token cannot be honoured.
+
+    Surfaced over the wire with ``error_kind="session_lost"`` so clients can
+    pattern-match the kind without substring-searching the message. Causes
+    include: token presented to a different worker than the one that minted
+    it (server_id mismatch), the registry entry aged out via TTL eviction,
+    AAD mismatch (cross-principal replay), or any other validation failure.
+
+    Sticky session machinery is HTTP-only; this error never originates from
+    pipe/unix transports.
+    """
+
+    error_kind: ClassVar[str] = "session_lost"
+
+
+class ServerDrainingError(Exception):
+    """Raised server-side when a sticky-enabled worker is draining and refuses new sessions.
+
+    Surfaced over the wire with ``error_kind="server_draining"``. Existing
+    sessions continue to serve through TTL or explicit close; only new
+    ``ctx.open_session`` calls are rejected. Operators trigger drain via
+    ``RpcServer.drain()`` (typically from a SIGTERM handler) ahead of
+    deploy-time worker rotation.
+    """
+
+    error_kind: ClassVar[str] = "server_draining"
 
 
 # ---------------------------------------------------------------------------

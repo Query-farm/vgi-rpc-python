@@ -79,6 +79,50 @@ To disable the page:
 app = make_wsgi_app(server, enable_not_found_page=False)
 ```
 
+### Sticky Sessions (opt-in)
+
+HTTP sticky sessions let an RPC method bind a Python object — an open DuckDB cursor, a loaded model handle, a streaming LLM client — to the worker process that opened it, keyed by a signed session token that the client echoes in a `VGI-Session` header. Subsequent requests from the same client (inside a `with_session_token()` block) carry the header and the framework restores the object as `ctx.session`. Misroutes, expiries, and process restarts surface as a typed `SessionLostError` so apps can decide whether to retry or fail loudly.
+
+The full wire contract — token format, header conventions, error kinds, the per-session serialization model, drain and crash semantics, load-balancer integration — lives in [`docs/sticky-sessions-spec.md`](../sticky-sessions-spec.md). The quickstart:
+
+```python
+from vgi_rpc import RpcServer, make_wsgi_app
+
+server = RpcServer(MyService, MyServiceImpl())
+app = make_wsgi_app(server, enable_sticky=True, sticky_default_ttl=300)
+```
+
+A method body opens a session by handing the framework a state object:
+
+```python
+class MyServiceImpl:
+    def open_query(self, sql: str, ctx) -> str:
+        cursor = duckdb.connect().execute(sql)
+        ctx.open_session(cursor)               # framework mints + returns the token
+        return "ok"
+
+    def next_rows(self, n: int, ctx) -> bytes:
+        return ctx.session.fetch_arrow_table(n).serialize().to_pybytes()
+
+    def close_query(self, ctx) -> None:
+        ctx.close_session()                    # closes cursor + evicts entry
+```
+
+On the client side, every session-using call lives inside a `with_session_token()` block — that's the opt-in signal the server requires (the leaked-session guard):
+
+```python
+from vgi_rpc.http import http_connect
+
+with http_connect(MyService, "http://localhost:8080") as conn, conn.with_session_token() as sess:
+    sess.open_query(sql="SELECT * FROM big")
+    rows = sess.next_rows(n=1000)
+    sess.close_query()
+```
+
+The block's exit fires a best-effort `DELETE /vgi/__session__` so handle-bearing state gets released promptly. To stash a token across processes, call `sess.detach()` before the block exits — that hands the caller the token and suppresses the DELETE so the server-side session survives until its TTL or another caller closes it.
+
+**HTTP-only.** Sticky machinery is not installed on pipe/subprocess/unix transports — those run as single processes where "sticky" is meaningless. `ctx.open_session` raises `RuntimeError("sticky sessions not available on this transport")` if called over a non-HTTP transport, so apps can detect-and-fall-back.
+
 ## API Reference
 
 ### Server

@@ -1485,6 +1485,14 @@ _EXPECTED_METHODS = frozenset(
         "exchange_oversized",
         "oversized_unary",
         "produce_oversized_batch",
+        # HTTP-only sticky-session conformance support (added 2026-05).
+        # The Sticky.* canonical conformance tests exercise these. Cross-
+        # language ports without sticky support skip the Sticky.* group;
+        # ports implementing sticky must implement these three methods to
+        # exercise the open / resume / close lifecycle.
+        "close_counter",
+        "increment_counter",
+        "open_counter",
     }
 )
 
@@ -1542,6 +1550,12 @@ _UNARY_METHODS = frozenset(
         "void_noop",
         "void_with_param",
         "with_defaults",
+        # Sticky session methods (HTTP-only at runtime; unary at the
+        # type level — server-side they may raise SessionLostError when
+        # invoked over a non-sticky transport).
+        "close_counter",
+        "increment_counter",
+        "open_counter",
     }
 )
 
@@ -1609,10 +1623,9 @@ def _test_desc_describe_version(desc: ServiceDescription) -> None:
 
 @_describe_test(category="describe_service", name="method_count")
 def _test_desc_method_count(desc: ServiceDescription) -> None:
-    # Bumped to 76 in 2026-04 when the HTTP-only response-cap conformance
-    # methods (``oversized_unary``, ``produce_oversized_batch``,
-    # ``exchange_oversized``) were added.
-    assert len(desc.methods) == 76
+    # 76 + 3 sticky methods (open_counter / increment_counter / close_counter)
+    # added 2026-05 alongside the HTTP-only Sticky.* conformance group.
+    assert len(desc.methods) == 79
 
 
 # ---------------------------------------------------------------------------

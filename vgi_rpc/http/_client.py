@@ -57,6 +57,7 @@ from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedRe
 
 from ._common import (
     _ARROW_CONTENT_TYPE,
+    _SESSION_ENDPOINT,
     _UPLOAD_URL_METHOD,
     _UPLOAD_URL_PARAMS_SCHEMA,
     EXTERNALIZATION_ENABLED_HEADER,
@@ -64,13 +65,19 @@ from ._common import (
     MAX_REQUEST_BYTES_HEADER,
     MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
+    SESSION_ACCEPT_HEADER,
+    SESSION_CLOSE_HEADER,
+    SESSION_HEADER,
+    STICKY_DEFAULT_TTL_HEADER,
+    STICKY_ENABLED_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
     Encoding,
-    _compress_body,
     available_encodings,
-    compress as _compress_with_encoding,
     parse_encoding_list,
+)
+from ._common import (
+    compress as _compress_with_encoding,
 )
 from ._retry import HttpRetryConfig, _options_with_retry, _post_with_retry
 
@@ -81,7 +88,7 @@ if TYPE_CHECKING:
 
 
 def _client_offered_encodings() -> tuple[Encoding, ...]:
-    """Encodings the client can both produce *and* decode.
+    """Return encodings the client can both produce *and* decode.
 
     httpx auto-decompresses gzip and deflate; for zstd it transparently
     decompresses if ``zstandard`` is importable.  We therefore advertise
@@ -984,6 +991,67 @@ class _HttpProxy:
         self.__dict__[name] = caller
         return caller
 
+    def with_session_token(
+        self,
+        token: str | None = None,
+    ) -> contextlib.AbstractContextManager[_SessionView]:
+        """Enter a sticky-session scope; yield a proxy view that tracks the session token.
+
+        Inside the ``with`` block, every request automatically carries
+        ``VGI-Session-Accept: true`` (the client opt-in that the server's
+        ``ctx.open_session`` requires) and, once the server returns one,
+        ``VGI-Session: <token>``. Captured tokens auto-update from response
+        headers and clear when the server emits ``VGI-Session-Close: true``.
+
+        Outside the ``with`` block, the underlying connection sends none
+        of these headers — so any sticky session a server method might
+        open without the opt-in would be silently leaked. The opt-in is
+        the leak-prevention contract.
+
+        On block exit, if a session is still live (the server hasn't
+        emitted ``VGI-Session-Close``), the framework fires a best-effort
+        ``DELETE /vgi/__session__`` so handle-bearing state (cursors, file
+        handles) gets released promptly. Failures are suppressed —
+        the server's TTL eviction is the safety net.
+
+        Multiple ``with_session_token()`` blocks may be open on the same
+        connection concurrently; each block has its own token state because
+        the per-call headers are emitted by the per-block tracking client,
+        not by the shared underlying httpx.Client.
+
+        Args:
+            token: Optional initial session token to resume an existing
+                session (e.g. previously stashed via
+                :meth:`_SessionView.current_session_token` across a
+                process lifecycle).
+
+        Returns:
+            A context manager yielding a :class:`_SessionView`. The view
+            quacks like the underlying typed proxy — calling any RPC
+            method on it goes through the session-tracking client.
+
+        """
+        return _open_session_view(self, token)
+
+    def _delete_session_best_effort(self, token: str) -> None:
+        """Issue ``DELETE /vgi/__session__`` and swallow any errors.
+
+        Invoked by :class:`_SessionView` on context-manager exit when the
+        session is still live. Logs at DEBUG so operators can investigate
+        the rare network-failure path without polluting normal logs.
+        """
+        try:
+            self._client.delete(
+                f"{self._url_prefix}/{_SESSION_ENDPOINT}",
+                headers={SESSION_HEADER: token},
+            )
+        except Exception:
+            wire_http_logger.debug(
+                "Best-effort DELETE /%s on with_session_token() exit failed",
+                _SESSION_ENDPOINT,
+                exc_info=True,
+            )
+
     def _make_unary_caller(self, info: RpcMethodInfo) -> Callable[..., object]:
         client = self._client
         url_prefix = self._url_prefix
@@ -1133,6 +1201,179 @@ class _HttpProxy:
 
 
 # ---------------------------------------------------------------------------
+# Sticky session client-side support
+# ---------------------------------------------------------------------------
+
+
+class _SessionTrackingClient:
+    """Thin wrapper around an httpx.Client / _SyncTestClient that injects + captures session headers.
+
+    Every outgoing request carries ``VGI-Session-Accept: true`` (the
+    server-side opt-in flag) and, if the view has captured a token,
+    ``VGI-Session: <token>``. Every response is scanned for
+    ``VGI-Session`` (token rotated by the server — happens at open
+    and could in future happen on refresh) and ``VGI-Session-Close:
+    true`` (clears the captured token). The wrapped client is shared
+    across proxy method closures via duck-typing — we forward
+    ``post``/``get``/``options``/``delete``/``put`` explicitly and
+    delegate everything else via :meth:`__getattr__`.
+    """
+
+    __slots__ = ("_inner", "_view")
+
+    def __init__(self, inner: httpx.Client | _SyncTestClient, view: _SessionView) -> None:
+        self._inner = inner
+        self._view = view
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate unknown attributes (e.g. ``base_url``, ``headers``) to the inner client."""
+        return getattr(self._inner, name)
+
+    def _merge_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
+        """Add session opt-in + token headers to a per-request header dict."""
+        merged: dict[str, str] = dict(headers or {})
+        merged[SESSION_ACCEPT_HEADER] = "true"
+        if self._view._token is not None:
+            merged[SESSION_HEADER] = self._view._token
+        return merged
+
+    def _capture(self, resp: Any) -> None:
+        """Update the view's session state from response headers."""
+        try:
+            hdrs = resp.headers
+        except AttributeError:
+            return
+        token = hdrs.get(SESSION_HEADER) or hdrs.get(SESSION_HEADER.lower())
+        if token:
+            self._view._token = token
+        close_flag = hdrs.get(SESSION_CLOSE_HEADER) or hdrs.get(SESSION_CLOSE_HEADER.lower())
+        if (close_flag or "").strip().lower() == "true":
+            self._view._token = None
+            self._view._closed = True
+
+    def post(self, url: str, **kwargs: Any) -> Any:
+        """Forward POST, merging session headers and capturing the response."""
+        kwargs["headers"] = self._merge_headers(kwargs.get("headers"))
+        resp = self._inner.post(url, **kwargs)
+        self._capture(resp)
+        return resp
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        """Forward GET, merging session headers and capturing the response."""
+        kwargs["headers"] = self._merge_headers(kwargs.get("headers"))
+        resp = self._inner.get(url, **kwargs)
+        self._capture(resp)
+        return resp
+
+    def options(self, url: str, **kwargs: Any) -> Any:
+        """Forward OPTIONS — capability probes don't open sessions, but capture anyway."""
+        kwargs["headers"] = self._merge_headers(kwargs.get("headers"))
+        resp = self._inner.options(url, **kwargs)
+        self._capture(resp)
+        return resp
+
+    def delete(self, url: str, **kwargs: Any) -> Any:
+        """Forward DELETE — used by ``_HttpProxy._delete_session_best_effort``."""
+        kwargs["headers"] = self._merge_headers(kwargs.get("headers"))
+        resp = self._inner.delete(url, **kwargs)
+        self._capture(resp)
+        return resp
+
+    def put(self, url: str, **kwargs: Any) -> Any:
+        """Forward PUT unchanged — externalised upload URLs go to external storage."""
+        # Don't inject session headers on PUT to external storage URLs:
+        # they aren't vgi-rpc requests, and adding random headers could
+        # break signed-URL validation.
+        return self._inner.put(url, **kwargs)
+
+    def close(self) -> None:
+        """No-op: we don't own the inner client; the caller closes it."""
+
+
+class _SessionView:
+    """A scoped sticky-session view of an :class:`_HttpProxy`.
+
+    Yielded by :meth:`_HttpProxy.with_session_token`. Delegates attribute
+    access to a fresh proxy whose client is wrapped in
+    :class:`_SessionTrackingClient`, so calling ``view.open_counter(...)``
+    invokes the underlying proxy through the tracking client and
+    automatically carries / captures session headers.
+
+    Stays minimal: token state is two fields, the public surface is
+    :meth:`current_session_token` for stashing across processes.
+    """
+
+    __slots__ = ("_closed", "_outer", "_proxy", "_token", "_tracking_client")
+
+    def __init__(self, outer: _HttpProxy, initial_token: str | None) -> None:
+        self._outer = outer
+        self._token = initial_token
+        self._closed = False
+        self._tracking_client = _SessionTrackingClient(outer._client, self)
+        # The tracking client implements the same duck-typed surface that
+        # _HttpProxy uses (post/get/options/delete/put + close + base_url
+        # via __getattr__ delegation); casting to satisfy the union type
+        # is honest because the wrapper preserves the contract exactly.
+        self._proxy = _HttpProxy(
+            outer._protocol,
+            cast("httpx.Client | _SyncTestClient", self._tracking_client),
+            outer._url_prefix,
+            outer._on_log,
+            external_config=outer._external_config,
+            ipc_validation=outer._ipc_validation,
+            retry_config=outer._retry_config,
+            compression_level=outer._compression_level,
+        )
+
+    def current_session_token(self) -> str | None:
+        """Return the session token in flight, or ``None`` if no session is open.
+
+        Useful for stashing the token across a process lifecycle and
+        passing it back later via ``conn.with_session_token(token=stashed)``
+        to resume the same server-side session. Call :meth:`detach` before
+        leaving the ``with`` block to suppress the best-effort DELETE so
+        the stashed token resolves to a live registry entry.
+        """
+        return self._token
+
+    def detach(self) -> str | None:
+        """Hand the session token off to the caller; suppress the exit-time DELETE.
+
+        After ``detach()`` the view forgets the token, so the ``with`` block's
+        exit will not fire ``DELETE /vgi/__session__``. The server-side
+        session remains live until its TTL elapses or another caller
+        explicitly closes it. Returns the token (or ``None`` if no session
+        was live to begin with) for convenience.
+
+        Use this when stashing a token for later resumption — without
+        ``detach()``, the framework's "always release handles promptly"
+        contract would evict the session the moment the block exits.
+        """
+        token = self._token
+        self._token = None
+        self._closed = True  # marks the view as already torn down for exit logic
+        return token
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate RPC method calls to the inner session-tracking proxy."""
+        return getattr(self._proxy, name)
+
+
+@contextlib.contextmanager
+def _open_session_view(
+    outer: _HttpProxy,
+    token: str | None,
+) -> Iterator[_SessionView]:
+    """Context-manager body for :meth:`_HttpProxy.with_session_token`."""
+    view = _SessionView(outer, initial_token=token)
+    try:
+        yield view
+    finally:
+        if not view._closed and view._token is not None:
+            outer._delete_session_best_effort(view._token)
+
+
+# ---------------------------------------------------------------------------
 # Server capabilities discovery
 # ---------------------------------------------------------------------------
 
@@ -1186,6 +1427,10 @@ class HttpServerCapabilities:
     max_upload_bytes: int | None = None
     supported_encodings: tuple[Encoding, ...] = (Encoding.ZSTD,)
     cache_expires_at: float | None = None
+    sticky_enabled: bool = False
+    """Whether the server has ``enable_sticky=True`` and supports ``VGI-Session``."""
+    sticky_default_ttl: int | None = None
+    """Default session TTL in seconds when ``open_session`` is called without an explicit TTL."""
 
 
 def http_capabilities(
@@ -1289,6 +1534,15 @@ def http_capabilities(
                         cache_expires_at = _time.monotonic() + float(t[len("max-age=") :])
                     break
 
+        sticky_enabled_raw = headers.get(STICKY_ENABLED_HEADER) or headers.get(STICKY_ENABLED_HEADER.lower())
+        sticky_enabled = sticky_enabled_raw == "true" if sticky_enabled_raw is not None else False
+
+        sticky_ttl: int | None = None
+        sticky_ttl_raw = headers.get(STICKY_DEFAULT_TTL_HEADER) or headers.get(STICKY_DEFAULT_TTL_HEADER.lower())
+        if sticky_ttl_raw is not None:
+            with contextlib.suppress(ValueError):
+                sticky_ttl = int(sticky_ttl_raw)
+
         return HttpServerCapabilities(
             max_request_bytes=max_req,
             max_response_bytes=max_resp,
@@ -1298,6 +1552,8 @@ def http_capabilities(
             max_upload_bytes=max_upload,
             supported_encodings=supported_encodings,
             cache_expires_at=cache_expires_at,
+            sticky_enabled=sticky_enabled,
+            sticky_default_ttl=sticky_ttl,
         )
     finally:
         if own_client:
