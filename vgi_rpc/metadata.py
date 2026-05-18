@@ -12,6 +12,8 @@ duplicating these patterns.
 
 from __future__ import annotations
 
+import re
+
 import pyarrow as pa
 
 __all__ = [
@@ -28,10 +30,12 @@ __all__ = [
     "LOG_MESSAGE_KEY",
     "PROTOCOL_HASH_KEY",
     "PROTOCOL_NAME_KEY",
+    "PROTOCOL_VERSION_KEY",
     "REQUEST_ID_KEY",
     "REQUEST_VERSION",
     "REQUEST_VERSION_KEY",
     "RPC_METHOD_KEY",
+    "SEMVER_REGEX",
     "SERVER_ID_KEY",
     "SHM_LENGTH_KEY",
     "SHM_OFFSET_KEY",
@@ -43,6 +47,7 @@ __all__ = [
     "TRACESTATE_KEY",
     "encode_metadata",
     "merge_metadata",
+    "parse_version",
     "strip_keys",
 ]
 
@@ -96,6 +101,33 @@ SHM_SEGMENT_SIZE_KEY = b"vgi_rpc.shm_segment_size"
 PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"
 DESCRIBE_VERSION_KEY = b"vgi_rpc.describe_version"
 PROTOCOL_HASH_KEY = b"vgi_rpc.protocol_hash"
+
+# Application protocol surface version. Carried on every request batch from a
+# vgi-rpc RpcClient bound to a Protocol that declares ``protocol_version``; also
+# emitted in the __describe__ response. Format: canonical semver MAJOR.MINOR.PATCH
+# (see ``SEMVER_REGEX``). Enforced at dispatch boundary on the server: exact
+# major+minor match required, patch ignored. Distinct from ``REQUEST_VERSION``
+# (wire framing) and from any catalog-level data-version semantics.
+PROTOCOL_VERSION_KEY = b"vgi_rpc.protocol_version"
+
+SEMVER_REGEX = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+
+def parse_version(value: str) -> tuple[int, int, int]:
+    """Parse a canonical semver string into ``(major, minor, patch)``.
+
+    Raises ``ValueError`` for any input that isn't ``MAJOR.MINOR.PATCH`` with
+    non-negative integers and no leading zeros (except literal ``0``). No
+    prereleases (``1.0.0-rc1``) and no build metadata (``1.0.0+foo``).
+    """
+    m = SEMVER_REGEX.match(value)
+    if m is None:
+        raise ValueError(
+            f"Invalid protocol version {value!r}: expected canonical semver "
+            f"MAJOR.MINOR.PATCH with non-negative integers and no leading zeros "
+            f"(no prereleases or build metadata)."
+        )
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 # W3C trace context propagation (on request batch custom metadata)
 TRACEPARENT_KEY = b"traceparent"

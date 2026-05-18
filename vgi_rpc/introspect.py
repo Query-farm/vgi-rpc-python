@@ -36,6 +36,7 @@ from vgi_rpc.metadata import (
     DESCRIBE_VERSION_KEY,
     PROTOCOL_HASH_KEY,
     PROTOCOL_NAME_KEY,
+    PROTOCOL_VERSION_KEY,
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
     RPC_METHOD_KEY,
@@ -148,6 +149,11 @@ class ServiceDescription:
             Stable across server processes that expose the same Protocol;
             changes when any wire-relevant detail changes.  Use this as the
             schema-registry key when decoding archived access-log records.
+        protocol_version: Application protocol surface version declared by
+            the Protocol class (canonical semver MAJOR.MINOR.PATCH), or empty
+            string when the Protocol opts out. Diagnostic — actual enforcement
+            happens via the per-request ``vgi_rpc.protocol_version`` metadata
+            key at the server's dispatch boundary.
         server_id: Server instance identifier.
         methods: Mapping of method name to ``MethodDescription``.
 
@@ -159,6 +165,7 @@ class ServiceDescription:
     protocol_hash: str
     server_id: str
     methods: Mapping[str, MethodDescription]
+    protocol_version: str = ""
 
     def __str__(self) -> str:
         """Return a human-readable summary of the service."""
@@ -168,8 +175,10 @@ class ServiceDescription:
             f"  request_version: {self.request_version}",
             f"  describe_version: {self.describe_version}",
             f"  protocol_hash: {self.protocol_hash}",
-            "",
         ]
+        if self.protocol_version:
+            lines.append(f"  protocol_version: {self.protocol_version}")
+        lines.append("")
         for name, md in sorted(self.methods.items()):
             lines.append(f"  {name}({md.method_type.value})")
             if md.params_schema.names:
@@ -189,18 +198,25 @@ def build_describe_batch(
     protocol_name: str,
     methods: Mapping[str, RpcMethodInfo],
     server_id: str,
+    protocol_version: str | None = None,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
     """Build the ``__describe__`` response batch.
 
     One row per method, sorted by name.  The returned
     ``pa.KeyValueMetadata`` carries protocol name, wire protocol
-    version, describe format version, ``protocol_hash``, and server
-    identity — callers pass it as ``custom_metadata`` when writing.
+    version, describe format version, ``protocol_hash``, server
+    identity, and (when configured) ``protocol_version`` — callers pass
+    it as ``custom_metadata`` when writing.
 
     Args:
         protocol_name: Name of the Protocol class.
         methods: Method metadata from ``rpc_methods()``.
         server_id: The server's identity string.
+        protocol_version: Optional application protocol surface version
+            (canonical semver MAJOR.MINOR.PATCH). When supplied, emitted
+            under ``vgi_rpc.protocol_version`` so a version-mismatched
+            client can discover the server's expected version by calling
+            ``__describe__``. Not part of the protocol_hash payload.
 
     Returns:
         A ``(pa.RecordBatch, pa.KeyValueMetadata)`` tuple.  The batch
@@ -245,15 +261,16 @@ def build_describe_batch(
 
     protocol_hash = compute_protocol_hash(protocol_name, batch)
 
-    custom_metadata = pa.KeyValueMetadata(
-        {
-            PROTOCOL_NAME_KEY: protocol_name.encode(),
-            REQUEST_VERSION_KEY: REQUEST_VERSION,
-            DESCRIBE_VERSION_KEY: DESCRIBE_VERSION.encode(),
-            PROTOCOL_HASH_KEY: protocol_hash.encode(),
-            SERVER_ID_KEY: server_id.encode(),
-        }
-    )
+    md_dict: dict[bytes, bytes] = {
+        PROTOCOL_NAME_KEY: protocol_name.encode(),
+        REQUEST_VERSION_KEY: REQUEST_VERSION,
+        DESCRIBE_VERSION_KEY: DESCRIBE_VERSION.encode(),
+        PROTOCOL_HASH_KEY: protocol_hash.encode(),
+        SERVER_ID_KEY: server_id.encode(),
+    }
+    if protocol_version is not None:
+        md_dict[PROTOCOL_VERSION_KEY] = protocol_version.encode()
+    custom_metadata = pa.KeyValueMetadata(md_dict)
     return batch, custom_metadata
 
 
@@ -361,6 +378,7 @@ def parse_describe_batch(
     describe_version: str = md.get(DESCRIBE_VERSION_KEY, b"").decode()
     protocol_hash: str = md.get(PROTOCOL_HASH_KEY, b"").decode()
     server_id: str = md.get(SERVER_ID_KEY, b"").decode()
+    protocol_version: str = md.get(PROTOCOL_VERSION_KEY, b"").decode()
 
     method_map: dict[str, MethodDescription] = {}
     for i in range(batch.num_rows):
@@ -399,6 +417,7 @@ def parse_describe_batch(
         protocol_hash=protocol_hash,
         server_id=server_id,
         methods=method_map,
+        protocol_version=protocol_version,
     )
 
 

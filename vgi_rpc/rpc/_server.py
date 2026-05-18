@@ -20,7 +20,13 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.external import ExternalLocationConfig, resolve_external_location
-from vgi_rpc.metadata import CANCEL_KEY, SHM_SEGMENT_NAME_KEY, SHM_SEGMENT_SIZE_KEY
+from vgi_rpc.metadata import (
+    CANCEL_KEY,
+    PROTOCOL_VERSION_KEY,
+    SHM_SEGMENT_NAME_KEY,
+    SHM_SEGMENT_SIZE_KEY,
+    parse_version,
+)
 from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
     AuthContext,
@@ -29,6 +35,7 @@ from vgi_rpc.rpc._common import (
     HookToken,
     MethodNotImplementedError,
     MethodType,
+    ProtocolVersionError,
     RpcError,
     TransportKind,
     VersionError,
@@ -141,7 +148,6 @@ def _emit_access_log(
     stats: CallStatistics | None = None,
     server_version: str = "",
     protocol_hash: str = "",
-    protocol_version: str = "",
     request_state: bytes | None = None,
     response_state: bytes | None = None,
     cancelled: bool = False,
@@ -164,8 +170,6 @@ def _emit_access_log(
             "status": status,
             "error_type": error_type,
         }
-        if protocol_version:
-            extra["protocol_version"] = protocol_version
         if cancelled:
             extra["cancelled"] = True
         if error_message:
@@ -307,6 +311,7 @@ class RpcServer:
         "_protocol",
         "_protocol_hash",
         "_protocol_version",
+        "_protocol_version_parts",
         "_server_id",
         "_server_version",
         "_transport_capabilities",
@@ -322,22 +327,21 @@ class RpcServer:
         external_location: ExternalLocationConfig | None = None,
         server_id: str | None = None,
         server_version: str = "",
-        protocol_version: str = "",
         enable_describe: bool = False,
         ipc_validation: IpcValidation = IpcValidation.FULL,
     ) -> None:
         """Initialize with a protocol type and its implementation.
 
         Args:
-            protocol: The Protocol class defining the RPC interface.
+            protocol: The Protocol class defining the RPC interface. If the
+                class declares a ``protocol_version: ClassVar[str]`` attribute
+                (canonical semver MAJOR.MINOR.PATCH), the server enforces an
+                exact major+minor match on every dispatched request. See
+                ``_check_protocol_version`` for the comparison rule.
             implementation: Object implementing all methods from *protocol*.
             external_location: Optional ExternalLocation configuration.
             server_id: Optional server identifier; auto-generated if ``None``.
-            server_version: Build version string included in access log entries
-                (separate from *protocol_version*).
-            protocol_version: Operator-supplied free-form protocol contract version
-                included in access log entries; complements ``protocol_hash`` for
-                humans.
+            server_version: Build version string included in access log entries.
             enable_describe: When ``True``, the server handles ``__describe__``
                 requests returning machine-readable method metadata.
             ipc_validation: Validation level for incoming IPC batches.
@@ -347,7 +351,21 @@ class RpcServer:
         self._protocol = protocol
         self._impl = implementation
         self._server_version = server_version
-        self._protocol_version = protocol_version
+        # Read protocol_version directly from the Protocol class's own dict
+        # (vars, not getattr) so subclasses that don't redeclare it get None.
+        # When None, the dispatch-boundary check no-ops — opt-in by declaration.
+        raw_version = vars(protocol).get("protocol_version")
+        if raw_version is None:
+            self._protocol_version: str | None = None
+            self._protocol_version_parts: tuple[int, int, int] | None = None
+        else:
+            if not isinstance(raw_version, str):
+                raise TypeError(
+                    f"{protocol.__name__}.protocol_version must be a str, "
+                    f"got {type(raw_version).__name__}"
+                )
+            self._protocol_version = raw_version
+            self._protocol_version_parts = parse_version(raw_version)
         self._ipc_validation = ipc_validation
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
@@ -362,7 +380,9 @@ class RpcServer:
         # access-log records on every dispatch.
         from vgi_rpc.introspect import build_describe_batch
 
-        _hash_batch, _hash_md = build_describe_batch(protocol.__name__, self._methods, self._server_id)
+        _hash_batch, _hash_md = build_describe_batch(
+            protocol.__name__, self._methods, self._server_id, self._protocol_version
+        )
         from vgi_rpc.metadata import PROTOCOL_HASH_KEY
 
         self._protocol_hash: str = _hash_md.get(PROTOCOL_HASH_KEY, b"").decode()
@@ -448,9 +468,79 @@ class RpcServer:
         return self._server_version
 
     @property
-    def protocol_version(self) -> str:
-        """Operator-supplied free-form protocol version label."""
+    def protocol_version(self) -> str | None:
+        """Application protocol surface version declared by the Protocol class.
+
+        Read from ``vars(protocol).get("protocol_version")`` at construction
+        (a ``ClassVar[str]`` in canonical semver MAJOR.MINOR.PATCH form, or
+        ``None`` when the Protocol opts out). When set, the server enforces
+        an exact major+minor match on every dispatched request via
+        ``_check_protocol_version``.
+        """
         return self._protocol_version
+
+    def _check_protocol_version(
+        self,
+        client_version_bytes: bytes | None,
+    ) -> None:
+        """Validate a client's declared protocol_version against the server's.
+
+        Raises ``ProtocolVersionError`` with a directional message telling
+        the reader which side to upgrade. Caller is responsible for invoking
+        only when ``self._protocol_version_parts is not None``.
+
+        Comparison rule (see plan §2.4): exact major+minor match; patch ignored.
+        """
+        server_parts = self._protocol_version_parts
+        server_version = self._protocol_version
+        assert server_parts is not None and server_version is not None
+        if client_version_bytes is None:
+            raise ProtocolVersionError(
+                f"VGI client/worker protocol_version mismatch.\n"
+                f"  Client: <not declared>\n"
+                f"  Server: {server_version}\n"
+                f"  Direction: the client did not send a vgi_rpc.protocol_version "
+                f"metadata key. This is either a vgi-rpc framework bug or a "
+                f"non-VGI client connecting to a VGI worker."
+            )
+        try:
+            client_version = client_version_bytes.decode()
+        except UnicodeDecodeError as exc:
+            raise ProtocolVersionError(
+                f"VGI client/worker protocol_version mismatch.\n"
+                f"  Client: <undecodable bytes>\n"
+                f"  Server: {server_version}\n"
+                f"  Direction: client sent non-UTF-8 protocol_version metadata."
+            ) from exc
+        try:
+            client_parts = parse_version(client_version)
+        except ValueError as exc:
+            raise ProtocolVersionError(
+                f"VGI client/worker protocol_version mismatch.\n"
+                f"  Client: {client_version}\n"
+                f"  Server: {server_version}\n"
+                f"  Direction: client sent a malformed protocol_version. "
+                f"Expected canonical semver MAJOR.MINOR.PATCH."
+            ) from exc
+        # Exact major+minor match; patch is ignored.
+        if client_parts[:2] == server_parts[:2]:
+            return
+        if (client_parts[0], client_parts[1]) < (server_parts[0], server_parts[1]):
+            direction = (
+                f"client is too old; upgrade the VGI extension/client to a "
+                f"version supporting protocol_version {server_version}."
+            )
+        else:
+            direction = (
+                f"server is too old; upgrade the VGI worker to a version "
+                f"supporting protocol_version {client_version}."
+            )
+        raise ProtocolVersionError(
+            f"VGI client/worker protocol_version mismatch.\n"
+            f"  Client: {client_version}\n"
+            f"  Server: {server_version}\n"
+            f"  Direction: {direction}"
+        )
 
     @property
     def protocol_hash(self) -> str:
@@ -600,6 +690,20 @@ class RpcServer:
                 )
                 return
 
+            # Application-protocol-version gate. Fires only when the Protocol
+            # declared a ``protocol_version`` ClassVar. ``__describe__`` is
+            # exempt: it is the diagnostic path a mismatched client uses to
+            # introspect the server's version. Failure here writes a typed
+            # error stream and returns so the serve loop continues.
+            if self._protocol_version_parts is not None and method_name != "__describe__":
+                try:
+                    md = _current_request_metadata.get()
+                    self._check_protocol_version(md.get(PROTOCOL_VERSION_KEY) if md is not None else None)
+                except ProtocolVersionError as exc:
+                    err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
+                    _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
+                    return
+
             _deserialize_params(kwargs, info.param_types, self._ipc_validation)
 
             try:
@@ -677,7 +781,6 @@ class RpcServer:
                 stats=stats,
                 server_version=self._server_version,
                 protocol_hash=self._protocol_hash,
-                protocol_version=self._protocol_version,
             )
             return
 
@@ -727,7 +830,6 @@ class RpcServer:
                 stats=stats,
                 server_version=self._server_version,
                 protocol_hash=self._protocol_hash,
-                protocol_version=self._protocol_version,
             )
             if hook is not None:
                 try:
@@ -790,7 +892,6 @@ class RpcServer:
                     stats=stats,
                     server_version=self._server_version,
                     protocol_hash=self._protocol_hash,
-                    protocol_version=self._protocol_version,
                 )
                 if hook is not None:
                     try:
@@ -912,7 +1013,6 @@ class RpcServer:
                 stats=stats,
                 server_version=self._server_version,
                 protocol_hash=self._protocol_hash,
-                protocol_version=self._protocol_version,
                 cancelled=cancelled,
             )
             if hook is not None:

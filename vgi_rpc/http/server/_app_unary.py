@@ -104,7 +104,6 @@ def _run_unary_sync(
                 stats=stats,
                 server_version=app._server.server_version,
                 protocol_hash=app._server.protocol_hash,
-                protocol_version=app._server.protocol_version,
             )
             return resp_buf, HTTPStatus.OK
 
@@ -223,7 +222,6 @@ def _run_unary_sync(
                 stats=stats,
                 server_version=app._server.server_version,
                 protocol_hash=app._server.protocol_hash,
-                protocol_version=app._server.protocol_version,
                 error_message=_truncate_error_message(_hook_exc),
             )
             if hook is not None:

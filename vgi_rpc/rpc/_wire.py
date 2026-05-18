@@ -27,6 +27,7 @@ from vgi_rpc.metadata import (
     LOG_EXTRA_KEY,
     LOG_LEVEL_KEY,
     LOG_MESSAGE_KEY,
+    PROTOCOL_VERSION_KEY,
     REQUEST_ID_KEY,
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
@@ -156,6 +157,7 @@ def _write_request(
     kwargs: dict[str, object],
     *,
     shm: ShmSegment | None = None,
+    protocol_version: str | None = None,
 ) -> None:
     """Write a request as a complete IPC stream (schema + 1 batch + EOS).
 
@@ -164,6 +166,11 @@ def _write_request(
 
     When *shm* is provided, the segment name and size are included in the
     metadata so the server can dynamically attach to the segment.
+
+    When *protocol_version* is provided, it is included as
+    ``vgi_rpc.protocol_version``. Callers that emit non-VGI requests (CLI
+    debug tools, HTTP upload-URL bootstrap) leave it at ``None`` so they
+    are structurally exempt from the server's dispatch-boundary check.
     """
     arrays: list[pa.Array[Any]] = []
     for f in params_schema:
@@ -171,6 +178,8 @@ def _write_request(
         arrays.append(pa.array([val], type=f.type))
     batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
     md: dict[bytes, bytes] = {RPC_METHOD_KEY: method_name.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION}
+    if protocol_version is not None:
+        md[PROTOCOL_VERSION_KEY] = protocol_version.encode()
     if shm is not None:
         md[SHM_SEGMENT_NAME_KEY] = shm.name.encode()
         md[SHM_SEGMENT_SIZE_KEY] = str(shm.size).encode()
@@ -799,8 +808,16 @@ def _send_request(
     kwargs: dict[str, object],
     *,
     shm: ShmSegment | None = None,
+    protocol_version: str | None = None,
 ) -> None:
-    """Merge defaults, validate, and write a request IPC stream."""
+    """Merge defaults, validate, and write a request IPC stream.
+
+    *protocol_version*: the application protocol surface version declared by
+    the Protocol class the client was constructed against, or ``None`` for
+    Protocols that have not opted in. Plumbed through to ``_write_request``
+    where it is added to the request batch's custom_metadata under
+    ``vgi_rpc.protocol_version``.
+    """
     merged = {**info.param_defaults, **kwargs}
     if wire_request_logger.isEnabledFor(logging.DEBUG):
         wire_request_logger.debug(
@@ -810,7 +827,7 @@ def _send_request(
             sorted(set(info.param_defaults) - set(kwargs)),
         )
     _validate_params(info.name, merged, info.param_types)
-    _write_request(writer, info.name, info.params_schema, merged, shm=shm)
+    _write_request(writer, info.name, info.params_schema, merged, shm=shm, protocol_version=protocol_version)
 
 
 def _read_batch_with_log_check(

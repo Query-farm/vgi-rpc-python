@@ -39,6 +39,7 @@ from vgi_rpc.rpc import (
     OutputCollector,
     PipeTransport,
     ProducerState,
+    ProtocolVersionError,
     RpcConnection,
     RpcError,
     RpcMethodInfo,
@@ -150,6 +151,7 @@ __all__ = [
     "RpcTransport",
     "RpcError",
     "RpcMethodInfo",
+    "ProtocolVersionError",
     "VersionError",
     "IPCError",
     # Convenience

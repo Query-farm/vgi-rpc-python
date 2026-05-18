@@ -17,7 +17,7 @@ from pyarrow import ipc
 
 from vgi_rpc.external import ExternalLocationConfig
 from vgi_rpc.log import Message
-from vgi_rpc.metadata import CANCEL_KEY
+from vgi_rpc.metadata import CANCEL_KEY, parse_version
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
 from vgi_rpc.rpc._debug import fmt_batch, wire_request_logger, wire_stream_logger, wire_transport_logger
 from vgi_rpc.rpc._transport import RpcTransport
@@ -320,6 +320,23 @@ class _RpcProxy:
         # ShmPipeTransport and _PooledTransport expose a .shm property;
         # plain RpcTransport does not.  Duck-type to avoid coupling to concrete classes.
         self._shm: ShmSegment | None = getattr(transport, "shm", None)
+        # Application protocol surface version. Read from the Protocol class's
+        # own dict (vars, not getattr) so subclasses that don't redeclare it
+        # get None — opt-in by declaration. When set, threaded through every
+        # _send_request so the server's dispatch-boundary check can enforce
+        # exact major+minor match. Validated at construction; malformed
+        # protocol_version raises ValueError here, not at first RPC.
+        raw_version = vars(protocol).get("protocol_version")
+        if raw_version is None:
+            self._protocol_version: str | None = None
+        else:
+            if not isinstance(raw_version, str):
+                raise TypeError(
+                    f"{protocol.__name__}.protocol_version must be a str, "
+                    f"got {type(raw_version).__name__}"
+                )
+            parse_version(raw_version)  # validate; raises ValueError on malformed
+            self._protocol_version = raw_version
 
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
@@ -342,12 +359,13 @@ class _RpcProxy:
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
         shm = self._shm
+        protocol_version = self._protocol_version
 
         def caller(**kwargs: object) -> object:
             if wire_request_logger.isEnabledFor(logging.DEBUG):
                 wire_request_logger.debug("Unary call: method=%s", info.name)
             try:
-                _send_request(transport.writer, info, kwargs, shm=shm)
+                _send_request(transport.writer, info, kwargs, shm=shm, protocol_version=protocol_version)
                 reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
                 return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
             except RpcError:
@@ -365,12 +383,13 @@ class _RpcProxy:
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
         shm = self._shm
+        protocol_version = self._protocol_version
 
         def caller(**kwargs: object) -> StreamSession:
             if wire_stream_logger.isEnabledFor(logging.DEBUG):
                 wire_stream_logger.debug("Stream init: method=%s", info.name)
             try:
-                _send_request(transport.writer, info, kwargs, shm=shm)
+                _send_request(transport.writer, info, kwargs, shm=shm, protocol_version=protocol_version)
                 # _PooledTransport (pool.py) uses __slots__ and tracks stream
                 # lifecycle to detect abandoned streams.  object.__setattr__ is
                 # needed because __slots__ classes don't have __dict__.

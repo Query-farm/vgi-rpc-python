@@ -276,7 +276,6 @@ class _UploadUrlResource:
                 http_status=http_status.value,
                 server_version=self._app._server.server_version,
                 protocol_hash=self._app._server.protocol_hash,
-                protocol_version=self._app._server.protocol_version,
                 error_message=_truncate_error_message(_upload_exc),
             )
 

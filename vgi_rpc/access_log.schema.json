@@ -51,10 +51,6 @@
       "description": "SHA-256 hex digest of the canonical __describe__ payload.",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "protocol_version": {
-      "type": "string",
-      "description": "Operator-supplied free-form protocol version label."
-    },
     "method": {
       "type": "string",
       "minLength": 1

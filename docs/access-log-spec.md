@@ -83,7 +83,6 @@ These fields appear on HTTP transports only.
 | Field | Type | Condition |
 |---|---|---|
 | `server_version` | string | Present when the implementation knows its server *build* version (e.g. set from a build constant). |
-| `protocol_version` | string | Present when the operator labels the *protocol contract* with a version (separate from `server_version`, which describes the build). Free-form. Use `protocol_hash` for machine comparisons. |
 | `claims` | object | Present and non-empty when `authenticated == true` and the auth provider produced claims. JSON-serializable; nested values follow JSON conventions. |
 
 ### 4.6 Call statistics

@@ -165,7 +165,6 @@ def _dispatch_telemetry(
             stats=_current_call_stats.get(),
             server_version=app._server.server_version,
             protocol_hash=app._server.protocol_hash,
-            protocol_version=app._server.protocol_version,
             error_message=outcome.error_message,
             request_state=outcome.request_state_bytes,
             response_state=outcome.response_state_bytes,

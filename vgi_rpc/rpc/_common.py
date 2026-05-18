@@ -628,6 +628,18 @@ class VersionError(Exception):
     """Raised when a request has a missing or incompatible protocol version."""
 
 
+class ProtocolVersionError(VersionError):
+    """Raised when the client's declared protocol_version is incompatible with the server's.
+
+    Subclass of ``VersionError`` so existing catch sites in ``serve_one``
+    (and the HTTP unary/stream wrappers) write a typed error stream and
+    continue. Carries a directional message that tells whoever reads it
+    which side to upgrade.
+    """
+
+    error_kind: ClassVar[str] = "protocol_version_mismatch"
+
+
 class MethodNotImplementedError(AttributeError):
     """Raised server-side when no handler is registered for the requested RPC method.
 

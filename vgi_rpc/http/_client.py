@@ -858,6 +858,23 @@ class _HttpProxy:
         self._ipc_validation = ipc_validation
         self._retry_config = retry_config
         self._compression_level = compression_level
+        # Application protocol surface version. Same opt-in semantics as the
+        # pipe client (vgi_rpc.rpc._client._RpcProxy): vars(), not getattr —
+        # subclasses that don't redeclare get None. Threaded into every
+        # _send_request so the server's dispatch-boundary check sees it.
+        from vgi_rpc.metadata import parse_version
+
+        raw_version = vars(protocol).get("protocol_version")
+        if raw_version is None:
+            self._protocol_version: str | None = None
+        else:
+            if not isinstance(raw_version, str):
+                raise TypeError(
+                    f"{protocol.__name__}.protocol_version must be a str, "
+                    f"got {type(raw_version).__name__}"
+                )
+            parse_version(raw_version)
+            self._protocol_version = raw_version
         # Capability cache populated lazily on first oversized request.
         # ``None`` = not yet probed; missing fields = server didn't advertise.
         self._capabilities: HttpServerCapabilities | None = None
@@ -1067,12 +1084,13 @@ class _HttpProxy:
 
         maybe_externalize = self._maybe_externalize_request
         externalize = self._externalize_request_body
+        protocol_version = self._protocol_version
 
         def caller(**kwargs: object) -> object:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug("HTTP unary call: %s/%s", url_prefix, info.name)
             req_buf = BytesIO()
-            _send_request(req_buf, info, kwargs)
+            _send_request(req_buf, info, kwargs, protocol_version=protocol_version)
             body = maybe_externalize(req_buf.getvalue())
 
             resp = _post_with_retry(
@@ -1132,13 +1150,14 @@ class _HttpProxy:
 
         maybe_externalize = self._maybe_externalize_request
         externalize = self._externalize_request_body
+        protocol_version = self._protocol_version
 
         def caller(**kwargs: object) -> HttpStreamSession:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug("HTTP stream init: %s/%s/init", url_prefix, info.name)
             # Send init request
             req_buf = BytesIO()
-            _send_request(req_buf, info, kwargs)
+            _send_request(req_buf, info, kwargs, protocol_version=protocol_version)
             body = maybe_externalize(req_buf.getvalue())
 
             resp = _post_with_retry(
