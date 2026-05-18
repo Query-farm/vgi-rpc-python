@@ -181,7 +181,13 @@ def _empty_array(arrow_type: pa.DataType) -> "pa.Array[Any]":
     length-0 array carries no actual nulls, so it is exactly an empty array
     of the type — and it handles arbitrarily nested types uniformly.
     """
-    return pa.nulls(0, type=arrow_type)
+    # pyarrow's nulls() stubs declare one overload per concrete DataType
+    # subtype (Int8Type, StringType, …) but no overload for the abstract
+    # ``DataType`` base — and we accept ``DataType`` because callers pass
+    # arbitrary inferred Arrow types. The runtime behaviour is correct
+    # for every concrete subtype, so the call is safe; the ignores just
+    # silence mypy's overload-matching + no-any-return on the line.
+    return pa.nulls(0, type=arrow_type)  # type: ignore[call-overload, no-any-return]
 
 
 def serialize_record_batch(

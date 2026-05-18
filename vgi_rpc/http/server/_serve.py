@@ -14,6 +14,8 @@ import threading
 import warnings
 from collections.abc import Mapping
 
+import falcon
+
 from vgi_rpc.rpc import RpcServer
 
 from ._factory import make_wsgi_app
@@ -122,7 +124,7 @@ def serve_http(
 
 
 def _install_drain_signal_handlers(
-    app: object,
+    app: falcon.App[falcon.Request, falcon.Response],
     drain_grace_seconds: float,
 ) -> None:
     """Install SIGTERM / SIGINT handlers that drain sticky sessions before exit.
@@ -138,9 +140,7 @@ def _install_drain_signal_handlers(
     every live session by the time we exit, so the cleanup contract is
     upheld.
     """
-    import falcon
-
-    handle = drain_handle(app) if isinstance(app, falcon.App) else None
+    handle = drain_handle(app)
     if handle is None:
         return
 
