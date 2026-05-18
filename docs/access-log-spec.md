@@ -99,6 +99,17 @@ These six fields appear together. Implementations MAY omit the entire group, but
 | `input_bytes` | integer | Sum of `RecordBatch.nbytes` across input batches (uncompressed in-memory size). |
 | `output_bytes` | integer | Sum of `RecordBatch.nbytes` across output batches. |
 
+### 4.7 Sticky session lifecycle
+
+When the request flows through a sticky-enabled HTTP transport (see [`sticky-sessions-spec.md`](sticky-sessions-spec.md)), the access record carries two additional fields describing the session lifecycle.
+
+| Field | Type | Condition |
+|---|---|---|
+| `session_action` | enum | One of `"none"` / `"open"` / `"resume"` / `"close"`. `"none"` = the request flowed through sticky middleware but neither carried a session token nor opened one (e.g. a unary call from a non-`with_session_token()` caller). `"open"` = the method called `ctx.open_session(...)`. `"resume"` = a valid `VGI-Session` token resolved to a live registry entry. `"close"` = the method called `ctx.close_session()`. Absent for non-sticky servers. |
+| `session_id` | string | Present when the request touched a session — i.e. when `session_action` is `"open"` / `"resume"` / `"close"`. Format: 12-byte hex, exactly 24 characters. Absent on `"none"` and on non-sticky servers. The id is stable across the open / resume / close lifecycle records for a given session. |
+
+**Gaps**: middleware-short-circuit cases (token validation failed; `server_id` mismatch; registry miss for an apparently-valid token) currently do NOT produce access-log records. The middleware emits a typed `SessionLostError` response without invoking dispatch, and the access-log emitter lives in the dispatch path. Operators monitoring for misroutes should rely on the typed error surface on the wire instead. Adding short-circuit access-log records is a documented follow-up.
+
 ## 5. Method-type rules
 
 All conditional behavior is keyed off `method_type` (and, for streams, whether the record is an init or continuation — distinguishable by the presence of `request_data`). **Rules MUST NOT be keyed off method names.** Method names are application-specific; framework conformance applies uniformly.

@@ -157,6 +157,15 @@
       "type": "integer",
       "minimum": 0,
       "description": "Length in characters of the request_data field that was dropped due to truncation."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Sticky session ID (12-byte hex, 24 chars). Present when the request was bound to a sticky session — i.e. carried a VGI-Session header that resolved to a live registry entry, or the method called ctx.open_session/close_session.",
+      "pattern": "^[0-9a-f]{24}$"
+    },
+    "session_action": {
+      "enum": ["none", "open", "resume", "close"],
+      "description": "Lifecycle action for the sticky session this request touched. 'open' = ctx.open_session was called; 'resume' = a valid VGI-Session token resolved to a live entry and dispatch ran; 'close' = ctx.close_session was called; 'none' (or absent) = the request did not interact with sticky machinery. Middleware-short-circuit cases (token validation failed; entry aged out) currently do not produce access-log records — they short-circuit before dispatch."
     }
   },
   "allOf": [

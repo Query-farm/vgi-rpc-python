@@ -61,6 +61,7 @@ from vgi_rpc.http._testing import (
     make_sync_client,
 )
 from vgi_rpc.http.server import make_wsgi_app, serve_http
+from vgi_rpc.http.server._sticky import DrainHandle, drain_handle
 
 with contextlib.suppress(ImportError):
     from vgi_rpc.http._oauth_jwt import jwt_authenticate  # noqa: F401
@@ -77,6 +78,8 @@ __all__ = [
     "bearer_authenticate",
     "bearer_authenticate_static",
     "chain_authenticate",
+    "DrainHandle",
+    "drain_handle",
     "HttpRetryConfig",
     "HttpServerCapabilities",
     "HttpStreamSession",

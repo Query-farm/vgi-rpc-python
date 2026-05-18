@@ -2054,6 +2054,67 @@ class TestSticky:
         # Default TTL is operator-tunable. Conformance just requires it be advertised as a positive int.
         assert caps.sticky_default_ttl is not None and caps.sticky_default_ttl > 0
 
+    def test_drain_rejects_new_opens(self, conformance_http_port: int) -> None:
+        """After server enters drain mode, ``ctx.open_session`` raises ``ServerDrainingError``.
+
+        Existing-session calls continue to serve (the contract: drain
+        lets in-flight sessions complete but rejects new ones).
+
+        Uses the conformance server's test-only ``POST /__test_drain__``
+        admin endpoint to flip the drain flag without sending SIGTERM
+        (which would kill the subprocess fixture mid-test). Ports
+        implementing drain MUST expose the same admin endpoint on
+        their conformance server for this test to run; ports that
+        don't expose it skip via the HTTP 404. The test always clears
+        the flag (``DELETE /__test_drain__``) on exit so subsequent
+        tests in the same fixture session aren't poisoned.
+        """
+        self._skip_unless_sticky(conformance_http_port)
+        import httpx
+
+        url_base = f"http://127.0.0.1:{conformance_http_port}"
+
+        # Probe the admin endpoint up front so we skip cleanly if the
+        # conformance server doesn't expose it (other-language ports
+        # without drain admin support).
+        probe = httpx.delete(f"{url_base}/__test_drain__", timeout=5.0)
+        if probe.status_code == 404:
+            pytest.skip(
+                "conformance server doesn't expose /__test_drain__ admin endpoint — "
+                "drain conformance N/A for this port",
+            )
+
+        try:
+            with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as existing:
+                # Step 1: open a session BEFORE draining — it stays valid
+                # after drain (the contract: existing sessions continue
+                # to serve).
+                existing.open_counter(initial=10)
+
+                # Step 2: flip the drain flag via the admin endpoint.
+                drain_resp = httpx.post(f"{url_base}/__test_drain__", timeout=5.0)
+                assert drain_resp.status_code in (200, 204), (
+                    f"unexpected status {drain_resp.status_code} from POST /__test_drain__"
+                )
+
+                # Step 3: existing session still works.
+                assert existing.increment_counter(by=5) == 15, (
+                    "existing-session calls must continue to serve during drain"
+                )
+
+                # Step 4: opening a NEW session while draining raises ServerDrainingError.
+                with proxy.with_session_token() as new_sess, pytest.raises(RpcError) as excinfo:
+                    new_sess.open_counter(initial=1)
+                assert excinfo.value.error_type == "ServerDrainingError", (
+                    f"expected ServerDrainingError, got {excinfo.value.error_type}"
+                )
+
+                existing.close_counter()
+        finally:
+            # Always clear the drain flag so subsequent tests in this
+            # session-scoped fixture aren't poisoned.
+            httpx.delete(f"{url_base}/__test_drain__", timeout=5.0)
+
     def test_echo_header_round_trip(self, conformance_http_port: int) -> None:
         """Echo headers advertised by the server are captured + replayed by a conformant client.
 

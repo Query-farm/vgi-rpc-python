@@ -45,7 +45,7 @@ import secrets
 import struct
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING
@@ -56,6 +56,8 @@ from vgi_rpc import crypto
 from vgi_rpc.rpc import (
     SessionLostError,
     _current_session_context,
+    _current_session_id,
+    _current_sticky_action,
     _current_sticky_sink,
     _get_auth_and_metadata,
     _SessionContext,
@@ -72,7 +74,7 @@ from ._responses import _set_error_response
 from ._state_token import _compute_aad
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
 _logger = logging.getLogger("vgi_rpc.sticky")
 
@@ -359,6 +361,11 @@ class _StickySink:
     Mutated during dispatch by the runtime API and read by
     ``_StickyMiddleware.process_response`` to decide which session
     headers to emit. Implements ``_StickySinkProtocol``.
+
+    ``session_id`` is kept here (in addition to the contextvar) so it
+    survives ``close_session()`` clearing the session contextvar — the
+    access log needs the id of the session this request touched, even
+    when the method that closed it has already returned.
     """
 
     accept_opens: bool
@@ -366,11 +373,18 @@ class _StickySink:
     _close_callback: Callable[[], bool]
     mint_token: str | None = None
     closed: bool = False
+    session_id: str | None = None
 
     def open(self, state: object, ttl: float | None) -> str:
         """Register a session via the callback; stash the minted token for the response."""
         token = self._open_callback(state, ttl)
         self.mint_token = token
+        # _open_callback set _current_session_context — capture the new id
+        # from there. We could equally have _open_callback return it, but
+        # the contextvar is the single source of truth right after open.
+        sc = _current_session_context.get()
+        if sc is not None:
+            self.session_id = sc.session_id
         return token
 
     def close(self) -> None:
@@ -506,16 +520,33 @@ class _StickyMiddleware:
             entry.lock.acquire()
             req.context.sticky_entry = entry
             req.context.sticky_entry_lock_acquired = True
+            session_id_hex = session_id.hex()
             sc_token = _current_session_context.set(
-                _SessionContext(state=entry.state, session_id=session_id.hex()),
+                _SessionContext(state=entry.state, session_id=session_id_hex),
             )
             req.context.sticky_session_token = sc_token
+            sid_token = _current_session_id.set(session_id_hex)
+            req.context.sticky_session_id_token = sid_token
+            # Mark the access log: valid token, entry found, dispatch will run.
+            action_token = _current_sticky_action.set("resume")
+        else:
+            # No token presented — record the absence so the access log shows
+            # the request flowed through the sticky middleware without touching
+            # a session. ``CallContext.open_session`` will override this to
+            # "open" if the method opts in.
+            action_token = _current_sticky_action.set("none")
+        req.context.sticky_action_token = action_token
 
         sink = _StickySink(
             accept_opens=accept_opens,
             _open_callback=lambda state, ttl: self._open_session(req, principal_key, state, ttl),
             _close_callback=lambda: self._close_session(req),
         )
+        # On resume, carry the session_id eagerly so the access log can read
+        # it even after close_session() clears the session contextvar.
+        resume_ctx = _current_session_context.get()
+        if resume_ctx is not None:
+            sink.session_id = resume_ctx.session_id
         req.context.sticky_sink = sink
         sink_token = _current_sticky_sink.set(sink)
         req.context.sticky_sink_token = sink_token
@@ -540,10 +571,16 @@ class _StickyMiddleware:
         )
         # Install the session context for the remainder of this request
         # so ctx.session / ctx.session_id work in the same call that opened.
+        session_id_hex = session_id.hex()
         sc_token = _current_session_context.set(
-            _SessionContext(state=state, session_id=session_id.hex()),
+            _SessionContext(state=state, session_id=session_id_hex),
         )
         req.context.sticky_session_token = sc_token
+        # Track session_id separately so it survives ctx.close_session()
+        # clearing the session-context contextvar — the access log still
+        # carries the id on close records.
+        sid_token = _current_session_id.set(session_id_hex)
+        req.context.sticky_session_id_token = sid_token
         return token
 
     def _close_session(self, req: falcon.Request) -> bool:
@@ -610,6 +647,14 @@ class _StickyMiddleware:
         if sink_token is not None:
             _current_sticky_sink.reset(sink_token)
             req.context.sticky_sink_token = None
+        action_token = getattr(req.context, "sticky_action_token", None)
+        if action_token is not None:
+            _current_sticky_action.reset(action_token)
+            req.context.sticky_action_token = None
+        sid_token = getattr(req.context, "sticky_session_id_token", None)
+        if sid_token is not None:
+            _current_session_id.reset(sid_token)
+            req.context.sticky_session_id_token = None
 
 
 # ---------------------------------------------------------------------------
@@ -718,8 +763,86 @@ class _ServerIdEnvMiddleware:
         req.env["vgi_rpc.server_id"] = self._server_id
 
 
+# ---------------------------------------------------------------------------
+# Drain handle for operator-facing graceful shutdown
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DrainHandle:
+    """Operator-facing handle for triggering graceful drain on a sticky-enabled WSGI app.
+
+    Returned by :func:`drain_handle` when called against an app built by
+    :func:`vgi_rpc.http.make_wsgi_app` with ``enable_sticky=True``. Provides
+    the two operations operators need to wire up SIGTERM handlers, pre-fork
+    worker-exit hooks (gunicorn ``worker_exit``), or custom shutdown logic:
+
+    * :meth:`drain` — flip the registry's drain flag so subsequent
+      ``ctx.open_session`` calls raise :class:`~vgi_rpc.rpc.ServerDrainingError`.
+      Existing-session calls continue to serve until TTL or explicit close.
+    * :meth:`shutdown` — invoke ``state.close()`` on every live session and
+      clear the registry. Use after the operator-controlled grace period.
+
+    Both methods are idempotent and thread-safe (they delegate to
+    :class:`_SessionRegistry`'s lock-guarded methods).
+    """
+
+    drain: Callable[[], None]
+    """Set the registry's drain flag; new ``ctx.open_session`` calls raise ``ServerDrainingError``."""
+
+    shutdown: Callable[[], None]
+    """Invoke ``state.close()`` on every live session and clear the registry."""
+
+    is_draining: Callable[[], bool]
+    """Return whether ``drain()`` has been invoked."""
+
+
+def drain_handle(app: falcon.App[falcon.Request, falcon.Response]) -> DrainHandle | None:
+    """Return a :class:`DrainHandle` for *app*, or ``None`` if sticky is not enabled.
+
+    Inspects the Falcon app's middleware tuple to find the
+    :class:`_StickyMiddleware` instance, then constructs closures over its
+    registry. Returns ``None`` cleanly for non-sticky apps so operator code
+    can branch with ``if (handle := drain_handle(app)) is not None: ...``.
+
+    Used by :func:`vgi_rpc.http.serve_http` for its SIGTERM wiring, and
+    exposed publicly so operators running under gunicorn / uwsgi / their
+    own WSGI launcher can wire equivalent shutdown hooks. See the spec at
+    ``docs/sticky-sessions-spec.md`` for the pre-fork worker-exit recipe.
+    """
+    # Falcon stores middleware as a tuple of three tuples:
+    # (request-handlers, request-handlers-async, response-handlers).
+    # Each handler is a bound method on a middleware instance; we walk
+    # them all to find a _StickyMiddleware. Iteration order is stable
+    # within Falcon's implementation but we don't rely on it — we just
+    # find the first sticky instance and stop.
+    middleware_groups: tuple[tuple[object, ...], ...] = getattr(app, "_middleware", ())
+    for group in middleware_groups:
+        for bound_method in group:
+            owner = getattr(bound_method, "__self__", None)
+            if isinstance(owner, _StickyMiddleware):
+                return _build_drain_handle(owner._registry)
+    return None
+
+
+def _build_drain_handle(registry: _SessionRegistry) -> DrainHandle:
+    """Build a :class:`DrainHandle` whose closures bind *registry* explicitly.
+
+    Lives outside the for-loop in :func:`drain_handle` so the lambdas
+    capture *registry* via the function parameter, not via the enclosing
+    loop variable (which would be a ruff B023 footgun even though only
+    one iteration ever runs).
+    """
+    return DrainHandle(
+        drain=lambda: registry.set_draining(True),
+        shutdown=registry.shutdown,
+        is_draining=lambda: registry.draining,
+    )
+
+
 # Re-exports for the factory module.
 __all__ = [
+    "DrainHandle",
     "_ReaperThread",
     "_ServerIdEnvMiddleware",
     "_SessionEntry",
@@ -727,6 +850,7 @@ __all__ = [
     "_SessionResource",
     "_StickyMiddleware",
     "_StickySink",
+    "drain_handle",
     "_open_session_token",
     "_seal_session_token",
     "install_server_id_middleware",
