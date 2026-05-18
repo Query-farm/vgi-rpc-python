@@ -123,6 +123,32 @@ The block's exit fires a best-effort `DELETE /vgi/__session__` so handle-bearing
 
 **HTTP-only.** Sticky machinery is not installed on pipe/subprocess/unix transports — those run as single processes where "sticky" is meaningless. `ctx.open_session` raises `RuntimeError("sticky sessions not available on this transport")` if called over a non-HTTP transport, so apps can detect-and-fall-back.
 
+#### Client-driven routing via echo headers
+
+Sticky LBs are not the only way to get a session-token-carrying request back to the worker that owns the session. With **echo headers**, the server tells the client (at session-open time) to attach an arbitrary set of headers on every subsequent request in the session, and the platform's edge proxy routes on those headers. Two helpers ship for [Fly.io](https://fly.io), where `fly-force-instance-id` is the proactive routing header `fly-proxy` honours:
+
+```python
+from vgi_rpc import RpcServer
+from vgi_rpc.http import make_wsgi_app
+from vgi_rpc.http.fly import auto_server_id, fly_sticky_echo_headers
+
+server = RpcServer(
+    MyService, MyServiceImpl(),
+    server_id=auto_server_id(),                # ⇒ FLY_MACHINE_ID on Fly, random elsewhere
+)
+app = make_wsgi_app(
+    server,
+    enable_sticky=True,
+    sticky_echo_headers=fly_sticky_echo_headers(),  # ⇒ {"fly-force-instance-id": <id>} on Fly, None elsewhere
+)
+```
+
+On Fly the server emits `VGI-Echo-fly-force-instance-id: <machine-id>` on session-opening responses; the client captures it and replays `fly-force-instance-id: <machine-id>` on every subsequent request in the session; fly-proxy routes directly to the owning Machine. No LB configuration required.
+
+Off Fly the helpers return `None` so the same code is a no-op — operators don't need conditional branches.
+
+Generic API (for non-Fly platforms): pass any `dict[str, str]` as `sticky_echo_headers` and the server will emit them as `VGI-Echo-<name>` on the session-opening response. The client's `with_session_token()` view captures + replays automatically; `sess.current_echo_headers()` exposes the captured map for inspection or stashing.
+
 ## API Reference
 
 ### Server

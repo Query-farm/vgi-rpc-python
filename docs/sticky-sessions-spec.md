@@ -36,8 +36,23 @@ When `enable_sticky=True`, the server MUST advertise these on every response (ch
 |---|---|---|
 | `VGI-Sticky-Enabled` | `"true"` | Discovery flag; absent or `"false"` on non-sticky servers. |
 | `VGI-Sticky-Default-TTL` | integer seconds | The TTL applied by `ctx.open_session` when its `ttl` argument is `None`. Operator-tunable via `sticky_default_ttl`. |
+| `VGI-Sticky-Echo-Headers` | comma-separated header names | Headers the client must replay on every subsequent request in the session — see §2.5. Absent when `sticky_echo_headers` is unset. |
 
-### 2.4 Framework-managed endpoints
+### 2.4 Echo headers (`VGI-Echo-*`)
+
+When the server is configured with `sticky_echo_headers={name: value, ...}`, every session-opening response (the response carrying the `VGI-Session` token) also carries `VGI-Echo-<name>: <value>` for each configured pair. The client MUST:
+
+1. Capture each `VGI-Echo-<name>` header on the response (case-insensitive lookup).
+2. Strip the `VGI-Echo-` prefix.
+3. Send the inner header (`<name>: <value>`) on every subsequent request inside the same session view, until the server emits `VGI-Session-Close: true` (which clears the captured echo headers alongside the token).
+
+Echo headers are emitted **once-only**, on the session-opening response. Subsequent responses MUST NOT re-emit them. Clients hold the captured map for the lifetime of the session view.
+
+The primary use case is **client-driven routing**: on Fly.io the server emits `VGI-Echo-fly-force-instance-id: <machine-id>`, the client sends `fly-force-instance-id: <machine-id>` on every subsequent request, and fly-proxy routes directly to the owning Machine without any LB configuration. Other platforms with similar header-based routing (Railway, custom Envoy filters) work identically — only the header name and value change.
+
+Echo headers carry no security guarantees beyond what the underlying transport provides; in particular they are NOT bound to the session token via AAD. A misbehaving client could echo a different header value than the server told it to. The contract assumes cooperative clients — the feature exists to make sticky routing *work*, not to enforce it.
+
+### 2.5 Framework-managed endpoints
 
 `DELETE {prefix}/__session__` — idempotent best-effort session teardown.
 
@@ -115,8 +130,7 @@ vgi-rpc-test --url http://<server> --filter "Sticky::*"
 
 The group is capability-gated: servers without `VGI-Sticky-Enabled: true` skip every test in the group cleanly. The Python implementation passes all tests; cross-language ports that wire up sticky support must pass them too. See [`docs/porting-guide.md`](porting-guide.md) for the full porting checklist.
 
-## 10. Out of scope for v1
+## 10. Out of scope
 
-- **Cookie emission.** AWS ALB application-based stickiness and CloudFront sticky sessions both require a cookie set by the application. Operators on those platforms can front with Envoy / NGINX (header-hash policies on `VGI-Session`) or switch to NLB (flow-hash). Cookie emission can be added as an additive operator flag in a follow-up without changing the v1 wire surface.
-- **Client-driven routing (echo headers).** A second PR will add server-side `sticky_echo_headers` config that tells the client to echo arbitrary routing headers on subsequent requests in the same session — enabling Fly.io's `fly-force-instance-id` and similar mechanisms. The current PR is the foundation; the echo-header layer composes on top without changes to existing wire contracts.
+- **Cookie emission.** AWS ALB application-based stickiness and CloudFront sticky sessions both require a cookie set by the application. Operators on those platforms can front with Envoy / NGINX (header-hash policies on `VGI-Session`) or switch to NLB (flow-hash). Cookie emission can be added as an additive operator flag in a follow-up without changing the wire surface.
 - **Pluggable session store.** Sessions hold live Python objects in-process. Redis-style external stores are explicitly excluded — they don't work for the cursor/handle pattern the feature is designed for, and the additional persistence story would compete with the well-defined "TTL eviction + crash = state lost" contract.

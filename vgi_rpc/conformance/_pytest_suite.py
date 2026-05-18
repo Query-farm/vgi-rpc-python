@@ -2053,3 +2053,46 @@ class TestSticky:
         assert caps.sticky_enabled is True
         # Default TTL is operator-tunable. Conformance just requires it be advertised as a positive int.
         assert caps.sticky_default_ttl is not None and caps.sticky_default_ttl > 0
+
+    def test_echo_header_round_trip(self, conformance_http_port: int) -> None:
+        """Echo headers advertised by the server are captured + replayed by a conformant client.
+
+        Capability-gated on ``VGI-Sticky-Echo-Headers`` so deployments
+        without echo-header support skip cleanly. The conformance server
+        is configured with a fixed marker echo header
+        (``x-vgi-conformance-echo: conformance-fixed-marker``) so this
+        test has a stable contract to exercise; real deployments
+        substitute their own (e.g. ``fly-force-instance-id`` on Fly).
+
+        Cross-language ports that implement sticky must implement the
+        same capture/replay contract to pass this test — see
+        ``docs/sticky-sessions-spec.md`` for the ``VGI-Echo-<name>``
+        wire shape.
+        """
+        self._skip_unless_sticky(conformance_http_port)
+        from vgi_rpc.http import http_capabilities
+
+        caps = http_capabilities(base_url=f"http://127.0.0.1:{conformance_http_port}")
+        if not caps.sticky_echo_headers:
+            pytest.skip(
+                "server doesn't advertise sticky echo headers — echo conformance N/A",
+            )
+        expected_name = "x-vgi-conformance-echo"
+        assert expected_name in caps.sticky_echo_headers, (
+            f"conformance server must advertise the {expected_name!r} echo header; got {caps.sticky_echo_headers!r}"
+        )
+        with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as sess:
+            # Opening a session must populate the captured echo headers
+            # via the VGI-Echo-* response header. We check the captured
+            # map directly (the contract surface) — the *next* call would
+            # carry the header on the wire, but verifying that requires
+            # server-side echo-back, which is out of scope for the
+            # conformance service. The capture proves the contract.
+            sess.open_counter(initial=1)
+            captured = dict(sess.current_echo_headers())
+            assert expected_name in captured, (
+                f"client must capture VGI-Echo-{expected_name} into current_echo_headers(); got {captured!r}"
+            )
+            assert captured[expected_name] == "conformance-fixed-marker", (
+                f"captured value must round-trip the server-configured marker; got {captured[expected_name]!r}"
+            )

@@ -47,6 +47,14 @@ SESSION_ACCEPT_HEADER = "VGI-Session-Accept"
 SESSION_CLOSE_HEADER = "VGI-Session-Close"
 STICKY_ENABLED_HEADER = "VGI-Sticky-Enabled"
 STICKY_DEFAULT_TTL_HEADER = "VGI-Sticky-Default-TTL"
+STICKY_ECHO_HEADERS_HEADER = "VGI-Sticky-Echo-Headers"
+"""Capability header listing the comma-separated names of headers a client must echo back."""
+
+# Prefix the server uses to tell the client "echo this header on subsequent
+# requests in this session". The client strips the prefix; e.g. on Fly the
+# server emits ``VGI-Echo-fly-force-instance-id: <machine-id>`` and the
+# client sends back ``fly-force-instance-id: <machine-id>``.
+ECHO_HEADER_PREFIX = "VGI-Echo-"
 
 # Framework-managed sticky session teardown endpoint. Parallel to the
 # synthetic __describe__ method but served by a dedicated Falcon resource;
