@@ -1639,10 +1639,11 @@ class TestDescribeConformance:
 
     def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
-        # 76 + 3 sticky methods (open_counter / increment_counter /
-        # close_counter) added 2026-05 alongside the Sticky.* conformance
-        # group.
-        assert len(service_description.methods) == 79
+        # 76 + 3 sticky unary methods (open_counter / increment_counter /
+        # close_counter) + 2 sticky streaming methods (stream_session_counter
+        # / exchange_session_counter), added 2026-05 alongside the
+        # Sticky.* conformance group.
+        assert len(service_description.methods) == 81
         assert service_description.protocol_name == "ConformanceService"
         echo_str = service_description.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY
@@ -2157,3 +2158,83 @@ class TestSticky:
             assert captured[expected_name] == "conformance-fixed-marker", (
                 f"captured value must round-trip the server-configured marker; got {captured[expected_name]!r}"
             )
+
+    # ------------------------------------------------------------------
+    # Streaming methods that share a sticky session
+    # ------------------------------------------------------------------
+    #
+    # The unary tests above prove the open / resume / close lifecycle on
+    # one-shot HTTP calls.  The tests below prove the same lifecycle holds
+    # when the session is touched by *streaming* RPCs: producer streams
+    # (multiple HTTP turns per call) and exchange streams (one HTTP turn
+    # per exchange round-trip).  Every iteration re-enters the sticky
+    # middleware so the spec must hold on each turn, not just the first.
+
+    def test_producer_stream_resumes_session(self, conformance_http_port: int) -> None:
+        """A producer stream sees the session counter on every iteration.
+
+        Open the counter at value 0, then drive a five-batch producer
+        stream that increments and emits the counter on every produce()
+        call.  The emitted values prove the same ``_StickyCounter`` is
+        rebound via ``ctx.session`` across the multi-request shape of
+        producer streams.
+        """
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=0)
+            batches = list(sess.stream_session_counter(count=5))
+            assert len(batches) == 5
+            assert [ab.batch.column("value")[0].as_py() for ab in batches] == [1, 2, 3, 4, 5]
+            # Unary read-back confirms the producer mutated the same
+            # backing object the unary path sees.
+            assert sess.increment_counter(by=10) == 15
+
+    def test_exchange_stream_resumes_session(self, conformance_http_port: int) -> None:
+        """An exchange stream sees the session counter on every round-trip.
+
+        Each exchange turn is its own HTTP request, so the sticky
+        middleware re-resolves the token from scratch every time. Verify
+        the counter accumulates across multiple turns and remains
+        consistent with a unary read after the stream closes.
+        """
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=100)
+            running = 100
+            with sess.exchange_session_counter() as stream:
+                for delta in (1, 2, 3, 4):
+                    running += delta
+                    inp = AnnotatedBatch.from_pydict({"by": [delta]})
+                    out = stream.exchange(inp)
+                    assert out.batch.column("value")[0].as_py() == running
+            # Sanity check via the unary path — same counter, same value.
+            assert sess.increment_counter(by=0) == running
+
+    def test_stream_without_session_raises(self, conformance_http_port: int) -> None:
+        """A streaming method that requires a session must surface RpcError when none is bound.
+
+        Drives ``stream_session_counter`` from outside any
+        ``with_session_token()`` block — no token presented, no session
+        resumed, so the producer raises and the client sees ``RpcError``.
+        """
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy, pytest.raises(RpcError):
+            list(proxy.stream_session_counter(count=3))
+
+    def test_session_shared_between_unary_and_stream(self, conformance_http_port: int) -> None:
+        """A single session is visible to both unary and streaming methods.
+
+        Order: unary open → unary increment → producer stream → unary
+        increment.  Every step observes the same backing counter,
+        proving sticky-session state is transport-shape-agnostic within
+        an HTTP session view.
+        """
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=10)
+            assert sess.increment_counter(by=5) == 15
+            batches = list(sess.stream_session_counter(count=3))
+            assert [ab.batch.column("value")[0].as_py() for ab in batches] == [16, 17, 18]
+            assert sess.increment_counter(by=2) == 20
+            final = sess.close_counter()
+            assert final == 20

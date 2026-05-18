@@ -24,6 +24,8 @@ from ._types import (
     _COUNTER_SCHEMA,
     _SCALE_INPUT_SCHEMA,
     _SCALE_OUTPUT_SCHEMA,
+    _SESSION_COUNTER_EXCHANGE_INPUT_SCHEMA,
+    _SESSION_COUNTER_OUTPUT_SCHEMA,
     AccumulatingExchangeState,
     AllTypes,
     BoundingBox,
@@ -47,11 +49,14 @@ from ._types import (
     Point,
     RichHeader,
     ScaleExchangeState,
+    SessionCounterExchangeState,
+    SessionCounterProducerState,
     SingleProducerState,
     Status,
     WideTypes,
     ZeroColumnExchangeState,
     _CancelProbe,
+    _StickyCounter,
     build_dynamic_schema,
     build_rich_header,
 )
@@ -556,20 +561,26 @@ class ConformanceServiceImpl:
         ctx.close_session()
         return final
 
+    # ------------------------------------------------------------------
+    # Sticky Sessions — Streaming
+    # ------------------------------------------------------------------
+    #
+    # Producer + exchange stream methods that share the same
+    # ``_StickyCounter`` bound by ``open_counter``.  Used by the
+    # ``TestSticky`` conformance group to prove sticky sessions work
+    # across the multi-request shape of streaming RPCs.
 
-class _StickyCounter:
-    """State object for the conformance sticky session methods.
+    def stream_session_counter(self, count: int) -> Stream[SessionCounterProducerState]:
+        """Emit ``count`` increments of the sticky session counter via a producer stream."""
+        return Stream(
+            output_schema=_SESSION_COUNTER_OUTPUT_SCHEMA,
+            state=SessionCounterProducerState(count=count),
+        )
 
-    Exposes ``close()`` so the registry's reaper / drain / explicit close
-    can observe and verify the cleanup contract from Python tests.
-    """
-
-    __slots__ = ("closed", "value")
-
-    def __init__(self, value: int) -> None:
-        self.value = value
-        self.closed = False
-
-    def close(self) -> None:
-        """Mark the counter closed — used by Python-only tests to verify eviction."""
-        self.closed = True
+    def exchange_session_counter(self) -> Stream[SessionCounterExchangeState]:
+        """Exchange stream that adds each input ``by`` column to the session counter."""
+        return Stream(
+            output_schema=_SESSION_COUNTER_OUTPUT_SCHEMA,
+            state=SessionCounterExchangeState(),
+            input_schema=_SESSION_COUNTER_EXCHANGE_INPUT_SCHEMA,
+        )

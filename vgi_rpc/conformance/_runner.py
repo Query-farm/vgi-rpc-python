@@ -1493,6 +1493,15 @@ _EXPECTED_METHODS = frozenset(
         "close_counter",
         "increment_counter",
         "open_counter",
+        # Sticky-session streaming variants (added 2026-05). Producer +
+        # exchange streams that resume the same ``_StickyCounter`` opened
+        # by ``open_counter``. Each stream iteration is its own HTTP
+        # request, so these exercise the sticky middleware across the
+        # multi-request shape of streaming RPCs. Ports implementing
+        # sticky must implement these to pass the streaming Sticky.*
+        # conformance tests.
+        "exchange_session_counter",
+        "stream_session_counter",
     }
 )
 
@@ -1585,6 +1594,9 @@ _STREAM_METHODS = frozenset(
         "produce_with_header_and_logs",
         "produce_with_logs",
         "produce_with_rich_header",
+        # Sticky-session streaming variants — see _EXPECTED_METHODS.
+        "exchange_session_counter",
+        "stream_session_counter",
     }
 )
 
@@ -1623,9 +1635,11 @@ def _test_desc_describe_version(desc: ServiceDescription) -> None:
 
 @_describe_test(category="describe_service", name="method_count")
 def _test_desc_method_count(desc: ServiceDescription) -> None:
-    # 76 + 3 sticky methods (open_counter / increment_counter / close_counter)
-    # added 2026-05 alongside the HTTP-only Sticky.* conformance group.
-    assert len(desc.methods) == 79
+    # 76 + 3 sticky unary methods (open_counter / increment_counter /
+    # close_counter) + 2 sticky streaming methods (stream_session_counter
+    # / exchange_session_counter), added 2026-05 alongside the HTTP-only
+    # Sticky.* conformance group.
+    assert len(desc.methods) == 81
 
 
 # ---------------------------------------------------------------------------

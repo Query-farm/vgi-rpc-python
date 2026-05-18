@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import pytest
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
-from vgi_rpc.conformance._impl import _StickyCounter
+from vgi_rpc.conformance._types import _StickyCounter
 from vgi_rpc.http import http_capabilities, http_connect
 from vgi_rpc.http._common import SESSION_ACCEPT_HEADER, SESSION_HEADER
 from vgi_rpc.http._testing import _SyncTestClient, make_sync_client

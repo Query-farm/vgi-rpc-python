@@ -411,6 +411,94 @@ class OversizedExchangeState(ExchangeState):
 
 
 # ---------------------------------------------------------------------------
+# Sticky-session stream states
+# ---------------------------------------------------------------------------
+#
+# The producer / exchange streams below resume the same ``_StickyCounter``
+# that the unary ``open_counter`` / ``increment_counter`` / ``close_counter``
+# methods bind via :meth:`CallContext.open_session`.  They prove the sticky-
+# session contract holds across stream iterations: each producer turn and
+# each exchange round-trip is its own HTTP request, so every iteration
+# re-enters the sticky middleware, re-resolves the ``VGI-Session`` token,
+# and surfaces the same shared state via ``ctx.session``.
+
+_SESSION_COUNTER_OUTPUT_SCHEMA = pa.schema([pa.field("value", pa.int64())])
+_SESSION_COUNTER_EXCHANGE_INPUT_SCHEMA = pa.schema([pa.field("by", pa.int64())])
+
+
+class _StickyCounter:
+    """State object for the conformance sticky session methods.
+
+    Exposes ``close()`` so the registry's reaper / drain / explicit close
+    can observe and verify the cleanup contract from Python tests.
+
+    Lives in ``_types.py`` (not ``_impl.py``) so the sticky stream-state
+    classes below can refer to it via ``isinstance`` without creating an
+    import cycle.
+    """
+
+    __slots__ = ("closed", "value")
+
+    def __init__(self, value: int) -> None:
+        self.value = value
+        self.closed = False
+
+    def close(self) -> None:
+        """Mark the counter closed — used by Python-only tests to verify eviction."""
+        self.closed = True
+
+
+@dataclass
+class SessionCounterProducerState(ProducerState):
+    """Producer stream that emits the sticky-session counter ``count`` times.
+
+    Each ``produce()`` call resolves the counter via ``ctx.session``,
+    increments it by one, and emits a one-row batch carrying the new
+    value.  Across HTTP turns the state's ``current`` field rides in the
+    continuation token while ``ctx.session`` is rebound by the sticky
+    middleware on every request — proving the session survives the
+    multi-request shape of streaming RPCs.
+    """
+
+    count: int
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit one row per session-counter increment, or finish."""
+        if self.current >= self.count:
+            out.finish()
+            return
+        counter = ctx.session
+        if not isinstance(counter, _StickyCounter):
+            raise RuntimeError("no sticky counter bound to this request")
+        counter.value += 1
+        out.emit_pydict({"value": [counter.value]})
+        self.current += 1
+
+
+@dataclass
+class SessionCounterExchangeState(ExchangeState):
+    """Exchange stream that adds each input batch's ``by`` column to the session counter.
+
+    For every exchange turn — itself a separate HTTP request — the sticky
+    middleware rebinds the same ``_StickyCounter`` via ``ctx.session`` and
+    the new value is emitted, so state genuinely persists across
+    independent turns rather than living on the lockstep wire.
+    """
+
+    _placeholder: int = 0
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Add the sum of the input ``by`` column to the session counter."""
+        counter = ctx.session
+        if not isinstance(counter, _StickyCounter):
+            raise RuntimeError("no sticky counter bound to this request")
+        col_sum = cast(int, pc.sum(input.batch.column("by")).as_py())
+        counter.value += col_sum
+        out.emit_pydict({"value": [counter.value]})
+
+
+# ---------------------------------------------------------------------------
 # Cancellation observability
 # ---------------------------------------------------------------------------
 

@@ -514,3 +514,30 @@ class ConformanceService(Protocol):
     def close_counter(self) -> int:
         """Close the sticky session; return the counter's final value before close."""
         ...
+
+    # ------------------------------------------------------------------
+    # Sticky Sessions — Streaming (HTTP-only; capability-gated tests)
+    # ------------------------------------------------------------------
+    #
+    # Producer + exchange streams that resume the sticky-session counter
+    # opened by ``open_counter``.  Each iteration is its own HTTP
+    # request, so the streams exercise the sticky middleware on every
+    # turn — proving the session contract holds across the multi-request
+    # shape of streaming RPCs (not just unary calls).
+
+    def stream_session_counter(self, count: int) -> Stream[StreamState]:
+        """Emit ``count`` increments of the sticky session counter via a producer stream.
+
+        Each emitted batch carries the post-increment value of the
+        counter bound to this request via ``ctx.session``.  Surfaces a
+        clear error when no session is bound.
+        """
+        ...
+
+    def exchange_session_counter(self) -> Stream[StreamState]:
+        """Exchange stream adding each input ``by`` column to the sticky session counter.
+
+        Each turn emits a single one-row batch with the post-update
+        value of the counter bound via ``ctx.session``.
+        """
+        ...
