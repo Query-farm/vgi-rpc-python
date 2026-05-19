@@ -331,10 +331,7 @@ class _RpcProxy:
             self._protocol_version: str | None = None
         else:
             if not isinstance(raw_version, str):
-                raise TypeError(
-                    f"{protocol.__name__}.protocol_version must be a str, "
-                    f"got {type(raw_version).__name__}"
-                )
+                raise TypeError(f"{protocol.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
             parse_version(raw_version)  # validate; raises ValueError on malformed
             self._protocol_version = raw_version
 

@@ -282,6 +282,7 @@ class TestLiveCapture:
         ids = {e["stream_id"] for e in stream_entries}
         assert len(ids) == 1, f"stream_id must be stable across continuations, got {ids}"
 
+
 class TestCli:
     """Smoke-test the CLI entry point."""
 

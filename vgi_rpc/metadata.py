@@ -129,6 +129,7 @@ def parse_version(value: str) -> tuple[int, int, int]:
         )
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
+
 # W3C trace context propagation (on request batch custom metadata)
 TRACEPARENT_KEY = b"traceparent"
 TRACESTATE_KEY = b"tracestate"

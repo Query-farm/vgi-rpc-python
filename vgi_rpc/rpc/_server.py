@@ -360,10 +360,7 @@ class RpcServer:
             self._protocol_version_parts: tuple[int, int, int] | None = None
         else:
             if not isinstance(raw_version, str):
-                raise TypeError(
-                    f"{protocol.__name__}.protocol_version must be a str, "
-                    f"got {type(raw_version).__name__}"
-                )
+                raise TypeError(f"{protocol.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
             self._protocol_version = raw_version
             self._protocol_version_parts = parse_version(raw_version)
         self._ipc_validation = ipc_validation
@@ -532,8 +529,7 @@ class RpcServer:
             )
         else:
             direction = (
-                f"server is too old; upgrade the VGI worker to a version "
-                f"supporting protocol_version {client_version}."
+                f"server is too old; upgrade the VGI worker to a version supporting protocol_version {client_version}."
             )
         raise ProtocolVersionError(
             f"VGI client/worker protocol_version mismatch.\n"
