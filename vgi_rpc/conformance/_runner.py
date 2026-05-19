@@ -1854,7 +1854,7 @@ def _test_desc_protocol_version_surfaces(desc: ServiceDescription) -> None:
 
 @_describe_test(category="describe_protocol_version", name="format")
 def _test_desc_protocol_version_format(desc: ServiceDescription) -> None:
-    """The protocol_version field must be canonical semver MAJOR.MINOR.PATCH."""
+    """Verify the protocol_version field is canonical semver MAJOR.MINOR.PATCH."""
     parts = desc.protocol_version.split(".")
     assert len(parts) == 3, f"expected MAJOR.MINOR.PATCH, got {desc.protocol_version!r}"
     for component in parts:
@@ -1867,7 +1867,7 @@ def _test_desc_protocol_version_format(desc: ServiceDescription) -> None:
 
 @_conformance_test(category="protocol_version", name="matched_dispatch_succeeds")
 def _test_proto_version_matched_dispatch(proxy: ConformanceService, logs: LogCollector) -> None:
-    """A normal dispatched RPC exercises the dispatch-boundary check on the matched-version path.
+    """Exercise the dispatch-boundary check on the matched-version path.
 
     The conformance client and server are both built against the same
     ConformanceService, so their declared protocol_version matches. A
