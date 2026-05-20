@@ -942,6 +942,7 @@ def describe(ctx: typer.Context) -> None:
             "request_version": desc.request_version,
             "describe_version": desc.describe_version,
             "protocol_hash": desc.protocol_hash,
+            "protocol_version": desc.protocol_version,
             "methods": {
                 name: {
                     "method_type": md.method_type.value,
@@ -979,9 +980,10 @@ def _call_unary_pipe(
     kwargs: dict[str, object],
     on_log: Callable[[Message], None] | None,
     config: _CliConfig,
+    protocol_version: str | None = None,
 ) -> None:
     """Call a unary method over pipe/unix transport."""
-    _write_request(transport.writer, method.name, method.params_schema, kwargs)
+    _write_request(transport.writer, method.name, method.params_schema, kwargs, protocol_version=protocol_version)
     reader = ValidatedReader(ipc.open_stream(transport.reader), IpcValidation.FULL)
     try:
         ab = _read_batch_with_log_check(reader, on_log)
@@ -998,9 +1000,10 @@ def _call_stream_pipe(
     kwargs: dict[str, object],
     on_log: Callable[[Message], None] | None,
     config: _CliConfig,
+    protocol_version: str | None = None,
 ) -> None:
     """Call a stream method over pipe/unix transport."""
-    _write_request(transport.writer, method.name, method.params_schema, kwargs)
+    _write_request(transport.writer, method.name, method.params_schema, kwargs, protocol_version=protocol_version)
     header_batch: pa.RecordBatch | None = None
     if method.has_header:
         header_batch = _read_raw_stream_header(transport.reader, IpcValidation.FULL, on_log)
@@ -1023,6 +1026,7 @@ def _call_unary_http(
     kwargs: dict[str, object],
     on_log: Callable[[Message], None] | None,
     config: _CliConfig,
+    protocol_version: str | None = None,
 ) -> None:
     """Call a unary method over HTTP transport."""
     import httpx
@@ -1031,7 +1035,7 @@ def _call_unary_http(
     from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
     req_buf = BytesIO()
-    _write_request(req_buf, method.name, method.params_schema, kwargs)
+    _write_request(req_buf, method.name, method.params_schema, kwargs, protocol_version=protocol_version)
 
     client = httpx.Client(base_url=url, follow_redirects=True)
     try:
@@ -1059,6 +1063,7 @@ def _call_stream_http(
     kwargs: dict[str, object],
     on_log: Callable[[Message], None] | None,
     config: _CliConfig,
+    protocol_version: str | None = None,
 ) -> None:
     """Call a stream method over HTTP transport."""
     import httpx
@@ -1067,7 +1072,7 @@ def _call_stream_http(
     from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
     req_buf = BytesIO()
-    _write_request(req_buf, method.name, method.params_schema, kwargs)
+    _write_request(req_buf, method.name, method.params_schema, kwargs, protocol_version=protocol_version)
 
     client = httpx.Client(base_url=url, follow_redirects=True)
     try:
@@ -1165,20 +1170,30 @@ def call(
 
     on_log = _get_on_log(config)
 
+    # The server enforces ``vgi_rpc.protocol_version`` at the dispatch
+    # boundary when the Protocol declares one (``__describe__`` surfaces it).
+    # Forward the discovered value on every call so a versioned worker
+    # doesn't reject the request as "client did not send a
+    # vgi_rpc.protocol_version metadata key". Empty string → ``None`` keeps
+    # the request structurally exempt for un-versioned servers.
+    protocol_version = desc.protocol_version or None
+
     try:
         if config.cmd or config.unix:
             # Reuse the transport from introspect for the call
             assert transport is not None
             if md.method_type == MethodType.UNARY:
-                _call_unary_pipe(transport, md, merged, on_log, config)
+                _call_unary_pipe(transport, md, merged, on_log, config, protocol_version=protocol_version)
             else:
-                _call_stream_pipe(transport, md, merged, on_log, config)
+                _call_stream_pipe(transport, md, merged, on_log, config, protocol_version=protocol_version)
         elif config.url:
             if transport is not None:
                 transport.close()
                 transport = None
             if md.method_type == MethodType.UNARY:
-                _call_unary_http(config.url, config.prefix, md, merged, on_log, config)
+                _call_unary_http(
+                    config.url, config.prefix, md, merged, on_log, config, protocol_version=protocol_version
+                )
             else:
                 _call_stream_http(
                     config.url,
@@ -1187,6 +1202,7 @@ def call(
                     merged,
                     on_log,
                     config,
+                    protocol_version=protocol_version,
                 )
     except RpcError as e:
         _emit_rpc_error(e)

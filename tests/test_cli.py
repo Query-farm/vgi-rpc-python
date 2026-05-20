@@ -33,6 +33,13 @@ _PIPE_CMD = f"{sys.executable} {_DESCRIBE_WORKER}"
 
 _DESCRIBE_HTTP_WORKER = str(Path(__file__).parent / "serve_fixture_describe_http.py")
 
+# Workers whose Protocol declares ``protocol_version`` so the server
+# enforces the dispatch-boundary check. Used to prove the CLI forwards the
+# discovered ``vgi_rpc.protocol_version`` on every call.
+_VERSIONED_WORKER = str(Path(__file__).parent / "serve_fixture_versioned.py")
+_VERSIONED_PIPE_CMD = f"{sys.executable} {_VERSIONED_WORKER}"
+_VERSIONED_HTTP_WORKER = str(Path(__file__).parent / "serve_fixture_versioned_http.py")
+
 
 # ---------------------------------------------------------------------------
 # HTTP fixture
@@ -77,6 +84,42 @@ def transport_args(request: pytest.FixtureRequest) -> list[str]:
     if request.param == "pipe":
         return ["--cmd", _PIPE_CMD]
     port: int = request.getfixturevalue("describe_http_port")
+    return ["--url", f"http://127.0.0.1:{port}"]
+
+
+@pytest.fixture(scope="module")
+def versioned_http_port() -> Iterator[int]:
+    """Spawn a versioned-Protocol HTTP server for the test module."""
+    from tests.conftest import _wait_for_http
+
+    proc = subprocess.Popen(
+        [sys.executable, _VERSIONED_HTTP_WORKER],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+        _wait_for_http(port)
+        yield port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(
+    params=[
+        "pipe",
+        "http",
+    ]
+)
+def versioned_transport_args(request: pytest.FixtureRequest) -> list[str]:
+    """Return CLI args selecting a transport backed by a versioned Protocol."""
+    if request.param == "pipe":
+        return ["--cmd", _VERSIONED_PIPE_CMD]
+    port: int = request.getfixturevalue("versioned_http_port")
     return ["--url", f"http://127.0.0.1:{port}"]
 
 
@@ -209,6 +252,43 @@ class TestCallUnary:
         assert result.exit_code == 0, f"Failed: {result.output}"
         data = json.loads(result.output)
         assert data["result"] == "RED"
+
+
+# ---------------------------------------------------------------------------
+# protocol_version propagation (parametrized over pipe/http)
+# ---------------------------------------------------------------------------
+
+
+class TestCallProtocolVersion:
+    """The CLI must forward the server's declared ``protocol_version``.
+
+    A worker whose Protocol declares ``protocol_version`` enforces an exact
+    major+minor match at the dispatch boundary. The CLI doesn't bind to the
+    Protocol class — it discovers the version via ``__describe__`` and must
+    replay it on every ``call``. Without that propagation the server rejects
+    the request with "client did not send a vgi_rpc.protocol_version
+    metadata key", so a clean unary result here proves the forwarding works.
+    """
+
+    def test_unary_call_forwards_version(self, versioned_transport_args: list[str]) -> None:
+        """A unary call against a versioned server succeeds (version forwarded)."""
+        result = _invoke([*versioned_transport_args, "--format", "json", "call", "add", "a=1.0", "b=2.0"])
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        data = json.loads(result.output)
+        assert data["result"] == 3.0
+
+    def test_describe_bypasses_version_gate(self, versioned_transport_args: list[str]) -> None:
+        """``describe`` against a versioned server surfaces the declared version.
+
+        ``__describe__`` is exempt from the dispatch-boundary check (it's the
+        discovery path a mismatched client uses), and the response carries the
+        server's ``protocol_version`` so the CLI can replay it on subsequent
+        calls.
+        """
+        result = _invoke([*versioned_transport_args, "--format", "json", "describe"])
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        data = json.loads(result.output)
+        assert data["protocol_version"] == "1.0.0"
 
 
 # ---------------------------------------------------------------------------

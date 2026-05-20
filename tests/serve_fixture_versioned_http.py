@@ -1,0 +1,42 @@
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
+"""Subprocess server entry point for CLI protocol_version tests (HTTP transport).
+
+Starts a waitress HTTP server exposing a Protocol that declares
+``protocol_version`` so the dispatch-boundary check is live. Prints
+``PORT:<n>`` to stdout so the parent process can discover the port.
+"""
+
+import socket
+import sys
+
+import waitress
+
+from tests._fixture_service import RpcFixtureServiceImpl
+from tests.serve_fixture_versioned import VersionedFixtureService
+from vgi_rpc.http import make_wsgi_app
+from vgi_rpc.rpc import RpcServer
+
+
+def _find_free_port() -> int:
+    """Find a free TCP port on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def main() -> None:
+    """Start a waitress HTTP server for the versioned fixture service."""
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else _find_free_port()
+
+    server = RpcServer(VersionedFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
+    app = make_wsgi_app(server)
+
+    print(f"PORT:{port}", flush=True)
+
+    waitress.serve(app, host="127.0.0.1", port=port, _quiet=True)
+
+
+if __name__ == "__main__":
+    main()
