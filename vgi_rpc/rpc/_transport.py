@@ -617,3 +617,198 @@ def _serve_unix_threaded(
             snapshot = list(active)
         for t in snapshot:
             t.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# Windows named-pipe transport
+#
+# CPython does not expose ``socket.AF_UNIX`` on Windows, so the launcher's local
+# rendezvous uses a Windows named pipe (``\\.\pipe\...``) there instead of an
+# AF_UNIX socket. ``serve_named_pipe`` mirrors ``serve_unix``'s threaded /
+# idle-timeout / on_bound semantics. Requires pywin32 (Windows-only dependency).
+# ---------------------------------------------------------------------------
+
+
+class NamedPipeTransport:
+    """Transport over a connected Windows named-pipe handle.
+
+    The connected ``PyHANDLE`` is converted to a CRT file descriptor via
+    ``msvcrt.open_osfhandle`` and wrapped in standard buffered file objects, so
+    the rest of the wire code sees the same reader/writer interface as
+    :class:`UnixTransport`. The handle's ownership is transferred to the fd
+    (``Detach``), so it is closed exactly once when the file objects close.
+    """
+
+    __slots__ = ("_reader", "_writer")
+
+    def __init__(self, handle: object) -> None:
+        import msvcrt  # noqa: PLC0415
+
+        raw = handle.Detach()  # type: ignore[attr-defined]  # take ownership from pywin32
+        fd = msvcrt.open_osfhandle(raw, os.O_BINARY)
+        self._reader: IOBase = cast(IOBase, os.fdopen(fd, "rb"))
+        self._writer: IOBase = cast(IOBase, os.fdopen(os.dup(fd), "wb", buffering=0))
+
+    @property
+    def reader(self) -> IOBase:
+        """Readable binary stream."""
+        return self._reader
+
+    @property
+    def writer(self) -> IOBase:
+        """Writable binary stream."""
+        return self._writer
+
+    def close(self) -> None:
+        """Close the reader and writer (and thus the underlying pipe handle)."""
+        with contextlib.suppress(Exception):
+            self._reader.close()
+        with contextlib.suppress(Exception):
+            self._writer.close()
+
+
+def serve_named_pipe(
+    server: RpcServer,
+    pipe_name: str,
+    *,
+    threaded: bool = False,
+    max_connections: int | None = None,
+    idle_timeout: float | None = None,
+    on_bound: Callable[[str], None] | None = None,
+) -> None:
+    """Serve RPC over a Windows named pipe — the Windows analog of ``serve_unix``.
+
+    ``pipe_name`` is a full named-pipe name (``\\\\.\\pipe\\vgi-rpc-<hash>``). The
+    pipe is created with ``PIPE_UNLIMITED_INSTANCES`` so concurrent clients each
+    get their own instance. Semantics mirror :func:`serve_unix`: sequential by
+    default; ``threaded=True`` serves each connection in a daemon thread with an
+    optional ``idle_timeout`` self-shutdown (startup grace ``max(idle_timeout,
+    60)``). ``on_bound`` is invoked once after the first pipe instance is created.
+
+    The pipe instances are *synchronous* (no overlapped I/O) so per-connection
+    ``ReadFile``/``WriteFile`` in the handler threads are simple blocking calls.
+    To unblock the accept loop's blocking ``ConnectNamedPipe`` at idle shutdown,
+    the idle timer briefly self-connects a throwaway client to the pipe.
+    """
+    if idle_timeout is not None and not threaded:
+        raise ValueError("idle_timeout requires threaded=True")
+
+    import pywintypes  # noqa: PLC0415
+    import win32file  # noqa: PLC0415
+    import win32pipe  # noqa: PLC0415
+    import winerror  # noqa: PLC0415
+
+    state_lock = threading.Lock()
+    conn_count = 0
+    timer: threading.Timer | None = None
+    shutdown_requested = False
+    semaphore = threading.Semaphore(max_connections) if max_connections is not None else None
+    active: set[threading.Thread] = set()
+
+    def _self_connect_to_unblock() -> None:
+        # Open (and immediately close) a client handle to wake a pending
+        # ConnectNamedPipe so the accept loop can observe shutdown_requested.
+        with contextlib.suppress(Exception):
+            h = win32file.CreateFile(
+                pipe_name,
+                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0,
+                None,
+                win32file.OPEN_EXISTING,
+                0,
+                None,
+            )
+            win32file.CloseHandle(h)
+
+    def _close_if_idle() -> None:
+        nonlocal timer, shutdown_requested
+        with state_lock:
+            timer = None
+            if conn_count != 0:
+                return
+            shutdown_requested = True
+        _self_connect_to_unblock()
+
+    def _arm_timer_locked(seconds: float) -> None:
+        nonlocal timer
+        if timer is not None:
+            timer.cancel()
+        timer = threading.Timer(seconds, _close_if_idle)
+        timer.daemon = True
+        timer.start()
+
+    def _cancel_timer_locked() -> None:
+        nonlocal timer
+        if timer is not None:
+            timer.cancel()
+            timer = None
+
+    if idle_timeout is not None:
+        with state_lock:
+            _arm_timer_locked(max(idle_timeout, 60.0))
+
+    def _handle(handle: object) -> None:
+        nonlocal conn_count
+        if semaphore is not None:
+            semaphore.acquire()
+        transport = NamedPipeTransport(handle)
+        try:
+            server.serve(transport)
+        except Exception:
+            _logger.debug("Error serving named-pipe connection", exc_info=True)
+        finally:
+            transport.close()
+            if semaphore is not None:
+                semaphore.release()
+            with state_lock:
+                conn_count -= 1
+                if conn_count == 0 and idle_timeout is not None:
+                    _arm_timer_locked(idle_timeout)
+                active.discard(threading.current_thread())
+
+    bound = False
+    try:
+        while True:
+            handle = win32pipe.CreateNamedPipe(
+                pipe_name,
+                win32pipe.PIPE_ACCESS_DUPLEX,
+                win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
+                win32pipe.PIPE_UNLIMITED_INSTANCES,
+                65536,
+                65536,
+                0,
+                None,
+            )
+            if not bound:
+                bound = True
+                if on_bound is not None:
+                    on_bound(pipe_name)
+            try:
+                win32pipe.ConnectNamedPipe(handle, None)  # blocks until a client connects
+            except pywintypes.error as exc:
+                # ERROR_PIPE_CONNECTED: a client connected between Create and Connect.
+                if exc.winerror != winerror.ERROR_PIPE_CONNECTED:
+                    win32file.CloseHandle(handle)
+                    break
+            with state_lock:
+                if shutdown_requested:
+                    win32file.CloseHandle(handle)  # this was the self-connect probe
+                    break
+                conn_count += 1
+                _cancel_timer_locked()
+            if not threaded:
+                _handle(handle)
+                with state_lock:
+                    if shutdown_requested:
+                        break
+                continue
+            t = threading.Thread(target=_handle, args=(handle,), daemon=True, name="vgi-pipe")
+            with state_lock:
+                active.add(t)
+            t.start()
+    finally:
+        with state_lock:
+            _cancel_timer_locked()
+            snapshot = list(active)
+        for t in snapshot:
+            t.join(timeout=10)

@@ -143,6 +143,7 @@ from vgi_rpc.rpc._transport import (
     _drain_stderr,
     make_pipe_pair,
     make_unix_pair,
+    serve_named_pipe,
     serve_stdio,
     serve_unix,
 )
@@ -230,6 +231,7 @@ __all__ = [
     "make_unix_pair",
     "rpc_methods",
     "run_server",
+    "serve_named_pipe",
     "serve_pipe",
     "serve_stdio",
     "serve_unix",
@@ -565,21 +567,40 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     elif args.unix is not None:
         threaded = True if args.threaded is None else args.threaded
         idle_timeout: float | None = args.idle_timeout if args.idle_timeout > 0 else None
-        absolute_path = os.path.abspath(args.unix)
 
-        def _emit_discovery_line(bound_path: str) -> None:
-            # Mirrors the PORT:<n> convention used by the HTTP transport.  After
-            # this line the worker MUST NOT write further data to stdout — see
-            # the cross-language launcher contract.
-            print(f"UNIX:{bound_path}", flush=True)
+        if sys.platform == "win32":
+            # CPython has no AF_UNIX on Windows; --unix carries a named-pipe name
+            # (\\.\pipe\...) which the launcher constructs. Serve over a named
+            # pipe and advertise it with the PIPE: discovery prefix (the C++
+            # launcher matches on that prefix per docs/launcher-protocol.md).
+            pipe_name = args.unix
 
-        serve_unix(
-            server,
-            absolute_path,
-            threaded=threaded,
-            idle_timeout=idle_timeout,
-            on_bound=_emit_discovery_line,
-        )
+            def _emit_discovery_line(bound_path: str) -> None:
+                print(f"PIPE:{bound_path}", flush=True)
+
+            serve_named_pipe(
+                server,
+                pipe_name,
+                threaded=threaded,
+                idle_timeout=idle_timeout,
+                on_bound=_emit_discovery_line,
+            )
+        else:
+            absolute_path = os.path.abspath(args.unix)
+
+            def _emit_discovery_line(bound_path: str) -> None:
+                # Mirrors the PORT:<n> convention used by the HTTP transport.  After
+                # this line the worker MUST NOT write further data to stdout — see
+                # the cross-language launcher contract.
+                print(f"UNIX:{bound_path}", flush=True)
+
+            serve_unix(
+                server,
+                absolute_path,
+                threaded=threaded,
+                idle_timeout=idle_timeout,
+                on_bound=_emit_discovery_line,
+            )
     else:
         serve_stdio(server)
 
