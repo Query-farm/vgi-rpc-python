@@ -642,9 +642,11 @@ class NamedPipeTransport:
     __slots__ = ("_reader", "_writer")
 
     def __init__(self, handle: object) -> None:
-        import msvcrt  # noqa: PLC0415
+        if sys.platform != "win32":  # pragma: no cover - Windows-only
+            raise RuntimeError("NamedPipeTransport is Windows-only")
+        import msvcrt
 
-        raw = handle.Detach()  # type: ignore[attr-defined]  # take ownership from pywin32
+        raw = handle.Detach()  # take ownership from pywin32 (PyHANDLE)
         fd = msvcrt.open_osfhandle(raw, os.O_BINARY)
         self._reader: IOBase = cast(IOBase, os.fdopen(fd, "rb"))
         self._writer: IOBase = cast(IOBase, os.fdopen(os.dup(fd), "wb", buffering=0))
@@ -676,9 +678,9 @@ def serve_named_pipe(
     idle_timeout: float | None = None,
     on_bound: Callable[[str], None] | None = None,
 ) -> None:
-    """Serve RPC over a Windows named pipe — the Windows analog of ``serve_unix``.
+    r"""Serve RPC over a Windows named pipe — the Windows analog of ``serve_unix``.
 
-    ``pipe_name`` is a full named-pipe name (``\\\\.\\pipe\\vgi-rpc-<hash>``). The
+    ``pipe_name`` is a full named-pipe name (``\\.\pipe\vgi-rpc-<hash>``). The
     pipe is created with ``PIPE_UNLIMITED_INSTANCES`` so concurrent clients each
     get their own instance. Semantics mirror :func:`serve_unix`: sequential by
     default; ``threaded=True`` serves each connection in a daemon thread with an
@@ -692,11 +694,13 @@ def serve_named_pipe(
     """
     if idle_timeout is not None and not threaded:
         raise ValueError("idle_timeout requires threaded=True")
+    if sys.platform != "win32":  # pragma: no cover - Windows-only
+        raise RuntimeError("serve_named_pipe is Windows-only")
 
-    import pywintypes  # noqa: PLC0415
-    import win32file  # noqa: PLC0415
-    import win32pipe  # noqa: PLC0415
-    import winerror  # noqa: PLC0415
+    import pywintypes
+    import win32file
+    import win32pipe
+    import winerror
 
     state_lock = threading.Lock()
     conn_count = 0

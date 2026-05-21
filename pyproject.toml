@@ -98,6 +98,11 @@ ignore_missing_imports = true
 module = "opentelemetry.*"
 ignore_missing_imports = true
 
+# pywin32 (Windows-only; no stubs installed on the Linux CI runner).
+[[tool.mypy.overrides]]
+module = ["win32file", "win32pipe", "winerror", "pywintypes"]
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = "joserfc.*"
 ignore_missing_imports = true
