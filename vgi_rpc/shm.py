@@ -561,8 +561,13 @@ def make_shm_pointer_batch(
         A ``(batch, custom_metadata)`` tuple.
 
     """
+    # pa.array([], type=...) raises ArrowNotImplementedError for sparse/dense
+    # unions and extension types (no empty-array builder for those). pa.nulls(0,
+    # type=...) produces a 0-row array for every Arrow type, so the pointer batch
+    # can carry any schema the worker emits. The batch is 0-row regardless; only
+    # its schema needs to match the IPC stream's schema.
     batch = pa.RecordBatch.from_arrays(
-        [pa.array([], type=f.type) for f in schema],
+        [pa.nulls(0, type=f.type) for f in schema],
         schema=schema,
     )
     custom_metadata = pa.KeyValueMetadata({SHM_OFFSET_KEY: str(offset).encode(), SHM_LENGTH_KEY: str(length).encode()})
