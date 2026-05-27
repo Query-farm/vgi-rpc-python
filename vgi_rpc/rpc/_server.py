@@ -30,10 +30,6 @@ from vgi_rpc.metadata import (
     SHM_SEGMENT_SIZE_KEY,
     parse_version,
 )
-from vgi_rpc.transport_options import (
-    TRANSPORT_OPTIONS_METHOD_NAME,
-    worker_transport_metadata,
-)
 from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
     AuthContext,
@@ -87,6 +83,10 @@ from vgi_rpc.rpc._wire import (
     _write_stream_header,
 )
 from vgi_rpc.shm import ShmSegment, resolve_shm_batch
+from vgi_rpc.transport_options import (
+    TRANSPORT_OPTIONS_METHOD_NAME,
+    worker_transport_metadata,
+)
 from vgi_rpc.utils import IpcValidation, ValidatedReader
 
 # ---------------------------------------------------------------------------

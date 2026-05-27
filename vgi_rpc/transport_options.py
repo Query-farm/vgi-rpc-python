@@ -40,5 +40,5 @@ def shm_available() -> bool:
 
 
 def worker_transport_metadata() -> dict[bytes, bytes]:
-    """This worker's transport capabilities, as ``__transport_options__`` response metadata."""
+    """Return this worker's transport capabilities as ``__transport_options__`` response metadata."""
     return {TRANSPORT_SHM_KEY: b"true" if shm_available() else b"false"}
