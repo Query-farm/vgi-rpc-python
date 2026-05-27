@@ -68,6 +68,7 @@ where they appear, and their semantics:
 | `tracestate` | W3C Trace Context string | OpenTelemetry trace state. Optional. |
 | `vgi_rpc.shm_segment_name` | UTF-8 OS name | Shared memory segment name (session-level). Optional. |
 | `vgi_rpc.shm_segment_size` | Decimal integer string | Shared memory segment total size in bytes. Optional. |
+| `vgi_rpc.transport.shm` | `"true"` / `"false"` | Client's shared-memory capability, on the `__transport_options__` request. See [Section 15](#15-transport-capability-negotiation-__transport_options__). Optional. |
 
 ### Response / log / error metadata (on response batch custom metadata)
 
@@ -78,6 +79,7 @@ where they appear, and their semantics:
 | `vgi_rpc.log_extra` | JSON string | Additional structured data. Optional. |
 | `vgi_rpc.server_id` | UTF-8 string (12-char hex) | Server instance identifier for distributed tracing. |
 | `vgi_rpc.request_id` | UTF-8 string | Echoed request correlation ID. |
+| `vgi_rpc.transport.shm` | `"true"` / `"false"` | Server's shared-memory capability, on the `__transport_options__` response. See [Section 15](#15-transport-capability-negotiation-__transport_options__). |
 
 ### Stream state (HTTP transport)
 
@@ -706,6 +708,17 @@ co-located processes. It is used alongside a pipe transport — the pipe
 carries control messages and small batches; large batches are written to
 shared memory and replaced with pointer batches on the pipe.
 
+> **Negotiation prerequisite.** Over the pipe / subprocess / AF-UNIX
+> transports, SHM MUST be negotiated via `__transport_options__`
+> ([Section 15](#15-transport-capability-negotiation-__transport_options__))
+> before use: a client only advertises a segment (and writes SHM pointer
+> batches) to a server that has confirmed `vgi_rpc.transport.shm = "true"`.
+> A server that cannot do SHM (non-POSIX host, missing runtime support, or a
+> server predating the method) reports `"false"` (or errors), and the client
+> falls back to the inline pipe transport. (HTTP servers advertise the same
+> capability via the `OPTIONS {prefix}/__capabilities__` endpoint in Section
+> 10.)
+
 ### Segment header format
 
 The shared memory segment begins with a 64 KiB (65,536 byte) header,
@@ -974,6 +987,63 @@ custom metadata:
 
 The `params_schema_ipc`, `result_schema_ipc`, and `header_schema_ipc`
 columns contain Arrow schemas serialized via `pa.Schema.serialize()`.
+
+---
+
+## 15. Transport Capability Negotiation (`__transport_options__`)
+
+`__transport_options__` is a built-in synthetic unary method (parallel to
+`__describe__`) through which a client and server discover each other's
+**transport** capabilities — chiefly whether the shared-memory side-channel
+(Section 11) may be used. It is the pipe / subprocess / AF-UNIX analogue of the
+HTTP `OPTIONS {prefix}/__capabilities__` endpoint (Section 10).
+
+It is **mandatory before SHM is used**: a client that has SHM available MUST NOT
+write SHM pointer batches (or advertise a segment) to a server unless that server
+has confirmed SHM support via this method. A server that cannot attach SHM (e.g.
+a non-POSIX host, or a runtime without the required FFM support) reports
+`shm = "false"` and the client falls back to inline transport. A server that does
+not implement the method at all returns a `method_not_implemented` error (or any
+error), which the client treats as "no SHM".
+
+Capabilities are negotiated **once per worker** and may be cached for the life of
+the worker process (they are process-level, not per-connection), so there is no
+per-call overhead.
+
+### Request
+
+Standard unary request with:
+- `vgi_rpc.method` = `"__transport_options__"`
+- Empty params schema (zero fields, one row)
+- The client's own capabilities as request metadata under the
+  `vgi_rpc.transport.*` namespace (e.g. `vgi_rpc.transport.shm = "true"`)
+
+### Response
+
+An IPC stream with an **empty** batch (zero fields). Capabilities ride as the
+response batch's `custom_metadata` under the `vgi_rpc.transport.*` namespace:
+
+| Key | Value | Description |
+|-----|-------|-------------|
+| `vgi_rpc.transport.shm` | `"true"` / `"false"` | Whether the server can use the SHM side-channel |
+| `vgi_rpc.server_id` | UTF-8 | Server instance identifier |
+| `vgi_rpc.request_version` | `"1"` | Wire protocol version |
+
+The capability set is open-ended: keys are matched by the `vgi_rpc.transport.`
+prefix and unknown keys are ignored, so future capabilities (e.g. compression,
+AEAD) can be added without a protocol-version bump. A feature is used only when
+**both** peers advertise it.
+
+### Negotiation rule
+
+```
+shm_enabled = client.advertises("vgi_rpc.transport.shm" == "true")
+              AND server.advertises("vgi_rpc.transport.shm" == "true")
+```
+
+A server that has not attached a segment but still receives an inbound SHM
+pointer batch (a negotiation violation) MUST fail loudly rather than silently
+treat the zero-row pointer as empty input.
 
 ---
 

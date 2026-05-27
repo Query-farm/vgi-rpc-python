@@ -45,6 +45,7 @@ __all__ = [
     "STATE_KEY",
     "TRACEPARENT_KEY",
     "TRACESTATE_KEY",
+    "TRANSPORT_SHM_KEY",
     "encode_metadata",
     "merge_metadata",
     "parse_version",
@@ -96,6 +97,11 @@ SHM_SOURCE_KEY = b"vgi_rpc.shm_source"
 # the segment itself at session level, distinct from per-batch SHM_OFFSET/LENGTH)
 SHM_SEGMENT_NAME_KEY = b"vgi_rpc.shm_segment_name"
 SHM_SEGMENT_SIZE_KEY = b"vgi_rpc.shm_segment_size"
+
+# Transport capability negotiation (__transport_options__ request/response
+# metadata). Capabilities live under the vgi_rpc.transport.* namespace; the
+# shared-memory side-channel is used only when both peers advertise "true".
+TRANSPORT_SHM_KEY = b"vgi_rpc.transport.shm"
 
 # Introspection (__describe__ response batch metadata)
 PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"

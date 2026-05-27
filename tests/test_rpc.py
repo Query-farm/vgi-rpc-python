@@ -1613,6 +1613,34 @@ class TestMalformedInput:
                 _dispatch_log_or_error(batch, cm)
         _drain_stream(reader)
 
+    def test_transport_options_reports_shm_capability(self) -> None:
+        """``__transport_options__`` replies with shm capability as response metadata, unregistered."""
+        from io import BytesIO
+
+        from pyarrow import ipc
+
+        from vgi_rpc.metadata import TRANSPORT_SHM_KEY
+        from vgi_rpc.rpc import PipeTransport
+        from vgi_rpc.rpc._common import _EMPTY_SCHEMA
+        from vgi_rpc.rpc._wire import _write_request
+        from vgi_rpc.transport_options import TRANSPORT_OPTIONS_METHOD_NAME, shm_available
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        # Not a registered method — handled by pre-dispatch interception.
+        assert TRANSPORT_OPTIONS_METHOD_NAME not in server.methods
+
+        req_buf = BytesIO()
+        _write_request(req_buf, TRANSPORT_OPTIONS_METHOD_NAME, _EMPTY_SCHEMA, {})
+        req_buf.seek(0)
+        resp_buf = BytesIO()
+        server.serve_one(PipeTransport(req_buf, resp_buf))
+
+        resp_buf.seek(0)
+        reader = ValidatedReader(ipc.open_stream(resp_buf), IpcValidation.NONE)
+        _batch, cm = reader.read_next_batch_with_custom_metadata()
+        assert cm is not None
+        assert cm.get(TRANSPORT_SHM_KEY) == (b"true" if shm_available() else b"false")
+
 
 # ---------------------------------------------------------------------------
 # Tests: Request version validation

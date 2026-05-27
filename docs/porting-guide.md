@@ -15,6 +15,7 @@ See [`WIRE_PROTOCOL.md`](WIRE_PROTOCOL.md). Concretely:
 - Dispatch by `vgi_rpc.method` custom metadata.
 - Reply with one IPC stream containing zero-row log batches followed by one result batch (unary), or interleaved log/data batches terminated by EOS (stream).
 - Encode errors as a zero-row batch with `vgi_rpc.error_*` metadata keys.
+- Handle the two built-in synthetic methods before normal dispatch: `__describe__` (introspection; [WIRE_PROTOCOL §14](WIRE_PROTOCOL.md)) and `__transport_options__` (transport capability negotiation; [§15](WIRE_PROTOCOL.md)). A worker that does **not** implement SHM can omit `__transport_options__` entirely — the standard `method_not_implemented` error makes clients fall back to the pipe. A worker that **does** implement SHM MUST answer it, reporting `vgi_rpc.transport.shm = "true"`, or clients will not use SHM with it.
 
 ### 2. The CLI surface
 
@@ -68,7 +69,7 @@ In order, smallest-blast-radius first:
 3. **Streaming.** Producer streams first (no client input), then exchange streams.
 4. **HTTP transport.** State-token signing and replay protection.
 5. **Access log.** Add a hook around dispatch that emits the JSON record. Begin with the 11 always-required fields; add conditional fields as you wire them up.
-6. **External-location and shared-memory transports** if you need them.
+6. **External-location and shared-memory transports** if you need them. For SHM, implement the `__transport_options__` handshake on both sides: a worker reports `vgi_rpc.transport.shm = "true"`; a client negotiates once per worker (caching the result) and only writes SHM pointer batches when the worker confirmed support, else it stays on the pipe. See [WIRE_PROTOCOL §15](WIRE_PROTOCOL.md).
 
 ## Reference implementations
 

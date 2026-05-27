@@ -23,9 +23,16 @@ from vgi_rpc.external import ExternalLocationConfig, resolve_external_location
 from vgi_rpc.metadata import (
     CANCEL_KEY,
     PROTOCOL_VERSION_KEY,
+    REQUEST_VERSION,
+    REQUEST_VERSION_KEY,
+    SERVER_ID_KEY,
     SHM_SEGMENT_NAME_KEY,
     SHM_SEGMENT_SIZE_KEY,
     parse_version,
+)
+from vgi_rpc.transport_options import (
+    TRANSPORT_OPTIONS_METHOD_NAME,
+    worker_transport_metadata,
 )
 from vgi_rpc.rpc._common import (
     _EMPTY_SCHEMA,
@@ -673,6 +680,35 @@ class RpcServer:
             except (VersionError, RpcError) as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
                     _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+                return
+
+            # __transport_options__ — framework transport-capability handshake,
+            # handled before method dispatch (not a registered method, so it never
+            # appears in `methods` / `__describe__`). Capabilities ride as response
+            # metadata; the response batch is empty. Always available.
+            if method_name == TRANSPORT_OPTIONS_METHOD_NAME:
+                caps_md = {
+                    **worker_transport_metadata(),
+                    REQUEST_VERSION_KEY: REQUEST_VERSION,
+                    SERVER_ID_KEY: self._server_id.encode(),
+                }
+                empty = pa.RecordBatch.from_arrays([], schema=_EMPTY_SCHEMA)
+                with ipc.new_stream(transport.writer, _EMPTY_SCHEMA) as writer:
+                    writer.write_batch(empty, custom_metadata=caps_md)
+                auth, transport_md = _get_auth_and_metadata()
+                _emit_access_log(
+                    self.protocol_name,
+                    TRANSPORT_OPTIONS_METHOD_NAME,
+                    MethodType.UNARY.value,
+                    self._server_id,
+                    auth,
+                    transport_md,
+                    0.0,
+                    "ok",
+                    stats=stats,
+                    server_version=self._server_version,
+                    protocol_hash=self._protocol_hash,
+                )
                 return
 
             info = self._methods.get(method_name)

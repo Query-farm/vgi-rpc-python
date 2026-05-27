@@ -88,6 +88,15 @@ server_transport = ShmPipeTransport(server_pipe, shm)
 
 Falls back to normal pipe IPC for batches that exceed the segment size.
 
+When a client drives a worker over the pipe / subprocess / Unix transports (as
+the DuckDB extension does), it does **not** assume the worker can read shared
+memory: it first negotiates via the built-in `__transport_options__` method
+(once per worker, cached) and only uses SHM when the worker reports
+`vgi_rpc.transport.shm = "true"`. A worker that lacks SHM (non-POSIX, or an
+older build that doesn't implement the method) transparently falls back to the
+pipe. See the [Wire Protocol §15](../WIRE_PROTOCOL.md) and the
+`transport_capabilities` below.
+
 ## Transport awareness
 
 Workers can ask which transport they are bound to — useful for tailoring startup work, enabling transport-specific metrics, or branching per-call behaviour. Three things are exposed:
