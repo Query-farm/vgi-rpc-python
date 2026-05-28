@@ -388,7 +388,7 @@ class RpcFixtureServiceImpl:
 
     def noop(self) -> None:
         """Do nothing."""
-        return None
+        return
 
     def generate(self, count: int) -> Stream[GenerateState]:
         """Generate count batches."""

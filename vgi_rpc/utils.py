@@ -751,9 +751,7 @@ class ArrowSerializableDataclass:
 
         """
         row_dict = self._to_row_dict()
-        batch = pa.RecordBatch.from_pylist([row_dict], schema=self.ARROW_SCHEMA)
-
-        return batch
+        return pa.RecordBatch.from_pylist([row_dict], schema=self.ARROW_SCHEMA)
 
     def serialize(self, dest: IOBase) -> None:
         """Serialize this instance to an Arrow IPC stream.

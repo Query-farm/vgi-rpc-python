@@ -293,7 +293,7 @@ def make_conn(
     ) -> contextlib.AbstractContextManager[Any]:
         if request.param == "pipe":
             return serve_pipe(RpcFixtureService, RpcFixtureServiceImpl(), on_log=on_log)
-        elif request.param == "shm_pipe":
+        if request.param == "shm_pipe":
 
             @contextlib.contextmanager
             def _shm_conn() -> Iterator[_RpcProxy]:
@@ -316,23 +316,22 @@ def make_conn(
                         shm.close()
 
             return _shm_conn()
-        elif request.param == "subprocess":
+        if request.param == "subprocess":
 
             @contextlib.contextmanager
             def _conn() -> Iterator[_RpcProxy]:
                 yield _RpcProxy(RpcFixtureService, subprocess_worker, on_log)
 
             return _conn()
-        elif request.param == "pool":
+        if request.param == "pool":
             return worker_pool.connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
-        elif request.param == "unix":
+        if request.param == "unix":
             path: str = request.getfixturevalue("unix_socket_server")
             return unix_connect(RpcFixtureService, path, on_log=on_log)
-        elif request.param == "unix_threaded":
+        if request.param == "unix_threaded":
             path = request.getfixturevalue("unix_threaded_socket_server")
             return unix_connect(RpcFixtureService, path, on_log=on_log)
-        else:
-            return http_connect(RpcFixtureService, f"http://127.0.0.1:{http_server_port}", on_log=on_log)
+        return http_connect(RpcFixtureService, f"http://127.0.0.1:{http_server_port}", on_log=on_log)
 
     return factory
 
@@ -598,27 +597,27 @@ def conformance_conn(
     ) -> contextlib.AbstractContextManager[Any]:
         if request.param == "pipe":
             return serve_pipe(ConformanceService, ConformanceServiceImpl(), on_log=on_log)
-        elif request.param == "subprocess":
+        if request.param == "subprocess":
 
             @contextlib.contextmanager
             def _conn() -> Iterator[_RpcProxy]:
                 yield _RpcProxy(ConformanceService, conformance_subprocess, on_log)
 
             return _conn()
-        elif request.param == "unix":
+        if request.param == "unix":
             path: str = request.getfixturevalue("conformance_unix_path")
             return unix_connect(ConformanceService, path, on_log=on_log)
-        elif request.param == "unix_threaded":
+        if request.param == "unix_threaded":
             path = request.getfixturevalue("conformance_unix_threaded_path")
             return unix_connect(ConformanceService, path, on_log=on_log)
-        elif request.param == "unix_launcher":
+        if request.param == "unix_launcher":
             path = request.getfixturevalue("conformance_unix_launcher_path")
             return unix_connect(ConformanceService, path, on_log=on_log)
-        elif request.param == "http_roundrobin":
+        if request.param == "http_roundrobin":
             ports: tuple[int, int] = request.getfixturevalue("conformance_http_two_servers")
             client = _make_roundrobin_client(ports)
             return http_connect(ConformanceService, client=client, on_log=on_log)
-        elif request.param == "http_externalize_always":
+        if request.param == "http_externalize_always":
             from vgi_rpc.external import ExternalLocationConfig
 
             ext_port = request.getfixturevalue("conformance_http_externalize_always_port")
@@ -630,8 +629,7 @@ def conformance_conn(
                 # in-process fake storage; disable the HTTPS-only validator.
                 external_location=ExternalLocationConfig(url_validator=None),
             )
-        else:
-            return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
+        return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
 
     return factory
 

@@ -50,7 +50,7 @@ line-length = 120
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "D", "RUF", "PERF"]
+select = ["E", "F", "I", "UP", "B", "SIM", "D", "RUF", "PERF", "RET", "C4", "PIE", "ISC", "FURB110"]
 ignore = [
   "D203",   # incompatible with D211 (no-blank-line-before-class)
   "D213",   # incompatible with D212 (multi-line-summary-first-line)

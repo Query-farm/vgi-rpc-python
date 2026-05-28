@@ -1977,7 +1977,7 @@ def run_conformance(
             error = str(e)
         except AssertionError as e:
             passed = False
-            error = str(e) if str(e) else "Assertion failed"
+            error = str(e) or "Assertion failed"
         except RpcError as e:
             passed = False
             error = f"RpcError({e.error_type}): {e.error_message}"
@@ -2073,7 +2073,7 @@ def run_describe_conformance(
             error = str(e)
         except AssertionError as e:
             passed = False
-            error = str(e) if str(e) else "Assertion failed"
+            error = str(e) or "Assertion failed"
         except Exception as e:
             passed = False
             error = f"{type(e).__name__}: {e}"

@@ -129,7 +129,7 @@ def _configure_logging(args: argparse.Namespace) -> None:
         handler.setFormatter(logging.Formatter("%(name)-30s %(levelname)-5s %(message)s"))
 
     numeric_level = logging.getLevelNamesMapping()[level]
-    targets: list[str] = args.log_logger if args.log_logger else ["vgi_rpc"]
+    targets: list[str] = args.log_logger or ["vgi_rpc"]
 
     for name in targets:
         if name not in _KNOWN_LOGGER_NAMES and not name.startswith("vgi_rpc.service."):

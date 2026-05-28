@@ -175,7 +175,7 @@ def _configure_logging(config: _CliConfig) -> None:
     numeric_level = logging.getLevelNamesMapping()[level.value]
 
     # Determine target loggers
-    targets = config.log_loggers if config.log_loggers else ["vgi_rpc"]
+    targets = config.log_loggers or ["vgi_rpc"]
 
     for name in targets:
         if name not in _KNOWN_LOGGER_NAMES and not name.startswith("vgi_rpc.service."):

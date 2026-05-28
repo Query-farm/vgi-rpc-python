@@ -318,12 +318,11 @@ def _exchange_code_for_token(
         except Exception:
             pass
         return token, _AUTH_COOKIE_DEFAULT_MAX_AGE, refresh_token
-    else:
-        token = body.get("access_token")
-        if not token:
-            raise ValueError("Token response missing access_token")
-        expires_in = body.get("expires_in", _AUTH_COOKIE_DEFAULT_MAX_AGE)
-        return token, int(expires_in), refresh_token
+    token = body.get("access_token")
+    if not token:
+        raise ValueError("Token response missing access_token")
+    expires_in = body.get("expires_in", _AUTH_COOKIE_DEFAULT_MAX_AGE)
+    return token, int(expires_in), refresh_token
 
 
 # ---------------------------------------------------------------------------

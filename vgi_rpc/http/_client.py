@@ -1588,7 +1588,7 @@ def http_capabilities(
             parsed = tuple(parse_encoding_list(supported_raw))
             # Empty parse (e.g. server advertised codecs we don't recognise)
             # falls back to zstd-only — the historical behaviour.
-            supported_encodings = parsed if parsed else (Encoding.ZSTD,)
+            supported_encodings = parsed or (Encoding.ZSTD,)
         else:
             supported_encodings = (Encoding.ZSTD,)
 

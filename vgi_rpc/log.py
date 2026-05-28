@@ -101,7 +101,7 @@ class Message:
         """Create a log message with level, message text, and optional extras."""
         self.level = level
         self.message = message
-        self.extra: dict[str, object] | None = kwargs if kwargs else None
+        self.extra: dict[str, object] | None = kwargs or None
 
     def __eq__(self, other: object) -> bool:
         """Compare log messages by level, message, and extra fields."""
