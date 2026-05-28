@@ -405,10 +405,10 @@ def _read_request(
     # Store trace context in contextvar for hook consumption (pipe/subprocess transport)
     tp = custom_metadata.get(TRACEPARENT_KEY) if custom_metadata else None
     if tp is not None:
-        headers: dict[str, str] = {"traceparent": tp if isinstance(tp, str) else tp.decode()}
+        headers: dict[str, str] = {"traceparent": tp.decode()}
         ts = custom_metadata.get(TRACESTATE_KEY) if custom_metadata else None
         if ts is not None:
-            headers["tracestate"] = ts if isinstance(ts, str) else ts.decode()
+            headers["tracestate"] = ts.decode()
         _current_trace_headers.set(headers)
     # If the outer batch is an external-location pointer, fetch the
     # referenced bytes and use the inner batch's columns for kwargs.
@@ -532,7 +532,7 @@ def _dispatch_log_or_error(
     request_id_bytes = custom_metadata.get(REQUEST_ID_KEY)
     request_id = ""
     if request_id_bytes is not None:
-        request_id = request_id_bytes.decode() if isinstance(request_id_bytes, bytes) else request_id_bytes
+        request_id = request_id_bytes.decode()
 
     if wire_batch_logger.isEnabledFor(logging.DEBUG):
         wire_batch_logger.debug(
@@ -553,7 +553,7 @@ def _dispatch_log_or_error(
     # Extract server_id from top-level metadata into extra
     server_id_bytes = custom_metadata.get(SERVER_ID_KEY)
     if server_id_bytes is not None:
-        extra["server_id"] = server_id_bytes.decode() if isinstance(server_id_bytes, bytes) else server_id_bytes
+        extra["server_id"] = server_id_bytes.decode()
     if request_id:
         extra["request_id"] = request_id
     msg = Message(Level(level_str), message_str, **extra)

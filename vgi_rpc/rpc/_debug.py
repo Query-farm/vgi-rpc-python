@@ -75,8 +75,8 @@ def fmt_metadata(metadata: pa.KeyValueMetadata | None) -> str:
         return "None"
     parts: list[str] = []
     for k, v in metadata.items():
-        key = k.decode("utf-8", errors="replace") if isinstance(k, bytes) else k
-        val = v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+        key = k.decode("utf-8", errors="replace")
+        val = v.decode("utf-8", errors="replace")
         if len(val) > _MAX_VALUE_LEN:
             val = val[:_MAX_VALUE_LEN] + "..."
         parts.append(f"{key}={val!r}")

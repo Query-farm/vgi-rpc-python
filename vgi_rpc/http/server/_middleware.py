@@ -467,7 +467,7 @@ class _CompressionMiddleware:
                     pieces.append(tail)
                 compressed = b"".join(pieces)
         else:  # pragma: no cover — _levels keys are filtered by available_encodings
-            return
+            return  # type: ignore[unreachable]  # exhaustive: _levels keys filtered by available_encodings
 
         resp.data = compressed
         resp.stream = None

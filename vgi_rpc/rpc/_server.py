@@ -290,7 +290,7 @@ def _maybe_attach_shm(
     if shm_size_bytes is None:
         return None
     try:
-        shm_name = shm_name_bytes if isinstance(shm_name_bytes, str) else shm_name_bytes.decode()
+        shm_name = shm_name_bytes.decode()
         shm_size = int(shm_size_bytes)
     except (ValueError, UnicodeDecodeError):
         _logger.warning("Ignoring malformed SHM metadata: name=%r, size=%r", shm_name_bytes, shm_size_bytes)

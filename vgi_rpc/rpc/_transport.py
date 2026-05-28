@@ -644,7 +644,7 @@ class NamedPipeTransport:
     def __init__(self, handle: object) -> None:
         if sys.platform != "win32":  # pragma: no cover - Windows-only
             raise RuntimeError("NamedPipeTransport is Windows-only")
-        import msvcrt
+        import msvcrt  # type: ignore[unreachable]  # reachable on win32; mypy runs on Linux
 
         raw = handle.Detach()  # take ownership from pywin32 (PyHANDLE)
         fd = msvcrt.open_osfhandle(raw, os.O_BINARY)
@@ -697,7 +697,7 @@ def serve_named_pipe(
     if sys.platform != "win32":  # pragma: no cover - Windows-only
         raise RuntimeError("serve_named_pipe is Windows-only")
 
-    import pywintypes
+    import pywintypes  # type: ignore[unreachable]  # reachable on win32; mypy runs on Linux
     import win32file
     import win32pipe
     import winerror

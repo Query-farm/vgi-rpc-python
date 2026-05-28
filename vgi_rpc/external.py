@@ -511,7 +511,7 @@ def resolve_external_location(
     assert custom_metadata is not None
     url_bytes = custom_metadata.get(LOCATION_KEY)
     assert url_bytes is not None
-    url = url_bytes.decode() if isinstance(url_bytes, bytes) else str(url_bytes)
+    url = url_bytes.decode()
 
     if config.url_validator is not None:
         config.url_validator(url)
@@ -535,7 +535,7 @@ def resolve_external_location(
         expected_sha256: str | None = None
         sha256_bytes = custom_metadata.get(LOCATION_SHA256_KEY)
         if sha256_bytes is not None:
-            expected_sha256 = sha256_bytes.decode() if isinstance(sha256_bytes, bytes) else str(sha256_bytes)
+            expected_sha256 = sha256_bytes.decode()
 
         retryer = Retrying(
             stop=stop_after_attempt(max_retries + 1),

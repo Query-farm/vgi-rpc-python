@@ -162,7 +162,7 @@ def _serialize_for_shm(batch: pa.RecordBatch) -> pa.Buffer:
         while True:
             msg = pa.ipc.read_message(reader)
             if msg is None:  # EOS
-                break
+                break  # type: ignore[unreachable]  # defensive: pyarrow stub types read_message as non-Optional
             msg.serialize_to(kept_sink)
     except EOFError:
         pass  # end of stream

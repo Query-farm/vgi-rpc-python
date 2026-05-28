@@ -189,11 +189,7 @@ def strip_keys(
     """
     if metadata is None:
         return None
-    stripped: dict[bytes, bytes] = {}
     keys_set = set(keys)
-    for k, v in metadata.items():
-        k_bytes = k if isinstance(k, bytes) else k.encode()
-        if k_bytes not in keys_set:
-            v_bytes = v if isinstance(v, bytes) else v.encode()
-            stripped[k_bytes] = v_bytes
+    # pyarrow always materializes KeyValueMetadata keys/values as bytes.
+    stripped = {k: v for k, v in metadata.items() if k not in keys_set}
     return pa.KeyValueMetadata(stripped) if stripped else None

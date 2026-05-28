@@ -238,7 +238,7 @@ def _create_oidc_discovery(issuer: str) -> Callable[[], tuple[str, str] | None]:
             return cached
         with lock:
             if fetched:
-                return cached
+                return cached  # type: ignore[unreachable]  # double-checked locking; mypy can't model concurrent set
             try:
                 url = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
                 with httpx.Client() as client:
@@ -771,7 +771,7 @@ class _OAuthPkceMiddleware:
             if status != 401:
                 return
         else:
-            return
+            return  # type: ignore[unreachable]  # defensive fallthrough for unexpected status types
 
         # Only redirect browsers (Accept: text/html)
         accept = req.get_header("Accept") or ""

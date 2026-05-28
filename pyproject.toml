@@ -65,6 +65,24 @@ python_version = "3.13"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
+warn_unreachable = true
+# Opt-in error codes beyond strict. All currently report zero findings; they
+# guard against future regressions (forgotten awaits, bare type:ignores, etc).
+enable_error_code = [
+  "ignore-without-code",  # require # type: ignore[code], not bare ignores
+  "unused-awaitable",     # catch un-awaited coroutines in the async paths
+  "truthy-bool",          # flag `if some_func:` (always-true) mistakes
+  "truthy-iterable",      # flag `if some_iterable:` on always-true types
+  "mutable-override",     # unsafe mutable-attribute overrides
+]
+
+# warn_unreachable is valuable in library code but produces false positives in
+# tests, where assert-narrowing collides with mutation mypy can't see (state
+# changed via background threads / methods) and with pyarrow stub imprecision.
+# CI type-checks vgi_rpc/ only; tests are checked via the pytest-mypy plugin.
+[[tool.mypy.overrides]]
+module = "tests.*"
+warn_unreachable = false
 
 [[tool.mypy.overrides]]
 module = "falcon.*"
