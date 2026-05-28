@@ -49,16 +49,16 @@ def test_exchange_accumulate_survives_backend_swap(conformance_http_two_servers:
     try:
         with http_connect(ConformanceService, client=client) as proxy, proxy.exchange_accumulate() as session:
             out1 = session.exchange(AnnotatedBatch.from_pydict({"value": [1.0, 2.0]}))
-            assert abs(cast(float, out1.batch.column("running_sum")[0].as_py()) - 3.0) < 1e-6
-            assert cast(int, out1.batch.column("exchange_count")[0].as_py()) == 1
+            assert abs(cast("float", out1.batch.column("running_sum")[0].as_py()) - 3.0) < 1e-6
+            assert cast("int", out1.batch.column("exchange_count")[0].as_py()) == 1
 
             out2 = session.exchange(AnnotatedBatch.from_pydict({"value": [10.0]}))
-            assert abs(cast(float, out2.batch.column("running_sum")[0].as_py()) - 13.0) < 1e-6
-            assert cast(int, out2.batch.column("exchange_count")[0].as_py()) == 2
+            assert abs(cast("float", out2.batch.column("running_sum")[0].as_py()) - 13.0) < 1e-6
+            assert cast("int", out2.batch.column("exchange_count")[0].as_py()) == 2
 
             out3 = session.exchange(AnnotatedBatch.from_pydict({"value": [100.0, 200.0]}))
-            assert abs(cast(float, out3.batch.column("running_sum")[0].as_py()) - 313.0) < 1e-6
-            assert cast(int, out3.batch.column("exchange_count")[0].as_py()) == 3
+            assert abs(cast("float", out3.batch.column("running_sum")[0].as_py()) - 313.0) < 1e-6
+            assert cast("int", out3.batch.column("exchange_count")[0].as_py()) == 3
     finally:
         client.close()
 

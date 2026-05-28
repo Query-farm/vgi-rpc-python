@@ -70,7 +70,7 @@ def main() -> None:
 
         try:
             # Create a typed proxy and call methods
-            svc = cast(MathService, _RpcProxy(MathService, client_transport))
+            svc = cast("MathService", _RpcProxy(MathService, client_transport))
 
             result_add = svc.add(a=2.5, b=3.5)
             print(f"add(2.5, 3.5)      = {result_add}")

@@ -460,7 +460,7 @@ class RpcConnection[P]:
         if wire_transport_logger.isEnabledFor(logging.DEBUG):
             wire_transport_logger.debug("RpcConnection open: protocol=%s", self._protocol.__name__)
         return cast(
-            P,
+            "P",
             _RpcProxy(
                 self._protocol,
                 self._transport,

@@ -583,7 +583,7 @@ def _deserialize_value(value: object, type_hint: object, ipc_validation: IpcVali
         return base[value]
     origin = get_origin(base)
     if origin is dict and isinstance(value, list):
-        return dict(cast(list[tuple[object, object]], value))
+        return dict(cast("list[tuple[object, object]]", value))
     if origin is frozenset and isinstance(value, list):
         return frozenset(value)
     return value

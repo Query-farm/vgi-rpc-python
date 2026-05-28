@@ -831,7 +831,7 @@ class _CompositeDispatchHook:
         """Delegate to all inner hooks in reverse order."""
         if not isinstance(token, list):
             return
-        pairs = cast(list[tuple["_DispatchHook", HookToken]], token)
+        pairs = cast("list[tuple[_DispatchHook, HookToken]]", token)
         for hook, inner_token in reversed(pairs):
             try:
                 hook.on_dispatch_end(inner_token, info, error, stats=stats)

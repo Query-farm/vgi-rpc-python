@@ -686,8 +686,8 @@ def _test_produce_n(proxy: ConformanceService, logs: LogCollector) -> None:
     batches = list(proxy.produce_n(count=5))
     assert len(batches) == 5
     for i, ab in enumerate(batches):
-        assert cast(int, ab.batch.column("index")[0].as_py()) == i
-        assert cast(int, ab.batch.column("value")[0].as_py()) == i * 10
+        assert cast("int", ab.batch.column("index")[0].as_py()) == i
+        assert cast("int", ab.batch.column("value")[0].as_py()) == i * 10
 
 
 @_conformance_test(category="producer_stream", name="produce_empty")
@@ -700,7 +700,7 @@ def _test_produce_empty(proxy: ConformanceService, logs: LogCollector) -> None:
 def _test_produce_single(proxy: ConformanceService, logs: LogCollector) -> None:
     batches = list(proxy.produce_single())
     assert len(batches) == 1
-    assert cast(int, batches[0].batch.column("index")[0].as_py()) == 0
+    assert cast("int", batches[0].batch.column("index")[0].as_py()) == 0
 
 
 @_conformance_test(category="producer_stream", name="produce_with_logs")
@@ -785,12 +785,12 @@ def _test_exchange_echo(proxy: ConformanceService, logs: LogCollector) -> None:
 def _test_exchange_accumulate(proxy: ConformanceService, logs: LogCollector) -> None:
     with proxy.exchange_accumulate() as session:
         out1 = session.exchange(AnnotatedBatch.from_pydict({"value": [1.0, 2.0]}))
-        assert abs(cast(float, out1.batch.column("running_sum")[0].as_py()) - 3.0) < 1e-6
-        assert cast(int, out1.batch.column("exchange_count")[0].as_py()) == 1
+        assert abs(cast("float", out1.batch.column("running_sum")[0].as_py()) - 3.0) < 1e-6
+        assert cast("int", out1.batch.column("exchange_count")[0].as_py()) == 1
 
         out2 = session.exchange(AnnotatedBatch.from_pydict({"value": [10.0]}))
-        assert abs(cast(float, out2.batch.column("running_sum")[0].as_py()) - 13.0) < 1e-6
-        assert cast(int, out2.batch.column("exchange_count")[0].as_py()) == 2
+        assert abs(cast("float", out2.batch.column("running_sum")[0].as_py()) - 13.0) < 1e-6
+        assert cast("int", out2.batch.column("exchange_count")[0].as_py()) == 2
 
 
 @_conformance_test(category="exchange_stream", name="with_logs")
@@ -921,7 +921,7 @@ def _test_exchange_header_then_exchange(proxy: ConformanceService, logs: LogColl
 
     with session:
         out = session.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
-        assert abs(cast(float, out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
+        assert abs(cast("float", out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -1094,7 +1094,7 @@ def _test_exchange_error_then_exchange(proxy: ConformanceService, logs: LogColle
 
     with proxy.exchange_scale(factor=2.0) as session2:
         out = session2.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
-        assert abs(cast(float, out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
+        assert abs(cast("float", out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
 
 
 @_conformance_test(category="error_recovery", name="multiple_sequential_sessions")
@@ -1103,7 +1103,7 @@ def _test_multiple_sequential_sessions(proxy: ConformanceService, logs: LogColle
     assert len(list(proxy.produce_n(count=2))) == 2
     with proxy.exchange_scale(factor=2.0) as session:
         out = session.exchange(AnnotatedBatch.from_pydict({"value": [3.0]}))
-        assert abs(cast(float, out.batch.column("value")[0].as_py()) - 6.0) < 1e-6
+        assert abs(cast("float", out.batch.column("value")[0].as_py()) - 6.0) < 1e-6
     assert proxy.echo_string(value="end") == "end"
 
 
@@ -1247,8 +1247,8 @@ def _test_rich_header_seed_42(proxy: ConformanceService, logs: LogCollector) -> 
     batches = list(session)
     assert len(batches) == 3
     for i, ab in enumerate(batches):
-        assert cast(int, ab.batch.column("index")[0].as_py()) == i
-        assert cast(int, ab.batch.column("value")[0].as_py()) == i * 10
+        assert cast("int", ab.batch.column("index")[0].as_py()) == i
+        assert cast("int", ab.batch.column("value")[0].as_py()) == i * 10
 
 
 @_conformance_test(category="rich_header_producer", name="seed_7")
@@ -1290,9 +1290,9 @@ def _test_dynamic_all_columns(proxy: ConformanceService, logs: LogCollector) -> 
     expected_schema = build_dynamic_schema(include_strings=True, include_floats=True)
     for i, ab in enumerate(batches):
         assert ab.batch.schema.equals(expected_schema)
-        assert cast(int, ab.batch.column("index")[0].as_py()) == i
+        assert cast("int", ab.batch.column("index")[0].as_py()) == i
         assert ab.batch.column("label")[0].as_py() == f"row-{i}"
-        assert abs(cast(float, ab.batch.column("score")[0].as_py()) - i * 1.5) < 1e-6
+        assert abs(cast("float", ab.batch.column("score")[0].as_py()) - i * 1.5) < 1e-6
 
 
 @_conformance_test(category="dynamic_schema_producer", name="strings_only")
@@ -1318,7 +1318,7 @@ def _test_dynamic_floats_only(proxy: ConformanceService, logs: LogCollector) -> 
     assert len(batches) == 2
     for i, ab in enumerate(batches):
         assert ab.batch.schema.names == ["index", "score"]
-        assert abs(cast(float, ab.batch.column("score")[0].as_py()) - i * 1.5) < 1e-6
+        assert abs(cast("float", ab.batch.column("score")[0].as_py()) - i * 1.5) < 1e-6
 
 
 @_conformance_test(category="dynamic_schema_producer", name="minimal")
@@ -1330,7 +1330,7 @@ def _test_dynamic_minimal(proxy: ConformanceService, logs: LogCollector) -> None
     batches = list(session)
     assert len(batches) == 1
     assert batches[0].batch.schema.names == ["index"]
-    assert cast(int, batches[0].batch.column("index")[0].as_py()) == 0
+    assert cast("int", batches[0].batch.column("index")[0].as_py()) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1347,7 +1347,7 @@ def _test_rich_exchange_header(proxy: ConformanceService, logs: LogCollector) ->
     _assert_rich_header_equal(header, build_rich_header(5))
     with session:
         out = session.exchange(AnnotatedBatch.from_pydict({"value": [4.0]}))
-        assert abs(cast(float, out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
+        assert abs(cast("float", out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
 
 
 @_conformance_test(category="rich_header_exchange", name="different_seed")
@@ -1359,7 +1359,7 @@ def _test_rich_exchange_different_seed(proxy: ConformanceService, logs: LogColle
     _assert_rich_header_equal(header, build_rich_header(12))
     with session:
         out = session.exchange(AnnotatedBatch.from_pydict({"value": [7.0]}))
-        assert abs(cast(float, out.batch.column("value")[0].as_py()) - 7.0) < 1e-6
+        assert abs(cast("float", out.batch.column("value")[0].as_py()) - 7.0) < 1e-6
 
 
 # ---------------------------------------------------------------------------

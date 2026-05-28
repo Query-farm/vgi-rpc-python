@@ -346,7 +346,7 @@ class AccumulatingExchangeState(ExchangeState):
 
     def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Accumulate values."""
-        col_sum = cast(float, pc.sum(input.batch.column("value")).as_py())
+        col_sum = cast("float", pc.sum(input.batch.column("value")).as_py())
         self.running_sum += col_sum
         self.exchange_count += 1
         out.emit_pydict({"running_sum": [self.running_sum], "exchange_count": [self.exchange_count]})
@@ -493,7 +493,7 @@ class SessionCounterExchangeState(ExchangeState):
         counter = ctx.session
         if not isinstance(counter, _StickyCounter):
             raise RuntimeError("no sticky counter bound to this request")
-        col_sum = cast(int, pc.sum(input.batch.column("by")).as_py())
+        col_sum = cast("int", pc.sum(input.batch.column("by")).as_py())
         counter.value += col_sum
         out.emit_pydict({"value": [counter.value]})
 

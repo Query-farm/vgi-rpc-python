@@ -972,18 +972,18 @@ class TestDrainStderr:
     def test_oserror_during_iteration(self, caplog: pytest.LogCaptureFixture) -> None:
         """OSError while reading lines should be silently caught."""
         pipe = _FaultyPipe(OSError("fd closed"))
-        _drain_stderr(cast(BinaryIO, pipe), logging.getLogger("test.drain"))
+        _drain_stderr(cast("BinaryIO", pipe), logging.getLogger("test.drain"))
 
     def test_valueerror_during_iteration(self) -> None:
         """ValueError while reading lines should be silently caught."""
         pipe = _FaultyPipe(ValueError("I/O on closed file"))
-        _drain_stderr(cast(BinaryIO, pipe), logging.getLogger("test.drain"))
+        _drain_stderr(cast("BinaryIO", pipe), logging.getLogger("test.drain"))
 
     def test_unexpected_exception_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
         """Unexpected exceptions should be logged at DEBUG level."""
         pipe = _FaultyPipe(RuntimeError("unexpected"))
         with caplog.at_level(logging.DEBUG, logger="vgi_rpc"):
-            _drain_stderr(cast(BinaryIO, pipe), logging.getLogger("test.drain"))
+            _drain_stderr(cast("BinaryIO", pipe), logging.getLogger("test.drain"))
 
         debug_records = [r for r in caplog.records if r.name == "vgi_rpc.rpc" and "Unexpected error" in r.message]
         assert len(debug_records) == 1
@@ -1076,11 +1076,11 @@ def _make_stdio_fixtures(*, tty: bool) -> tuple[Any, Any, Any]:
         return tty
 
     fake_stdin = cast(
-        Any,
+        "Any",
         type("FakeStdin", (), {"isatty": _isatty, "fileno": lambda self: reader.fileno()})(),
     )
     fake_stdout = cast(
-        Any,
+        "Any",
         type("FakeStdout", (), {"isatty": _isatty, "fileno": lambda self: writer.fileno()})(),
     )
 

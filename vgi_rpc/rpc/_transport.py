@@ -233,7 +233,7 @@ class SubprocessTransport:
         assert self._proc.stdout is not None
         assert self._proc.stdin is not None
         self._reader: IOBase = os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False)
-        self._writer: IOBase = cast(IOBase, self._proc.stdin)
+        self._writer: IOBase = cast("IOBase", self._proc.stdin)
         self._closed = False
         self._stderr_thread: threading.Thread | None = None
         if wire_transport_logger.isEnabledFor(logging.DEBUG):
@@ -346,8 +346,8 @@ class UnixTransport:
     def __init__(self, sock: socket.socket) -> None:
         """Initialize from a connected AF_UNIX socket."""
         self._sock = sock
-        self._reader: IOBase = cast(IOBase, sock.makefile("rb"))
-        self._writer: IOBase = cast(IOBase, sock.makefile("wb", buffering=0))
+        self._reader: IOBase = cast("IOBase", sock.makefile("rb"))
+        self._writer: IOBase = cast("IOBase", sock.makefile("wb", buffering=0))
 
     @property
     def reader(self) -> IOBase:
@@ -648,8 +648,8 @@ class NamedPipeTransport:
 
         raw = handle.Detach()  # take ownership from pywin32 (PyHANDLE)
         fd = msvcrt.open_osfhandle(raw, os.O_BINARY)
-        self._reader: IOBase = cast(IOBase, os.fdopen(fd, "rb"))
-        self._writer: IOBase = cast(IOBase, os.fdopen(os.dup(fd), "wb", buffering=0))
+        self._reader: IOBase = cast("IOBase", os.fdopen(fd, "rb"))
+        self._writer: IOBase = cast("IOBase", os.fdopen(os.dup(fd), "wb", buffering=0))
 
     @property
     def reader(self) -> IOBase:

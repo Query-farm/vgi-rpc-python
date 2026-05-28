@@ -651,7 +651,7 @@ def http_connect[P](
     url_prefix = getattr(client, "prefix", "") if prefix is None else prefix
     try:
         yield cast(
-            P,
+            "P",
             _HttpProxy(
                 protocol,
                 client,
