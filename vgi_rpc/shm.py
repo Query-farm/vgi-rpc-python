@@ -114,7 +114,7 @@ class _ShmSink(RawIOBase):
         self._pos = start
         self._start = start
 
-    def write(self, data: bytes | bytearray | memoryview | pa.Buffer) -> int:  # type: ignore[override]
+    def write(self, data: bytes | bytearray | memoryview | pa.Buffer) -> int:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """Write *data* into the shared memory region."""
         if isinstance(data, pa.Buffer):
             mv = memoryview(data).cast("B")
@@ -487,7 +487,7 @@ class ShmSegment:
         except BufferError:
             # SharedMemory.close() released _buf but _mmap.close()
             # failed — null it out to prevent __del__ from retrying.
-            self._shm._mmap = None  # type: ignore[attr-defined]
+            self._shm._mmap = None  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
 
     def unlink(self) -> None:
         """Unlink (destroy) the shared memory segment."""

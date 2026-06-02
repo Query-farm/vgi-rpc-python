@@ -177,7 +177,7 @@ def _drain_pipe(pipe: object) -> threading.Thread:
 
     def _drain() -> None:
         try:
-            for _ in pipe:  # type: ignore[attr-defined]
+            for _ in pipe:  # type: ignore[attr-defined]  # ty: ignore[not-iterable]
                 pass
         except (OSError, ValueError):
             pass

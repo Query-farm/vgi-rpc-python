@@ -96,7 +96,7 @@ try:
 
     _HAS_OTEL = True
 except ImportError:
-    _otel_trace = None  # type: ignore[assignment]
+    _otel_trace = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     _HAS_OTEL = False
 
 if TYPE_CHECKING:

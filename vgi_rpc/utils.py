@@ -187,7 +187,7 @@ def _empty_array(arrow_type: pa.DataType) -> "pa.Array[Any]":
     # arbitrary inferred Arrow types. The runtime behaviour is correct
     # for every concrete subtype, so the call is safe; the ignores just
     # silence mypy's overload-matching + no-any-return on the line.
-    return pa.nulls(0, type=arrow_type)  # type: ignore[call-overload, no-any-return]
+    return pa.nulls(0, type=arrow_type)  # type: ignore[call-overload, no-any-return]  # ty: ignore[no-matching-overload]
 
 
 def serialize_record_batch(
@@ -656,7 +656,7 @@ class ArrowSerializableDataclass:
         __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
 
     # Auto-generated from field annotations on first access
-    ARROW_SCHEMA: ClassVar[pa.Schema] = _ArrowSchemaDescriptor()  # type: ignore[assignment]
+    ARROW_SCHEMA: ClassVar[pa.Schema] = _ArrowSchemaDescriptor()  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
 
     # Optional: explicit Arrow type overrides for complex fields
     _ARROW_FIELD_OVERRIDES: ClassVar[dict[str, pa.DataType]] = {}
@@ -887,7 +887,7 @@ class ArrowSerializableDataclass:
         if isinstance(inner_type, type) and hasattr(inner_type, "deserialize_from_bytes") and isinstance(value, bytes):
             deserialize_method: object = getattr(inner_type, "deserialize_from_bytes")  # noqa: B009
             if callable(deserialize_method):
-                return deserialize_method(value, ipc_validation)
+                return deserialize_method(value, ipc_validation)  # ty: ignore[call-top-callable]
 
         # Handle Enum reconstruction from name (uppercase) or value (legacy lowercase)
         if isinstance(inner_type, type) and issubclass(inner_type, Enum):

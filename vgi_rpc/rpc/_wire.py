@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 try:
     from vgi_rpc.otel import _inject_trace_context
 except ImportError:
-    _inject_trace_context = None  # type: ignore[assignment]
+    _inject_trace_context = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
 
 
 # ---------------------------------------------------------------------------

@@ -160,7 +160,7 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
         return _respond(start_response, "404 Not Found", b"")
 
     # Attach the store so tests can inspect / reset it.
-    app.store = store  # type: ignore[attr-defined]
+    app.store = store  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     return app
 
 

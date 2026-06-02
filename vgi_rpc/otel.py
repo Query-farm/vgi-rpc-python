@@ -159,7 +159,7 @@ class _OtelFalconMiddleware:
         """Extract trace context from HTTP headers and attach to OTel context."""
         # Start from a clean root context so reused threads don't inherit
         # stale span context from previous requests.
-        ctx = propagate.extract(req, context=otel_context.Context(), getter=_FALCON_GETTER)  # type: ignore[arg-type]
+        ctx = propagate.extract(req, context=otel_context.Context(), getter=_FALCON_GETTER)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         token = otel_context.attach(ctx)
         req.context.otel_context_token = token
 

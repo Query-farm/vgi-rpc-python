@@ -1407,7 +1407,7 @@ class TestExternalLocation:
         with http_connect(
             ConformanceService,
             f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]
+            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         ) as proxy:
             assert proxy.echo_string(value="small") == "small"
 
@@ -1419,7 +1419,7 @@ class TestExternalLocation:
         with http_connect(
             ConformanceService,
             f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]
+            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         ) as proxy:
             assert proxy.echo_large_string(value=big) == big
 
@@ -1431,7 +1431,7 @@ class TestExternalLocation:
         with http_connect(
             ConformanceService,
             f"http://127.0.0.1:{conformance_http_with_zstd_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]
+            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         ) as proxy:
             assert proxy.echo_large_string(value=big) == big
 
@@ -1508,7 +1508,7 @@ class TestExternalLocation:
         with http_connect(
             ConformanceService,
             f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]
+            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         ) as proxy:
             assert proxy.echo_large_string(value=big) == big
         after = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
@@ -1550,7 +1550,7 @@ class TestExternalLocation:
         with http_connect(
             ConformanceService,
             f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]
+            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             compression_level=None,
         ) as proxy:
             assert proxy.echo_large_string(value=big) == big
