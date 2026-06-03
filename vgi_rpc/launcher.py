@@ -16,6 +16,8 @@ Architecture:
   cross-platform, kernel-managed auto-release on process death).
 * Each spawned worker self-terminates after ``idle_timeout`` seconds with
   zero connected clients (see :func:`vgi_rpc.rpc.serve_unix`).
+* ``--status``/``--gc`` enumerate workers by their persistent ``<hash>.meta``
+  file, not the ``.lock`` (which ``filelock`` unlinks on release).
 
 Cross-language contract for workers:
 
@@ -325,10 +327,12 @@ class GcResult:
 def gc_state_dir(state_dir: Path, *, limit: int | None = None, exclude_hash: str | None = None) -> GcResult:
     """Remove ``<hash>.lock``/``.sock``/``.meta`` triples whose worker is gone.
 
-    For each lockfile we can grab non-blocking, probe the sibling socket; if
-    the probe also fails the entry is stale and we unlink all three files.
-    Entries whose lock is held are left alone (a launch is in flight or the
-    worker is alive).
+    Entries are enumerated by their persistent ``.meta`` file (the ``.lock`` is
+    transient — ``filelock`` unlinks it on release, so it can't anchor
+    discovery). For each entry we grab the sibling lock non-blocking and probe
+    the socket; if the probe fails the entry is stale and we unlink all three
+    files. Entries whose lock is held are left alone (a launch is in flight or
+    the worker is alive).
 
     Args:
         state_dir: Directory to scan.
@@ -340,15 +344,15 @@ def gc_state_dir(state_dir: Path, *, limit: int | None = None, exclude_hash: str
     cleaned: list[str] = []
     skipped: list[str] = []
     seen = 0
-    for lock_path in sorted(state_dir.glob("*.lock")):
+    for meta_path in sorted(state_dir.glob("*.meta")):
         if limit is not None and seen >= limit:
             break
         seen += 1
-        hash_id = lock_path.stem
+        hash_id = meta_path.stem
         if exclude_hash is not None and hash_id == exclude_hash:
             continue
         sock_path = state_dir / f"{hash_id}.sock"
-        meta_path = state_dir / f"{hash_id}.meta"
+        lock_path = state_dir / f"{hash_id}.lock"
         try:
             probe_lock = FileLock(str(lock_path), timeout=0.0)
             probe_lock.acquire()
@@ -383,17 +387,16 @@ class StatusRow:
 
 
 def status_rows(state_dir: Path) -> list[StatusRow]:
-    """Return one row per ``<hash>.lock`` in *state_dir*, with liveness probe.
+    """Return one row per ``<hash>.meta`` in *state_dir*, with liveness probe.
 
     Read-only; takes no locks.  Best-effort parsing of ``.meta`` — entries
     with missing or corrupt metadata still appear with whatever fields can
     be recovered.
     """
     rows: list[StatusRow] = []
-    for lock_path in sorted(state_dir.glob("*.lock")):
-        hash_id = lock_path.stem
+    for meta_path in sorted(state_dir.glob("*.meta")):
+        hash_id = meta_path.stem
         sock_path = state_dir / f"{hash_id}.sock"
-        meta_path = state_dir / f"{hash_id}.meta"
         cmd: list[str] = []
         cwd = ""
         started_at: float | None = None

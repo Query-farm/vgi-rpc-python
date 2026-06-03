@@ -232,7 +232,7 @@ def test_hash_differentiates_vgi_rpc_env(state_dir: Path, monkeypatch: pytest.Mo
 
 @_SKIP_WIN
 def test_status_lists_known_workers(state_dir: Path) -> None:
-    """``status_rows`` returns one row per ``.lock`` with a liveness probe."""
+    """``status_rows`` returns one row per ``.meta`` with a liveness probe."""
     config = LaunchConfig(
         worker_argv=tuple(_worker_argv()),
         idle_timeout=10.0,
@@ -276,6 +276,9 @@ def test_gc_skips_held_lock(state_dir: Path) -> None:
     hash_id = "cccc777788889999"
     (state_dir / f"{hash_id}.lock").touch()
     (state_dir / f"{hash_id}.sock").touch()  # stale, no listener
+    # A real in-flight launch has written its .meta (discovery anchor) before
+    # spawning, while still holding the lock.
+    (state_dir / f"{hash_id}.meta").write_text("{}", encoding="utf-8")
     held = FileLock(str(state_dir / f"{hash_id}.lock"))
     held.acquire()
     try:
@@ -284,8 +287,10 @@ def test_gc_skips_held_lock(state_dir: Path) -> None:
         held.release()
     assert result.cleaned == []
     assert result.skipped_in_use == [hash_id]
-    # Files preserved for the lock holder.
-    assert (state_dir / f"{hash_id}.lock").exists()
+    # Persistent files preserved for the lock holder (the .lock is transient —
+    # held.release() above unlinks it on modern filelock).
+    assert (state_dir / f"{hash_id}.meta").exists()
+    assert (state_dir / f"{hash_id}.sock").exists()
 
 
 @_SKIP_WIN
@@ -305,8 +310,10 @@ def test_explicit_socket_path_skips_hash() -> None:
         path = launch(config)
         assert path == sock_path
         _connect_and_close(path)
-        # Sibling lockfile next to the socket.
-        assert Path(sock_path + ".lock").exists()
+        # Explicit --socket skips the per-hash machinery: no .meta marker is
+        # written, so the worker is invisible to --status/--gc.
+        assert list(base.glob("*.meta")) == []
+        assert status_rows(base) == []
     finally:
         # Wait for idle-shutdown to remove the socket then clean up.
         _wait_for_path_gone(sock_path, timeout=10.0)
