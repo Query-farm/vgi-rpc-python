@@ -31,10 +31,10 @@ Each span carries the following attributes:
 | `rpc.method` | `str` | Method name |
 | `rpc.vgi_rpc.method_type` | `str` | `"unary"` or `"stream"` |
 | `rpc.vgi_rpc.server_id` | `str` | Server instance identifier |
-| `enduser.id` | `str` | Caller principal (when authenticated) |
+| `rpc.vgi_rpc.auth.principal` | `str` | Caller principal (when authenticated) |
 | `rpc.vgi_rpc.auth.domain` | `str` | Auth scheme (when authenticated) |
 | `rpc.vgi_rpc.auth.authenticated` | `str` | `"true"` or `"false"` |
-| `net.peer.ip` | `str` | Client IP address (HTTP only) |
+| `client.address` | `str` | Client IP address (HTTP only) |
 | `user_agent.original` | `str` | User agent string (HTTP only) |
 | `rpc.vgi_rpc.input_batches` | `int` | Number of input batches read by the server |
 | `rpc.vgi_rpc.output_batches` | `int` | Number of output batches written by the server |

@@ -32,10 +32,12 @@ Define RPC interfaces as Python [`Protocol`](https://docs.python.org/3/library/t
 - **Mutual TLS** — [client certificate authentication](api/mtls.md) via proxy headers (PEM-in-header, Envoy XFCC) with fingerprint, subject, and custom validation
 - **OAuth discovery** — [RFC 9728](api/oauth.md) protected resource metadata + JWT authentication via Authlib
 - **Runtime introspection** — opt-in [`__describe__`](api/introspection.md) RPC method for dynamic service discovery
-- **CLI tool** — [`vgi-rpc describe` and `vgi-rpc call`](api/cli.md) for ad-hoc service interaction
+- **CLI tool** — [`vgi-rpc describe`, `call`, and `launch`](api/cli.md) for ad-hoc service interaction and Unix-socket worker pooling
 - **Shared memory transport** — zero-copy batch transfer between co-located processes — see [Transports](api/transports.md#shared-memory)
 - **IPC validation** — configurable batch validation levels for untrusted data
 - **Large batch support** — transparent [externalization to S3/GCS](api/external.md) for oversized data
+- **HTTP response caps** — bound on-wire body size and external upload volume per call via [`max_response_bytes` and `max_externalized_response_bytes`](hosting.md)
+- **Sticky sessions** — opt-in HTTP affinity binding stateful objects (cursors, model handles) to a client across calls — see [Sticky Sessions](sticky-sessions-spec.md)
 - **Per-call I/O statistics** — [`CallStatistics`](api/core.md#callstatistics) tracks batches, rows, and bytes for usage accounting (access log + [OTel](api/otel.md) spans)
 - **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full wire-level visibility — see [Logging](api/logging.md#wire-protocol-debugging)
 

@@ -115,6 +115,17 @@ ORDER BY timestamp;
 
 For cross-call correlation (e.g. a downstream service called from inside a method), populate the optional `request_id` field — VGI sets it automatically on HTTP transport, and shippers forward it as a structured field.
 
+## Sticky-session fields
+
+On servers with [sticky sessions](sticky-sessions-spec.md) enabled, records that touch a session also carry:
+
+| Field | Meaning |
+|---|---|
+| `session_id` | The 24-char hex session ID (12 bytes), stable across the open / resume / close lifecycle. |
+| `session_action` | `"open"`, `"resume"`, `"close"`, or `"none"`. |
+
+Both are absent on non-sticky servers and when `session_action` is `"none"`. See the [access-log specification](access-log-spec.md#47-sticky-session-lifecycle) for the exact contract.
+
 ## Programmatic access
 
 The access log is a standard Python logger; attach any handler:

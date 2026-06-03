@@ -2,7 +2,7 @@
 
 Command-line interface for introspecting and calling methods on vgi-rpc services. Requires `pip install vgi-rpc[cli]`.
 
-Registered as the `vgi-rpc` entry point. Provides `describe`, `call`, and `loggers` commands.
+Registered as the `vgi-rpc` entry point. Provides `describe`, `call`, `loggers`, and `launch` commands. Connects over HTTP (`--url`), a subprocess (`--cmd`), or a Unix domain socket (`--unix`).
 
 ## Usage
 
@@ -14,6 +14,9 @@ vgi-rpc describe --cmd "python worker.py"
 
 # HTTP transport
 vgi-rpc describe --url http://localhost:8000
+
+# Unix domain socket transport
+vgi-rpc describe --unix /run/vgi/worker.sock
 
 # JSON output
 vgi-rpc describe --cmd "python worker.py" --format json
@@ -44,6 +47,42 @@ vgi-rpc loggers
 # JSON (for scripting / LLM consumption)
 vgi-rpc loggers --format json
 ```
+
+### Launch a worker pool
+
+`vgi-rpc launch` spawns or reuses a long-running Unix-socket worker. Pass the worker command after `--`. The same `(cmd, args, cwd, VGI_RPC_*-env)` hashes to the same socket, so repeated launches reuse a warm worker; workers self-shut-down after `--idle-timeout` seconds idle. Concurrent first-callers serialise on a per-hash lock, so exactly one worker is spawned.
+
+```bash
+# Discover-or-spawn a worker and print its socket path (UNIX:<path>)
+vgi-rpc launch -- python -m my_worker
+
+# Custom idle timeout (seconds)
+vgi-rpc launch --idle-timeout 600 -- python -m my_worker
+
+# Explicit socket path (skips the per-hash machinery)
+vgi-rpc launch --socket /run/vgi/my.sock -- python -m my_worker
+
+# List tracked workers and their liveness, then exit
+vgi-rpc launch --status
+
+# Remove stale lock/socket/meta entries, then exit
+vgi-rpc launch --gc
+```
+
+The printed `UNIX:<path>` can be fed straight to `--unix` on a subsequent `describe`/`call`.
+
+| Option | Default | Description |
+|---|---|---|
+| `--socket` | (hash-derived) | Explicit socket path; skips the per-hash machinery |
+| `--idle-timeout` | `300` | Worker self-shutdown after N seconds idle |
+| `--connect-timeout` | `30` | Max seconds to wait for the per-hash lock |
+| `--worker-startup-timeout` | `60` | Max seconds to wait for the worker's `UNIX:<path>` line (JVM-friendly) |
+| `--worker-stderr` | (discard) | Append worker stderr to this file |
+| `--state-dir` | (per-user) | Override the default state directory |
+| `--status` | | List known workers and exit (no spawning) |
+| `--gc` | | Remove stale entries and exit |
+
+`--status` and `--gc` are mutually exclusive.
 
 ### Debug logging
 
@@ -178,7 +217,8 @@ Streams without headers are unaffected — no `__header__` line or `Header:` sec
 |---|---|---|
 | `--url` | `-u` | HTTP base URL |
 | `--cmd` | `-c` | Subprocess command |
-| `--prefix` | `-p` | URL path prefix (default `/vgi`) |
+| `--unix` | | Unix domain socket path |
+| `--prefix` | `-p` | URL path prefix (default `""`) |
 | `--format` | `-f` | Output format: `auto`, `json`, `table`, or `arrow` |
 | `--output` | `-o` | Output file path (default: stdout) |
 | `--verbose` | `-v` | Show server log messages on stderr |

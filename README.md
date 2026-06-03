@@ -485,18 +485,30 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `prefix` | `"/vgi"` | URL prefix for all RPC endpoints |
-| `signing_key` | random 32 bytes | HMAC key for signing state tokens |
-| `max_stream_response_bytes` | `None` | Split producer stream responses across multiple HTTP exchanges |
-| `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |
+| `prefix` | `""` | URL prefix for all RPC endpoints (default: root) |
+| `token_key` | random 32 bytes per process | AEAD (XChaCha20-Poly1305) master key for sealing state/session tokens. **Must** be shared across workers in multi-process deployments |
+| `max_response_bytes` | `None` | Cap on the on-wire HTTP body. Hard for unary/exchange (surfaces as `RpcError`); soft for producer streams (split via continuation tokens). Externalised payloads are not charged against it |
+| `max_externalized_response_bytes` | `None` | Hard cap on total bytes uploaded to external storage during one HTTP response |
 | `max_request_bytes` | `None` | Advertise max request body size via `VGI-Max-Request-Bytes` header (no enforcement) |
+| `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |
 | `cors_origins` | `None` | Allowed CORS origins — `"*"` for all, a string, or list of strings |
+| `cors_max_age` | `7200` | `Access-Control-Max-Age` (seconds) on preflight responses; only effective with `cors_origins` |
 | `upload_url_provider` | `None` | `UploadUrlProvider` for generating pre-signed upload URLs (enables `__upload_url__/init` endpoint) |
 | `max_upload_bytes` | `None` | Advertise max upload size via `VGI-Max-Upload-Bytes` header (requires `upload_url_provider`) |
-| `otel_config` | `None` | `OtelConfig` for OpenTelemetry instrumentation |
+| `otel_config` | `None` | `OtelConfig` for OpenTelemetry instrumentation (requires `[otel]`) |
+| `sentry_config` | `None` | `SentryConfig` for Sentry error reporting (requires `[sentry]`) |
 | `token_ttl` | `3600` | Maximum age (seconds) for stream state tokens |
+| `compression_level` | `3` | Zstd level for request/response bodies (1–22; also enables gzip fallback). `None` disables compression |
+| `enable_not_found_page` | `True` | Friendly HTML 404 page for unmatched paths |
+| `enable_landing_page` | `True` | Friendly HTML landing page at `GET {prefix}` |
+| `enable_describe_page` | `True` | HTML method listing at `GET {prefix}/describe` (when `enable_describe=True`) |
+| `enable_health_endpoint` | `True` | JSON health check at `GET {prefix}/health` (bypasses auth) |
+| `repo_url` | `None` | Source-repository link surfaced on the landing page |
+| `oauth_resource_metadata` | `None` | `OAuthResourceMetadata` for RFC 9728 discovery |
 | `enable_sticky` | `False` | Enable HTTP [sticky sessions](docs/sticky-sessions-spec.md) — `ctx.open_session(state)` binds a Python object to the worker for the session token's lifetime |
 | `sticky_default_ttl` | `300.0` | Default session TTL in seconds for sticky sessions; overridable per-call via `ctx.open_session(state, ttl=...)` |
+| `sticky_echo_headers` | `None` | Headers the client replays on every subsequent request in the session (e.g. Fly.io routing) |
+| `max_stream_response_bytes` | `None` | **Deprecated** alias for `max_response_bytes`; emits a `DeprecationWarning` when set |
 
 ### CORS (browser clients)
 

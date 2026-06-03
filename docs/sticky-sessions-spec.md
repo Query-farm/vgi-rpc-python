@@ -82,7 +82,7 @@ Methods on `CallContext`:
 | Member | Contract |
 |---|---|
 | `ctx.session: object | None` | The state object bound by a previous `open_session`, or `None`. Implementations MUST return the same object identity across calls within the same session. |
-| `ctx.session_id: str | None` | The 12-char hex session ID (for logging). |
+| `ctx.session_id: str | None` | The 24-char hex session ID (12 bytes, for logging). |
 | `ctx.open_session(state, ttl=None)` | Registers `state` in the per-worker registry, schedules `VGI-Session` mint on the response. Raises `RuntimeError` if (1) the transport doesn't have sticky machinery installed, (2) the request lacks `VGI-Session-Accept: true`, or (3) a session is already active for this request. |
 | `ctx.close_session()` | Invokes `state.close()` if defined, removes the registry entry, schedules `VGI-Session-Close: true` on the response. Idempotent. |
 

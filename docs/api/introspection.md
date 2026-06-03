@@ -39,9 +39,11 @@ from vgi_rpc import http_introspect
 desc = http_introspect("http://localhost:8080")
 ```
 
-The `ServiceDescription` contains method metadata, parameter schemas, default values, and docstrings — everything a dynamic client needs without the Python Protocol class.
+The `ServiceDescription` carries language-neutral method metadata — name, method type, request/result/header Arrow schemas, and stream flags — everything a dynamic client needs to *invoke* methods without the Python Protocol class. It also includes `protocol_hash` (a SHA-256 digest identifying the contract) and `protocol_version`.
 
-For stream methods that declare a header type (`Stream[S, H]`), `MethodDescription` includes `has_header` (`bool`) and `header_schema` (`pa.Schema | None`) fields describing the header's Arrow schema. These are `False` / `None` for methods without headers.
+The wire format is `describe_version` `"4"`: Python-flavoured fields (parameter type names, default values, docstrings) were **dropped** for cross-language neutrality. Consumers that need those human-readable details import the Protocol source class directly rather than reconstructing them from the wire.
+
+For stream methods that declare a header type (`Stream[S, H]`), `MethodDescription` includes `has_header` (`bool`) and `header_schema` (`pa.Schema | None`) fields describing the header's Arrow schema. Streams also carry `is_exchange` (`bool | None`) — `True` for exchange (bidi), `False` for producer, `None` for unary. Header fields are `False` / `None` for methods without headers.
 
 ## API Reference
 

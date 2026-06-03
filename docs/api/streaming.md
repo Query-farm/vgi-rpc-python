@@ -1,9 +1,11 @@
 # Streaming
 
-Streaming methods return `Stream[S]` where `S` is a `StreamState` subclass. The state's `process(input, out, ctx)` method is called once per iteration.
+Streaming methods return `Stream[S]` where `S` is a `StreamState` subclass. The framework calls the state once per iteration. In practice you subclass one of the two convenience bases rather than `StreamState` directly:
 
-- **Producer streams** — server pushes data; client iterates. Call `out.finish()` to end.
-- **Exchange streams** — client sends data; server responds each iteration. Client controls termination via `close()`.
+- **Producer streams** — subclass `ProducerState` and override `produce(out, ctx)`. The server pushes data; the client iterates. Call `out.finish()` to end.
+- **Exchange streams** — subclass `ExchangeState` and override `exchange(input, out, ctx)`. The client sends data; the server responds each iteration. The client controls termination via `close()`.
+
+(Both are thin wrappers over the base `StreamState.process(input, out, ctx)` hook, which you can override directly if you need the raw form.)
 
 ## How StreamState Persistence Works
 

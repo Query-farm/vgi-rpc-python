@@ -367,7 +367,7 @@ class CallContext:
 
     @property
     def session_id(self) -> str | None:
-        """The opaque 12-char session ID, or ``None`` if no session is bound to this request."""
+        """The opaque 24-char hex session ID, or ``None`` if no session is bound to this request."""
         sc = _current_session_context.get()
         return sc.session_id if sc is not None else None
 

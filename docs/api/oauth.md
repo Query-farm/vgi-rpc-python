@@ -305,6 +305,18 @@ client_secret = parse_client_secret('Bearer resource_metadata="https://...", cli
 
 Returns `None` if the header doesn't contain `client_secret`.
 
+## parse_device_code_client_id() / parse_device_code_client_secret()
+
+Extract the `device_code_client_id` / `device_code_client_secret` from a `WWW-Authenticate` header — the credentials a client uses for the OAuth device-authorization flow. Both are custom extensions (not in RFC 9728) and return `None` when absent.
+
+```python
+from vgi_rpc.http import parse_device_code_client_id, parse_device_code_client_secret
+
+header = 'Bearer resource_metadata="https://...", device_code_client_id="cli-app", device_code_client_secret="s3cret"'
+parse_device_code_client_id(header)      # "cli-app"
+parse_device_code_client_secret(header)  # "s3cret"
+```
+
 ## parse_use_id_token_as_bearer()
 
 Extract the `use_id_token_as_bearer` flag from a `WWW-Authenticate` header. Custom extension (not in RFC 9728).

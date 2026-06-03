@@ -109,7 +109,8 @@ where they appear, and their semantics:
 |-------------|-------|-------------|
 | `vgi_rpc.protocol_name` | UTF-8 string | Protocol class name. |
 | `vgi_rpc.request_version` | `"1"` | Wire protocol version. |
-| `vgi_rpc.describe_version` | `"2"` | Introspection format version. |
+| `vgi_rpc.describe_version` | `"4"` | Introspection format version. |
+| `vgi_rpc.protocol_hash` | UTF-8 hex string | SHA-256 digest over the canonical describe payload. |
 | `vgi_rpc.server_id` | UTF-8 string | Server instance identifier. |
 
 ---
@@ -967,23 +968,27 @@ custom metadata:
 
 - `vgi_rpc.protocol_name` — Protocol class name
 - `vgi_rpc.request_version` — Wire protocol version (`"1"`)
-- `vgi_rpc.describe_version` — Introspection format version (`"2"`)
+- `vgi_rpc.describe_version` — Introspection format version (`"4"`)
+- `vgi_rpc.protocol_hash` — SHA-256 hex digest over the canonical describe payload
 - `vgi_rpc.server_id` — Server instance identifier
 
 ### Response batch schema
+
+The schema is deliberately language-neutral (`describe_version` `"4"`). Python-flavoured
+fields present in earlier versions (`doc`, `param_types_json`, `param_defaults_json`,
+`param_docs_json`) were **dropped in v4** — human-readable type names, defaults, and
+docstrings live in the Protocol source class, not on the wire.
 
 | Column | Arrow type | Nullable | Description |
 |--------|-----------|----------|-------------|
 | `name` | `utf8` | No | Method name |
 | `method_type` | `utf8` | No | `"unary"` or `"stream"` |
-| `doc` | `utf8` | Yes | Method docstring |
 | `has_return` | `bool` | No | Whether the unary method returns a value |
 | `params_schema_ipc` | `binary` | No | Serialized `pa.Schema` for request parameters |
 | `result_schema_ipc` | `binary` | No | Serialized `pa.Schema` for unary response |
-| `param_types_json` | `utf8` | Yes | JSON: `{"param_name": "type_name", ...}` |
-| `param_defaults_json` | `utf8` | Yes | JSON: `{"param_name": default_value, ...}` |
 | `has_header` | `bool` | No | Whether the stream method has a header type |
 | `header_schema_ipc` | `binary` | Yes | Serialized `pa.Schema` for the header (null if no header) |
+| `is_exchange` | `bool` | Yes | For streams: `true` = exchange (bidi), `false` = producer; `null` for unary |
 
 The `params_schema_ipc`, `result_schema_ipc`, and `header_schema_ipc`
 columns contain Arrow schemas serialized via `pa.Schema.serialize()`.

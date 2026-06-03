@@ -126,7 +126,7 @@ For HTTP transport, the wire protocol maps to separate endpoints: `POST /vgi/{me
 
 ## Code Style
 
-- Line length 120, double quotes, target Python 3.12+
-- Strict mypy (`python_version = "3.12"`, `strict = true`)
+- Line length 120, double quotes, target Python 3.13+
+- Strict mypy (`python_version = "3.13"`, `strict = true`)
 - Ruff rules: E, F, I, UP, B, SIM, D, RUF, PERF (includes docstring enforcement)
 - Google-style docstrings with Args/Returns/Raises sections

@@ -51,6 +51,8 @@ The upload URL endpoint is enabled by passing `upload_url_provider` to [`make_ws
 
 ## Server Configuration
 
+`S3Storage` requires `pip install vgi-rpc[s3]` (and `GCSStorage` requires `[gcs]`); the symbols are only exported from `vgi_rpc` when their backend dependency is installed.
+
 ```python
 from vgi_rpc import Compression, ExternalLocationConfig, FetchConfig, RpcServer, S3Storage
 
@@ -138,6 +140,12 @@ config = ExternalLocationConfig(
     compression=Compression(level=9),
 )
 
+# gzip — stdlib zlib, the right choice when consumers can't do zstd
+config = ExternalLocationConfig(
+    storage=storage,
+    compression=Compression(algorithm="gzip"),  # level defaults to 6
+)
+
 # Disable compression
 config = ExternalLocationConfig(
     storage=storage,
@@ -145,9 +153,9 @@ config = ExternalLocationConfig(
 )
 ```
 
-The storage backend stores the `Content-Encoding` header alongside the object. When the client fetches the data, the `Content-Encoding: zstd` header triggers automatic decompression.
+`Compression(algorithm=...)` accepts `"zstd"` (default; needs `zstandard` on both writer and reader) or `"gzip"` (stdlib `zlib`, no extra dependency). The storage backend stores the `Content-Encoding` header alongside the object; on fetch the `Content-Encoding: zstd` / `gzip` header triggers automatic decompression.
 
-Requires `pip install vgi-rpc[external]` (installs `zstandard`).
+zstd requires `pip install vgi-rpc[external]` (installs `zstandard`); gzip works with no extra dependency.
 
 ## Parallel Fetching
 

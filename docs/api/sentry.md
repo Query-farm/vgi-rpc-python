@@ -52,7 +52,8 @@ When `record_request_context=True` (the default), each Sentry event carries:
 | `contexts.rpc.method_type` | `"unary"` or `"stream"` |
 | `contexts.rpc.service` | Protocol class name |
 | `contexts.rpc.server_id` | `RpcServer.server_id` |
-| `user.username` | `auth.principal` (when authenticated) |
+| `user.id` | `auth.principal` (when authenticated — typically the JWT `sub`) |
+| `user.<field>` | Mapped from JWT claims via `SentryConfig.user_claim_map` (e.g. `user.username`, `user.email`) |
 | `tags["rpc.method"]` | RPC method name (always — for Issues filtering) |
 | `tags["rpc.method_type"]` | `"unary"` or `"stream"` (always) |
 | `tags["auth.domain"]` | `auth.domain` (when set) |
