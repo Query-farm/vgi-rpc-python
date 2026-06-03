@@ -83,7 +83,7 @@ _logger = logging.getLogger("vgi_rpc.sticky")
 # We use length-prefix on server_id since it can vary (RpcServer permits
 # operator-supplied IDs); session_id is framework-minted and fixed-length.
 _TOKEN_VERSION = 1
-_SESSION_ID_LEN = 12  # bytes — matches RpcServer.server_id format (24 hex chars / 12 bytes)
+_SESSION_ID_LEN = 12  # bytes → 24 hex chars when encoded (RpcServer.server_id is shorter: 12 hex chars)
 _PLAINTEXT_PREFIX = struct.Struct("<Q B")  # created_at, server_id_len
 _PLAINTEXT_SUFFIX = struct.Struct("<Q")  # expires_at
 
