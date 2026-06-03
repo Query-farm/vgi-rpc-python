@@ -18,7 +18,7 @@ from vgi_rpc.rpc import RpcServer, serve_unix
 def main() -> None:
     """Serve the conformance service over a threaded Unix domain socket."""
     path = sys.argv[1]
-    server = RpcServer(ConformanceService, ConformanceServiceImpl())
+    server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
     print(f"UNIX:{path}", flush=True)
     serve_unix(server, path, threaded=True)
 

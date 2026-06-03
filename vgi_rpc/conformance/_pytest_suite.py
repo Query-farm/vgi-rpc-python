@@ -1612,40 +1612,31 @@ class TestHealth:
 
 
 class TestDescribeConformance:
-    """Validate __describe__ introspection output for the conformance service."""
+    """Validate __describe__ introspection output for the conformance service.
 
-    @pytest.fixture(scope="class")
-    def service_description(self) -> ServiceDescription:
-        """Build a ServiceDescription via in-process pipe introspect()."""
-        client_transport, server_transport = make_pipe_pair()
-        server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+    The ``conformance_describe`` fixture (provided by the host harness) sends a
+    real ``__describe__`` request to the worker under test — across every
+    transport in the conformance matrix — so introspection is validated against
+    the actual server, not a throwaway in-process Python one.
+    """
 
-        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
-        thread.start()
-        try:
-            desc = introspect(client_transport)
-        finally:
-            client_transport.close()
-            thread.join(timeout=5)
-        return desc
-
-    def test_run_describe_conformance(self, service_description: ServiceDescription) -> None:
+    def test_run_describe_conformance(self, conformance_describe: ServiceDescription) -> None:
         """Run the full describe conformance suite and fail with detailed errors."""
-        suite = run_describe_conformance(service_description)
+        suite = run_describe_conformance(conformance_describe)
         if not suite.success:
             failures = [r for r in suite.results if not r.passed]
             details = "\n".join(f"  {r.name}: {r.error}" for r in failures)
             pytest.fail(f"{suite.failed}/{suite.total} describe conformance tests failed:\n{details}")
 
-    def test_describe_via_rpc(self, service_description: ServiceDescription) -> None:
+    def test_describe_via_rpc(self, conformance_describe: ServiceDescription) -> None:
         """Smoke test: basic transport-level describe call works."""
         # 76 + 3 sticky unary methods (open_counter / increment_counter /
         # close_counter) + 2 sticky streaming methods (stream_session_counter
         # / exchange_session_counter), added 2026-05 alongside the
         # Sticky.* conformance group.
-        assert len(service_description.methods) == 81
-        assert service_description.protocol_name == "ConformanceService"
-        echo_str = service_description.methods["echo_string"]
+        assert len(conformance_describe.methods) == 81
+        assert conformance_describe.protocol_name == "ConformanceService"
+        echo_str = conformance_describe.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY
 
 

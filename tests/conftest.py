@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import pytest
 
+from vgi_rpc.introspect import ServiceDescription
 from vgi_rpc.pool import WorkerPool
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
@@ -632,6 +633,79 @@ def conformance_conn(
         return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
 
     return factory
+
+
+@pytest.fixture(
+    params=[
+        "pipe",
+        "subprocess",
+        "http",
+        pytest.param("http_externalize_always", marks=_SKIP_WIN_EXTERNALIZE),
+        pytest.param("unix", marks=_SKIP_UNIX),
+        pytest.param("unix_threaded", marks=_SKIP_UNIX),
+        pytest.param("unix_launcher", marks=_SKIP_UNIX),
+    ]
+)
+def conformance_describe(
+    request: pytest.FixtureRequest,
+    conformance_http_port: int,
+    conformance_subprocess: SubprocessTransport,
+) -> ServiceDescription:
+    """Return a ``ServiceDescription`` obtained by calling ``__describe__`` over the wire.
+
+    Parallels ``conformance_conn`` — same transport matrix — but instead of a
+    proxy it sends a real ``__describe__`` request to the worker under test and
+    parses the response.  This is what lets ``TestDescribeConformance`` validate
+    introspection against the *actual* worker (subprocess / HTTP / Unix-socket
+    server) rather than a throwaway in-process Python server.  Every conformance
+    worker entry point is launched with ``enable_describe=True`` so the method is
+    available on the wire.
+
+    For the ``pipe`` variant there is no separate worker process — the faithful
+    equivalent is a fresh in-process pipe server with describe enabled.
+    """
+    from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+    from vgi_rpc.http import http_introspect
+    from vgi_rpc.introspect import introspect
+    from vgi_rpc.rpc import RpcServer, UnixTransport, make_pipe_pair
+
+    param = request.param
+    if param == "pipe":
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+        thread.start()
+        try:
+            return introspect(client_transport)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+    if param == "subprocess":
+        return introspect(conformance_subprocess)
+    if param in ("unix", "unix_threaded", "unix_launcher"):
+        import socket as _socket
+
+        path_fixture = {
+            "unix": "conformance_unix_path",
+            "unix_threaded": "conformance_unix_threaded_path",
+            "unix_launcher": "conformance_unix_launcher_path",
+        }[param]
+        path: str = request.getfixturevalue(path_fixture)
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+            sock.connect(path)
+        except BaseException:
+            sock.close()
+            raise
+        transport = UnixTransport(sock)
+        try:
+            return introspect(transport)
+        finally:
+            transport.close()
+    if param == "http_externalize_always":
+        ext_port: int = request.getfixturevalue("conformance_http_externalize_always_port")
+        return http_introspect(base_url=f"http://127.0.0.1:{ext_port}")
+    return http_introspect(base_url=f"http://127.0.0.1:{conformance_http_port}")
 
 
 def _free_port() -> int:

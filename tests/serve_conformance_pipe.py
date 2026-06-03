@@ -10,12 +10,18 @@ RPC requests over stdin/stdout.
 """
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
-from vgi_rpc.rpc import run_server
+from vgi_rpc.rpc import RpcServer, run_server
 
 
 def main() -> None:
-    """Serve the conformance service over stdin/stdout."""
-    run_server(ConformanceService, ConformanceServiceImpl())
+    """Serve the conformance service over stdin/stdout.
+
+    Pre-builds the ``RpcServer`` with ``enable_describe=True`` so the
+    ``TestDescribeConformance`` suite can probe ``__describe__`` against this
+    real subprocess worker (not just an in-process Python server).
+    """
+    server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+    run_server(server)
 
 
 if __name__ == "__main__":

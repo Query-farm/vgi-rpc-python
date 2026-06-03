@@ -76,7 +76,10 @@ def main() -> None:
     parser.add_argument("--http", action="store_true", default=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--describe", action="store_true", default=False)
+    # Default on so TestDescribeConformance can probe __describe__ against this
+    # real HTTP worker.  Use --no-describe semantics by omitting the flag is not
+    # possible with store_true; tests that need it off build their own server.
+    parser.add_argument("--describe", action="store_true", default=True)
     parser.add_argument(
         "--fake-storage",
         default=None,
