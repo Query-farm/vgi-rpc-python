@@ -544,6 +544,89 @@ class HttpStreamSession:
                 _drain_stream(reader)
             raise
 
+    def next_with_token(self) -> tuple[AnnotatedBatch | None, bytes | None]:
+        """Read one producer batch and surface the worker's continuation token.
+
+        Reads exactly one data batch and returns it paired with the resume
+        token that continues the stream AFTER that batch — the worker's own
+        serialized producer state. A fresh session positioned at that token
+        (see :meth:`seek_to_token`) resumes on any node, which is the basis
+        for stateless, load-balanced relays that must not pin a scan to one
+        process.
+
+        Returns ``(None, None)`` at end-of-stream. Requires per-batch
+        continuation tokens (the default server behaviour — i.e. the worker
+        is not configured with ``max_response_bytes``); raises
+        ``RuntimeError`` if a single response carries more than one data
+        batch (coarser-than-batch resume is not representable here).
+
+        Drives the same wire protocol as :meth:`__iter__` but yields one
+        ``(batch, token)`` per call instead of auto-following the token. Do
+        not interleave with ``__iter__``/``exchange`` on the same session.
+        """
+        _multi = (
+            "next_with_token requires one data batch per response; the upstream "
+            "worker buffered multiple (configured max_response_bytes?)"
+        )
+        # Init may have preloaded one data batch; its resume point is _state_bytes.
+        if self._pending_batches:
+            if len(self._pending_batches) > 1:
+                raise RuntimeError(_multi)
+            return self._pending_batches.pop(0), self._state_bytes
+
+        if self._finished or self._state_bytes is None:
+            self._finished = True
+            return None, None
+
+        reader = self._send_continuation(self._state_bytes)
+        data_ab: AnnotatedBatch | None = None
+        next_token: bytes | None = None
+        try:
+            while True:
+                try:
+                    batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+                except StopIteration:
+                    break
+                # Continuation token (zero-row batch with STATE_KEY).
+                if batch.num_rows == 0 and custom_metadata is not None:
+                    token = custom_metadata.get(STATE_KEY)
+                    if token is not None:
+                        if not isinstance(token, bytes):
+                            raise TypeError(f"Expected bytes for state token, got {type(token).__name__}")
+                        next_token = token
+                        continue
+                if _dispatch_log_or_error(batch, custom_metadata, self._on_log):
+                    continue
+                resolved_batch, resolved_cm = resolve_external_location(
+                    batch, custom_metadata, self._external_config, self._on_log, reader.ipc_validation
+                )
+                if data_ab is not None:
+                    raise RuntimeError(_multi)
+                data_ab = AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm)
+        except RpcError:
+            _drain_stream(reader)
+            raise
+        _drain_stream(reader)
+
+        self._state_bytes = next_token
+        if data_ab is None:
+            # No data this turn -> the producer finished (out.finish(), no token).
+            self._finished = True
+            return None, None
+        return data_ab, next_token
+
+    def seek_to_token(self, token: bytes) -> None:
+        """Reposition a freshly-initialised session to resume from ``token``.
+
+        Discards any init-preloaded batches and points the session at the
+        given continuation token (as returned by :meth:`next_with_token`),
+        so the next :meth:`next_with_token` continues from exactly there.
+        Used to resume a scan on a new process/node.
+        """
+        self._pending_batches = []
+        self._state_bytes = token
+        self._finished = False
+
     def close(self) -> None:
         """Close the session (no-op for HTTP — stateless)."""
 
@@ -985,6 +1068,44 @@ class _HttpProxy:
 
             self._capabilities = replace(self._capabilities, supported_encodings=parsed)
         return parsed
+
+    def resume_stream(
+        self,
+        method_name: str,
+        token: bytes,
+        *,
+        output_schema: pa.Schema | None = None,
+    ) -> HttpStreamSession:
+        """Resume a producer stream from a continuation *token* without re-binding.
+
+        A continuation request (``POST /{method_name}/exchange`` carrying only the
+        ``STATE_KEY`` token) is fully self-describing: the server recovers the producer
+        state, schemas, and function identity from the signed token alone (see
+        ``_run_stream_exchange_sync`` server-side), so no ``bind``/``init`` round-trip is
+        needed. This is the cheap path for a stateless relay that holds a per-batch token
+        and resumes on any connection/node — unlike ``init(...)`` which would produce and
+        discard a fresh first turn before seeking.
+
+        The returned session is positioned at *token*; the first ``next_with_token()``
+        (or iteration) issues the continuation. ``output_schema`` is unused on the
+        producer-continuation path (each response's IPC stream carries its own schema)
+        and defaults to the empty schema.
+        """
+        return HttpStreamSession(
+            client=self._client,
+            url_prefix=self._url_prefix,
+            method=method_name,
+            state_bytes=token,
+            output_schema=output_schema if output_schema is not None else _EMPTY_SCHEMA,
+            on_log=self._on_log,
+            external_config=self._external_config,
+            ipc_validation=self._ipc_validation,
+            pending_batches=[],
+            finished=False,
+            header=None,
+            retry_config=self._retry_config,
+            compression_level=self._compression_level,
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Resolve RPC method names to callable proxies, caching on first access.
