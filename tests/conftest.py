@@ -685,6 +685,8 @@ def conformance_describe(
     if param in ("unix", "unix_threaded", "unix_launcher"):
         import socket as _socket
 
+        if sys.platform == "win32":  # pragma: no cover - unix params skip on Windows
+            raise RuntimeError("AF_UNIX is not available on Windows")
         path_fixture = {
             "unix": "conformance_unix_path",
             "unix_threaded": "conformance_unix_threaded_path",
