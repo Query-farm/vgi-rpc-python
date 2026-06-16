@@ -294,6 +294,9 @@ class ShmAllocator:
     def free(self, offset: int) -> None:
         """Remove allocation entry by *offset*.
 
+        Args:
+            offset: Byte offset of the allocation to remove.
+
         Raises:
             ValueError: If no allocation starts at *offset*.
 

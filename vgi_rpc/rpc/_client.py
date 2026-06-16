@@ -150,6 +150,9 @@ class StreamSession:
         the ``on_log`` callback before returning. On ``RpcError``, the
         session is automatically closed so the transport is clean.
 
+        Args:
+            input: The input batch to send to the server for this exchange.
+
         Raises:
             StopIteration: When the stream has finished.
             RpcError: On server-side errors or transport failures,

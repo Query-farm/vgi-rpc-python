@@ -1,0 +1,131 @@
+vgi_rpc/cli.py
+    DOC101: Function `_get_service_description`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_get_service_description`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [config: _CliConfig].
+--------------------
+vgi_rpc/conformance/_protocol.py
+    DOC201: Method `ConformanceService.produce_with_rich_header` does not have a return section in docstring
+    DOC201: Method `ConformanceService.produce_dynamic_schema` does not have a return section in docstring
+    DOC201: Method `ConformanceService.exchange_with_rich_header` does not have a return section in docstring
+--------------------
+vgi_rpc/conformance/_runner.py
+    DOC301: Class `LogCollector`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/conformance/_test_cli.py
+    DOC301: Class `_ShmTransportWrapper`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/conformance/fake_storage.py
+    DOC301: Class `FakeStorageBackend`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/http/_client.py
+    DOC301: Class `HttpStreamSession`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC101: Function `_parse_metadata_json`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_parse_metadata_json`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [body: dict[str, Any]].
+    DOC201: Function `_parse_metadata_json` does not have a return section in docstring
+--------------------
+vgi_rpc/http/_oauth.py
+    DOC301: Class `_OAuthResourceMetadataResource`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/http/_oauth_pkce.py
+    DOC101: Function `_unpack_oauth_cookie`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_unpack_oauth_cookie`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [cookie_value: str, max_age: int, session_key: bytes].
+    DOC101: Function `_exchange_code_for_token`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_exchange_code_for_token`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [client_id: str, client_secret: str | None, code: str, code_verifier: str, redirect_uri: str, token_endpoint: str, use_id_token: bool].
+--------------------
+vgi_rpc/http/_retry.py
+    DOC301: Class `HttpTransientError`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC101: Method `HttpTransientError.__init__`: Docstring contains fewer arguments than in function signature.
+    DOC103: Method `HttpTransientError.__init__`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [body_preview: str, retry_after: float | None, status_code: int].
+--------------------
+vgi_rpc/http/server/_app.py
+    DOC101: Method `_HttpRpcApp._resolve_method`: Docstring contains fewer arguments than in function signature.
+    DOC103: Method `_HttpRpcApp._resolve_method`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [method: str, req: falcon.Request].
+    DOC201: Method `_HttpRpcApp._resolve_method` does not have a return section in docstring
+--------------------
+vgi_rpc/http/server/_app_unary.py
+    DOC101: Function `_run_unary_sync`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_run_unary_sync`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [app: _HttpRpcApp, info: RpcMethodInfo, method_name: str, stream: IOBase].
+--------------------
+vgi_rpc/http/server/_middleware.py
+    DOC301: Class `_TransportNotifyMiddleware`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/http/server/_state_token.py
+    DOC101: Function `_resolve_state_cls`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_resolve_state_cls`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [data: bytes, state_info: _StateInfo].
+--------------------
+vgi_rpc/http/server/_sticky.py
+    DOC101: Function `_open_session_token`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_open_session_token`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [aad: bytes, token: str, token_key: bytes].
+    DOC201: Function `_open_session_token` does not have a return section in docstring
+    DOC101: Method `_SessionRegistry.open`: Docstring contains fewer arguments than in function signature.
+    DOC103: Method `_SessionRegistry.open`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [principal_key: str, state: object, ttl: float | None].
+    DOC201: Method `_SessionRegistry.open` does not have a return section in docstring
+--------------------
+vgi_rpc/launcher.py
+    DOC201: Function `gc_state_dir` does not have a return section in docstring
+--------------------
+vgi_rpc/log.py
+    DOC606: Class `Message`, Attribute `MAX_TRACEBACK_CHARS`: This attribute is documented inline, but it should be documented in the class docstring instead.
+    DOC606: Class `Message`, Attribute `MAX_TRACEBACK_FRAMES`: This attribute is documented inline, but it should be documented in the class docstring instead.
+    DOC602: Class `Message`: Class docstring contains more class attributes than in actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
+    DOC603: Class `Message`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [MAX_TRACEBACK_CHARS: ClassVar[int], MAX_TRACEBACK_FRAMES: ClassVar[int]]. Arguments in the docstring but not in the actual class attributes: [extra: , level: , message: ]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
+    DOC301: Class `Message`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC101: Method `Message.__init__`: Docstring contains fewer arguments than in function signature.
+    DOC103: Method `Message.__init__`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [**kwargs: object, level: Level, message: str].
+--------------------
+vgi_rpc/logging_utils.py
+    DOC301: Class `VgiAccessLogFormatter`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/pool.py
+    DOC301: Class `_PooledTransport`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC301: Class `WorkerPool`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/rpc/_client.py
+    DOC301: Class `StreamSession`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC201: Method `StreamSession.exchange` does not have a return section in docstring
+    DOC301: Class `RpcConnection`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/rpc/_common.py
+    DOC301: Class `CallContext`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC301: Class `RpcError`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/rpc/_server.py
+    DOC101: Function `_log_method_error`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_log_method_error`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [exc: BaseException, method_name: str, protocol_name: str, server_id: str].
+    DOC301: Class `RpcServer`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/rpc/_transport.py
+    DOC301: Class `PipeTransport`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC301: Class `ShmPipeTransport`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC301: Class `SubprocessTransport`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC301: Class `UnixTransport`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------
+vgi_rpc/rpc/_types.py
+    DOC301: Class `OutputCollector`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC201: Method `Stream.__iter__` does not have a return section in docstring
+    DOC201: Method `Stream.__enter__` does not have a return section in docstring
+    DOC101: Method `Stream.__exit__`: Docstring contains fewer arguments than in function signature.
+    DOC103: Method `Stream.__exit__`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [exc_tb: TracebackType | None, exc_type: type[BaseException] | None, exc_val: BaseException | None].
+    DOC201: Method `Stream.exchange` does not have a return section in docstring
+    DOC201: Method `Stream.tick` does not have a return section in docstring
+    DOC101: Function `_validate_protocol_params`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_validate_protocol_params`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [method_name: str, protocol: type, sig: inspect.Signature].
+    DOC101: Function `_validate_implementation`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_validate_implementation`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [implementation: object, methods: Mapping[str, RpcMethodInfo], protocol: type].
+--------------------
+vgi_rpc/rpc/_wire.py
+    DOC101: Function `_read_request`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_read_request`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [external_config: ExternalLocationConfig | None, ipc_validation: IpcValidation, reader_stream: IOBase].
+    DOC201: Function `_read_request` does not have a return section in docstring
+    DOC101: Function `_flush_collector`: Docstring contains fewer arguments than in function signature.
+    DOC103: Function `_flush_collector`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [external_config: ExternalLocationConfig | None, out: OutputCollector, shm: ShmSegment | None, writer: ipc.RecordBatchStreamWriter].
+--------------------
+vgi_rpc/shm.py
+    DOC301: Class `_ShmSink`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC301: Class `ShmAllocator`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC301: Class `ShmSegment`: __init__() should not have a docstring; please combine it with the docstring of the class
+    DOC201: Method `ShmSegment.create` does not have a return section in docstring
+    DOC201: Method `ShmSegment.attach` does not have a return section in docstring
+--------------------
+vgi_rpc/utils.py
+    DOC301: Class `ValidatedReader`: __init__() should not have a docstring; please combine it with the docstring of the class
+--------------------

@@ -86,6 +86,9 @@ class HttpTransientError(RpcError):
 
     """
 
+    status_code: int
+    retry_after: float | None
+
     def __init__(self, status_code: int, body_preview: str, retry_after: float | None = None) -> None:
         """Initialize with HTTP status code and response body preview."""
         self.status_code = status_code

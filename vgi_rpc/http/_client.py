@@ -1595,6 +1595,20 @@ class HttpServerCapabilities:
         cache_expires_at: Monotonic timestamp (``time.monotonic()``) at
             which this snapshot of the capabilities should be re-probed.
             ``None`` means no expiry hint was given.
+        sticky_enabled: Whether the server has ``enable_sticky=True`` and
+            supports ``VGI-Session``.
+        sticky_default_ttl: Default session TTL in seconds when
+            ``open_session`` is called without an explicit TTL.
+        sticky_echo_headers: Header names the server tells the client to echo
+            on every subsequent session request.  Parsed from the
+            comma-separated ``VGI-Sticky-Echo-Headers`` capability header.
+            Empty tuple when the server is sticky-enabled but has no
+            echo-header config (the default), or when the server is
+            non-sticky.  Concrete values land on the ``_SessionView`` via
+            captured ``VGI-Echo-<name>`` response headers on the
+            session-opening response; this field exposes the *names* for
+            introspection (LB configuration, cross-language client
+            implementations).
 
     """
 
@@ -1607,20 +1621,8 @@ class HttpServerCapabilities:
     supported_encodings: tuple[Encoding, ...] = (Encoding.ZSTD,)
     cache_expires_at: float | None = None
     sticky_enabled: bool = False
-    """Whether the server has ``enable_sticky=True`` and supports ``VGI-Session``."""
     sticky_default_ttl: int | None = None
-    """Default session TTL in seconds when ``open_session`` is called without an explicit TTL."""
     sticky_echo_headers: tuple[str, ...] = ()
-    """Header names the server tells the client to echo on every subsequent session request.
-
-    Parsed from the comma-separated ``VGI-Sticky-Echo-Headers`` capability
-    header. Empty tuple when the server is sticky-enabled but has no
-    echo-header config (the default), or when the server is non-sticky.
-    Concrete values land on the ``_SessionView`` via captured
-    ``VGI-Echo-<name>`` response headers on the session-opening response;
-    this field exposes the *names* for introspection (LB configuration,
-    cross-language client implementations).
-    """
 
 
 def http_capabilities(

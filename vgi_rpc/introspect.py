@@ -149,13 +149,13 @@ class ServiceDescription:
             Stable across server processes that expose the same Protocol;
             changes when any wire-relevant detail changes.  Use this as the
             schema-registry key when decoding archived access-log records.
+        server_id: Server instance identifier.
+        methods: Mapping of method name to ``MethodDescription``.
         protocol_version: Application protocol surface version declared by
             the Protocol class (canonical semver MAJOR.MINOR.PATCH), or empty
             string when the Protocol opts out. Diagnostic — actual enforcement
             happens via the per-request ``vgi_rpc.protocol_version`` metadata
             key at the server's dispatch boundary.
-        server_id: Server instance identifier.
-        methods: Mapping of method name to ``MethodDescription``.
 
     """
 

@@ -235,6 +235,9 @@ class OutputCollector:
     def merge_data_metadata(self, metadata: pa.KeyValueMetadata) -> None:
         """Merge extra metadata into the data batch.
 
+        Args:
+            metadata: Key-value metadata to merge into the emitted data batch.
+
         Raises:
             RuntimeError: If no data batch was emitted.
 
@@ -581,6 +584,8 @@ class RpcMethodInfo:
             parameters that have defaults in the Protocol signature.
         param_types: Mapping of parameter name to its Python type annotation
             (excludes ``self`` and ``return``).
+        param_docs: Mapping of parameter name to its documented description,
+            parsed from the Protocol method's docstring ``Args:`` section.
         header_type: For stream methods with a header, the concrete
             ``ArrowSerializableDataclass`` subclass for the header.
             ``None`` when the method has no header.

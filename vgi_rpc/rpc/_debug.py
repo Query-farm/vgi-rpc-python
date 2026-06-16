@@ -53,6 +53,9 @@ _MAX_VALUE_LEN = 80
 def fmt_schema(schema: pa.Schema) -> str:
     """Format an Arrow schema compactly.
 
+    Args:
+        schema: The Arrow schema to render.
+
     Returns:
         ``"(a: double, b: double)"`` or ``"(empty)"`` for zero-field schemas.
 
@@ -65,6 +68,9 @@ def fmt_schema(schema: pa.Schema) -> str:
 
 def fmt_metadata(metadata: pa.KeyValueMetadata | None) -> str:
     """Format Arrow custom metadata compactly.
+
+    Args:
+        metadata: The Arrow key-value metadata to render, or ``None``.
 
     Returns:
         ``"{vgi_rpc.method='add', vgi_rpc.request_version='1'}"``
@@ -86,6 +92,9 @@ def fmt_metadata(metadata: pa.KeyValueMetadata | None) -> str:
 def fmt_batch(batch: pa.RecordBatch) -> str:
     """Format a RecordBatch summary.
 
+    Args:
+        batch: The Arrow record batch to summarize.
+
     Returns:
         ``"RecordBatch(rows=1, cols=2, schema=(a: double, b: double), bytes=128)"``
 
@@ -97,6 +106,9 @@ def fmt_batch(batch: pa.RecordBatch) -> str:
 
 def fmt_kwargs(kwargs: dict[str, object]) -> str:
     """Format keyword arguments compactly.
+
+    Args:
+        kwargs: Mapping of argument name to value to render.
 
     Returns:
         ``"a=1.0, b=2.0"`` with long repr values truncated.

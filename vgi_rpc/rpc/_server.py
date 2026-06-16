@@ -657,6 +657,10 @@ class RpcServer:
         metadata) are caught, written back as error responses, and the
         method returns normally so the serve loop can continue.
 
+        Args:
+            transport: The transport to read the request from and write the
+                response to.
+
         Raises:
             pa.ArrowInvalid: If the incoming data is not valid Arrow IPC.
                 An error response is written to *transport* before raising so

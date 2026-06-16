@@ -237,4 +237,30 @@ dev = [
     "sentry-sdk>=2.0",
     "cryptography>=41.0",
     "pynacl>=1.5",
+    "pydoclint>=0.8",
 ]
+
+[tool.pydoclint]
+# Docstring consistency gate (complements ruff's `D` rules, which only check
+# docstring *shape*, not whether documented args/attributes match the code).
+# Enforced families: DOC001 (parse), DOC101/102/103 (arg<->signature), DOC4xx
+# (yields), DOC60x (dataclass attributes). Run via `uv run pydoclint vgi_rpc/`.
+style = "google"
+# We keep types in signatures, not docstrings (Google style) — so don't ask for
+# them in docstrings, and don't try to match return/yield *types* against prose.
+arg_type_hints_in_docstring = false
+check_return_types = false
+check_yield_types = false
+# Validate that an `Attributes:` section matches the actual dataclass fields.
+check_class_attributes = true
+# Raises/returns/init-docstring sections are intentionally NOT gated: this
+# codebase documents exceptions via mkdocstrings `[`Exc`][]` cross-refs and
+# raises them indirectly (pydoclint can't see either), and `Returns:` sections
+# are often redundant with the summary. Reviewers cover these case by case.
+skip_checking_raises = true
+ignore = ["DOC201", "DOC301"]
+# Existing violations (ClassVar constants like ARROW_SCHEMA/FIXED_SCHEMA, plus
+# undocumented args on private helpers and exception __init__s) are frozen in
+# the baseline; only NEW violations fail. Regenerate after intentional changes:
+#   uv run pydoclint --generate-baseline=True --baseline=.pydoclint-baseline vgi_rpc/
+baseline = ".pydoclint-baseline"
