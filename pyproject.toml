@@ -238,6 +238,7 @@ dev = [
     "cryptography>=41.0",
     "pynacl>=1.5",
     "pydoclint>=0.8",
+    "hypothesis>=6.155.3",
 ]
 
 [tool.pydoclint]
