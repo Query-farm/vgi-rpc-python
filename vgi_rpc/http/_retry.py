@@ -90,7 +90,14 @@ class HttpTransientError(RpcError):
     retry_after: float | None
 
     def __init__(self, status_code: int, body_preview: str, retry_after: float | None = None) -> None:
-        """Initialize with HTTP status code and response body preview."""
+        """Initialize with HTTP status code and response body preview.
+
+        Args:
+            status_code: The HTTP status code that caused the failure.
+            body_preview: Truncated response body, included in the error message.
+            retry_after: Parsed ``Retry-After`` value in seconds, or ``None``.
+
+        """
         self.status_code = status_code
         self.retry_after = retry_after
         super().__init__(

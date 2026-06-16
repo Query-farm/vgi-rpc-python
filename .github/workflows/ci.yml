@@ -74,9 +74,8 @@ jobs:
         run: uv run ruff check .
 
       # Docstring consistency: documented args/attributes must match the code.
-      # Config + frozen baseline live in pyproject.toml ([tool.pydoclint]); only
-      # NEW violations fail. Regenerate the baseline with:
-      #   uv run pydoclint --generate-baseline=True --baseline=.pydoclint-baseline vgi_rpc/
+      # Config lives in pyproject.toml ([tool.pydoclint]); vgi_rpc/ is fully
+      # clean with no baseline, so any new violation fails immediately.
       - name: Docstring lint (pydoclint)
         run: uv run pydoclint vgi_rpc/
 

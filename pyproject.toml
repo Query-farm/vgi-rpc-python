@@ -251,16 +251,17 @@ style = "google"
 arg_type_hints_in_docstring = false
 check_return_types = false
 check_yield_types = false
+# Allow `__init__` to carry its own docstring and validate its `Args:` there
+# (rather than requiring constructor params to be documented on the class).
+allow_init_docstring = true
 # Validate that an `Attributes:` section matches the actual dataclass fields.
 check_class_attributes = true
-# Raises/returns/init-docstring sections are intentionally NOT gated: this
-# codebase documents exceptions via mkdocstrings `[`Exc`][]` cross-refs and
-# raises them indirectly (pydoclint can't see either), and `Returns:` sections
-# are often redundant with the summary. Reviewers cover these case by case.
+# Raises (DOC5xx) are intentionally not gated: this codebase documents
+# exceptions via mkdocstrings `[`Exc`][]` cross-refs and raises them indirectly,
+# neither of which pydoclint can see. (pydoclint 0.8.x has no per-code ignore,
+# so non-gated families are turned off via these family switches instead.)
 skip_checking_raises = true
-ignore = ["DOC201", "DOC301"]
-# Existing violations (ClassVar constants like ARROW_SCHEMA/FIXED_SCHEMA, plus
-# undocumented args on private helpers and exception __init__s) are frozen in
-# the baseline; only NEW violations fail. Regenerate after intentional changes:
+# No baseline: vgi_rpc/ is fully clean under this config, so the gate enforces
+# every in-scope violation with no grandfathered exceptions. If a future change
+# needs to defer cleanup, freeze the current state and re-add `baseline`:
 #   uv run pydoclint --generate-baseline=True --baseline=.pydoclint-baseline vgi_rpc/
-baseline = ".pydoclint-baseline"

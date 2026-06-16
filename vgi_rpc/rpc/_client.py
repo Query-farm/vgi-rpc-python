@@ -146,12 +146,15 @@ class StreamSession:
     def exchange(self, input: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch, receive the output batch.
 
-        Returns an ``AnnotatedBatch``. Log batches are delivered to
-        the ``on_log`` callback before returning. On ``RpcError``, the
-        session is automatically closed so the transport is clean.
+        Log batches are delivered to the ``on_log`` callback before
+        returning. On ``RpcError``, the session is automatically closed so
+        the transport is clean.
 
         Args:
             input: The input batch to send to the server for this exchange.
+
+        Returns:
+            The output ``AnnotatedBatch`` for this exchange.
 
         Raises:
             StopIteration: When the stream has finished.

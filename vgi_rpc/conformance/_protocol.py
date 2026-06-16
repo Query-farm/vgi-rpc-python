@@ -455,6 +455,10 @@ class ConformanceService(Protocol):
             seed: Determines all header field values deterministically.
             count: Number of {index, value} batches to produce.
 
+        Returns:
+            A producer stream of ``{index, value}`` batches carrying a
+            ``RichHeader``.
+
         """
         ...
 
@@ -472,6 +476,10 @@ class ConformanceService(Protocol):
             include_strings: Whether to include a ``label: utf8`` column.
             include_floats: Whether to include a ``score: float64`` column.
 
+        Returns:
+            A producer stream whose batch schema is determined by
+            ``include_strings`` / ``include_floats``, carrying a ``RichHeader``.
+
         """
         ...
 
@@ -485,6 +493,10 @@ class ConformanceService(Protocol):
         Args:
             seed: Determines all header field values deterministically.
             factor: Multiplier applied to input values.
+
+        Returns:
+            An exchange stream that scales input values by ``factor``, carrying
+            a ``RichHeader``.
 
         """
         ...

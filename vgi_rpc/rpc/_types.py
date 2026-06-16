@@ -480,6 +480,9 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
     def __iter__(self) -> Iterator[AnnotatedBatch]:
         """Iterate over output batches (client-side stub for producer streams).
 
+        Returns:
+            An iterator over output batches (on the server-side implementation).
+
         Raises:
             NotImplementedError: Always — this is a server-side type.
                 Use ``StreamSession`` on the client.
@@ -489,6 +492,9 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
 
     def __enter__(self) -> Self:
         """Enter context manager (client-side stub for exchange streams).
+
+        Returns:
+            The stream context (on the server-side implementation).
 
         Raises:
             NotImplementedError: Always — this is a server-side type.
@@ -505,6 +511,11 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
     ) -> None:
         """Exit context manager (client-side stub).
 
+        Args:
+            exc_type: Exception type if the context exited via an exception.
+            exc_val: Exception instance if the context exited via an exception.
+            exc_tb: Traceback if the context exited via an exception.
+
         Raises:
             NotImplementedError: Always — this is a server-side type.
 
@@ -517,6 +528,10 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
         Args:
             input: The input batch to send.
 
+        Returns:
+            The output batch for the given input (on the server-side
+            implementation).
+
         Raises:
             NotImplementedError: Always — this is a server-side type.
                 Use ``StreamSession`` on the client.
@@ -526,6 +541,9 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
 
     def tick(self) -> AnnotatedBatch:
         """Send a tick and receive output (client-side stub for producer streams).
+
+        Returns:
+            The next output batch (on the server-side implementation).
 
         Raises:
             NotImplementedError: Always — this is a server-side type.
@@ -704,6 +722,11 @@ def _validate_protocol_params(protocol: type, method_name: str, sig: inspect.Sig
     so all parameters must be passable as keyword arguments. This rejects
     positional-only, ``*args``, and ``**kwargs`` parameters.
 
+    Args:
+        protocol: The Protocol class being introspected.
+        method_name: Name of the method whose parameters are validated.
+        sig: The method's resolved signature.
+
     Raises:
         TypeError: If any parameter uses an unsupported kind.
 
@@ -831,6 +854,11 @@ def _validate_implementation(
     implementation, is callable, and has a compatible parameter list.
     The special ``ctx`` parameter is allowed on implementations
     even when not present in the protocol.
+
+    Args:
+        protocol: The Protocol class defining the contract.
+        implementation: The object expected to implement the protocol.
+        methods: Introspected method metadata keyed by method name.
 
     Raises:
         TypeError: If one or more validation errors are found.  The

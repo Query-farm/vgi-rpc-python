@@ -2071,6 +2071,12 @@ def parse_device_code_client_secret(www_authenticate: str) -> str | None:
 def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
     """Parse a JSON dict into an ``OAuthResourceMetadataResponse``.
 
+    Args:
+        body: Decoded JSON object from the resource-metadata response.
+
+    Returns:
+        The parsed ``OAuthResourceMetadataResponse``.
+
     Raises:
         ValueError: If required fields (``resource``, ``authorization_servers``)
             are missing from the JSON.

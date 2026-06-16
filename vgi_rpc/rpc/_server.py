@@ -120,6 +120,12 @@ def _truncate_error_message(exc: BaseException | None, limit: int = _ACCESS_LOG_
 def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc: BaseException) -> str:
     """Log an RPC method error and return the exception class name.
 
+    Args:
+        protocol_name: Name of the Protocol the method belongs to.
+        method_name: Name of the method that raised.
+        server_id: Identifier of the server handling the call.
+        exc: The exception raised by the method.
+
     Returns:
         The exception class name (for use as ``error_type``).
 

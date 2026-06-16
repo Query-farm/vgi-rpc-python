@@ -66,6 +66,13 @@ class _HttpRpcApp:
     def _resolve_method(self, req: falcon.Request, method: str) -> RpcMethodInfo:
         """Validate content type and resolve method info.
 
+        Args:
+            req: The incoming Falcon request.
+            method: The RPC method name from the request path.
+
+        Returns:
+            The resolved ``RpcMethodInfo`` for the requested method.
+
         Raises:
             _RpcHttpError: If content type is wrong or method is unknown.
 

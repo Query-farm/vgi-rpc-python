@@ -82,9 +82,10 @@ class Message:
     and transmitted to the client as zero-row batches with log metadata.
 
     Attributes:
-        level: Severity level indicating the nature of the message.
-        message: Human-readable log message text.
-        extra: Additional arbitrary key-value pairs to include in the JSON output.
+        MAX_TRACEBACK_CHARS: Maximum character length for formatted tracebacks
+            before truncation.
+        MAX_TRACEBACK_FRAMES: Maximum number of stack frames to include in
+            structured frame data.
 
     """
 
@@ -92,13 +93,18 @@ class Message:
     __hash__ = None  # type: ignore[assignment]  # Unhashable since we define __eq__
 
     MAX_TRACEBACK_CHARS: ClassVar[int] = 16_000
-    """Maximum character length for formatted tracebacks before truncation."""
-
     MAX_TRACEBACK_FRAMES: ClassVar[int] = 5
-    """Maximum number of stack frames to include in structured frame data."""
 
     def __init__(self, level: Level, message: str, **kwargs: object) -> None:
-        """Create a log message with level, message text, and optional extras."""
+        """Create a log message with level, message text, and optional extras.
+
+        Args:
+            level: Severity level indicating the nature of the message.
+            message: Human-readable log message text.
+            **kwargs: Additional arbitrary key-value pairs included as
+                structured extra data in the JSON output.
+
+        """
         self.level = level
         self.message = message
         self.extra: dict[str, object] | None = kwargs or None

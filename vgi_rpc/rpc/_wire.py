@@ -355,6 +355,16 @@ def _read_request(
     bytes are fetched and the inner batch's columns are used to extract
     kwargs (the dispatch metadata always comes from the outer batch).
 
+    Args:
+        reader_stream: Stream to read the request IPC bytes from.
+        ipc_validation: Validation level applied to the incoming IPC stream.
+        external_config: External-location config for resolving pointer
+            batches, or ``None`` to disable resolution.
+
+    Returns:
+        ``(method_name, kwargs)`` — the dispatched method name and its
+        decoded keyword arguments.
+
     Raises:
         RpcError: If ``vgi_rpc.method`` is missing or if the request
             batch has a non-empty schema but ``num_rows != 1``.
@@ -442,6 +452,13 @@ def _flush_collector(
     shm: ShmSegment | None = None,
 ) -> int:
     """Write all accumulated batches from an OutputCollector to an IPC stream writer.
+
+    Args:
+        writer: IPC stream writer to write the accumulated batches to.
+        out: Collector holding the batches to flush.
+        external_config: External-location config for offloading large
+            batches, or ``None`` to keep everything inline.
+        shm: Shared-memory segment for zero-copy transfer, or ``None``.
 
     Returns:
         Bytes of payload uploaded to external storage during this flush.

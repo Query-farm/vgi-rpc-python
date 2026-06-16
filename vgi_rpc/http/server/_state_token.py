@@ -301,6 +301,10 @@ def _resolve_state_cls(
 ) -> tuple[type[StreamState], bytes]:
     """Resolve the concrete state class from token state bytes.
 
+    Args:
+        data: Raw token state bytes.
+        state_info: Metadata describing the stream's state class.
+
     Returns:
         ``(state_cls, raw_state_bytes)``
 

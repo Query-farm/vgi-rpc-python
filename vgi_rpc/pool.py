@@ -160,16 +160,6 @@ class WorkerPool:
     to *max_idle* globally.  A daemon reaper thread evicts workers that
     exceed *idle_timeout*.
 
-    Args:
-        max_idle: Global cap on idle workers across all commands.
-        idle_timeout: Seconds before an idle worker is evicted.
-        stderr: How to handle child process stderr.
-        stderr_logger: Logger for ``StderrMode.PIPE`` output.
-        shm_size: If set, each ``connect()`` call creates an isolated
-            :class:`~vgi_rpc.shm.ShmSegment` of this size (in bytes)
-            for zero-copy data transfer.  The segment is destroyed
-            automatically when the borrow ends.
-
     """
 
     def __init__(
@@ -180,7 +170,19 @@ class WorkerPool:
         stderr_logger: logging.Logger | None = None,
         shm_size: int | None = None,
     ) -> None:
-        """Initialize the pool with the given configuration."""
+        """Initialize the pool with the given configuration.
+
+        Args:
+            max_idle: Global cap on idle workers across all commands.
+            idle_timeout: Seconds before an idle worker is evicted.
+            stderr: How to handle child process stderr.
+            stderr_logger: Logger for ``StderrMode.PIPE`` output.
+            shm_size: If set, each ``connect()`` call creates an isolated
+                :class:`~vgi_rpc.shm.ShmSegment` of this size (in bytes)
+                for zero-copy data transfer.  The segment is destroyed
+                automatically when the borrow ends.
+
+        """
         if max_idle < 0:
             raise ValueError(f"max_idle must be non-negative, got {max_idle}")
         if idle_timeout <= 0:

@@ -878,6 +878,9 @@ def _get_service_description(
 ) -> tuple[ServiceDescription, RpcTransport | None]:
     """Get ServiceDescription from configured transport.
 
+    Args:
+        config: Resolved CLI configuration identifying the target service.
+
     Returns:
         A tuple of (description, transport). The transport is non-None only
         for pipe/subprocess/unix transports, where it is left open for reuse

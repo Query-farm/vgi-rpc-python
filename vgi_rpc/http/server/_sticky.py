@@ -126,7 +126,15 @@ def _open_session_token(
     token_key: bytes,
     aad: bytes,
 ) -> tuple[str, bytes, int]:
-    """Open a session token. Returns ``(server_id, session_id, expires_at)``.
+    """Open a session token.
+
+    Args:
+        token: The sealed session token from the ``VGI-Session`` header.
+        token_key: AEAD key used to open the token.
+        aad: Additional authenticated data binding the token to its principal.
+
+    Returns:
+        ``(server_id, session_id, expires_at)``.
 
     Raises:
         SessionLostError: For any malformed, tampered, expired, wrong-key,
@@ -212,7 +220,15 @@ class _SessionRegistry:
         ttl: float | None,
         principal_key: str,
     ) -> tuple[bytes, float]:
-        """Register a session. Returns ``(session_id, expires_at)``.
+        """Register a session.
+
+        Args:
+            state: The session object to register.
+            ttl: Time-to-live in seconds, or ``None`` for the registry default.
+            principal_key: Identity key the session is bound to.
+
+        Returns:
+            ``(session_id, expires_at)``.
 
         Raises:
             ServerDrainingError: If the server is in drain mode.

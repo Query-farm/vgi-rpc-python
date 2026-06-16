@@ -355,6 +355,10 @@ class ShmSegment:
                 peers attaching with the actual ``shm.size`` see a
                 consistent ``data_size`` field.
 
+        Returns:
+            The newly created ``ShmSegment`` with its allocator header
+            initialized.
+
         """
         if size <= HEADER_SIZE:
             raise ValueError(f"Segment size must be > {HEADER_SIZE}, got {size}")
@@ -383,6 +387,9 @@ class ShmSegment:
             track: Whether the resource tracker should track this segment.
                 Set to ``False`` when the caller does not own the segment
                 (e.g. dynamic attachment in a subprocess).
+
+        Returns:
+            A ``ShmSegment`` attached to the existing segment.
 
         """
         shm = SharedMemory(name=name, create=False, size=size, track=track)

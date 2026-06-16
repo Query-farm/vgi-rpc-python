@@ -60,6 +60,12 @@ def _run_unary_sync(
 ) -> tuple[BytesIO, HTTPStatus]:
     """Run a unary method synchronously.
 
+    Args:
+        app: The HTTP RPC application handling the call.
+        method_name: Name of the unary method being invoked.
+        info: Resolved method metadata (schemas, method type).
+        stream: Request body stream carrying the IPC request.
+
     Returns:
         ``(response_buf, http_status)`` — the IPC response stream
         and the HTTP status code to use.

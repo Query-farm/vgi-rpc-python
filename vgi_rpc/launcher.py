@@ -340,6 +340,10 @@ def gc_state_dir(state_dir: Path, *, limit: int | None = None, exclude_hash: str
             the opportunistic in-launch GC to keep work bounded.
         exclude_hash: Skip this hash (the launcher's own entry).
 
+    Returns:
+        A ``GcResult`` listing the hash IDs that were cleaned and those
+        skipped because their lock was held.
+
     """
     cleaned: list[str] = []
     skipped: list[str] = []

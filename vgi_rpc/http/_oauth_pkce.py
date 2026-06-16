@@ -160,6 +160,11 @@ def _unpack_oauth_cookie(
 ) -> tuple[str, str, str, str]:
     """Unpack and verify a signed OAuth session cookie.
 
+    Args:
+        cookie_value: The raw signed cookie value to verify and unpack.
+        session_key: Secret key used to verify the cookie signature.
+        max_age: Maximum cookie age in seconds before it is considered expired.
+
     Returns:
         ``(code_verifier, state_nonce, original_url, return_to)``
 
@@ -271,6 +276,15 @@ def _exchange_code_for_token(
     use_id_token: bool,
 ) -> tuple[str, int, str | None]:
     """Exchange an authorization code for a token.
+
+    Args:
+        token_endpoint: OAuth token endpoint URL.
+        code: Authorization code returned by the provider.
+        redirect_uri: Redirect URI registered for the authorization request.
+        code_verifier: PKCE code verifier matching the earlier challenge.
+        client_id: OAuth client identifier.
+        client_secret: OAuth client secret, or ``None`` for public clients.
+        use_id_token: Whether to return the ID token instead of the access token.
 
     Returns:
         ``(token, max_age_seconds, refresh_token_or_none)``
