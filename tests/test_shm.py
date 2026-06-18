@@ -11,17 +11,29 @@ import struct
 import sys
 import threading
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Protocol
 
 import pyarrow as pa
 import pytest
 from pyarrow import ipc
 
-from vgi_rpc.metadata import LOG_LEVEL_KEY, SHM_LENGTH_KEY, SHM_OFFSET_KEY, SHM_SOURCE_KEY
+from vgi_rpc.metadata import (
+    LOG_LEVEL_KEY,
+    REQUEST_VERSION,
+    REQUEST_VERSION_KEY,
+    RPC_METHOD_KEY,
+    SHM_LENGTH_KEY,
+    SHM_OFFSET_KEY,
+    SHM_SEGMENT_NAME_KEY,
+    SHM_SEGMENT_SIZE_KEY,
+    SHM_SOURCE_KEY,
+)
 from vgi_rpc.rpc import (
     AnnotatedBatch,
     CallContext,
     OutputCollector,
+    RpcError,
     RpcServer,
     ShmPipeTransport,
     Stream,
@@ -29,6 +41,7 @@ from vgi_rpc.rpc import (
     _RpcProxy,
     make_pipe_pair,
 )
+from vgi_rpc.rpc._wire import _read_request
 from vgi_rpc.shm import (
     HEADER_SIZE,
     MAX_ALLOCS,
@@ -728,6 +741,73 @@ class TestShmIntegration:
             assert result == 3
             client.close()
             thread.join(timeout=5)
+        finally:
+            _cleanup_shm(shm)
+
+    def test_read_request_resolves_shm_pointer_batch(self) -> None:
+        """A shm-pointer *request* batch is resolved before kwargs are decoded.
+
+        Cross-language regression: the C++ client routes a large single-row
+        request batch through the shm side channel (sending a 0-row pointer
+        inline), whereas Python's ``_write_request`` keeps the request inline —
+        so no Python end-to-end test exercised this path. Before the fix,
+        ``_read_request`` resolved only external-location pointers, so a
+        shm-routed request hit the ``num_rows != 1`` guard and failed with
+        ``Expected 1 row in request batch, got 0`` (the exact error seen on the
+        shm CI lane — accumulate / table_buffering, whose ``request: binary``
+        blobs cross the threshold). Build the pointer batch the way the C++
+        client does (``maybe_write_to_shm``, with the segment named in the
+        metadata) and assert it resolves both ways — static segment and dynamic
+        attach — and still fails with neither.
+        """
+        shm = ShmSegment.create(1024 * 1024)
+        try:
+            params_schema = pa.schema([("request", pa.binary())])
+            payload = b"serialized-request-blob"
+            batch = pa.RecordBatch.from_arrays([pa.array([payload], pa.binary())], schema=params_schema)
+            # Mirror the client wire: method + version + the client-owned
+            # segment's name/size (so the dynamic path can attach) all ride on
+            # the pointer batch's metadata.
+            dispatch_md = pa.KeyValueMetadata(
+                {
+                    RPC_METHOD_KEY: b"do_thing",
+                    REQUEST_VERSION_KEY: REQUEST_VERSION,
+                    SHM_SEGMENT_NAME_KEY: shm.name.encode(),
+                    SHM_SEGMENT_SIZE_KEY: str(shm.size).encode(),
+                }
+            )
+
+            def _pointer_stream() -> BytesIO:
+                # Fresh allocation each call: resolving frees the region, so a
+                # reused pointer would dangle.
+                ptr_batch, ptr_cm = maybe_write_to_shm(batch, dispatch_md, shm)
+                assert is_shm_pointer_batch(ptr_batch, ptr_cm), "request batch should have routed through shm"
+                sink = BytesIO()
+                with ipc.new_stream(sink, ptr_batch.schema) as writer:
+                    writer.write_batch(ptr_batch, custom_metadata=ptr_cm)
+                return BytesIO(sink.getvalue())
+
+            # Static ShmPipeTransport segment, passed straight in.
+            method_name, kwargs = _read_request(_pointer_stream(), shm=shm)
+            assert method_name == "do_thing"
+            assert kwargs == {"request": payload}
+
+            # Dynamic pipe / Unix-socket path: attach the client-owned segment
+            # named in the request metadata (as serve_one's _maybe_attach_shm does).
+            def _attach(md: pa.KeyValueMetadata | None) -> ShmSegment:
+                assert md is not None
+                name = md.get(SHM_SEGMENT_NAME_KEY)
+                size = md.get(SHM_SEGMENT_SIZE_KEY)
+                assert name is not None and size is not None
+                return ShmSegment.attach(name.decode(), int(size), track=False)
+
+            method_name, kwargs = _read_request(_pointer_stream(), attach_shm=_attach)
+            assert method_name == "do_thing"
+            assert kwargs == {"request": payload}
+
+            # With neither, the 0-row pointer trips the single-row guard.
+            with pytest.raises(RpcError, match="Expected 1 row in request batch, got 0"):
+                _read_request(_pointer_stream())
         finally:
             _cleanup_shm(shm)
 

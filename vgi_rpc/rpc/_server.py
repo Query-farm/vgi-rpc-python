@@ -26,6 +26,7 @@ from vgi_rpc.metadata import (
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
     SERVER_ID_KEY,
+    SHM_OFFSET_KEY,
     SHM_SEGMENT_NAME_KEY,
     SHM_SEGMENT_SIZE_KEY,
     parse_version,
@@ -302,6 +303,46 @@ def _maybe_attach_shm(
         _logger.warning("Ignoring malformed SHM metadata: name=%r, size=%r", shm_name_bytes, shm_size_bytes)
         return None
     return ShmSegment.attach(shm_name, shm_size, track=False)
+
+
+class _ConnectionShm:
+    """Per-connection cache of a client-advertised SHM segment.
+
+    A client names its segment once — in an early request's metadata — then
+    routes later batches (request *and* data) through it carrying only an
+    offset/length, no name (the C++ extension does this; the Python client
+    happens to re-advertise the name every request, so it never needed the
+    cache). The worker attaches on first sight and reuses the attachment for
+    the connection's lifetime, which :meth:`RpcServer.serve` closes at the end.
+    Without this, a later offset-only pointer request can't be resolved and
+    trips the ``num_rows != 1`` guard in ``_read_request``.
+    """
+
+    __slots__ = ("name", "segment")
+
+    def __init__(self) -> None:
+        self.segment: ShmSegment | None = None
+        self.name: bytes | None = None
+
+    def refresh(self, req_md: pa.KeyValueMetadata | None, transport_kind: TransportKind | None) -> None:
+        """Attach and cache the segment named in *req_md* when it first appears or changes."""
+        name = req_md.get(SHM_SEGMENT_NAME_KEY) if req_md is not None else None
+        if name is None or name == self.name:
+            return
+        new = _maybe_attach_shm(req_md, transport_kind)
+        if new is None:
+            return
+        self.close()
+        self.segment = new
+        self.name = name
+
+    def close(self) -> None:
+        """Detach the cached segment, if any."""
+        if self.segment is not None:
+            with contextlib.suppress(BufferError):
+                self.segment.close()
+        self.segment = None
+        self.name = None
 
 
 # ---------------------------------------------------------------------------
@@ -636,27 +677,34 @@ class RpcServer:
         else:
             kind = TransportKind.PIPE
         self._notify_transport(kind, capabilities)
-        while True:
-            try:
-                self.serve_one(transport)
-            except (EOFError, StopIteration):
-                break
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                _logger.debug(
-                    "serve loop ending due to broken pipe",
-                    exc_info=True,
-                    extra={"server_id": self._server_id},
-                )
-                break
-            except pa.ArrowInvalid:
-                _logger.warning(
-                    "serve loop ending due to ArrowInvalid",
-                    exc_info=True,
-                    extra={"server_id": self._server_id},
-                )
-                break
+        # Cache the client's dynamically-advertised SHM segment for the life of
+        # the connection so later offset-only request/data batches resolve
+        # against it (see _ConnectionShm).
+        conn_shm = _ConnectionShm()
+        try:
+            while True:
+                try:
+                    self.serve_one(transport, shm_cache=conn_shm)
+                except (EOFError, StopIteration):
+                    break
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    _logger.debug(
+                        "serve loop ending due to broken pipe",
+                        exc_info=True,
+                        extra={"server_id": self._server_id},
+                    )
+                    break
+                except pa.ArrowInvalid:
+                    _logger.warning(
+                        "serve loop ending due to ArrowInvalid",
+                        exc_info=True,
+                        extra={"server_id": self._server_id},
+                    )
+                    break
+        finally:
+            conn_shm.close()
 
-    def serve_one(self, transport: RpcTransport) -> None:
+    def serve_one(self, transport: RpcTransport, *, shm_cache: _ConnectionShm | None = None) -> None:
         """Handle a single RPC call (any method type) over the given transport.
 
         Protocol-level errors (``VersionError``, ``RpcError`` from missing
@@ -666,6 +714,10 @@ class RpcServer:
         Args:
             transport: The transport to read the request from and write the
                 response to.
+            shm_cache: Per-connection SHM segment cache supplied by
+                :meth:`serve`. When ``None`` (e.g. a direct ``serve_one``
+                call), a client-advertised segment is attached and detached
+                per call instead of being cached across requests.
 
         Raises:
             pa.ArrowInvalid: If the incoming data is not valid Arrow IPC.
@@ -682,7 +734,20 @@ class RpcServer:
         dynamic_shm: ShmSegment | None = None
         try:
             try:
-                method_name, kwargs = _read_request(transport.reader, self._ipc_validation, self._external_config)
+                # A client may route the (single-row) request batch through the
+                # shm side channel. Resolve it with the static ShmPipeTransport
+                # segment if present, else the connection-cached segment a prior
+                # request advertised, else (cache empty) let _read_request attach
+                # the segment named in this request's own metadata.
+                static_shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
+                cached_shm = shm_cache.segment if shm_cache is not None else None
+                method_name, kwargs = _read_request(
+                    transport.reader,
+                    self._ipc_validation,
+                    self._external_config,
+                    shm=static_shm or cached_shm,
+                    attach_shm=lambda md: _maybe_attach_shm(md, self._transport_kind),
+                )
             except pa.ArrowInvalid as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
                     _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
@@ -755,12 +820,31 @@ class RpcServer:
                 _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
                 return
 
-            # Determine SHM segment: prefer transport-level, fall back to request metadata.
-            # ``_maybe_attach_shm`` rejects the dynamic path for HTTP — defence-in-depth
-            # since HTTP doesn't currently invoke ``serve_one``.
+            # Determine the SHM segment for this call's data plane (resolving
+            # input batches, routing output/response batches). Prefer the
+            # transport-level segment; else the connection cache, refreshed from
+            # any segment name this request advertised; else — when no cache is
+            # wired — a per-call attach. ``_maybe_attach_shm`` rejects the
+            # dynamic path for HTTP (defence-in-depth; HTTP doesn't invoke
+            # ``serve_one``).
+            #
+            # Crucially, only route the *response* through shm when the client
+            # signalled shm for THIS exchange — it sent the request via a shm
+            # pointer (SHM_OFFSET_KEY) or advertised the segment
+            # (SHM_SEGMENT_NAME_KEY). The C++ client resolves shm responses only
+            # for those methods; for plain inline requests (bind, catalog_*,
+            # transaction_*) it expects an inline response and reports a
+            # shm-routed one as empty.
+            req_md = _current_request_metadata.get()
+            request_used_shm = req_md is not None and (
+                req_md.get(SHM_OFFSET_KEY) is not None or req_md.get(SHM_SEGMENT_NAME_KEY) is not None
+            )
             shm = transport.shm if isinstance(transport, ShmPipeTransport) else None
-            if shm is None:
-                dynamic_shm = _maybe_attach_shm(_current_request_metadata.get(), self._transport_kind)
+            if shm is None and shm_cache is not None:
+                shm_cache.refresh(req_md, self._transport_kind)
+                shm = shm_cache.segment if request_used_shm else None
+            if shm is None and shm_cache is None:
+                dynamic_shm = _maybe_attach_shm(req_md, self._transport_kind)
                 shm = dynamic_shm
 
             if info.method_type == MethodType.UNARY:

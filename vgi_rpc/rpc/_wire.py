@@ -64,7 +64,7 @@ from vgi_rpc.rpc._types import (
     RpcMethodInfo,
     _unwrap_annotated,
 )
-from vgi_rpc.shm import ShmSegment, maybe_write_to_shm, resolve_shm_batch
+from vgi_rpc.shm import ShmSegment, is_shm_pointer_batch, maybe_write_to_shm, resolve_shm_batch
 from vgi_rpc.utils import (
     ArrowSerializableDataclass,
     IpcValidation,
@@ -346,6 +346,8 @@ def _read_request(
     reader_stream: IOBase,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     external_config: ExternalLocationConfig | None = None,
+    shm: ShmSegment | None = None,
+    attach_shm: Callable[[pa.KeyValueMetadata | None], ShmSegment | None] | None = None,
 ) -> tuple[str, dict[str, object]]:
     """Read a request IPC stream, return (method_name, kwargs).
 
@@ -355,11 +357,27 @@ def _read_request(
     bytes are fetched and the inner batch's columns are used to extract
     kwargs (the dispatch metadata always comes from the outer batch).
 
+    A client may also route the single-row request batch through the
+    shared-memory side channel — it arrives as a 0-row pointer batch whose
+    metadata names the segment.  *shm* resolves it for a static
+    :class:`ShmPipeTransport`; *attach_shm* resolves it for the dynamic
+    pipe / Unix-socket path, where the segment is client-owned and named in
+    this request's own metadata (the worker attaches, reads the request
+    back, then releases its region and detaches).
+
     Args:
         reader_stream: Stream to read the request IPC bytes from.
         ipc_validation: Validation level applied to the incoming IPC stream.
         external_config: External-location config for resolving pointer
             batches, or ``None`` to disable resolution.
+        shm: Pre-attached shared-memory segment (a static
+            :class:`ShmPipeTransport`'s) for resolving a pointer request
+            batch, or ``None``.
+        attach_shm: Callback that attaches a client-owned segment named in
+            the request metadata (typically :func:`_maybe_attach_shm` bound
+            to the transport kind), or ``None`` to disable dynamic attach.
+            Used only when *shm* is ``None`` and the request is a shm
+            pointer; the segment it returns is detached before returning.
 
     Returns:
         ``(method_name, kwargs)`` — the dispatched method name and its
@@ -426,15 +444,38 @@ def _read_request(
     # always taken from the outer batch above.
     if external_config is not None:
         batch, _ = resolve_external_location(batch, custom_metadata, external_config)
-    if len(batch.schema) > 0 and batch.num_rows != 1:
-        raise RpcError(
-            "ProtocolError",
-            f"Expected 1 row in request batch, got {batch.num_rows}. "
-            f"Each parameter is a column (not a row). The batch should have exactly 1 row with schema "
-            f"{fmt_schema(batch.schema)}.",
-            "",
-        )
-    kwargs = {f.name: batch.column(i)[0].as_py() for i, f in enumerate(batch.schema)}
+    # Resolve a shared-memory pointer request batch back to its real columns.
+    # A client (e.g. the C++ extension) may route the single-row request batch
+    # through the shm side channel above a size threshold, so the inline batch
+    # arrives 0-row; mirror the data-batch path that already calls
+    # resolve_shm_batch. Use the static transport segment when present,
+    # otherwise attach the client-owned segment named in this request's own
+    # metadata (the dynamic pipe / Unix-socket path). ``release_shm`` frees the
+    # region once kwargs are materialised (``.as_py()`` copies the values out,
+    # so the region is then dead); a segment we attached here is detached too.
+    release_shm: Callable[[], None] | None = None
+    owned_shm: ShmSegment | None = None
+    request_shm = shm
+    if request_shm is None and attach_shm is not None and is_shm_pointer_batch(batch, custom_metadata):
+        request_shm = owned_shm = attach_shm(custom_metadata)
+    try:
+        if request_shm is not None:
+            batch, _, release_shm = resolve_shm_batch(batch, custom_metadata, request_shm)
+        if len(batch.schema) > 0 and batch.num_rows != 1:
+            raise RpcError(
+                "ProtocolError",
+                f"Expected 1 row in request batch, got {batch.num_rows}. "
+                f"Each parameter is a column (not a row). The batch should have exactly 1 row with schema "
+                f"{fmt_schema(batch.schema)}.",
+                "",
+            )
+        kwargs = {f.name: batch.column(i)[0].as_py() for i, f in enumerate(batch.schema)}
+    finally:
+        if release_shm is not None:
+            release_shm()
+        if owned_shm is not None:
+            with contextlib.suppress(BufferError):
+                owned_shm.close()
     if wire_request_logger.isEnabledFor(logging.DEBUG):
         wire_request_logger.debug(
             "Parsed request: method=%s, kwargs={%s}",
