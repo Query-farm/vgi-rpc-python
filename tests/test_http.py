@@ -21,10 +21,10 @@ import falcon.testing
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from aioresponses import CallbackResult
-from aioresponses import aioresponses as aioresponses_ctx
 from pyarrow import ipc
 
+from tests._aiomock import CallbackResult, aiointercept
+from tests._aiomock import mock_aiohttp as aiointercept_ctx
 from vgi_rpc.external import (
     ExternalLocationConfig,
     UploadUrl,
@@ -750,7 +750,7 @@ class TestHttpExternalStorage:
         server = RpcServer(_ExternalService, _ExternalServiceImpl(), external_location=config)
         return make_sync_client(server, token_key=b"test-key")
 
-    def _mock_aio_dynamic(self, storage: MockStorage, mock: aioresponses_ctx) -> None:
+    def _mock_aio_dynamic(self, storage: MockStorage, mock: aiointercept) -> None:
         """Register pattern-based HEAD + GET callbacks that serve from MockStorage dynamically."""
         pattern = re.compile(r"^https://mock\.storage/.*$")
 
@@ -778,7 +778,7 @@ class TestHttpExternalStorage:
         config = self._make_config(storage, threshold=10)
         client = self._make_client(config)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(_ExternalService, client=client, external_location=config) as proxy:
                 result = proxy.echo_large(data="x" * 200)
@@ -808,7 +808,7 @@ class TestHttpExternalStorage:
 
         received_logs: list[Message] = []
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(
                 _ExternalService, client=client, on_log=received_logs.append, external_location=config
@@ -830,7 +830,7 @@ class TestHttpExternalStorage:
 
         received_logs: list[Message] = []
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(
                 _ExternalService, client=client, on_log=received_logs.append, external_location=config
@@ -849,7 +849,7 @@ class TestHttpExternalStorage:
         config = self._make_config(storage, threshold=100)
         client = self._make_client(config)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(_ExternalService, client=client, external_location=config) as proxy:
                 bidi = proxy.bidi_large(factor=2.0)
@@ -871,7 +871,7 @@ class TestHttpExternalStorage:
         config = self._make_config(storage, threshold=100)
         client = self._make_client(config)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(_ExternalService, client=client, external_location=config) as proxy:
                 bidi = proxy.bidi_large(factor=3.0)
@@ -919,7 +919,7 @@ class TestHttpExternalSHA256:
         server = RpcServer(_ExternalService, _ExternalServiceImpl(), external_location=config)
         return make_sync_client(server, token_key=b"test-key")
 
-    def _mock_aio_dynamic(self, storage: MockStorage, mock: aioresponses_ctx) -> None:
+    def _mock_aio_dynamic(self, storage: MockStorage, mock: aiointercept) -> None:
         """Register pattern-based HEAD + GET callbacks."""
         pattern = re.compile(r"^https://mock\.storage/.*$")
 
@@ -949,7 +949,7 @@ class TestHttpExternalSHA256:
         config = self._make_config(storage, threshold=10)
         client = self._make_client(config)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(_ExternalService, client=client, external_location=config) as proxy:
                 result = proxy.echo_large(data="x" * 200)
@@ -969,7 +969,7 @@ class TestHttpExternalSHA256:
         config = self._make_config(storage, threshold=10)
         client = self._make_client(config)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(_ExternalService, client=client, external_location=config) as proxy:
                 result = proxy.echo_large(data="hello world " * 50)
@@ -999,7 +999,7 @@ class TestHttpExternalSHA256:
         pointer, cm = make_external_location_batch(schema, url, sha256="0" * 64)
 
         with (
-            aioresponses_ctx() as mock,
+            aiointercept_ctx() as mock,
             pytest.raises(RuntimeError, match="SHA-256 checksum mismatch"),
         ):
             self._mock_aio_dynamic(storage, mock)
@@ -1013,7 +1013,7 @@ class TestHttpExternalSHA256:
 
         received_logs: list[Message] = []
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
             with http_connect(
                 _ExternalService, client=client, on_log=received_logs.append, external_location=config

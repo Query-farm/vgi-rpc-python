@@ -19,10 +19,10 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 import zstandard
-from aioresponses import CallbackResult
-from aioresponses import aioresponses as aioresponses_ctx
 from pyarrow import ipc
 
+from tests._aiomock import CallbackResult, aiointercept
+from tests._aiomock import mock_aiohttp as aiointercept_ctx
 from vgi_rpc.external import (
     Compression,
     ExternalLocationConfig,
@@ -66,7 +66,7 @@ _SCHEMA = pa.schema([pa.field("value", pa.int64())])
 class MockStorage(ExternalStorage):
     """In-memory ExternalStorage for testing.
 
-    Uses ``https://`` URLs so aioresponses can intercept them.
+    Uses ``https://`` URLs so aiointercept can intercept them.
     """
 
     def __init__(self) -> None:
@@ -95,10 +95,10 @@ class MockStorage(ExternalStorage):
 
 
 @contextmanager
-def _mock_aio(storage: MockStorage, *, content_encoding: str | None = None) -> Iterator[aioresponses_ctx]:
-    """Context manager that registers all MockStorage URLs in aioresponses."""
+def _mock_aio(storage: MockStorage, *, content_encoding: str | None = None) -> Iterator[aiointercept]:
+    """Context manager that registers all MockStorage URLs in aiointercept."""
     enc = content_encoding or storage.last_content_encoding
-    with aioresponses_ctx() as mock:
+    with aiointercept_ctx() as mock:
         for url, body in storage.data.items():
             head_headers: dict[str, str] = {"Content-Length": str(len(body))}
             get_headers: dict[str, str] = {"Content-Length": str(len(body))}
@@ -352,7 +352,7 @@ class TestResolveExternalLocation:
 
         pointer, cm = make_external_location_batch(_SCHEMA, url)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             # First attempt: HEAD ok, GET fails; second attempt: HEAD ok, GET succeeds
             mock.head(url, headers={"Content-Length": str(len(ipc_bytes))})
             mock.get(url, exception=aiohttp.ClientConnectionError("transient failure"))
@@ -371,7 +371,7 @@ class TestResolveExternalLocation:
         pointer, cm = make_external_location_batch(_SCHEMA, url)
 
         with (
-            aioresponses_ctx() as mock,
+            aiointercept_ctx() as mock,
             pytest.raises(RuntimeError, match="Failed to resolve"),
         ):
             # Both attempts: HEAD fails with connection error
@@ -1039,7 +1039,7 @@ class _ExternalServiceImpl:
         )
 
 
-def _mock_aio_dynamic(storage: MockStorage, mock: aioresponses_ctx, *, content_encoding: str | None = None) -> None:
+def _mock_aio_dynamic(storage: MockStorage, mock: aiointercept, *, content_encoding: str | None = None) -> None:
     """Register pattern-based HEAD + GET callbacks that serve from MockStorage dynamically."""
     pattern = re.compile(r"^https://mock\.storage/.*$")
     enc = content_encoding or storage.last_content_encoding
@@ -1087,7 +1087,7 @@ class TestPipeIntegration:
         storage = MockStorage()
         config = self._make_config(storage, threshold=10)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock)
             with serve_pipe(
                 _ExternalService,
@@ -1121,7 +1121,7 @@ class TestPipeIntegration:
 
         received_logs: list[Message] = []
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock)
             with serve_pipe(
                 _ExternalService,
@@ -1145,7 +1145,7 @@ class TestPipeIntegration:
 
         received_logs: list[Message] = []
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock)
             with serve_pipe(
                 _ExternalService,
@@ -1165,7 +1165,7 @@ class TestPipeIntegration:
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock)
             with serve_pipe(
                 _ExternalService,
@@ -1189,7 +1189,7 @@ class TestPipeIntegration:
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock)
             with serve_pipe(
                 _ExternalService,
@@ -1328,7 +1328,7 @@ class TestExternalDisabled:
 class TestS3Storage:
     """Tests for S3Storage with moto mock.
 
-    Uses moto's mock_aws for S3 operations and aioresponses to intercept
+    Uses moto's mock_aws for S3 operations and aiointercept to intercept
     fetches, reading back from moto's mock S3.
     """
 
@@ -1373,7 +1373,7 @@ class TestS3Storage:
             externalize_threshold_bytes=10,
         )
 
-        # Helper to read objects from moto's mock S3 for aioresponses
+        # Helper to read objects from moto's mock S3 for aiointercept
         def _s3_callback(url_: Any, **kwargs: Any) -> CallbackResult:
             parsed = urlparse(str(url_))
             key = parsed.path.lstrip("/")
@@ -1388,7 +1388,7 @@ class TestS3Storage:
             body: bytes = resp["Body"].read()
             return CallbackResult(status=200, headers={"Content-Length": str(len(body))})
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             pattern = re.compile(r"^https://.*test-bucket.*$")
             for _ in range(10):
                 mock.head(pattern, callback=_s3_head_callback)
@@ -1485,7 +1485,7 @@ class TestGCSStorage:
         assert call_kwargs.kwargs["method"] == "GET"
 
     def test_full_roundtrip(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
-        """Full round-trip with mocked GCS + aioresponses."""
+        """Full round-trip with mocked GCS + aiointercept."""
         from vgi_rpc.gcs import GCSStorage
 
         _, _, _, mock_blob = _gcs_mocks
@@ -1507,7 +1507,7 @@ class TestGCSStorage:
         assert ext_batch.num_rows == 0
         assert ext_cm is not None
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             body = uploaded["data"]
             mock.head(
                 "https://storage.googleapis.com/test",
@@ -1620,7 +1620,7 @@ class TestFetchConfigIntegration:
 
         pointer, cm = make_external_location_batch(_SCHEMA, url)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             mock.head(url, headers={"Content-Length": str(len(ipc_bytes))})
             mock.get(url, body=ipc_bytes, headers={"Content-Length": str(len(ipc_bytes))})
 
@@ -1669,7 +1669,7 @@ class TestFetchConfigIntegration:
                     )
             return CallbackResult(status=200, body=ipc_bytes)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             mock.head(
                 url,
                 headers={"Content-Length": str(len(ipc_bytes)), "Accept-Ranges": "bytes"},
@@ -1858,7 +1858,7 @@ class TestPipeIntegrationCompressed:
         storage = MockStorage()
         config = self._make_config(storage, threshold=10)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock, content_encoding="zstd")
             with serve_pipe(
                 _ExternalService,
@@ -1880,7 +1880,7 @@ class TestPipeIntegrationCompressed:
 
         received_logs: list[Message] = []
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock, content_encoding="zstd")
             with serve_pipe(
                 _ExternalService,
@@ -1900,7 +1900,7 @@ class TestPipeIntegrationCompressed:
         storage = MockStorage()
         config = self._make_config(storage, threshold=100)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock, content_encoding="zstd")
             with serve_pipe(
                 _ExternalService,
@@ -1984,7 +1984,7 @@ class TestStreamHeaderExternalization:
         storage = MockStorage()
         config = self._make_config(storage, threshold=10)
 
-        with aioresponses_ctx() as mock:
+        with aiointercept_ctx() as mock:
             _mock_aio_dynamic(storage, mock)
             with serve_pipe(
                 _HeaderExternalService,

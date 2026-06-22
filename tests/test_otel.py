@@ -14,7 +14,6 @@ from typing import Protocol, cast
 
 import pyarrow as pa
 import pytest
-from aioresponses import aioresponses as aioresponses_ctx
 from opentelemetry.metrics import MeterProvider
 from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -25,6 +24,8 @@ from opentelemetry.trace import SpanKind, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pyarrow import ipc
 
+from tests._aiomock import aiointercept
+from tests._aiomock import mock_aiohttp as aiointercept_ctx
 from vgi_rpc.external import (
     ExternalLocationConfig,
     ExternalStorage,
@@ -1070,9 +1071,9 @@ def _serialize_ipc(
 
 
 @contextmanager
-def _mock_aio(storage: _MockStorage) -> Iterator[aioresponses_ctx]:
-    """Register all MockStorage URLs in aioresponses."""
-    with aioresponses_ctx() as mock:
+def _mock_aio(storage: _MockStorage) -> Iterator[aiointercept]:
+    """Register all MockStorage URLs in aiointercept."""
+    with aiointercept_ctx() as mock:
         for url, body in storage.data.items():
             headers = {"Content-Length": str(len(body))}
             mock.head(url, headers=headers)
@@ -1202,9 +1203,9 @@ class TestExternalOtel:
             fetch_config=FetchConfig(parallel_threshold_bytes=999999),
         )
 
-        with aioresponses_ctx() as mock:
-            mock.head(url, exception=OSError("connection refused"))
-            mock.get(url, exception=OSError("connection refused"))
+        with aiointercept_ctx() as mock:
+            mock.head(url, exception=True)
+            mock.get(url, exception=True)
             with pytest.raises(RuntimeError, match="Failed to resolve"):
                 resolve_external_location(pointer, cm, config)
 

@@ -12,13 +12,6 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
-    # Hold aiohttp below 3.14: it added a required ClientResponse.stream_writer
-    # kwarg that breaks aioresponses 0.7.8 (latest), failing the external/fetch
-    # test suites. Drop this ignore (and lift the pyproject cap) once
-    # aioresponses ships a 3.14-compatible release.
-    ignore:
-      - dependency-name: "aiohttp"
-        versions: [">=3.14"]
     # Roll all non-breaking bumps into a single weekly PR to keep noise down;
     # major bumps still open as individual PRs so they get reviewed on their own.
     groups:
