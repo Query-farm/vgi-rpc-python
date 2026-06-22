@@ -1543,6 +1543,28 @@ class TestUploadUrlEndpoint:
             default_headers=default_headers,
         )
 
+    def test_public_upload_url_contract_is_exported(self) -> None:
+        """The __upload_url__ wire contract is public so intermediaries needn't copy it."""
+        from vgi_rpc.http import (
+            MAX_UPLOAD_URL_COUNT,
+            UPLOAD_URL_METHOD,
+            UPLOAD_URL_PARAMS_SCHEMA,
+            UPLOAD_URL_RESPONSE_SCHEMA,
+        )
+        from vgi_rpc.http._common import (
+            _MAX_UPLOAD_URL_COUNT,
+            _UPLOAD_URL_METHOD,
+            _UPLOAD_URL_PARAMS_SCHEMA,
+            _UPLOAD_URL_SCHEMA,
+        )
+
+        assert UPLOAD_URL_METHOD == _UPLOAD_URL_METHOD == "__upload_url__"
+        assert MAX_UPLOAD_URL_COUNT == _MAX_UPLOAD_URL_COUNT
+        assert UPLOAD_URL_PARAMS_SCHEMA.equals(_UPLOAD_URL_PARAMS_SCHEMA)
+        assert UPLOAD_URL_PARAMS_SCHEMA.names == ["count"]
+        assert UPLOAD_URL_RESPONSE_SCHEMA.equals(_UPLOAD_URL_SCHEMA)
+        assert UPLOAD_URL_RESPONSE_SCHEMA.names == ["upload_url", "download_url", "expires_at"]
+
     def test_returns_urls(self) -> None:
         """Endpoint returns N URL rows."""
         storage = MockStorage()

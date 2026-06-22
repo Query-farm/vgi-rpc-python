@@ -52,6 +52,18 @@ from vgi_rpc.http._common import (
     UPLOAD_URL_HEADER,
     _RpcHttpError,
 )
+from vgi_rpc.http._common import (
+    _MAX_UPLOAD_URL_COUNT as MAX_UPLOAD_URL_COUNT,
+)
+from vgi_rpc.http._common import (
+    _UPLOAD_URL_METHOD as UPLOAD_URL_METHOD,
+)
+from vgi_rpc.http._common import (
+    _UPLOAD_URL_PARAMS_SCHEMA as UPLOAD_URL_PARAMS_SCHEMA,
+)
+from vgi_rpc.http._common import (
+    _UPLOAD_URL_SCHEMA as UPLOAD_URL_RESPONSE_SCHEMA,
+)
 from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc
 from vgi_rpc.http._oauth import OAuthResourceMetadata
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
@@ -86,10 +98,14 @@ __all__ = [
     "HttpTransientError",
     "MAX_REQUEST_BYTES_HEADER",
     "MAX_UPLOAD_BYTES_HEADER",
+    "MAX_UPLOAD_URL_COUNT",
     "OAuthResourceMetadata",
     "RPC_ERROR_HEADER",
     "OAuthResourceMetadataResponse",
     "UPLOAD_URL_HEADER",
+    "UPLOAD_URL_METHOD",
+    "UPLOAD_URL_PARAMS_SCHEMA",
+    "UPLOAD_URL_RESPONSE_SCHEMA",
     "_ARROW_CONTENT_TYPE",
     "_RpcHttpError",
     "_SyncTestClient",
