@@ -51,6 +51,7 @@ from vgi_rpc.http._common import (
     RPC_ERROR_HEADER,
     UPLOAD_URL_HEADER,
     _RpcHttpError,
+    decode_content_encoding,
 )
 from vgi_rpc.http._common import (
     _MAX_UPLOAD_URL_COUNT as MAX_UPLOAD_URL_COUNT,
@@ -103,6 +104,7 @@ __all__ = [
     "RPC_ERROR_HEADER",
     "OAuthResourceMetadataResponse",
     "UPLOAD_URL_HEADER",
+    "decode_content_encoding",
     "UPLOAD_URL_METHOD",
     "UPLOAD_URL_PARAMS_SCHEMA",
     "UPLOAD_URL_RESPONSE_SCHEMA",

@@ -86,6 +86,40 @@ def _decompress_body(data: bytes, *, max_output_size: int | None = None) -> byte
     return decompress(Encoding.ZSTD, data, max_output_size=max_output_size)
 
 
+def decode_content_encoding(
+    data: bytes,
+    content_encoding: str | None,
+    *,
+    max_output_size: int | None = None,
+) -> bytes:
+    """Decode an HTTP body per its ``Content-Encoding``, or return it unchanged.
+
+    Handles the codings vgi-rpc speaks (``zstd``, ``gzip``); the header may list
+    several applied in order, which are decoded in reverse. Unknown/``identity``
+    codings are left as-is. Intended for an intermediary (proxy/gateway) that
+    must read a compressed request/response body to inspect or rewrite it.
+
+    Args:
+        data: The raw (possibly compressed) body bytes.
+        content_encoding: The ``Content-Encoding`` header value, or ``None``.
+        max_output_size: Optional decompression output cap (per coding).
+
+    Returns:
+        The decoded body bytes (the input unchanged when nothing applies).
+
+    """
+    if not content_encoding:
+        return data
+    result = data
+    for name in reversed([c.strip().lower() for c in content_encoding.split(",") if c.strip()]):
+        try:
+            encoding = Encoding(name)
+        except ValueError:
+            continue  # identity / unknown coding — leave as-is
+        result = decompress(encoding, result, max_output_size=max_output_size)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Shared HTML styles for error and landing pages
 # ---------------------------------------------------------------------------

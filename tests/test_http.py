@@ -2916,3 +2916,29 @@ class TestCookiesRealServer:
                 client.close()
         finally:
             server.close()
+
+
+class TestDecodeContentEncoding:
+    """Tests for the public decode_content_encoding helper (for intermediaries)."""
+
+    def test_decodes_zstd(self) -> None:
+        """A zstd Content-Encoding is decompressed."""
+        from vgi_rpc._codec import Encoding, compress
+        from vgi_rpc.http import decode_content_encoding
+
+        assert decode_content_encoding(compress(Encoding.ZSTD, b"hello"), "zstd") == b"hello"
+
+    def test_decodes_gzip(self) -> None:
+        """A gzip Content-Encoding is decompressed."""
+        from vgi_rpc._codec import Encoding, compress
+        from vgi_rpc.http import decode_content_encoding
+
+        assert decode_content_encoding(compress(Encoding.GZIP, b"hello"), "gzip") == b"hello"
+
+    def test_passthrough_when_absent_or_identity(self) -> None:
+        """No header / an unknown or identity coding leaves the body unchanged."""
+        from vgi_rpc.http import decode_content_encoding
+
+        assert decode_content_encoding(b"plain", None) == b"plain"
+        assert decode_content_encoding(b"plain", "identity") == b"plain"
+        assert decode_content_encoding(b"plain", "") == b"plain"

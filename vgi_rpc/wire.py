@@ -21,7 +21,15 @@ import pyarrow.ipc as ipc
 if TYPE_CHECKING:
     from vgi_rpc.external import ServerExternalConfig
 
-__all__ = ["build_error_stream", "find_state_token", "read_request", "write_request"]
+__all__ = [
+    "build_error_stream",
+    "find_protocol_version",
+    "find_state_token",
+    "read_request",
+    "read_unary_result",
+    "write_request",
+    "write_unary_result",
+]
 
 
 def read_request(
@@ -163,3 +171,99 @@ def find_state_token(data: bytes) -> bytes | None:
     except Exception:
         return None
     return None
+
+
+def find_protocol_version(data: bytes) -> str | None:
+    """Return the application ``protocol_version`` stamped on a request body.
+
+    Scans the request batch's ``custom_metadata`` for
+    :data:`vgi_rpc.metadata.PROTOCOL_VERSION_KEY`. An intermediary that rewrites
+    a request must recover and re-stamp this (see ``write_request``) so the
+    backend's dispatch-boundary version check still sees the originating client's
+    version. Returns ``None`` when absent or unparseable — a request that never
+    carried one is structurally exempt from the check.
+
+    Args:
+        data: The (decompressed) request IPC body bytes.
+
+    Returns:
+        The protocol-version string, or ``None``.
+
+    """
+    from vgi_rpc.metadata import PROTOCOL_VERSION_KEY
+
+    try:
+        reader = ipc.open_stream(BytesIO(data))
+        while True:
+            try:
+                rb = reader.read_next_batch_with_custom_metadata()
+            except StopIteration:
+                break
+            md = rb.custom_metadata
+            if md is not None:
+                version = md.get(PROTOCOL_VERSION_KEY)
+                if version:
+                    return version.decode()
+    except Exception:
+        return None
+    return None
+
+
+def read_unary_result(data: bytes) -> tuple[pa.Schema, bytes] | None:
+    """Unwrap a unary-RPC response to ``(envelope_schema, raw_result_bytes)``.
+
+    A unary response is an IPC stream of zero or more leading **log batches**
+    (0-row, carrying :data:`vgi_rpc.metadata.LOG_LEVEL_KEY` in schema metadata)
+    followed by one data batch whose ``result`` column holds the serialized
+    response object. This returns the envelope schema plus the **raw** result
+    bytes — no typed decode — for an intermediary that inspects or rewrites the
+    response and re-wraps it via :func:`write_unary_result`.
+
+    Lenient: returns ``None`` for an error/empty/non-``result`` stream, so the
+    caller can forward it unchanged.
+
+    Args:
+        data: The (resolved, decompressed) response IPC body bytes.
+
+    Returns:
+        ``(envelope_schema, result_bytes)``, or ``None``.
+
+    """
+    from vgi_rpc.metadata import LOG_LEVEL_KEY
+
+    reader = ipc.open_stream(BytesIO(data))
+    while True:
+        try:
+            batch = reader.read_next_batch()
+        except StopIteration:
+            return None
+        if batch.num_rows > 0:
+            if "result" not in batch.schema.names:
+                return None
+            idx = batch.schema.get_field_index("result")
+            return batch.schema, batch.column(idx)[0].as_py()
+        md = batch.schema.metadata
+        if md and LOG_LEVEL_KEY in md:
+            continue
+        return None
+
+
+def write_unary_result(envelope_schema: pa.Schema, result_bytes: bytes) -> bytes:
+    """Build a unary-RPC response IPC stream wrapping ``result_bytes``.
+
+    The inverse of :func:`read_unary_result`: emit a single data batch whose
+    ``result`` column carries ``result_bytes`` under ``envelope_schema``.
+
+    Args:
+        envelope_schema: The response envelope schema (a single ``result`` field).
+        result_bytes: The serialized response object.
+
+    Returns:
+        The response IPC stream bytes.
+
+    """
+    batch = pa.record_batch([pa.array([result_bytes], type=pa.binary())], schema=envelope_schema)
+    buf = BytesIO()
+    with ipc.new_stream(buf, envelope_schema) as writer:
+        writer.write_batch(batch)
+    return buf.getvalue()

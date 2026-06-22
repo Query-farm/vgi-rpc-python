@@ -8,7 +8,15 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from vgi_rpc.metadata import PROTOCOL_VERSION_KEY, STATE_KEY
-from vgi_rpc.wire import build_error_stream, find_state_token, read_request, write_request
+from vgi_rpc.wire import (
+    build_error_stream,
+    find_protocol_version,
+    find_state_token,
+    read_request,
+    read_unary_result,
+    write_request,
+    write_unary_result,
+)
 
 _SCHEMA = pa.schema([pa.field("request", pa.binary())])
 
@@ -78,3 +86,29 @@ def test_find_state_token_absent_or_unparseable() -> None:
     assert find_state_token(b"") is None
     assert find_state_token(_stream(pa.schema([]))) is None
     assert find_state_token(b"not-an-ipc-stream") is None
+
+
+def test_find_protocol_version() -> None:
+    """The stamped protocol_version is recovered; absent/junk yields None."""
+    assert find_protocol_version(write_request("bind", _SCHEMA, {"request": b"x"}, protocol_version="3.1")) == "3.1"
+    assert find_protocol_version(write_request("bind", _SCHEMA, {"request": b"x"})) is None
+    assert find_protocol_version(b"junk") is None
+
+
+def test_unary_result_round_trip() -> None:
+    """write_unary_result + read_unary_result preserve the raw result payload."""
+    envelope = pa.schema([pa.field("result", pa.binary())])
+    parsed = read_unary_result(write_unary_result(envelope, b"serialized-response"))
+    assert parsed is not None
+    schema, result_bytes = parsed
+    assert schema.names == ["result"]
+    assert result_bytes == b"serialized-response"
+
+
+def test_read_unary_result_none_for_non_result_stream() -> None:
+    """A data batch without a 'result' column is not a unary result (None)."""
+    schema = pa.schema([pa.field("x", pa.int64())])
+    buf = BytesIO()
+    with ipc.new_stream(buf, schema) as w:
+        w.write_batch(pa.record_batch({"x": [1]}, schema=schema))
+    assert read_unary_result(buf.getvalue()) is None
