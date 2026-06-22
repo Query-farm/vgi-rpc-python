@@ -16,11 +16,12 @@ from io import BytesIO
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
+import pyarrow.ipc as ipc
 
 if TYPE_CHECKING:
     from vgi_rpc.external import ServerExternalConfig
 
-__all__ = ["build_error_stream", "read_request", "write_request"]
+__all__ = ["build_error_stream", "find_state_token", "read_request", "write_request"]
 
 
 def read_request(
@@ -101,3 +102,64 @@ def build_error_stream(
     buf = BytesIO()
     _write_error_stream(buf, schema if schema is not None else pa.schema([]), exc, server_id=server_id)
     return buf.getvalue()
+
+
+def find_state_token(data: bytes) -> bytes | None:
+    """Return the stream-state continuation token carried in a request/response body.
+
+    The token (key :data:`vgi_rpc.metadata.STATE_KEY`) rides in a record batch's
+    ``custom_metadata`` — not a header. Stream continuations recover their state
+    from this token, never from headers, so an intermediary that wants to route
+    or correlate a stream by it must read the batch metadata.
+
+    Two body shapes are handled by one walk:
+
+    * an **exchange request** is a single IPC stream whose first batch carries
+      the token;
+    * a **producer init/exchange response** may be *several concatenated IPC
+      streams* (a header stream followed by the producer's data stream — the
+      header lives in its own stream with a different schema), so the token can
+      be in a later stream.
+
+    Returns the first token found across all concatenated streams (so the
+    single-stream request case returns after its first batch), or ``None`` if
+    absent or the body is unparseable.
+
+    Note:
+        For a response that rotates the token across multiple data batches, the
+        *last* token is the continuation the peer will send next; this returns
+        the first. Single-token responses (the common case) make them identical.
+
+    Args:
+        data: The (decompressed) request or response IPC body bytes.
+
+    Returns:
+        The state token bytes, or ``None``.
+
+    """
+    from vgi_rpc.metadata import STATE_KEY
+
+    try:
+        buf = BytesIO(data)
+        total = len(data)
+        while buf.tell() < total:
+            start = buf.tell()
+            try:
+                reader = ipc.open_stream(buf)
+                while True:
+                    try:
+                        rb = reader.read_next_batch_with_custom_metadata()
+                    except StopIteration:
+                        break
+                    md = rb.custom_metadata
+                    if md is not None:
+                        token = md.get(STATE_KEY)
+                        if token:
+                            return token
+            except Exception:
+                break
+            if buf.tell() == start:  # no forward progress — avoid an infinite loop
+                break
+    except Exception:
+        return None
+    return None
