@@ -69,6 +69,20 @@ class _HealthResource:
         resp.content_type = falcon.MEDIA_JSON
         resp.data = self._body
 
+    def on_head(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Answer ``HEAD {prefix}/health`` with GET's headers and no body.
+
+        ``/health`` is the mandatory, auth-exempt capability-discovery endpoint,
+        and the C++ client probes it with ``HEAD`` (the Python client uses
+        ``OPTIONS``/``GET``). Falcon does not synthesize ``HEAD`` from ``on_get``
+        here, so without this responder ``HEAD /health`` 405s and discovery
+        silently degrades to defaults. Emit the same ``Content-Type`` +
+        ``Content-Length`` (the capability headers are added by middleware on
+        every response), with no body.
+        """
+        resp.content_type = falcon.MEDIA_JSON
+        resp.set_header("Content-Length", str(len(self._body)))
+
 
 def _apply_cookies_to_response(resp: falcon.Response, cookies: list[CookieSpec]) -> None:
     """Apply queued ``CookieSpec`` entries to the Falcon response."""

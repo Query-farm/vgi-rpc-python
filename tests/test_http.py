@@ -2455,6 +2455,25 @@ class TestHealthEndpoint:
         resp = health_client._client.simulate_post(f"{health_client.prefix}/health")
         assert resp.status_code == 405
 
+    def test_health_head_returns_200_with_capabilities(self, health_client: _SyncTestClient) -> None:
+        """HEAD {prefix}/health returns 200 with GET's capability headers, no body.
+
+        ``/health`` is the mandatory capability-discovery endpoint, and the C++
+        client probes it with ``HEAD``. It must not 405 (which would carry no
+        Content-Length and degrade discovery), and must expose the same
+        capability headers as GET so discovery is verb-independent.
+        """
+        prefix = health_client.prefix
+        get_resp = health_client._client.simulate_get(f"{prefix}/health")
+        head_resp = health_client._client.simulate_head(f"{prefix}/health")
+        assert head_resp.status_code == 200
+        assert "application/json" in head_resp.headers.get("content-type", "")
+        assert head_resp.headers.get("content-length") == str(len(get_resp.content))
+        assert head_resp.content == b""  # HEAD carries no body
+        get_caps = {k.lower(): v for k, v in get_resp.headers.items() if k.lower().startswith("vgi-")}
+        head_caps = {k.lower(): v for k, v in head_resp.headers.items() if k.lower().startswith("vgi-")}
+        assert head_caps == get_caps
+
 
 # ---------------------------------------------------------------------------
 # Tests: HTTP cookies
