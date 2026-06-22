@@ -237,15 +237,25 @@ dev = [
     "sentry-sdk>=2.0",
     "cryptography>=41.0",
     "pynacl>=1.5",
-    "pydoclint>=0.8",
     "hypothesis>=6.155.3",
 ]
+# pydoclint is intentionally NOT a project dependency. It depends on
+# `docstring-parser-fork`, which installs into the same `docstring_parser/`
+# import namespace as the canonical `docstring-parser` this package needs at
+# runtime (vgi_rpc/rpc/_types.py). When both land in one venv, whichever uv
+# installs last wins non-deterministically — and the fork-vs-canonical race
+# made docstring symbols (e.g. DocstringYields) appear/disappear across
+# unrelated dependency bumps, flaking the lint gate. Run pydoclint isolated:
+#   uvx --python 3.13 --from pydoclint==0.8.7 pydoclint vgi_rpc/
+# (CI uses the same invocation; --python 3.13 is required so the parser
+# understands this package's 3.13 syntax.)
 
 [tool.pydoclint]
 # Docstring consistency gate (complements ruff's `D` rules, which only check
 # docstring *shape*, not whether documented args/attributes match the code).
 # Enforced families: DOC001 (parse), DOC101/102/103 (arg<->signature), DOC4xx
-# (yields), DOC60x (dataclass attributes). Run via `uv run pydoclint vgi_rpc/`.
+# (yields), DOC60x (dataclass attributes). Run isolated (see note by the dev
+# group above): `uvx --python 3.13 --from pydoclint==0.8.7 pydoclint vgi_rpc/`.
 style = "google"
 # We keep types in signatures, not docstrings (Google style) — so don't ask for
 # them in docstrings, and don't try to match return/yield *types* against prose.

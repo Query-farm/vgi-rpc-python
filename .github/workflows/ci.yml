@@ -76,8 +76,12 @@ jobs:
       # Docstring consistency: documented args/attributes must match the code.
       # Config lives in pyproject.toml ([tool.pydoclint]); vgi_rpc/ is fully
       # clean with no baseline, so any new violation fails immediately.
+      # Run isolated via uvx: pydoclint pulls docstring-parser-fork, which
+      # collides with the canonical docstring-parser in the project venv, so it
+      # is deliberately not a project dependency (see pyproject.toml). --python
+      # 3.13 is required so the parser understands the package's 3.13 syntax.
       - name: Docstring lint (pydoclint)
-        run: uv run pydoclint vgi_rpc/
+        run: uvx --python 3.13 --from pydoclint==0.8.7 pydoclint vgi_rpc/
 
       - name: Type check (mypy)
         run: uv run mypy vgi_rpc/ --any-exprs-report mypy-type-report
