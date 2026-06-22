@@ -529,15 +529,6 @@ wheels = [
 ]
 
 [[package]]
-name = "docstring-parser-fork"
-version = "0.0.14"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/66/bf/27f9cab2f0cd1d17a4420572088bbc19f36d726fbcf165edf226a8926dbc/docstring_parser_fork-0.0.14.tar.gz", hash = "sha256:a2743a63d8d36c09650594f7b4ab5b2758fee8629dcf794d1b221b23179baa5c", size = 34551, upload-time = "2025-09-07T17:27:38.272Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/50/98b146aea0f1cd7531d25f12bea69fa9ce8d1662124f93fb30dc4511b65e/docstring_parser_fork-0.0.14-py3-none-any.whl", hash = "sha256:4c544f234ef2cc2749a3df32b70c437d77888b1099143a1ad5454452c574b9af", size = 43063, upload-time = "2025-09-07T17:27:37.012Z" },
-]
-
-[[package]]
 name = "falcon"
 version = "4.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1862,19 +1853,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pydoclint"
-version = "0.8.7"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "click" },
-    { name = "docstring-parser-fork" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/bf/2e/e4df6b0cbb281cb6cf355f5d90b8c66939c7f3cd799c075fab23e0983dfb/pydoclint-0.8.7.tar.gz", hash = "sha256:1ce5055dfdaf2bc3c999d3ffd5494556b903b7090bb5fadac90819107f90629b", size = 199793, upload-time = "2026-06-22T01:24:20.117Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e9/d4/15fe5c3e66bbf3f60eb9c6ef7c2dca3931302f9acf317e65d70e7d8b338a/pydoclint-0.8.7-py3-none-any.whl", hash = "sha256:40f6b80e59129fe753f6a2f9edd76e4259c970eedc1ce3663adc43f54af439d3", size = 82963, upload-time = "2026-06-22T01:24:19.102Z" },
-]
-
-[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2623,7 +2601,6 @@ dev = [
     { name = "opentelemetry-api" },
     { name = "opentelemetry-sdk" },
     { name = "pyarrow-stubs" },
-    { name = "pydoclint" },
     { name = "pynacl" },
     { name = "pytest" },
     { name = "pytest-benchmark" },
@@ -2696,7 +2673,6 @@ dev = [
     { name = "opentelemetry-api", specifier = ">=1.20" },
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
     { name = "pyarrow-stubs", specifier = ">=17.0" },
-    { name = "pydoclint", specifier = ">=0.8" },
     { name = "pynacl", specifier = ">=1.5" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-benchmark", specifier = ">=4.0" },
