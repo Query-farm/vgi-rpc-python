@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
 import zstandard
-from aioresponses import CallbackResult, aioresponses
 
+from tests._aiomock import CallbackResult, aiointercept, mock_aiohttp
 from vgi_rpc.external_fetch import FetchConfig, _compute_ranges, _ensure_pool, _head_probe, _reset_session, fetch_url
 
 # ---------------------------------------------------------------------------
@@ -22,7 +22,7 @@ from vgi_rpc.external_fetch import FetchConfig, _compute_ranges, _ensure_pool, _
 # ---------------------------------------------------------------------------
 
 
-def _register_head(mock: aioresponses, url: str, data: bytes, *, accept_ranges: bool = True) -> None:
+def _register_head(mock: aiointercept, url: str, data: bytes, *, accept_ranges: bool = True) -> None:
     """Register a HEAD handler that returns Content-Length and optionally Accept-Ranges."""
     head_headers: dict[str, str] = {"Content-Length": str(len(data))}
     if accept_ranges:
@@ -30,7 +30,7 @@ def _register_head(mock: aioresponses, url: str, data: bytes, *, accept_ranges: 
     mock.head(url, headers=head_headers)
 
 
-def _register_range_url(mock: aioresponses, url: str, data: bytes, *, accept_ranges: bool = True) -> None:
+def _register_range_url(mock: aiointercept, url: str, data: bytes, *, accept_ranges: bool = True) -> None:
     """Register HEAD + GET (simple and Range) handlers for a URL.
 
     The HEAD response includes ``Content-Length`` and optionally
@@ -38,7 +38,7 @@ def _register_range_url(mock: aioresponses, url: str, data: bytes, *, accept_ran
     full body or individual Range chunks.
 
     Args:
-        mock: The aioresponses mock instance.
+        mock: The aiointercept mock instance.
         url: The URL to register.
         data: The complete data the URL serves.
         accept_ranges: Whether to advertise Range support.
@@ -115,7 +115,7 @@ class TestFetchSimpleBelowThreshold:
         data = b"hello world"
         url = "https://example.com/small"
         with FetchConfig(parallel_threshold_bytes=1024) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data)
                 mock.get(url, body=data, headers={"Content-Length": str(len(data))})
 
@@ -128,7 +128,7 @@ class TestFetchSimpleBelowThreshold:
         data = b"x" * 100
         url = "https://example.com/no-range"
         with FetchConfig(parallel_threshold_bytes=50) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data, accept_ranges=False)
                 mock.get(url, body=data, headers={"Content-Length": str(len(data))})
 
@@ -141,7 +141,7 @@ class TestFetchSimpleBelowThreshold:
         data = b"streaming data"
         url = "https://example.com/no-cl"
         with FetchConfig(parallel_threshold_bytes=10) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 # HEAD returns no Content-Length
                 mock.head(url, headers={"Accept-Ranges": "bytes"})
                 mock.get(url, body=data)
@@ -159,7 +159,7 @@ class TestHeadProbeFallback:
         data = b"head not allowed"
         url = "https://example.com/no-head"
         with FetchConfig(parallel_threshold_bytes=10000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(url, status=405)
                 mock.get(url, body=data, headers={"Content-Length": str(len(data))})
 
@@ -172,7 +172,7 @@ class TestHeadProbeFallback:
         data = b"head not implemented"
         url = "https://example.com/no-head-501"
         with FetchConfig(parallel_threshold_bytes=10000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(url, status=501)
                 mock.get(url, body=data, headers={"Content-Length": str(len(data))})
 
@@ -189,7 +189,7 @@ class TestHeadProbeFallback:
             chunk_size_bytes=512,
             max_parallel_requests=4,
         ) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_range_url(mock, url, data)
                 result = fetch_url(url, config)
 
@@ -207,7 +207,7 @@ class TestHeadProbeFallback:
             assert pool.loop is not None
             assert pool.session is not None
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(url, status=403)
 
                 future = asyncio.run_coroutine_threadsafe(
@@ -252,7 +252,7 @@ class TestPresignedRangeProbe:
             return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
 
         with FetchConfig(parallel_threshold_bytes=10_000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 # No HEAD mock on purpose: presigned path should never issue HEAD.
                 mock.get(url, callback=_probe_then_get, repeat=True)
                 result = fetch_url(url, config)
@@ -280,7 +280,7 @@ class TestPresignedRangeProbe:
             return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
 
         with FetchConfig(parallel_threshold_bytes=10_000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.get(url, callback=_range_ignored, repeat=True)
                 result = fetch_url(url, config)
 
@@ -307,7 +307,7 @@ class TestPresignedRangeProbe:
             return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
 
         with FetchConfig(parallel_threshold_bytes=10_000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.get(url, callback=_probe_forbidden, repeat=True)
                 result = fetch_url(url, config)
 
@@ -327,7 +327,7 @@ class TestFetchParallelChunks:
             chunk_size_bytes=2048,
             max_parallel_requests=4,
         ) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_range_url(mock, url, data)
                 result = fetch_url(url, config)
 
@@ -347,7 +347,7 @@ class TestFetchParallelChunks:
             chunk_size_bytes=chunk_size,
             max_parallel_requests=8,
         ) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_range_url(mock, url, data)
                 result = fetch_url(url, config)
 
@@ -364,7 +364,7 @@ class TestFetchMaxBytes:
     def test_max_fetch_bytes_rejected_at_probe(self) -> None:
         """Content-Length exceeds limit → RuntimeError before download."""
         url = "https://example.com/huge"
-        with FetchConfig(max_fetch_bytes=100) as config, aioresponses() as mock:
+        with FetchConfig(max_fetch_bytes=100) as config, mock_aiohttp() as mock:
             mock.head(
                 url,
                 headers={"Content-Length": "99999", "Accept-Ranges": "bytes"},
@@ -400,7 +400,7 @@ class TestFetchMaxBytes:
                     )
                 return CallbackResult(status=200, body=b"x" * 200)
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(url, headers={"Content-Length": "200", "Accept-Ranges": "bytes"})
                 for _ in range(50):
                     mock.get(url, callback=_lying_callback)
@@ -426,7 +426,7 @@ class TestFetchChunkValidation:
                 # Server ignores Range and returns full body with 200
                 return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data)
                 for _ in range(10):
                     mock.get(url, callback=_ignore_range_callback)
@@ -448,7 +448,7 @@ class TestFetchHedging:
             max_parallel_requests=4,
             speculative_retry_multiplier=0,
         ) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_range_url(mock, url, data)
                 result = fetch_url(url, config)
 
@@ -464,7 +464,7 @@ class TestFetchHedging:
             max_parallel_requests=8,
             speculative_retry_multiplier=1.0,  # aggressive — hedge anything above median
         ) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_range_url(mock, url, data)
                 result = fetch_url(url, config)
 
@@ -473,7 +473,7 @@ class TestFetchHedging:
     def test_slow_chunks_trigger_hedging(self) -> None:
         """Slow responses trigger time-based hedging; result is correct.
 
-        Uses ``repeat=True`` on a single mock to avoid an aioresponses
+        Uses ``repeat=True`` on a single mock to avoid an aiointercept
         ``KeyError`` race where two concurrent async callbacks (original +
         hedge) try to delete the same non-repeating mock entry.  The sleep
         is generous (0.5 s) so that even on Windows — where asyncio timer
@@ -516,7 +516,7 @@ class TestFetchHedging:
                         )
                 return CallbackResult(status=200, body=data)
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data)
                 mock.get(url, callback=_slow_callback, repeat=True)
                 result = fetch_url(url, config)
@@ -567,7 +567,7 @@ class TestFetchHedging:
                         )
                 return CallbackResult(status=200, body=data)
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data)
                 mock.get(url, callback=_slow_callback, repeat=True)
                 result = fetch_url(url, config)
@@ -587,7 +587,7 @@ class TestFetchHedging:
             speculative_retry_multiplier=1.0,
             max_speculative_hedges=0,
         ) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_range_url(mock, url, data)
                 result = fetch_url(url, config)
 
@@ -646,7 +646,7 @@ class TestFetchHedging:
                     },
                 )
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data)
                 mock.get(url, callback=_callback, repeat=True)
                 result = fetch_url(url, config)
@@ -661,7 +661,7 @@ class TestFetchErrors:
     def test_server_error_propagates(self) -> None:
         """500 on HEAD raises aiohttp.ClientResponseError."""
         url = "https://example.com/error"
-        with FetchConfig(parallel_threshold_bytes=10000) as config, aioresponses() as mock:
+        with FetchConfig(parallel_threshold_bytes=10000) as config, mock_aiohttp() as mock:
             mock.head(url, status=500)
 
             with pytest.raises(aiohttp.ClientResponseError):
@@ -670,8 +670,8 @@ class TestFetchErrors:
     def test_overall_timeout(self) -> None:
         """Overall deadline exceeded raises."""
         url = "https://example.com/slow"
-        with FetchConfig(timeout_seconds=0.1, parallel_threshold_bytes=10000) as config, aioresponses() as mock:
-            mock.head(url, exception=TimeoutError())
+        with FetchConfig(timeout_seconds=0.1, parallel_threshold_bytes=10000) as config, mock_aiohttp() as mock:
+            mock.head(url, exception=True)
 
             with pytest.raises((TimeoutError, aiohttp.ClientError)):
                 fetch_url(url, config)
@@ -682,7 +682,7 @@ class TestFetchErrors:
         data = b"x" * 200
         # HEAD returns no Content-Length so the header guard doesn't trigger — forces
         # the streaming _read_response_body path to catch the oversize body.
-        with FetchConfig(max_fetch_bytes=100, parallel_threshold_bytes=10000) as config, aioresponses() as mock:
+        with FetchConfig(max_fetch_bytes=100, parallel_threshold_bytes=10000) as config, mock_aiohttp() as mock:
             mock.head(url, headers={})
             mock.get(url, body=data)
 
@@ -690,17 +690,35 @@ class TestFetchErrors:
                 fetch_url(url, config)
 
     def test_invalid_content_length_header(self) -> None:
-        """Non-numeric Content-Length from HEAD falls back to simple GET."""
-        data = b"some data"
-        url = "https://example.com/bad-cl"
-        with FetchConfig(parallel_threshold_bytes=5) as config:
-            with aioresponses() as mock:
-                mock.head(url, headers={"Content-Length": "not-a-number"})
-                mock.get(url, body=data)
+        """Non-numeric Content-Length from HEAD is treated as unknown length.
 
-                result = fetch_url(url, config)
+        A real HTTP server can never emit a malformed ``Content-Length`` (and
+        aiointercept routes through one, so it can't be mocked end-to-end), but
+        ``_head_probe`` still guards the parse defensively. Exercise that branch
+        directly: a non-numeric header must yield ``content_length=None`` rather
+        than raising, which lets the caller fall back to a plain GET.
+        """
 
-            assert result == data
+        class _Resp:
+            status = 200
+            headers: ClassVar[dict[str, str]] = {"Content-Length": "not-a-number", "Accept-Ranges": "bytes"}
+
+            def raise_for_status(self) -> None:
+                pass
+
+        class _HeadCtx:
+            async def __aenter__(self) -> _Resp:
+                return _Resp()
+
+            async def __aexit__(self, *exc: object) -> bool:
+                return False
+
+        client = AsyncMock()
+        client.head = lambda _url: _HeadCtx()
+
+        content_length, accept_ranges, _ = asyncio.run(_head_probe("https://example.com/bad-cl", client))
+        assert content_length is None
+        assert accept_ranges == "bytes"
 
     def test_chunk_error_cancels_pending(self) -> None:
         """Error in a Range chunk cancels remaining tasks and propagates."""
@@ -729,7 +747,7 @@ class TestFetchErrors:
                     )
                 return CallbackResult(status=200, body=b"")
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(url, headers={"Content-Length": "300", "Accept-Ranges": "bytes"})
                 for _ in range(50):
                     mock.get(url, callback=_fail_callback)
@@ -748,7 +766,7 @@ class TestNestedEventLoop:
         with FetchConfig(parallel_threshold_bytes=10000) as config:
 
             async def run_in_loop() -> bytes:
-                with aioresponses() as mock:
+                with mock_aiohttp() as mock:
                     _register_head(mock, url, data, accept_ranges=False)
                     mock.get(url, body=data, headers={"Content-Length": str(len(data))})
                     return fetch_url(url, config)
@@ -770,7 +788,7 @@ class TestFetchPool:
         data = b"reuse me"
         url = "https://example.com/pool-reuse"
         with FetchConfig(parallel_threshold_bytes=10000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data, accept_ranges=False)
                 mock.get(url, body=data, headers={"Content-Length": str(len(data))})
                 _register_head(mock, url, data, accept_ranges=False)
@@ -829,7 +847,7 @@ class TestFetchPool:
             assert config._pool.session is None
 
             # Use again — should re-initialize
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 _register_head(mock, url, data, accept_ranges=False)
                 mock.get(url, body=data, headers={"Content-Length": str(len(data))})
                 result = fetch_url(url, config)
@@ -910,7 +928,7 @@ class TestFetchDecompression:
         compressed = zstandard.ZstdCompressor().compress(raw_data)
         url = "https://example.com/zstd-simple"
         with FetchConfig(parallel_threshold_bytes=10_000_000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(
                     url,
                     headers={
@@ -941,7 +959,7 @@ class TestFetchDecompression:
             chunk_size_bytes=512,
             max_parallel_requests=4,
         ) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(
                     url,
                     headers={
@@ -981,7 +999,7 @@ class TestFetchDecompression:
         data = b"raw bytes no compression"
         url = "https://example.com/no-encoding"
         with FetchConfig(parallel_threshold_bytes=10_000_000) as config:
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(
                     url,
                     headers={"Content-Length": str(len(data))},
@@ -1004,7 +1022,7 @@ class TestFetchDecompression:
             assert pool.loop is not None
             assert pool.session is not None
 
-            with aioresponses() as mock:
+            with mock_aiohttp() as mock:
                 mock.head(
                     url,
                     headers={
@@ -1030,7 +1048,7 @@ class TestFetchDecompression:
         """Corrupted zstd data with Content-Encoding: zstd raises RuntimeError."""
         corrupt_data = b"this is not valid zstd data"
         url = "https://example.com/corrupt-zstd"
-        with FetchConfig(parallel_threshold_bytes=10_000_000) as config, aioresponses() as mock:
+        with FetchConfig(parallel_threshold_bytes=10_000_000) as config, mock_aiohttp() as mock:
             mock.head(
                 url,
                 headers={
@@ -1073,7 +1091,7 @@ class TestFetchDecompression:
         # the bomb's declared decompressed size exceeds the cap.
         with (
             FetchConfig(parallel_threshold_bytes=10_000_000, max_fetch_bytes=512 * 1024) as config,
-            aioresponses() as mock,
+            mock_aiohttp() as mock,
         ):
             mock.head(
                 url,
