@@ -53,11 +53,14 @@ class TransportKind(StrEnum):
             the parent's stdin/stdout.
         HTTP: WSGI / ``serve_http`` / ``make_wsgi_app``.
         UNIX: ``UnixTransport`` (AF_UNIX socket).
+        TCP: ``TcpTransport`` (AF_INET socket).  Raw Arrow-IPC framing over a
+            bare TCP socket — no auth/TLS; use ``HTTP`` for untrusted networks.
     """
 
     PIPE = "pipe"
     HTTP = "http"
     UNIX = "unix"
+    TCP = "tcp"
 
 
 class ServeStartHook(Protocol):

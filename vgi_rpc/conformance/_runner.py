@@ -149,8 +149,8 @@ class LogCollector:
 # ---------------------------------------------------------------------------
 
 
-_Transport = Literal["pipe", "http", "unix"]
-_ALL_TRANSPORTS: tuple[_Transport, ...] = ("pipe", "http", "unix")
+_Transport = Literal["pipe", "http", "unix", "tcp"]
+_ALL_TRANSPORTS: tuple[_Transport, ...] = ("pipe", "http", "unix", "tcp")
 
 
 class _ConformanceSkip(Exception):
@@ -174,8 +174,9 @@ class _ConformanceTest:
         fn: The test function.
         transports: Tuple of transports this test is compatible with.  The
             CLI runner detects the active transport from the user's flag
-            (``--cmd`` → ``"pipe"``, ``--unix`` → ``"unix"``, ``--url`` →
-            ``"http"``) and skips tests whose tuple excludes it.  Cross-
+            (``--cmd`` → ``"pipe"``, ``--unix`` → ``"unix"``, ``--tcp`` →
+            ``"tcp"``, ``--url`` → ``"http"``) and skips tests whose tuple
+            excludes it.  Cross-
             language ports must honour this field — the strict-fail tests
             in particular require behaviour that is HTTP-specific.
 
@@ -1923,7 +1924,7 @@ def run_conformance(
         filter_patterns: Optional glob patterns to filter which tests run.
         on_progress: Optional callback invoked after each test completes.
         timeout: Per-test timeout in seconds.  Set to ``0`` to disable.
-        transport: Active transport (``"pipe"``, ``"http"``, or ``"unix"``).
+        transport: Active transport (``"pipe"``, ``"http"``, ``"unix"``, or ``"tcp"``).
             When set, tests whose ``transports`` tuple excludes this value
             are reported as skipped (with ``passed=True`` so they don't fail
             the suite).  When ``None`` (back-compat), all tests run

@@ -46,6 +46,7 @@ _CONFORMANCE_HTTP_AUTH = str(Path(__file__).parent / "serve_conformance_http_aut
 _CONFORMANCE_HTTP_STRICT = str(Path(__file__).parent / "serve_conformance_http_strict.py")
 _CONFORMANCE_UNIX = str(Path(__file__).parent / "serve_conformance_unix.py")
 _CONFORMANCE_UNIX_THREADED = str(Path(__file__).parent / "serve_conformance_unix_threaded.py")
+_CONFORMANCE_TCP = str(Path(__file__).parent / "serve_conformance_tcp.py")
 
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 """Type alias for the ``make_conn`` fixture return type."""
@@ -127,6 +128,20 @@ def _wait_for_unix(path: str, timeout: float = 5.0) -> None:
         except (FileNotFoundError, ConnectionRefusedError, OSError):
             time.sleep(0.1)
     raise TimeoutError(f"Unix socket at {path} did not start within {timeout}s")
+
+
+def _wait_for_tcp(host: str, port: int, timeout: float = 5.0) -> None:
+    """Poll until a TCP socket is accepting connections."""
+    import socket
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise TimeoutError(f"TCP server at {host}:{port} did not start within {timeout}s")
 
 
 def _short_unix_path(name: str) -> str:
@@ -250,6 +265,34 @@ def conformance_unix_threaded_path() -> Iterator[str]:
         assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
         _wait_for_unix(path)
         yield path
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_tcp_addr() -> Iterator[tuple[str, int]]:
+    """Spawn a threaded conformance TCP server for the session.
+
+    Binds ``127.0.0.1:0`` (OS auto-selects the port) and reads the
+    ``TCP:<host>:<port>`` discovery line to learn the bound address.
+
+    Yields:
+        The ``(host, port)`` the server is listening on.
+
+    """
+    proc = subprocess.Popen(
+        [sys.executable, _CONFORMANCE_TCP, "127.0.0.1", "0"],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("TCP:"), f"Expected TCP:<host>:<port>, got: {line!r}"
+        host, _, port_str = line[len("TCP:") :].rpartition(":")
+        port = int(port_str)
+        _wait_for_tcp(host, port)
+        yield (host, port)
     finally:
         proc.terminate()
         proc.wait(timeout=5)
@@ -576,6 +619,7 @@ def conformance_subprocess() -> Iterator[SubprocessTransport]:
         pytest.param("unix", marks=_SKIP_UNIX),
         pytest.param("unix_threaded", marks=_SKIP_UNIX),
         pytest.param("unix_launcher", marks=_SKIP_UNIX),
+        "tcp",
     ]
 )
 def conformance_conn(
@@ -585,13 +629,13 @@ def conformance_conn(
 ) -> ConnFactory:
     """Return a factory for conformance service connections.
 
-    Parametrized over pipe, subprocess, http, unix, unix_threaded, and
-    unix_launcher transports.
+    Parametrized over pipe, subprocess, http, unix, unix_threaded,
+    unix_launcher, and tcp transports.
     """
     from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
     from vgi_rpc.http import http_connect
     from vgi_rpc.log import Message
-    from vgi_rpc.rpc import serve_pipe, unix_connect
+    from vgi_rpc.rpc import serve_pipe, tcp_connect, unix_connect
 
     def factory(
         on_log: Callable[[Message], None] | None = None,
@@ -614,6 +658,9 @@ def conformance_conn(
         if request.param == "unix_launcher":
             path = request.getfixturevalue("conformance_unix_launcher_path")
             return unix_connect(ConformanceService, path, on_log=on_log)
+        if request.param == "tcp":
+            host, tcp_port = request.getfixturevalue("conformance_tcp_addr")
+            return tcp_connect(ConformanceService, host, tcp_port, on_log=on_log)
         if request.param == "http_roundrobin":
             ports: tuple[int, int] = request.getfixturevalue("conformance_http_two_servers")
             client = _make_roundrobin_client(ports)
@@ -644,6 +691,7 @@ def conformance_conn(
         pytest.param("unix", marks=_SKIP_UNIX),
         pytest.param("unix_threaded", marks=_SKIP_UNIX),
         pytest.param("unix_launcher", marks=_SKIP_UNIX),
+        "tcp",
     ]
 )
 def conformance_describe(
@@ -667,7 +715,7 @@ def conformance_describe(
     from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
     from vgi_rpc.http import http_introspect
     from vgi_rpc.introspect import introspect
-    from vgi_rpc.rpc import RpcServer, UnixTransport, make_pipe_pair
+    from vgi_rpc.rpc import RpcServer, TcpTransport, UnixTransport, make_pipe_pair
 
     param = request.param
     if param == "pipe":
@@ -704,6 +752,16 @@ def conformance_describe(
             return introspect(transport)
         finally:
             transport.close()
+    if param == "tcp":
+        import socket as _socket
+
+        host, tcp_port = request.getfixturevalue("conformance_tcp_addr")
+        sock = _socket.create_connection((host, tcp_port))
+        tcp_transport = TcpTransport(sock)
+        try:
+            return introspect(tcp_transport)
+        finally:
+            tcp_transport.close()
     if param == "http_externalize_always":
         ext_port: int = request.getfixturevalue("conformance_http_externalize_always_port")
         return http_introspect(base_url=f"http://127.0.0.1:{ext_port}")

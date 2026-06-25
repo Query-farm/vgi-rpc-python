@@ -70,6 +70,7 @@ In order, smallest-blast-radius first:
 4. **HTTP transport.** State-token signing and replay protection.
 5. **Access log.** Add a hook around dispatch that emits the JSON record. Begin with the 11 always-required fields; add conditional fields as you wire them up.
 6. **External-location and shared-memory transports** if you need them. For SHM, implement the `__transport_options__` handshake on both sides: a worker reports `vgi_rpc.transport.shm = "true"`; a client negotiates once per worker (caching the result) and only writes SHM pointer batches when the worker confirmed support, else it stays on the pipe. See [WIRE_PROTOCOL §15](WIRE_PROTOCOL.md).
+7. **Unix / TCP socket transports** if you need them. Both reuse the raw Arrow-IPC framing (no HTTP envelope); they differ only in the listening socket. The worker accepts `--unix PATH` / `--tcp [HOST:]PORT`, defaults the TCP host to loopback (`127.0.0.1`), and emits a `UNIX:<path>` / `TCP:<host>:<port>` discovery line on stdout once bound. Drive conformance with `vgi-rpc-test --unix <path>` / `--tcp <host>:<port>`. TCP carries **no auth/TLS** — it is for trusted networks only; use HTTP otherwise.
 
 ## Reference implementations
 
@@ -84,6 +85,8 @@ All four ports (Go, TypeScript, Java, Rust) implement HTTP transport with stream
 - **TypeScript**: HTTP + pipe transports implemented. State tokens are AEAD-sealed (XChaCha20-Poly1305 via `@noble/ciphers`) over a pluggable serializer (default JSON + BigInt). Token wire-format v4 envelope matches Python.
 - **Java**: HTTP + pipe + Unix transports implemented. State tokens are AEAD-sealed (ChaCha20-Poly1305 via JDK 21 native `javax.crypto.Cipher`, 12-byte nonce) over a CBOR-encoded payload (or caller-supplied via `PortableStreamState`).
 - **Rust**: HTTP + pipe + Unix transports implemented. State tokens are AEAD-sealed (XChaCha20-Poly1305 via the `chacha20poly1305` crate) over a length-prefixed envelope matching Python.
+
+**TCP transport.** The Python reference implements a raw-framing TCP transport (`TcpTransport` / `serve_tcp`, conformance via `vgi-rpc-test --tcp`); it shares the Unix-socket serve loop and differs only in the listening socket (AF_INET, `[HOST:]PORT`, loopback default). Ports that already have Unix transport (Go, Java, Rust) can add TCP by cloning their Unix serve path; TypeScript adds it alongside its launcher socket support. Status per port is tracked as each lands.
 
 ## HTTP response-cap conformance
 

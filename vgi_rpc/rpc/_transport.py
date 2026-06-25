@@ -488,36 +488,50 @@ def serve_unix(
         on_bound(path)
     try:
         if threaded:
-            _serve_unix_threaded(server, sock, max_connections, idle_timeout)
+            _serve_socket_threaded(server, sock, max_connections, idle_timeout, UnixTransport, "vgi-unix")
         else:
-            _serve_unix_sequential(server, sock)
+            _serve_socket_sequential(server, sock, UnixTransport)
     finally:
         sock.close()
         with contextlib.suppress(OSError):
             os.unlink(path)
 
 
-def _serve_unix_sequential(server: RpcServer, sock: socket.socket) -> None:
-    """Accept and serve connections one at a time."""
+def _serve_socket_sequential(
+    server: RpcServer,
+    sock: socket.socket,
+    transport_factory: Callable[[socket.socket], RpcTransport],
+) -> None:
+    """Accept and serve connections one at a time.
+
+    Args:
+        server: The RPC server to dispatch requests.
+        sock: A bound, listening stream socket (AF_UNIX or AF_INET).
+        transport_factory: Builds a transport from an accepted connection
+            socket — :class:`UnixTransport` or :class:`TcpTransport`.
+
+    """
     while True:
         try:
             conn, _ = sock.accept()
         except OSError:
             break
-        transport = UnixTransport(conn)
+        transport = transport_factory(conn)
         try:
             server.serve(transport)
         except Exception:
-            _logger.debug("Error serving Unix connection", exc_info=True)
+            _logger.debug("Error serving socket connection", exc_info=True)
         finally:
             transport.close()
 
 
-def _serve_unix_threaded(
+def _serve_socket_threaded(
     server: RpcServer,
     sock: socket.socket,
     max_connections: int | None,
     idle_timeout: float | None,
+    transport_factory: Callable[[socket.socket], RpcTransport],
+    thread_name_prefix: str,
 ) -> None:
     """Accept connections in daemon threads, optionally idle-shutdown.
 
@@ -527,6 +541,18 @@ def _serve_unix_threaded(
     fires it re-checks the connection count under the state lock before closing
     the listening socket — closing causes the accept loop's ``OSError`` branch
     to unwind cleanly so the surrounding ``finally`` can unlink the path.
+
+    Args:
+        server: The RPC server to dispatch requests.
+        sock: A bound, listening stream socket (AF_UNIX or AF_INET).
+        max_connections: Maximum simultaneous connections, or ``None`` for
+            unlimited.
+        idle_timeout: Seconds of zero-connection idle before self-terminating,
+            or ``None`` to run indefinitely.
+        transport_factory: Builds a transport from an accepted connection
+            socket — :class:`UnixTransport` or :class:`TcpTransport`.
+        thread_name_prefix: Prefix for the per-connection daemon thread names.
+
     """
     semaphore: threading.Semaphore | None = None
     if max_connections is not None:
@@ -572,11 +598,11 @@ def _serve_unix_threaded(
         nonlocal conn_count
         if semaphore is not None:
             semaphore.acquire()
-        transport = UnixTransport(conn)
+        transport = transport_factory(conn)
         try:
             server.serve(transport)
         except Exception:
-            _logger.debug("Error serving Unix connection", exc_info=True)
+            _logger.debug("Error serving socket connection", exc_info=True)
         finally:
             transport.close()
             if semaphore is not None:
@@ -606,7 +632,7 @@ def _serve_unix_threaded(
                 target=_handle,
                 args=(conn,),
                 daemon=True,
-                name=f"vgi-unix-{conn.fileno()}",
+                name=f"{thread_name_prefix}-{conn.fileno()}",
             )
             with state_lock:
                 active.add(t)
@@ -617,6 +643,169 @@ def _serve_unix_threaded(
             snapshot = list(active)
         for t in snapshot:
             t.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# TcpTransport + make_tcp_pair + serve_tcp
+#
+# Raw Arrow-IPC framing over a bare TCP (AF_INET) socket — the network analog of
+# UnixTransport.  There is NO authentication or TLS on this transport; bind it to
+# a trusted network only (the default host is loopback-only).  For untrusted
+# networks use the HTTP transport, which carries auth middleware and TLS via the
+# fronting server.
+# ---------------------------------------------------------------------------
+
+
+class TcpTransport:
+    """Transport backed by a connected TCP (AF_INET) socket.
+
+    The reader is buffered (default ``makefile`` buffering) so that
+    ``read(n)`` returns exactly *n* bytes — required by Arrow IPC.
+    The writer is unbuffered (``buffering=0``) so data is flushed
+    immediately, matching the pattern used by :class:`UnixTransport`.
+
+    Nagle's algorithm is disabled (``TCP_NODELAY``) so the lockstep
+    request/response framing is not delayed waiting to coalesce writes.
+    """
+
+    __slots__ = ("_reader", "_sock", "_writer")
+
+    def __init__(self, sock: socket.socket) -> None:
+        """Initialize from a connected AF_INET socket."""
+        with contextlib.suppress(OSError):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._sock = sock
+        self._reader: IOBase = cast("IOBase", sock.makefile("rb"))
+        self._writer: IOBase = cast("IOBase", sock.makefile("wb", buffering=0))
+
+    @property
+    def reader(self) -> IOBase:
+        """Readable binary stream."""
+        return self._reader
+
+    @property
+    def writer(self) -> IOBase:
+        """Writable binary stream."""
+        return self._writer
+
+    def close(self) -> None:
+        """Close the reader, writer, and underlying socket."""
+        self._reader.close()
+        self._writer.close()
+        self._sock.close()
+
+
+def make_tcp_pair() -> tuple[TcpTransport, TcpTransport]:
+    """Create connected client/server transports over a loopback TCP socket.
+
+    ``socket.socketpair`` only supports ``AF_UNIX``, so for AF_INET we bind a
+    throwaway listener on ``127.0.0.1:0``, connect a client, and accept the
+    server side.  Returns ``(client_transport, server_transport)``.
+
+    Returns:
+        A ``(client_transport, server_transport)`` pair of connected
+        :class:`TcpTransport` instances.
+
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        client = socket.create_connection(listener.getsockname())
+        server_conn, _ = listener.accept()
+    finally:
+        listener.close()
+    if wire_transport_logger.isEnabledFor(logging.DEBUG):
+        wire_transport_logger.debug(
+            "make_tcp_pair: client_fd=%d, server_fd=%d",
+            client.fileno(),
+            server_conn.fileno(),
+        )
+    return TcpTransport(client), TcpTransport(server_conn)
+
+
+def serve_tcp(
+    server: RpcServer,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    *,
+    threaded: bool = False,
+    max_connections: int | None = None,
+    idle_timeout: float | None = None,
+    on_bound: Callable[[str, int], None] | None = None,
+) -> None:
+    """Serve RPC on a TCP socket, accepting connections in a loop.
+
+    Binds to ``(host, port)``, listens, and accepts connections.  By default
+    connections are handled sequentially (one at a time).  With
+    ``threaded=True`` each accepted connection is served in its own daemon
+    thread, allowing multiple clients to use the same socket concurrently.
+
+    The default *host* is loopback-only (``127.0.0.1``).  Binding a routable
+    address (e.g. ``0.0.0.0``) is explicit opt-in and exposes the **unauthenticated,
+    unencrypted** raw framing protocol on the network — only do so on a trusted
+    network; use the HTTP transport otherwise.
+
+    .. note::
+
+       When ``threaded=True`` the *implementation* object passed to
+       :class:`RpcServer` is shared across threads.  If it carries mutable
+       state the caller must ensure thread-safety (e.g. via locks).  Per-
+       connection stream state (:class:`StreamState`) is always isolated.
+
+    Args:
+        server: The RPC server to dispatch requests.
+        host: Interface to bind.  Defaults to ``127.0.0.1`` (loopback only).
+        port: TCP port to bind.  ``0`` (default) lets the OS choose a free
+            port, reported to *on_bound*.
+        threaded: When ``True``, serve each connection in a separate thread.
+        max_connections: Maximum number of connections served simultaneously.
+            Only meaningful when *threaded* is ``True``; ignored otherwise.
+            Excess connections are accepted but queued until a slot is free.
+            ``None`` means unlimited.
+        idle_timeout: When set, the worker self-terminates after this many
+            seconds with zero active connections.  Only meaningful when
+            *threaded* is ``True``; raises ``ValueError`` otherwise.  A
+            startup-grace timer of ``max(idle_timeout, 60)`` seconds protects
+            the worker from shutting down before the first client arrives.
+            ``None`` (default) keeps the accept loop running indefinitely.
+        on_bound: Optional callback invoked with ``(host, port)`` once the
+            socket is bound and listening, before the accept loop runs.  The
+            *port* is the actual bound port (resolved when ``port=0``).  Used
+            by ``run_server`` to emit the ``TCP:<host>:<port>`` discovery line
+            on stdout only after bind has succeeded.  Exceptions raised by the
+            callback propagate and abort the serve.
+
+    Raises:
+        ValueError: If *idle_timeout* is set but *threaded* is ``False``.
+
+    """
+    if idle_timeout is not None and not threaded:
+        raise ValueError("idle_timeout requires threaded=True")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    bound_port = int(sock.getsockname()[1])
+    sock.listen(128 if threaded else 16)
+    if wire_transport_logger.isEnabledFor(logging.DEBUG):
+        wire_transport_logger.debug(
+            "serve_tcp: server_id=%s, protocol=%s, host=%s, port=%d, threaded=%s, idle_timeout=%s",
+            server.server_id,
+            server.protocol_name,
+            host,
+            bound_port,
+            threaded,
+            idle_timeout,
+        )
+    if on_bound is not None:
+        on_bound(host, bound_port)
+    try:
+        if threaded:
+            _serve_socket_threaded(server, sock, max_connections, idle_timeout, TcpTransport, "vgi-tcp")
+        else:
+            _serve_socket_sequential(server, sock, TcpTransport)
+    finally:
+        sock.close()
 
 
 # ---------------------------------------------------------------------------

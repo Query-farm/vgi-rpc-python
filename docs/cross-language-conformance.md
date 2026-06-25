@@ -1,6 +1,6 @@
 # Cross-Language Conformance Testing
 
-The `vgi-rpc-test` CLI tool runs the conformance suite against any worker that speaks the vgi-rpc wire protocol (Arrow IPC over stdin/stdout, HTTP, or Unix sockets).
+The `vgi-rpc-test` CLI tool runs the conformance suite against any worker that speaks the vgi-rpc wire protocol (Arrow IPC over stdin/stdout, HTTP, Unix sockets, or TCP sockets).
 
 ## Install
 
@@ -22,6 +22,10 @@ vgi-rpc-test --url http://localhost:8000 --prefix /custom  # default prefix: /vg
 
 # Unix socket transport
 vgi-rpc-test --unix /tmp/my-worker.sock
+
+# TCP socket transport — raw framing, no auth/TLS (trusted networks only)
+vgi-rpc-test --tcp 127.0.0.1:9000
+vgi-rpc-test --tcp 9000              # host defaults to 127.0.0.1
 
 # Pipe + shared memory
 vgi-rpc-test --cmd "./my-worker" --shm 4194304  # 4MB segment

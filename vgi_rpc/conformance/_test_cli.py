@@ -11,6 +11,7 @@ Usage::
     vgi-rpc-test --cmd "./my-server"
     vgi-rpc-test --url http://localhost:8000
     vgi-rpc-test --unix /tmp/server.sock
+    vgi-rpc-test --tcp 127.0.0.1:9000
     vgi-rpc-test --cmd "./my-server" --shm 4194304
     vgi-rpc-test --cmd "./my-server" --filter "scalar*,void*"
     vgi-rpc-test --list
@@ -278,6 +279,38 @@ def _open_unix_transport(
         yield proxy
 
 
+@contextlib.contextmanager
+def _open_tcp_transport(
+    address: str,
+    log_collector: LogCollector,
+) -> Iterator[ConformanceService]:
+    """Create a TCP transport connection to the server under test.
+
+    Args:
+        address: ``HOST:PORT`` (host defaults to ``127.0.0.1`` if omitted).
+        log_collector: Collector to receive server log messages.
+
+    Yields:
+        A typed ConformanceService proxy.
+
+    """
+    from vgi_rpc.rpc import tcp_connect
+
+    if ":" in address:
+        host_part, _, port_part = address.rpartition(":")
+        host = host_part or "127.0.0.1"
+    else:
+        host, port_part = "127.0.0.1", address
+    try:
+        port = int(port_part)
+    except ValueError:
+        sys.stderr.write(f"--tcp expects HOST:PORT, got {address!r}\n")
+        sys.exit(2)
+
+    with tcp_connect(ConformanceService, host, port, on_log=log_collector) as proxy:  # type: ignore[type-abstract]
+        yield proxy
+
+
 # ---------------------------------------------------------------------------
 # Progress callback
 # ---------------------------------------------------------------------------
@@ -314,6 +347,7 @@ def _build_parser() -> argparse.ArgumentParser:
     transport_excl.add_argument("--cmd", "-c", metavar="CMD", help="Subprocess command to test (pipe transport)")
     transport_excl.add_argument("--url", "-u", metavar="URL", help="HTTP base URL to test")
     transport_excl.add_argument("--unix", metavar="PATH", help="Unix domain socket path to test")
+    transport_excl.add_argument("--tcp", metavar="HOST:PORT", help="TCP socket address to test")
     transport_group.add_argument("--prefix", default="", help="URL path prefix (default: none)")
     transport_group.add_argument(
         "--shm",
@@ -453,8 +487,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     # Validate transport
-    if not args.cmd and not args.url and not args.unix:
-        parser.error("Either --cmd, --url, or --unix is required (unless using --list)")
+    if not args.cmd and not args.url and not args.unix and not args.tcp:
+        parser.error("Either --cmd, --url, --unix, or --tcp is required (unless using --list)")
 
     if args.shm is not None and not args.cmd:
         parser.error("--shm requires --cmd")
@@ -479,13 +513,16 @@ def main(argv: list[str] | None = None) -> None:
 
     # Open transport and run
     try:
-        active_transport: Literal["pipe", "http", "unix"]
+        active_transport: Literal["pipe", "http", "unix", "tcp"]
         if args.cmd:
             ctx_manager = _open_pipe_transport(args.cmd, args.shm, effective_collector)
             active_transport = "pipe"
         elif args.unix:
             ctx_manager = _open_unix_transport(args.unix, effective_collector)
             active_transport = "unix"
+        elif args.tcp:
+            ctx_manager = _open_tcp_transport(args.tcp, effective_collector)
+            active_transport = "tcp"
         else:
             ctx_manager = _open_http_transport(args.url, args.prefix, effective_collector)
             active_transport = "http"

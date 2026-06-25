@@ -139,12 +139,15 @@ from vgi_rpc.rpc._transport import (
     ShmPipeTransport,
     StderrMode,
     SubprocessTransport,
+    TcpTransport,
     UnixTransport,
     _drain_stderr,
     make_pipe_pair,
+    make_tcp_pair,
     make_unix_pair,
     serve_named_pipe,
     serve_stdio,
+    serve_tcp,
     serve_unix,
 )
 from vgi_rpc.rpc._types import (
@@ -221,6 +224,7 @@ __all__ = [
     "StreamSession",
     "StreamState",
     "SubprocessTransport",
+    "TcpTransport",
     "TransportKind",
     "UnixTransport",
     "VersionError",
@@ -228,14 +232,17 @@ __all__ = [
     "current_auth",
     "describe_rpc",
     "make_pipe_pair",
+    "make_tcp_pair",
     "make_unix_pair",
     "rpc_methods",
     "run_server",
     "serve_named_pipe",
     "serve_pipe",
     "serve_stdio",
+    "serve_tcp",
     "serve_unix",
     "serve_unix_pipe",
+    "tcp_connect",
     "unix_connect",
     # Internal — used by vgi_rpc.http, vgi_rpc.introspect, vgi_rpc.external, and tests
     "HookToken",
@@ -360,6 +367,10 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
 
     - ``--http``  — Serve over HTTP instead of stdin/stdout (requires
       ``vgi-rpc[http]``).
+    - ``--unix PATH`` — Serve raw framing over a Unix domain socket.
+    - ``--tcp [HOST:]PORT`` — Serve raw framing over a TCP socket.  Host
+      defaults to ``127.0.0.1`` (loopback only); ``PORT`` may be ``0`` to
+      auto-select.  No auth/TLS — use ``--http`` for untrusted networks.
     - ``--host HOST`` — HTTP bind address (default ``127.0.0.1``).
     - ``--port PORT`` — HTTP port (default ``0``, auto-select).
     - ``--describe`` — Enable the ``__describe__`` introspection method.
@@ -408,13 +419,24 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             "and --idle-timeout governs self-shutdown."
         ),
     )
+    transport_mode.add_argument(
+        "--tcp",
+        metavar="[HOST:]PORT",
+        default=None,
+        help=(
+            "Serve raw framing over a TCP socket instead of stdin/stdout. "
+            "HOST defaults to 127.0.0.1 (loopback only); PORT may be 0 to auto-select. "
+            "Mutually exclusive with --http/--unix.  When set, --threaded defaults to True "
+            "and --idle-timeout governs self-shutdown.  No auth/TLS — use --http for untrusted networks."
+        ),
+    )
     parser.add_argument(
         "--idle-timeout",
         type=float,
         default=float(os.environ.get("VGI_RPC_IDLE_TIMEOUT", "300")),
         help=(
             "Self-terminate after this many seconds with zero active connections. "
-            "Only meaningful with --unix.  A startup-grace period of max(idle_timeout, 60) "
+            "Only meaningful with --unix/--tcp.  A startup-grace period of max(idle_timeout, 60) "
             "protects against shutdown before the first client.  0 disables.  "
             "Env: VGI_RPC_IDLE_TIMEOUT (default 300)."
         ),
@@ -424,8 +446,8 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Serve each Unix-socket connection in a separate daemon thread "
-            "(only meaningful with --unix; default True when --unix is set)."
+            "Serve each socket connection in a separate daemon thread "
+            "(only meaningful with --unix/--tcp; default True when either is set)."
         ),
     )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
@@ -516,7 +538,8 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     if args.access_log_max_bytes and args.access_log_when:
         raise SystemExit("--access-log-max-bytes and --access-log-when are mutually exclusive")
 
-    if args.unix is not None:
+    if args.unix is not None or args.tcp is not None:
+        raw_flag = "--unix" if args.unix is not None else "--tcp"
         http_only_violations: list[str] = []
         if args.access_log:
             http_only_violations.append("--access-log")
@@ -527,7 +550,7 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         if http_only_violations:
             raise SystemExit(
                 f"{', '.join(http_only_violations)} {'are' if len(http_only_violations) > 1 else 'is'} "
-                "HTTP-only and cannot be combined with --unix"
+                f"HTTP-only and cannot be combined with {raw_flag}"
             )
 
     if isinstance(protocol_or_server, RpcServer):
@@ -601,6 +624,35 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
                 idle_timeout=idle_timeout,
                 on_bound=_emit_discovery_line,
             )
+    elif args.tcp is not None:
+        threaded = True if args.threaded is None else args.threaded
+        idle_timeout = args.idle_timeout if args.idle_timeout > 0 else None
+
+        if ":" in args.tcp:
+            host_part, _, port_part = args.tcp.rpartition(":")
+            tcp_host = host_part or "127.0.0.1"
+        else:
+            tcp_host = "127.0.0.1"
+            port_part = args.tcp
+        try:
+            tcp_port = int(port_part)
+        except ValueError:
+            raise SystemExit(f"--tcp expects [HOST:]PORT, got {args.tcp!r}") from None
+
+        def _emit_tcp_discovery_line(bound_host: str, bound_port: int) -> None:
+            # Mirrors the UNIX:<path> / PORT:<n> discovery conventions.  After
+            # this line the worker MUST NOT write further data to stdout — see
+            # the cross-language launcher contract.
+            print(f"TCP:{bound_host}:{bound_port}", flush=True)
+
+        serve_tcp(
+            server,
+            tcp_host,
+            tcp_port,
+            threaded=threaded,
+            idle_timeout=idle_timeout,
+            on_bound=_emit_tcp_discovery_line,
+        )
     else:
         serve_stdio(server)
 
@@ -731,6 +783,47 @@ def unix_connect[P](
         sock.close()
         raise
     transport = UnixTransport(sock)
+    try:
+        with RpcConnection(
+            protocol, transport, on_log=on_log, external_location=external_location, ipc_validation=ipc_validation
+        ) as proxy:
+            yield proxy
+    finally:
+        transport.close()
+
+
+@contextlib.contextmanager
+def tcp_connect[P](
+    protocol: type[P],
+    host: str,
+    port: int,
+    *,
+    on_log: Callable[[Message], None] | None = None,
+    external_location: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
+) -> Iterator[P]:
+    """Connect to a TCP RPC server and yield a typed proxy.
+
+    The raw framing protocol carries no authentication or encryption; only
+    connect to trusted endpoints (use HTTP for untrusted networks).
+
+    Args:
+        protocol: The Protocol class defining the RPC interface.
+        host: Hostname or IP address of the TCP server.
+        port: TCP port of the server.
+        on_log: Optional callback for log messages from the server.
+        external_location: Optional ExternalLocation configuration for
+            resolving and producing externalized batches.
+        ipc_validation: Validation level for incoming IPC batches.
+
+    Yields:
+        A typed RPC proxy supporting all methods defined on *protocol*.
+
+    """
+    import socket as _socket
+
+    sock = _socket.create_connection((host, port))
+    transport = TcpTransport(sock)
     try:
         with RpcConnection(
             protocol, transport, on_log=on_log, external_location=external_location, ipc_validation=ipc_validation

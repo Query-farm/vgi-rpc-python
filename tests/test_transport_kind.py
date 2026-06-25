@@ -26,6 +26,7 @@ from vgi_rpc.rpc import (
     PipeTransport,
     UnixTransport,
     make_pipe_pair,
+    make_tcp_pair,
     make_unix_pair,
     serve_pipe,
 )
@@ -205,6 +206,34 @@ class TestUnixTransport:
             assert proxy.report_kind() == "unix"
             assert server.transport_kind == TransportKind.UNIX
             assert impl.kinds == [TransportKind.UNIX]
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+
+# ---------------------------------------------------------------------------
+# TCP transport
+# ---------------------------------------------------------------------------
+
+
+class TestTcpTransport:
+    """Hook fires with TCP for TcpTransport."""
+
+    def test_tcp_pair(self) -> None:
+        """Direct TcpTransport pair binds as TCP."""
+        client_transport, server_transport = make_tcp_pair()
+        impl = _RecordingImpl()
+        server = RpcServer(_KindService, impl)
+        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+        thread.start()
+        try:
+            from vgi_rpc.rpc._client import _RpcProxy
+
+            proxy = _RpcProxy(_KindService, client_transport, None)
+            assert proxy.report_kind() == "tcp"
+            assert server.transport_kind == TransportKind.TCP
+            assert impl.kinds == [TransportKind.TCP]
         finally:
             client_transport.close()
             thread.join(timeout=5)

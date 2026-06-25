@@ -59,7 +59,7 @@ from vgi_rpc.rpc._common import (
     _record_output,
 )
 from vgi_rpc.rpc._debug import wire_stream_logger
-from vgi_rpc.rpc._transport import PipeTransport, RpcTransport, ShmPipeTransport, UnixTransport
+from vgi_rpc.rpc._transport import PipeTransport, RpcTransport, ShmPipeTransport, TcpTransport, UnixTransport
 from vgi_rpc.rpc._types import (
     AnnotatedBatch,
     OutputCollector,
@@ -672,6 +672,8 @@ class RpcServer:
             capabilities = frozenset({"shm"})
         elif isinstance(transport, UnixTransport):
             kind = TransportKind.UNIX
+        elif isinstance(transport, TcpTransport):
+            kind = TransportKind.TCP
         elif isinstance(transport, PipeTransport):
             kind = TransportKind.PIPE
         else:
