@@ -1,10 +1,16 @@
 # Issues
 
-Functional deficiencies across the three vgi-rpc implementations, written as actionable tasks for coding agents.
+Functional deficiencies across the vgi-rpc implementations, written as actionable tasks for coding agents.
 
 ## Naming Convention
 
-`{lang}-{number}-{short-description}.md` where lang is `go`, `ts`, or `py`.
+`{lang}-{number}-{short-description}.md` where lang is `go`, `ts`, `py`, `rust`, or `java`. Completed cross-port features are recorded as `feature-{name}.md` marked RESOLVED.
+
+## Completed Features
+
+| Record | Summary |
+|--------|---------|
+| [feature-tcp-transport](feature-tcp-transport.md) | Raw-TCP socket transport landed + released across all five ports (Py 0.21.0, Go v0.10.0, TS 0.8.0, Rust 0.6.0, Java 0.11.0) |
 
 ## Current Issues
 

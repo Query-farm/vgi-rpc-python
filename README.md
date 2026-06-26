@@ -1,12 +1,19 @@
 # vgi-rpc-sync
 
-Keeps the three [vgi-rpc](https://vgi-rpc.query.farm) implementations in sync:
+Keeps the [vgi-rpc](https://vgi-rpc.query.farm) implementations in sync:
 
-| Language | Repo | Role |
-|----------|------|------|
-| Python | `~/Development/vgi-rpc` | Reference implementation (features land here first) |
-| Go | `~/Development/vgi-rpc-go` | |
-| TypeScript | `~/Development/vgi-rpc-typescript` | |
+| Language | Repo | Latest release | Role |
+|----------|------|----------------|------|
+| Python | `~/Development/vgi-rpc` | 0.21.0 (PyPI) | Reference implementation (features land here first) |
+| Go | `~/Development/vgi-rpc-go` | v0.10.0 (module tag) | |
+| TypeScript | `~/Development/vgi-rpc-typescript` | 0.8.0 (npm) | |
+| Rust | `~/Development/vgi-rpc-rust` | 0.6.0 (crates.io) | |
+| Java | `~/Development/vgi-rpc-java` | 0.11.0 (Maven Central) | |
+
+> The `make`/`port.py` tooling below currently automates **Python, Go, and TypeScript**;
+> Rust and Java are tracked here but not yet wired into the Makefile targets.
+> Recent cross-port work is recorded under [`issues/`](issues/README.md) (see
+> [feature-tcp-transport](issues/feature-tcp-transport.md)).
 
 ## Quick start
 
