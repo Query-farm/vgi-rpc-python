@@ -36,7 +36,7 @@ def shm_available() -> bool:
     Windows' ``multiprocessing.shared_memory`` uses a different, non-interoperable
     backing, so shm is offered only on POSIX.
     """
-    return sys.platform != "win32"
+    return True  # POSIX shm_open + Windows CreateFileMapping (multiprocessing.shared_memory)
 
 
 def worker_transport_metadata() -> dict[bytes, bytes]:
