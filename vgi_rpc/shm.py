@@ -33,7 +33,9 @@ All integers are little-endian for C++ interop.  Offsets are absolute
 from __future__ import annotations
 
 import logging
+import os
 import struct
+import sys
 from collections.abc import Callable
 from io import RawIOBase
 from multiprocessing.shared_memory import SharedMemory
@@ -628,6 +630,29 @@ def resolve_shm_batch(
     return resolved_batch, resolved_cm, release_fn
 
 
+def _resolve_shm_min_batch_bytes() -> int:
+    """Smallest batch (bytes) worth shipping through shm; below this the pipe wins.
+
+    shm's fixed per-batch cost (slot allocation + pointer round trip + the peer's
+    resolve/free) only pays off once the copy it avoids is large enough. The
+    measured crossover is platform-specific: POSIX ``shm_open``/``mmap`` is cheap
+    (~64KB) while Windows' page-file mapping plus the fast overlapped-pipe read
+    push it to ~1.5MB. Overridable via ``VGI_RPC_SHM_MIN_BATCH_BYTES``.
+    """
+    raw = os.environ.get("VGI_RPC_SHM_MIN_BATCH_BYTES")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return 1024 * 1024 if sys.platform == "win32" else 64 * 1024
+
+
+#: Resolved once at import. Mirrors the same gate in the C++ engine and the
+#: Go/Rust/Java SDK output paths.
+SHM_MIN_BATCH_BYTES = _resolve_shm_min_batch_bytes()
+
+
 def maybe_write_to_shm(
     batch: pa.RecordBatch,
     custom_metadata: pa.KeyValueMetadata | None,
@@ -646,6 +671,9 @@ def maybe_write_to_shm(
 
     """
     if shm is None or batch.num_rows == 0:
+        return batch, custom_metadata
+    # Small batches are cheaper over the pipe than through shm.
+    if batch.nbytes < SHM_MIN_BATCH_BYTES:
         return batch, custom_metadata
 
     result = shm.allocate_and_write(batch)

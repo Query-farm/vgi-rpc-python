@@ -18,6 +18,7 @@ import pyarrow as pa
 import pytest
 from pyarrow import ipc
 
+import vgi_rpc.shm as _shm_module
 from vgi_rpc.metadata import (
     LOG_LEVEL_KEY,
     REQUEST_VERSION,
@@ -57,6 +58,18 @@ from vgi_rpc.shm import (
 from vgi_rpc.utils import ArrowSerializableDataclass
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="shared-memory transport is POSIX-only")
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_shm_size_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the shm write/resolve mechanics with tiny batches.
+
+    ``maybe_write_to_shm`` skips shm for batches below ``SHM_MIN_BATCH_BYTES``
+    (the pipe is faster for small batches); these tests use tiny batches on
+    purpose, so neutralize the gate. The gate's real behavior is covered by the
+    end-to-end crossover benchmark, not here.
+    """
+    monkeypatch.setattr(_shm_module, "SHM_MIN_BATCH_BYTES", 0)
 
 # ---------------------------------------------------------------------------
 # Test schema & helpers
