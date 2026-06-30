@@ -15,8 +15,6 @@ unknown keys are ignored, so the set is open-ended.
 
 from __future__ import annotations
 
-import sys
-
 from vgi_rpc.metadata import TRANSPORT_SHM_KEY
 
 __all__ = [

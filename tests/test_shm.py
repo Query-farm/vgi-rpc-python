@@ -71,6 +71,7 @@ def _neutralize_shm_size_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(_shm_module, "SHM_MIN_BATCH_BYTES", 0)
 
+
 # ---------------------------------------------------------------------------
 # Test schema & helpers
 # ---------------------------------------------------------------------------
