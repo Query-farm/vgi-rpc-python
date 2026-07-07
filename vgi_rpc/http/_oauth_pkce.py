@@ -79,6 +79,8 @@ def _identity_cookie_value(id_token: str | None) -> str | None:
         return None
     raw = json.dumps(ident, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
 _SESSION_COOKIE_VERSION = 4  # v4 adds return_to field for external frontends
 _SESSION_MAX_AGE = 600  # 10 minutes
 _AUTH_COOKIE_DEFAULT_MAX_AGE = 3600  # 1 hour fallback
