@@ -23,6 +23,7 @@ from vgi_rpc import AuthContext, RpcServer
 from vgi_rpc.http import OAuthResourceMetadata
 from vgi_rpc.http._oauth_pkce import (
     _AUTH_COOKIE_NAME,
+    _IDENTITY_COOKIE_NAME,
     _SESSION_COOKIE_NAME,
     _derive_session_key,
     _generate_code_challenge,
@@ -576,7 +577,7 @@ class TestOAuthCallback:
         mock_client_cls.return_value = mock_client
 
         token = _mint_jwt(self.priv)
-        mock_exchange.return_value = (token, 3600, None)
+        mock_exchange.return_value = (token, 3600, None, token)
 
         state = "test-state-123"
         cookie = self._make_session_cookie(state=state, url="/vgi/describe")
@@ -590,6 +591,8 @@ class TestOAuthCallback:
         assert result.headers.get("location") == "/vgi/describe"
         # Auth cookie should be set
         assert _AUTH_COOKIE_NAME in result.cookies
+        # The display-identity cookie is derived from the id_token for the page.
+        assert _IDENTITY_COOKIE_NAME in result.cookies
 
 
 # ---------------------------------------------------------------------------

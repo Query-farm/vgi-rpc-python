@@ -46,6 +46,39 @@ logger = logging.getLogger(__name__)
 
 _SESSION_COOKIE_NAME = "_vgi_oauth_session"
 _AUTH_COOKIE_NAME = "_vgi_auth"
+
+# JS-readable display identity for the shared VGI landing page. Derived from the
+# OIDC id_token at the callback (display-only; the validated bearer remains the
+# security boundary) so the page shows the signed-in email/name regardless of
+# whether the bearer cookie holds an access or id token.
+_IDENTITY_COOKIE_NAME = "_vgi_identity"
+_IDENTITY_CLAIMS = ("sub", "email", "preferred_username", "name", "picture")
+
+
+def _decode_jwt_payload(token: str) -> dict[str, object] | None:
+    """Best-effort decode of a JWT payload (no signature verification)."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return None
+
+
+def _identity_cookie_value(id_token: str | None) -> str | None:
+    """base64url(JSON) of the display-identity claims from an id_token, or None."""
+    if not id_token:
+        return None
+    claims = _decode_jwt_payload(id_token)
+    if not claims:
+        return None
+    ident = {k: claims[k] for k in _IDENTITY_CLAIMS if claims.get(k) is not None}
+    if not ident:
+        return None
+    raw = json.dumps(ident, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 _SESSION_COOKIE_VERSION = 4  # v4 adds return_to field for external frontends
 _SESSION_MAX_AGE = 600  # 10 minutes
 _AUTH_COOKIE_DEFAULT_MAX_AGE = 3600  # 1 hour fallback
@@ -274,7 +307,7 @@ def _exchange_code_for_token(
     client_id: str,
     client_secret: str | None,
     use_id_token: bool,
-) -> tuple[str, int, str | None]:
+) -> tuple[str, int, str | None, str | None]:
     """Exchange an authorization code for a token.
 
     Args:
@@ -287,7 +320,9 @@ def _exchange_code_for_token(
         use_id_token: Whether to return the ID token instead of the access token.
 
     Returns:
-        ``(token, max_age_seconds, refresh_token_or_none)``
+        ``(token, max_age_seconds, refresh_token_or_none, id_token_or_none)``.
+        The id_token is always returned when present (used to derive the display
+        identity cookie), independent of ``use_id_token``.
 
     Raises:
         ValueError: On token exchange failure.
@@ -312,6 +347,7 @@ def _exchange_code_for_token(
         raise ValueError(f"Token exchange failed: {exc}") from exc
 
     refresh_token = body.get("refresh_token")
+    id_tok = body.get("id_token")
 
     if use_id_token:
         token = body.get("id_token")
@@ -328,15 +364,15 @@ def _exchange_code_for_token(
                 exp = claims.get("exp")
                 if exp is not None:
                     max_age = max(int(exp) - int(time.time()), 60)
-                    return token, max_age, refresh_token
+                    return token, max_age, refresh_token, id_tok
         except Exception:
             pass
-        return token, _AUTH_COOKIE_DEFAULT_MAX_AGE, refresh_token
+        return token, _AUTH_COOKIE_DEFAULT_MAX_AGE, refresh_token, id_tok
     token = body.get("access_token")
     if not token:
         raise ValueError("Token response missing access_token")
     expires_in = body.get("expires_in", _AUTH_COOKIE_DEFAULT_MAX_AGE)
-    return token, int(expires_in), refresh_token
+    return token, int(expires_in), refresh_token, id_tok
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +608,7 @@ class _OAuthCallbackResource:
 
         # Exchange code for token
         try:
-            token, max_age, refresh_token = _exchange_code_for_token(
+            token, max_age, refresh_token, id_token = _exchange_code_for_token(
                 token_endpoint=token_endpoint,
                 code=code,
                 redirect_uri=self._redirect_uri,
@@ -645,6 +681,20 @@ class _OAuthCallbackResource:
             http_only=False,
             same_site="Lax",
         )
+        # Display-identity cookie for the shared landing page (JS-readable). Set
+        # from the id_token so the page shows email/name even when the bearer is
+        # an access token that carries no profile claims.
+        identity = _identity_cookie_value(id_token)
+        if identity is not None:
+            resp.set_cookie(
+                _IDENTITY_COOKIE_NAME,
+                identity,
+                max_age=max_age,
+                path=self._cookie_path,
+                secure=self._secure_cookie,
+                http_only=False,
+                same_site="Lax",
+            )
         # Clear session cookie
         resp.set_cookie(
             _SESSION_COOKIE_NAME,
@@ -679,6 +729,14 @@ class _OAuthLogoutResource:
         """Clear auth cookie and redirect to landing page."""
         resp.set_cookie(
             _AUTH_COOKIE_NAME,
+            "",
+            max_age=0,
+            path=self._cookie_path,
+            secure=self._secure_cookie,
+            http_only=False,
+        )
+        resp.set_cookie(
+            _IDENTITY_COOKIE_NAME,
             "",
             max_age=0,
             path=self._cookie_path,
