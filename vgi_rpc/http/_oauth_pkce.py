@@ -62,7 +62,8 @@ def _decode_jwt_payload(token: str) -> dict[str, object] | None:
         if len(parts) < 2:
             return None
         payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload))
+        decoded = json.loads(base64.urlsafe_b64decode(payload))
+        return decoded if isinstance(decoded, dict) else None
     except Exception:
         return None
 
