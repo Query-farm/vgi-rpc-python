@@ -317,6 +317,14 @@ def _run_http_producer_init(
     resp_buf = BytesIO()
     if info.header_type is not None:
         _write_stream_header(resp_buf, result.header, app._server.external_config, sink=sink, method_name=method_name)
+    # Over HTTP a producer's first turn runs INSIDE the /init request, so the init
+    # request's Arrow metadata IS the first tick's metadata — surface it to the
+    # producer's first process() call. Without this the first turn sees the empty
+    # _TICK_BATCH and never observes first-tick metadata (e.g. the result-cache
+    # conditional-revalidation validators vgi.cache.if_none_match), which on the pipe
+    # transport ride a real first tick. Only the init turn carries it; continuation
+    # /exchange turns pass their own client tick metadata as usual.
+    init_request_metadata = _current_request_metadata.get()
     produce_buf = _run_http_producer_turn(
         app,
         schema=result.output_schema,
@@ -328,6 +336,7 @@ def _run_http_producer_init(
         transport_metadata=transport_metadata,
         outcome=outcome,
         sink=sink,
+        init_request_metadata=init_request_metadata,
     )
     resp_buf.write(produce_buf.getvalue())
     resp_buf.seek(0)
@@ -753,6 +762,7 @@ def _run_http_producer_turn(
     transport_metadata: Mapping[str, Any],
     outcome: _DispatchOutcome,
     sink: _ClientLogSink | None = None,
+    init_request_metadata: pa.KeyValueMetadata | None = None,
 ) -> BytesIO:
     """Run one HTTP turn of a producer stream.
 
@@ -800,6 +810,11 @@ def _run_http_producer_turn(
             (``status``, ``error_type``, ``error_message``).
         sink: Optional log sink to flush before producing (initial request
             only).  Continuation calls pass ``None``.
+        init_request_metadata: The init request's Arrow ``custom_metadata``,
+            passed only by the init turn.  Delivered to the producer's FIRST
+            ``process()`` call as the tick's ``custom_metadata`` (HTTP folds the
+            first producer turn into ``/init``, so this is the first tick), then
+            reset to the empty tick.  ``None`` on continuation turns.
 
     Returns:
         The IPC response body as a ``BytesIO``, positioned at the start.
@@ -844,6 +859,17 @@ def _run_http_producer_turn(
             kind=app._server.transport_kind,
             implementation=app._server.implementation,
         )
+        # The producer's FIRST tick carries the init request's metadata when this is
+        # the init turn (HTTP folds the first producer turn into /init), so a producer
+        # that reads first-tick metadata — e.g. the result-cache revalidation
+        # validators vgi.cache.if_none_match — observes it exactly as on the pipe
+        # transport. Later ticks (and continuation /exchange turns) use the empty
+        # _TICK_BATCH.
+        first_tick = (
+            AnnotatedBatch(batch=_TICK_BATCH.batch, custom_metadata=init_request_metadata)
+            if init_request_metadata is not None
+            else _TICK_BATCH
+        )
         try:
             while True:
                 # Snapshot the budgets remaining at the start of this iteration.
@@ -863,7 +889,8 @@ def _run_http_producer_turn(
                     externalization_enabled=externalization_enabled,
                 )
                 current_out[0] = out
-                state.process(_TICK_BATCH, out, produce_ctx)
+                state.process(first_tick, out, produce_ctx)
+                first_tick = _TICK_BATCH  # only the first process() sees init metadata
                 if not out.finished:
                     out.validate()
                 # Pre-flight the external cap BEFORE flushing — predicting the
