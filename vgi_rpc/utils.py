@@ -24,6 +24,7 @@ ValidatedReader : Wrapper around RecordBatchStreamReader with configurable valid
 
 """
 
+from collections.abc import Callable
 from dataclasses import MISSING, Field, dataclass
 from dataclasses import fields as dataclass_fields
 from enum import Enum
@@ -34,6 +35,7 @@ from typing import (
     Annotated,
     Any,
     ClassVar,
+    NamedTuple,
     Protocol,
     Self,
     Union,
@@ -417,6 +419,88 @@ def _has_binary_arrow_type(field_type: object) -> bool:
     return False
 
 
+class _FieldPlan(NamedTuple):
+    """Precomputed per-field metadata used on the serialization hot paths."""
+
+    name: str
+    resolved_type: object
+    """Annotation as resolved by ``get_type_hints`` (``Annotated`` preserved)."""
+    unwrapped_type: object
+    """``resolved_type`` with a top-level ``Annotated`` wrapper stripped."""
+    transient: bool
+    binary_dataclass: bool
+    """True for ``Annotated[SomeDataclass, ArrowType(pa.binary())]`` fields."""
+    default: object
+    """The field default, or ``dataclasses.MISSING``."""
+    default_factory: object
+    """The field default factory, or ``dataclasses.MISSING``."""
+
+
+class _SerializationPlan(NamedTuple):
+    """Cached per-class serialization metadata (see ``_serialization_plan``)."""
+
+    fields: tuple[_FieldPlan, ...]
+    required_fields: list[str]
+    """Non-transient fields without a default — must be present in a batch."""
+
+
+def _serialization_plan(cls: "type[ArrowSerializableDataclass]") -> _SerializationPlan:
+    """Return the cached per-class serialization plan, computing it on first use.
+
+    ``_to_row_dict`` and ``deserialize_from_batch`` run once per RPC message,
+    and resolving ``get_type_hints(include_extras=True)`` plus re-deriving the
+    transient / required / binary-override facts per call dominated their cost.
+    The plan is computed once per class and cached on the class itself
+    (``cls.__dict__`` check, mirroring ``_ArrowSchemaDescriptor``) so
+    subclasses never inherit a parent's cached plan.
+
+    Args:
+        cls: The ``ArrowSerializableDataclass`` subclass to plan for.
+
+    Returns:
+        The cached ``_SerializationPlan`` for exactly this class.
+
+    """
+    cached = cls.__dict__.get("_cached_serialization_plan")
+    if cached is not None:
+        return cast("_SerializationPlan", cached)
+
+    # Use get_type_hints to resolve string annotations.
+    # include_extras=True preserves Annotated[T, ...] for Transient detection.
+    try:
+        type_hints = get_type_hints(cls, include_extras=True)
+    except Exception:
+        type_hints = {f.name: f.type for f in dataclass_fields(cls)}
+
+    field_plans: list[_FieldPlan] = []
+    required_fields: list[str] = []
+    for f in dataclass_fields(cls):
+        field_type = type_hints.get(f.name, f.type)
+        transient = _is_transient_field(field_type)
+        unwrapped = field_type
+        if get_origin(field_type) is Annotated:
+            args = get_args(field_type)
+            unwrapped = args[0] if args else field_type
+        has_default = f.default is not MISSING or f.default_factory is not MISSING
+        if not transient and not has_default:
+            required_fields.append(f.name)
+        field_plans.append(
+            _FieldPlan(
+                name=f.name,
+                resolved_type=field_type,
+                unwrapped_type=unwrapped,
+                transient=transient,
+                binary_dataclass=_has_binary_arrow_type(field_type),
+                default=f.default,
+                default_factory=f.default_factory,
+            )
+        )
+
+    plan = _SerializationPlan(fields=tuple(field_plans), required_fields=required_fields)
+    cls._cached_serialization_plan = plan
+    return plan
+
+
 def _is_optional_type(python_type: object) -> tuple[object, bool]:
     """Check if a type is Optional (X | None) and extract the inner type.
 
@@ -661,6 +745,11 @@ class ArrowSerializableDataclass:
     # Optional: explicit Arrow type overrides for complex fields
     _ARROW_FIELD_OVERRIDES: ClassVar[dict[str, pa.DataType]] = {}
 
+    # Per-class serialization plan cache, populated lazily by
+    # _serialization_plan(). Each subclass gets its own entry (the lookup
+    # checks cls.__dict__, never this inherited default).
+    _cached_serialization_plan: ClassVar[_SerializationPlan | None] = None
+
     def _to_row_dict(self) -> dict[str, object]:
         """Convert instance to a dictionary for Arrow batch construction.
 
@@ -675,31 +764,32 @@ class ArrowSerializableDataclass:
         - list elements -> recursively converted
 
         """
-        try:
-            type_hints = get_type_hints(type(self), include_extras=True)
-        except Exception:
-            type_hints = {f.name: f.type for f in dataclass_fields(self)}
-
         row: dict[str, object] = {}
-        for field in dataclass_fields(self):
-            field_type = type_hints.get(field.name, field.type)
-            if _is_transient_field(field_type):
+        for field_plan in _serialization_plan(type(self)).fields:
+            if field_plan.transient:
                 continue
-            value = getattr(self, field.name)
+            value = getattr(self, field_plan.name)
             # If the field has ArrowType(pa.binary()) and the value is an
             # ArrowSerializableDataclass, serialize to IPC bytes instead of
             # converting to a struct dict.
-            if isinstance(value, ArrowSerializableDataclass) and _has_binary_arrow_type(field_type):
+            if field_plan.binary_dataclass and isinstance(value, ArrowSerializableDataclass):
                 value = value.serialize_to_bytes()
             else:
                 value = self._convert_value_for_serialization(value)
-            row[field.name] = value
+            row[field_plan.name] = value
         return row
 
     def _convert_value_for_serialization(self, value: object) -> object:
         """Convert a value for Arrow serialization."""
         if value is None:
             return None
+
+        # Fast path: plain scalars pass through untouched. Exact type checks
+        # (not isinstance) so subclasses — notably Enum members, which subclass
+        # str/int — still take the full dispatch below.
+        value_type = type(value)
+        if value_type is str or value_type is int or value_type is float or value_type is bool or value_type is bytes:
+            return value
 
         # Handle pa.Schema -> serialize to bytes
         if isinstance(value, pa.Schema):
@@ -797,65 +887,47 @@ class ArrowSerializableDataclass:
             KeyError: If an Enum name cannot be resolved.
 
         """
-        # Use get_type_hints to resolve string annotations.
-        # include_extras=True preserves Annotated[T, ...] for Transient detection.
-        try:
-            type_hints = get_type_hints(cls, include_extras=True)
-        except Exception:
-            type_hints = {f.name: f.type for f in dataclass_fields(cls)}
-
-        # Get required fields (those without defaults) from dataclass definition.
-        # Fields with defaults or default_factory are optional for compatibility.
-        # Transient fields are never required (they are not in the batch).
-        required_fields = []
-        for f in dataclass_fields(cls):
-            field_type = type_hints.get(f.name, f.type)
-            if _is_transient_field(field_type):
-                continue
-            has_default = f.default is not MISSING or f.default_factory is not MISSING
-            if not has_default:
-                required_fields.append(f.name)
+        # Cached per-class plan: resolved type hints, transient flags, and the
+        # required-field list (non-transient fields without defaults; fields
+        # with defaults or default_factory are optional for compatibility).
+        plan = _serialization_plan(cls)
 
         # Validate and extract row
         row = _validate_single_row_batch(
             batch,
             cls.__name__,
-            required_fields=required_fields,
+            required_fields=plan.required_fields,
         )
 
         # Convert values back to expected Python types
         kwargs: dict[str, Any] = {}
-        for field in dataclass_fields(cls):
-            field_type = type_hints.get(field.name, field.type)
+        for field_plan in plan.fields:
+            name = field_plan.name
 
             # Transient fields are not in the batch — use their default value
-            if _is_transient_field(field_type):
-                if field.default is not MISSING:
-                    kwargs[field.name] = field.default
-                elif field.default_factory is not MISSING:
-                    kwargs[field.name] = field.default_factory()
+            if field_plan.transient:
+                if field_plan.default is not MISSING:
+                    kwargs[name] = field_plan.default
+                elif field_plan.default_factory is not MISSING:
+                    factory = cast("Callable[[], object]", field_plan.default_factory)
+                    kwargs[name] = factory()
                 continue
 
             # Check if field is present in the row
-            if field.name not in row:
+            if name not in row:
                 # Use default if available (for backward compatibility)
-                if field.default is not MISSING:
-                    kwargs[field.name] = field.default
-                elif field.default_factory is not MISSING:
-                    kwargs[field.name] = field.default_factory()
+                if field_plan.default is not MISSING:
+                    kwargs[name] = field_plan.default
+                elif field_plan.default_factory is not MISSING:
+                    factory = cast("Callable[[], object]", field_plan.default_factory)
+                    kwargs[name] = factory()
                 # If no default, it would have been caught by validate_single_row_batch
                 continue
 
-            value = row.get(field.name)
+            value = row.get(name)
 
-            # Unwrap Annotated to get actual type
-            if get_origin(field_type) is Annotated:
-                args = get_args(field_type)
-                field_type = args[0] if args else field_type
-
-            # Convert value based on field type
-            value = cls._convert_value_for_deserialization(value, field_type, ipc_validation)
-            kwargs[field.name] = value
+            # Convert value based on field type (Annotated already unwrapped in the plan)
+            kwargs[name] = cls._convert_value_for_deserialization(value, field_plan.unwrapped_type, ipc_validation)
 
         return cls(**kwargs)
 
