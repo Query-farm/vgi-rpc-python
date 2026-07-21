@@ -1025,9 +1025,7 @@ class TestIpcValidationFromEnv:
             ("  STANDARD  ", IpcValidation.STANDARD),
         ],
     )
-    def test_recognised_values(
-        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: IpcValidation
-    ) -> None:
+    def test_recognised_values(self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: IpcValidation) -> None:
         """Values are case-insensitive and whitespace-tolerant."""
         monkeypatch.setenv("VGI_RPC_IPC_VALIDATION", raw)
         assert IpcValidation.from_env() is expected
@@ -1051,7 +1049,5 @@ class TestIpcValidationFromEnv:
 
         monkeypatch.setenv("VGI_RPC_IPC_VALIDATION", "none")
         assert RpcServer(RpcFixtureService, RpcFixtureServiceImpl()).ipc_validation is IpcValidation.NONE
-        explicit = RpcServer(
-            RpcFixtureService, RpcFixtureServiceImpl(), ipc_validation=IpcValidation.FULL
-        )
+        explicit = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), ipc_validation=IpcValidation.FULL)
         assert explicit.ipc_validation is IpcValidation.FULL

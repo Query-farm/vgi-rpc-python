@@ -2027,9 +2027,7 @@ class TestResponseEncodingPreference:
 
     def test_identity_first_wins(self) -> None:
         """A client can explicitly demand an uncompressed body."""
-        assert self._pick(
-            **{"X-VGI-Accept-Encoding": "identity", "Accept-Encoding": "gzip, zstd"}
-        ) == (None, False)
+        assert self._pick(**{"X-VGI-Accept-Encoding": "identity", "Accept-Encoding": "gzip, zstd"}) == (None, False)
 
     def test_identity_after_codec_does_not_win(self) -> None:
         """A codec listed before identity still wins."""

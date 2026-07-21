@@ -1063,7 +1063,7 @@ class _HttpProxy:
             # Present but empty ⇒ server speaks no compression.  Cache that
             # as an empty set rather than ignoring it, so we stop offering
             # it compressed request bodies.
-            parsed = ()
+            parsed: tuple[Encoding, ...] = ()
         else:
             parsed = tuple(parse_encoding_list(raw))
             if not parsed:
@@ -1717,6 +1717,7 @@ def http_capabilities(
         supported_raw = headers.get(SUPPORTED_ENCODINGS_HEADER)
         if supported_raw is None:
             supported_raw = headers.get(SUPPORTED_ENCODINGS_HEADER.lower())
+        supported_encodings: tuple[Encoding, ...]
         if supported_raw is None:
             # Absent ⇒ legacy server predating the header; assume zstd.
             supported_encodings = (Encoding.ZSTD,)

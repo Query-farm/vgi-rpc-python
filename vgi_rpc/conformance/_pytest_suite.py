@@ -16,10 +16,13 @@ import os
 import threading
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
+
+if TYPE_CHECKING:
+    import httpx
 
 from vgi_rpc.conformance import (
     AllTypes,
@@ -1650,10 +1653,9 @@ def _advertised_encodings(port: int) -> list[str] | None:
     return [t.strip().lower() for t in raw.split(",") if t.strip()]
 
 
-def _response_codec(resp: object) -> str | None:
+def _response_codec(resp: httpx.Response) -> str | None:
     """Return the codec a response claims, from either stamping header."""
-    headers = resp.headers  # type: ignore[attr-defined]
-    ce = headers.get("Content-Encoding") or headers.get("X-VGI-Content-Encoding")
+    ce = resp.headers.get("Content-Encoding") or resp.headers.get("X-VGI-Content-Encoding")
     return ce.strip().lower() if ce else None
 
 
@@ -1685,7 +1687,7 @@ class TestHttpCompressionNegotiationConformance:
     # minimum-size floor (Rust, for one, won't compress below 1 KiB).
     PAYLOAD = "conformance-compression-probe " * 4096
 
-    def _echo(self, port: int, headers: dict[str, str]) -> object:
+    def _echo(self, port: int, headers: dict[str, str]) -> httpx.Response:
         import httpx
 
         from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
@@ -1740,7 +1742,7 @@ class TestHttpCompressionNegotiationConformance:
             {"X-VGI-Accept-Encoding": codec, "Accept-Encoding": ""},
         )
         assert _response_codec(resp) == codec
-        assert resp.headers.get("X-VGI-Content-Encoding", "").strip().lower() == codec  # type: ignore[attr-defined]
+        assert resp.headers.get("X-VGI-Content-Encoding", "").strip().lower() == codec
 
     def test_custom_header_outranks_gzip_first_standard(self, conformance_http_port: int) -> None:
         """The cpp-httplib regression: a gzip-first Accept-Encoding must not win."""
@@ -1756,7 +1758,7 @@ class TestHttpCompressionNegotiationConformance:
         )
         assert _response_codec(resp) == "zstd", "gzip listed first must not beat VGI's zstd preference"
         # zstd is in both headers, so the standard header carries it.
-        assert resp.headers.get("Content-Encoding", "").strip().lower() == "zstd"  # type: ignore[attr-defined]
+        assert resp.headers.get("Content-Encoding", "").strip().lower() == "zstd"
 
     def test_empty_advertisement_means_never_compressed(self, request: pytest.FixtureRequest) -> None:
         """A server advertising no codecs must not compress, however asked.

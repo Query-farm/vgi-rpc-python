@@ -481,7 +481,10 @@ class _CompressionMiddleware:
                     pieces.append(tail)
                 compressed = b"".join(pieces)
         else:  # pragma: no cover — _levels keys are filtered by available_encodings
-            return  # type: ignore[unreachable]  # exhaustive: _levels keys filtered by available_encodings
+            # Unreachable in practice: _levels only ever holds codecs from
+            # available_encodings(), and IDENTITY is excluded from that set.
+            # mypy can't see it, since IDENTITY is a member of the enum.
+            return
 
         resp.data = compressed
         resp.stream = None
