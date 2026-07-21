@@ -984,26 +984,26 @@ class ArrowSerializableDataclass:
             and isinstance(getattr(inner_type, "ARROW_SCHEMA", None), pa.Schema)
             and isinstance(value, dict)
         ):
-            # Recursively deserialize nested dataclass
+            # Recursively deserialize nested dataclass.  Consume the nested
+            # class's cached plan rather than re-resolving its annotations:
+            # this branch runs once per *message* for nested state — a stream
+            # state that wraps a whole init request hits it on every batch —
+            # so an uncached get_type_hints here sits squarely on the hot path.
             value_dict = cast("dict[str, object]", value)
             nested_kwargs: dict[str, object] = {}
-            try:
-                nested_hints = get_type_hints(inner_type, include_extras=True)
-            except Exception:
-                nested_hints = {f.name: f.type for f in dataclass_fields(inner_type)}
-            for f in dataclass_fields(inner_type):
-                f_type = nested_hints.get(f.name, f.type)
+            nested_plan = _serialization_plan(cast("type[ArrowSerializableDataclass]", inner_type))
+            for field_plan in nested_plan.fields:
                 # Skip transient fields — use their default value
-                if _is_transient_field(f_type):
-                    if f.default is not MISSING:
-                        nested_kwargs[f.name] = f.default
-                    elif f.default_factory is not MISSING:
-                        nested_kwargs[f.name] = f.default_factory()
+                if field_plan.transient:
+                    if field_plan.default is not MISSING:
+                        nested_kwargs[field_plan.name] = field_plan.default
+                    elif field_plan.default_factory is not MISSING:
+                        factory = cast("Callable[[], object]", field_plan.default_factory)
+                        nested_kwargs[field_plan.name] = factory()
                     continue
-                if get_origin(f_type) is Annotated:
-                    f_type = get_args(f_type)[0]
-                nested_kwargs[f.name] = cls._convert_value_for_deserialization(
-                    value_dict.get(f.name), f_type, ipc_validation
+                # Annotated already unwrapped in the plan.
+                nested_kwargs[field_plan.name] = cls._convert_value_for_deserialization(
+                    value_dict.get(field_plan.name), field_plan.unwrapped_type, ipc_validation
                 )
             return inner_type(**nested_kwargs)
 
