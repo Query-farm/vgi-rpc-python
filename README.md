@@ -498,7 +498,7 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `otel_config` | `None` | `OtelConfig` for OpenTelemetry instrumentation (requires `[otel]`) |
 | `sentry_config` | `None` | `SentryConfig` for Sentry error reporting (requires `[sentry]`) |
 | `token_ttl` | `3600` | Maximum age (seconds) for stream state tokens |
-| `compression_level` | `3` | Zstd level for request/response bodies (1–22; also enables gzip fallback). `None` disables compression |
+| `compression_level` | `3` | Zstd level for request/response bodies (1–22; also enables gzip fallback). `None` disables response compression (compressed *request* bodies are still decoded) |
 | `enable_not_found_page` | `True` | Friendly HTML 404 page for unmatched paths |
 | `enable_landing_page` | `True` | Friendly HTML landing page at `GET {prefix}` |
 | `enable_describe_page` | `True` | HTML method listing at `GET {prefix}/describe` (when `enable_describe=True`) |

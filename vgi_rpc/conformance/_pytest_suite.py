@@ -1702,6 +1702,88 @@ class TestHttpCompressionNegotiationConformance:
         assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
         return resp
 
+    def _echo_compressed(self, port: int, codec: str) -> httpx.Response:
+        """POST a *compressed* ``echo_string`` request, asking for a plain response.
+
+        The accept headers pin ``identity`` so the reply is readable
+        without a client-side decompressor, isolating the direction under
+        test (request decoding) from response negotiation.  The status is
+        deliberately not asserted — callers decide what is acceptable.
+        """
+        import httpx
+
+        from vgi_rpc.http._common import _ARROW_CONTENT_TYPE, Encoding, compress
+
+        body = compress(Encoding(codec), _unary_request_body("echo_string", value=self.PAYLOAD))
+        return httpx.post(
+            f"http://127.0.0.1:{port}/echo_string",
+            content=body,
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                "Content-Encoding": codec,
+                "Accept-Encoding": "identity",
+                "X-VGI-Accept-Encoding": "identity",
+            },
+            timeout=30.0,
+        )
+
+    @staticmethod
+    def _echoed_value(resp: httpx.Response) -> object:
+        """Read the ``result`` column out of an uncompressed unary response."""
+        from io import BytesIO
+
+        reader = pa.ipc.open_stream(BytesIO(resp.content))
+        for batch in reader:
+            if "result" in batch.schema.names:
+                return batch.column("result")[0].as_py()
+        raise AssertionError("response carried no result batch")
+
+    def test_advertised_codec_decodes_a_compressed_request(self, conformance_http_port: int) -> None:
+        """A codec the server advertises must be accepted on a request body.
+
+        The advertisement is what a client negotiates its *request*
+        encoding against, so anything listed there has to round-trip.
+        """
+        advertised = _advertised_encodings(conformance_http_port)
+        if not advertised:
+            pytest.skip("server advertises no codecs")
+        for codec in advertised:
+            resp = self._echo_compressed(conformance_http_port, codec)
+            assert resp.status_code == 200, f"{codec}: {resp.status_code}: {resp.content[:200]!r}"
+            assert self._echoed_value(resp) == self.PAYLOAD, codec
+
+    def test_compression_disabled_server_survives_a_compressed_request(self, request: pytest.FixtureRequest) -> None:
+        """A compression-disabled server must not choke on a compressed request body.
+
+        "I compress no responses" is a server policy about the *response*
+        direction; it says nothing about being able to read a request.
+        Peers compress by default (the DuckDB engine sends zstd request
+        bodies), and an implementation that drops its decoder along with
+        its compressor feeds ciphertext to the Arrow reader and answers
+        500 -- the Python SDK did exactly that.
+
+        Decoding is the right behaviour and is asserted whenever the
+        server answers 200: the echoed payload must come back intact.  A
+        clean 415 is tolerated as the other defensible answer (an
+        implementation that genuinely cannot decode), because the
+        conformance contract here is that the failure is *negotiated*,
+        never a 5xx.
+        """
+        try:
+            port = request.getfixturevalue("conformance_http_no_compression_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no compression-disabled server")
+
+        from vgi_rpc.http._common import available_encodings
+
+        codec = available_encodings()[0].value
+        resp = self._echo_compressed(port, codec)
+        assert resp.status_code != 500, f"compressed request must not 500: {resp.content[:200]!r}"
+        assert resp.status_code in (200, 415), f"{resp.status_code}: {resp.content[:200]!r}"
+        if resp.status_code == 200:
+            assert _response_codec(resp) is None, "a compression-disabled server must reply uncompressed"
+            assert self._echoed_value(resp) == self.PAYLOAD
+
     def test_supported_encodings_is_advertised(self, conformance_http_port: int) -> None:
         """The header is present, lists only real codecs, and omits identity."""
         advertised = _advertised_encodings(conformance_http_port)

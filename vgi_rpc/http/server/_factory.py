@@ -186,12 +186,16 @@ def make_wsgi_app(
             output than level 3 (8.41 MB body: 5.77 ms/4.219 MB at
             level 1 vs 27.39 ms/4.384 MB at level 3) — for this data
             shape it is not a speed/size tradeoff.
-            Valid zstd range is 1-22.  ``None`` disables compression
-            entirely (no codec is advertised, and bodies travel
-            uncompressed).  Set ``VGI_HTTP_DISABLE_ZSTD=1`` in the
-            environment to drop zstd from the advertised set even when
-            ``zstandard`` is installed — useful for testing the
-            gzip-fallback path.
+            Valid zstd range is 1-22.  ``None`` disables *response*
+            compression: no codec is advertised and every response body
+            travels uncompressed.  Request bodies are still decoded — a
+            peer that compressed its request (the DuckDB engine does so
+            by default) is served normally rather than failing on the
+            undecoded bytes, since decoding costs nothing to support.
+            Set ``VGI_HTTP_DISABLE_ZSTD=1`` in the environment to drop
+            zstd from both the advertised set and the accepted request
+            codecs even when ``zstandard`` is installed — useful for
+            testing the gzip-fallback path.
         enable_not_found_page: When ``True`` (the default), requests to
             paths that do not match any RPC route receive a friendly HTML
             404 page.  Set to ``False`` to use Falcon's default 404
@@ -332,36 +336,46 @@ def make_wsgi_app(
     # compression ratios on Arrow IPC bodies, tight enough that a tiny
     # compressed body cannot claim hundreds of MB and OOM the server.
     #
+    # The two directions are configured **independently**: what we accept on
+    # a request body (``decodable``) and what we will produce on a response
+    # (``codec_levels``).  ``compression_level=None`` means "do not compress
+    # responses" — it does NOT mean "cannot read a compressed request".
+    # Dropping the middleware entirely for that case used to leave such a
+    # server unable to decode a zstd request body at all (the DuckDB engine
+    # sends one by default), which surfaced as a 500 out of the Arrow reader
+    # rather than a clean answer.  Decoding costs nothing to offer, so it
+    # stays on regardless.
+    #
     # ``compression_level`` (the historical int knob) sets the zstd level;
     # gzip is always offered at level 6 alongside it so peers that can't
     # do zstd (browsers without a polyfill, Python aiohttp without
     # ``zstandard``) can still negotiate compression.  ``VGI_HTTP_DISABLE_ZSTD=1``
-    # drops zstd from the advertised set even when ``zstandard`` is
-    # importable — used by tests that need to exercise the gzip path
-    # without uninstalling the package.
-    enabled_encodings: tuple[Encoding, ...] = ()
+    # drops zstd from *both* sets even when ``zstandard`` is importable —
+    # used by tests that need to exercise the gzip path without uninstalling
+    # the package, so the server must also refuse zstd request bodies.
+    #
+    # available_encodings() drops codecs whose runtime support is missing
+    # (e.g. zstd when zstandard isn't installed) — keep the factory and
+    # middleware in lockstep so the advertised list matches what we
+    # actually accept.
+    runtime = set(available_encodings())
+    zstd_disabled = os.environ.get("VGI_HTTP_DISABLE_ZSTD") == "1"
+    decodable: tuple[Encoding, ...] = tuple(
+        enc for enc in (Encoding.ZSTD, Encoding.GZIP) if enc in runtime and not (zstd_disabled and enc is Encoding.ZSTD)
+    )
+    codec_levels: dict[Encoding, int] = {}
     if compression_level is not None:
+        codec_levels = {enc: (compression_level if enc is Encoding.ZSTD else 6) for enc in decodable}
+    enabled_encodings: tuple[Encoding, ...] = tuple(codec_levels)
+    if decodable or codec_levels:
         max_decompressed_bytes = max_request_bytes * 16 if max_request_bytes is not None else None
-        codec_levels: dict[Encoding, int] = {
-            Encoding.ZSTD: compression_level,
-            Encoding.GZIP: 6,
-        }
-        if os.environ.get("VGI_HTTP_DISABLE_ZSTD") == "1":
-            codec_levels.pop(Encoding.ZSTD, None)
-        # available_encodings() drops codecs whose runtime support is missing
-        # (e.g. zstd when zstandard isn't installed) — keep the factory and
-        # middleware in lockstep so the advertised list matches what we
-        # actually accept.
-        runtime = set(available_encodings())
-        codec_levels = {enc: lvl for enc, lvl in codec_levels.items() if enc in runtime}
-        enabled_encodings = tuple(codec_levels)
-        if codec_levels:
-            middleware.append(
-                _CompressionMiddleware(
-                    codec_levels,
-                    max_decompressed_bytes=max_decompressed_bytes,
-                )
+        middleware.append(
+            _CompressionMiddleware(
+                codec_levels,
+                decode_encodings=decodable,
+                max_decompressed_bytes=max_decompressed_bytes,
             )
+        )
 
     # OTel middleware must come before auth so spans cover the full request
     if otel_config is not None:
@@ -396,18 +410,24 @@ def make_wsgi_app(
         if max_upload_bytes is not None:
             capability_headers[MAX_UPLOAD_BYTES_HEADER] = str(max_upload_bytes)
             cors_expose.append(MAX_UPLOAD_BYTES_HEADER)
-    # Advertise the compression codecs we actually accept on the wire.  A
-    # client compares this against its own codec set and picks the first
-    # mutually supported one for its request body.  Absent header ⇒
-    # ``{zstd}`` (back-compat with pre-gzip servers).
+    # Advertise the compression codecs this server negotiates.  A client
+    # compares this against its own codec set and picks the first mutually
+    # supported one for its request body.  Absent header ⇒ ``{zstd}``
+    # (back-compat with pre-gzip servers).
     #
     # Always emitted, including as an *empty* value when compression is
     # disabled (``compression_level=None``).  Absent and present-but-empty
     # mean different things: absent is a legacy server, for which clients
     # assume ``{zstd}``, whereas empty is this server positively stating it
     # speaks no compression.  Omitting it here would make a deliberately
-    # uncompressed server indistinguishable from an old one and get it
-    # sent zstd request bodies it cannot decode.
+    # uncompressed server indistinguishable from an old one.
+    #
+    # The advertisement tracks the *encode* set, not the decode set: it is
+    # the negotiated contract ("nothing compressed will come back, don't
+    # bother compressing for me"), and a client is entitled to take it at
+    # face value.  The server still decodes a compressed request body it
+    # receives anyway — being lenient about what it accepts costs nothing
+    # and is not something to advertise.
     capability_headers[SUPPORTED_ENCODINGS_HEADER] = ", ".join(e.value for e in enabled_encodings)
     cors_expose.append(SUPPORTED_ENCODINGS_HEADER)
     # Sticky session capability headers — advertised only when sticky is on

@@ -21,7 +21,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import types as _types
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from io import BytesIO, IOBase
 from typing import Any
 
@@ -297,37 +297,53 @@ class _AuthMiddleware:
 class _CompressionMiddleware:
     """Falcon middleware for transparent codec request/response compression.
 
-    On requests: if ``Content-Encoding`` names a supported codec (zstd or
-    gzip), the request body is decompressed and stored in
+    The two directions are **independent capabilities**, configured
+    separately.  Decoding a request costs nothing to offer and is what a
+    peer needs from us; encoding a response is a server policy an operator
+    may want off (already-compressed transport, CPU budget, a proxy that
+    re-compresses).  Conflating them meant a server with response
+    compression disabled could not decode a compressed request at all —
+    it read the compressed bytes as Arrow IPC and 500'd.
+
+    On requests: if ``Content-Encoding`` names a codec in
+    ``decode_encodings``, the request body is decompressed and stored in
     ``req.context.decompressed_stream`` so resource handlers read
-    uncompressed data.  An unknown codec triggers 415.
+    uncompressed data.  An unknown or non-accepted codec triggers 415.
 
     On responses: pick the first codec from the client's
     ``Accept-Encoding`` / ``X-VGI-Accept-Encoding`` that we can produce
-    (``levels`` keys), compress an Arrow IPC body with it, and stamp
+    (``encode_levels`` keys), compress an Arrow IPC body with it, and stamp
     the chosen codec on ``Content-Encoding`` (or ``X-VGI-Content-Encoding``
-    if the client used the custom header).  No overlap → uncompressed.
+    if the client used the custom header).  No overlap → uncompressed.  An
+    empty ``encode_levels`` disables response compression outright while
+    leaving request decoding untouched.
 
     The decompression cap (``max_decompressed_bytes``) bounds output to
     block decompression-bomb DoS regardless of codec.  zstd uses its
     frame-header pre-check; gzip uses a bounded streaming loop.
     """
 
-    __slots__ = ("_available", "_levels", "_max_decompressed_bytes")
+    __slots__ = ("_decode", "_levels", "_max_decompressed_bytes")
 
     def __init__(
         self,
-        levels: dict[Encoding, int] | int,
+        encode_levels: dict[Encoding, int] | int | None = None,
         *,
+        decode_encodings: Iterable[Encoding] | None = None,
         max_decompressed_bytes: int | None = None,
     ) -> None:
-        if isinstance(levels, int):
+        if isinstance(encode_levels, int):
             # Back-compat: old factories passed a single int (zstd level).
-            levels = {Encoding.ZSTD: levels}
-        # Only keep codecs the runtime can actually produce.
+            encode_levels = {Encoding.ZSTD: encode_levels}
+        elif encode_levels is None:
+            encode_levels = {}
+        # Only keep codecs the runtime can actually produce/consume.
         runtime = set(available_encodings())
-        self._levels: dict[Encoding, int] = {enc: lvl for enc, lvl in levels.items() if enc in runtime}
-        self._available: tuple[Encoding, ...] = tuple(self._levels)
+        self._levels: dict[Encoding, int] = {enc: lvl for enc, lvl in encode_levels.items() if enc in runtime}
+        # Request decoding defaults to whatever we can encode, so callers
+        # that only pass levels keep the historical behaviour.
+        decodable = tuple(encode_levels) if decode_encodings is None else tuple(decode_encodings)
+        self._decode: tuple[Encoding, ...] = tuple(enc for enc in decodable if enc in runtime)
         self._max_decompressed_bytes = max_decompressed_bytes
 
     def _pick_response_encoding(self, req: falcon.Request) -> tuple[Encoding | None, bool]:
@@ -376,12 +392,12 @@ class _CompressionMiddleware:
                 title="Unsupported Content-Encoding",
                 description=f"Content-Encoding {content_encoding!r} is not supported by this server",
             )
-        if req_enc not in self._levels:
+        if req_enc not in self._decode:
             raise falcon.HTTPUnsupportedMediaType(
                 title="Unsupported Content-Encoding",
                 description=(
                     f"Content-Encoding {content_encoding!r} is not enabled on this server; "
-                    f"supported: {', '.join(e.value for e in self._available) or 'none'}"
+                    f"supported: {', '.join(e.value for e in self._decode) or 'none'}"
                 ),
             )
         try:

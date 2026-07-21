@@ -2205,6 +2205,109 @@ class TestCompressionNegotiation:
         assert caps.supported_encodings == ()
         client.close()
 
+    @staticmethod
+    def _greet_request_body(name: str) -> bytes:
+        """Build a complete uncompressed Arrow IPC ``greet`` request."""
+        req_buf = BytesIO()
+        schema = pa.schema([pa.field("name", pa.utf8())])
+        md = pa.KeyValueMetadata({b"vgi_rpc.method": b"greet", b"vgi_rpc.request_version": b"1"})
+        with ipc.new_stream(req_buf, schema) as writer:
+            writer.write_batch(pa.RecordBatch.from_pydict({"name": [name]}, schema=schema), custom_metadata=md)
+        return req_buf.getvalue()
+
+    @staticmethod
+    def _greet_result(body: bytes) -> object:
+        """Read the ``result`` value out of a unary Arrow IPC response body."""
+        reader = ipc.open_stream(BytesIO(body))
+        return reader.read_next_batch().column("result")[0].as_py()
+
+    def test_disabled_compression_still_decodes_zstd_request(self) -> None:
+        """Regression: ``compression_level=None`` must still *decode* a zstd request.
+
+        ``compression_level=None`` means "do not compress responses", not
+        "cannot read a compressed request".  It used to drop the whole
+        compression middleware, taking request decoding with it — the
+        DuckDB engine compresses request bodies by default, so the Arrow
+        reader got zstd bytes and raised
+        ``Invalid IPC stream: negative continuation token``, surfacing to
+        the client as a 500.
+        """
+        import zstandard
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test-key", compression_level=None)
+        falcon_client = falcon.testing.TestClient(app)
+
+        body = zstandard.ZstdCompressor(level=3).compress(self._greet_request_body("Compressed"))
+        result = falcon_client.simulate_post(
+            "/greet",
+            body=body,
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                "Content-Encoding": "zstd",
+                "Accept-Encoding": "zstd",
+            },
+        )
+        assert result.status_code == 200, result.content[:300]
+        # Response must go out uncompressed even though the client offered zstd.
+        assert result.headers.get("content-encoding") is None
+        assert result.headers.get("x-vgi-content-encoding") is None
+        assert result.content[:4] != _ZSTD_MAGIC
+        assert self._greet_result(result.content) == "Hello, Compressed!"
+
+    def test_disabled_compression_still_decodes_gzip_request(self) -> None:
+        """The same leniency applies to gzip request bodies."""
+        import zlib
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test-key", compression_level=None)
+        falcon_client = falcon.testing.TestClient(app)
+
+        co = zlib.compressobj(6, zlib.DEFLATED, 31)
+        raw = self._greet_request_body("Gzipped")
+        body = co.compress(raw) + co.flush(zlib.Z_FINISH)
+        result = falcon_client.simulate_post(
+            "/greet",
+            body=body,
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                "Content-Encoding": "gzip",
+                "Accept-Encoding": "gzip",
+            },
+        )
+        assert result.status_code == 200, result.content[:300]
+        assert result.headers.get("content-encoding") is None
+        assert self._greet_result(result.content) == "Hello, Gzipped!"
+
+    def test_disabled_compression_still_415s_unknown_codec(self) -> None:
+        """Decoding leniency does not extend to codecs we do not speak."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test-key", compression_level=None)
+        falcon_client = falcon.testing.TestClient(app)
+
+        result = falcon_client.simulate_post(
+            "/greet",
+            body=b"\x42\x5a\x68\x39",  # 'BZh9' — bzip2 magic
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, "Content-Encoding": "bzip2"},
+        )
+        assert result.status_code == 415
+
+    def test_disabled_compression_advertises_nothing_but_decodes(self) -> None:
+        """Decode leniency must not leak into the advertisement.
+
+        The advertised set is the *encode* contract clients negotiate
+        against; a compression-disabled server still says "empty" even
+        though it will decode a request it never asked for.
+        """
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test-key", compression_level=None)
+        falcon_client = falcon.testing.TestClient(app)
+
+        options = falcon_client.simulate_options("/health")
+        header = options.headers.get("VGI-Supported-Encodings") or options.headers.get("vgi-supported-encodings")
+        assert header is not None, "header must be present, not omitted"
+        assert header.strip() == "", header
+
     def test_gzip_only_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """End-to-end client/server with zstd disabled — only gzip negotiates."""
         monkeypatch.setenv("VGI_HTTP_DISABLE_ZSTD", "1")
