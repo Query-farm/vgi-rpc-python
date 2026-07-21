@@ -53,6 +53,7 @@ def serve_http(
     max_externalized_response_bytes: int | None = None,
     max_stream_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
+    compression_level: int | None = 1,
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
@@ -97,6 +98,9 @@ def serve_http(
             in-memory body buffers.  When ``None``, buffers default to
             64 MiB — large enough that Arrow bodies never spill to a
             temp file, which is waitress's behaviour above 512 KiB.
+        compression_level: zstd level for request/response bodies, or
+            ``None`` to disable compression entirely.  See
+            :func:`make_wsgi_app`.
         enable_sticky: See :func:`make_wsgi_app`.
         sticky_default_ttl: See :func:`make_wsgi_app`.
         sticky_echo_headers: See :func:`make_wsgi_app`.
@@ -136,6 +140,7 @@ def serve_http(
         server,
         max_response_bytes=max_response_bytes,
         max_request_bytes=max_request_bytes,
+        compression_level=compression_level,
         max_externalized_response_bytes=max_externalized_response_bytes,
         enable_sticky=enable_sticky,
         sticky_default_ttl=sticky_default_ttl,

@@ -122,6 +122,16 @@ def main() -> None:
             "test_echo_header_round_trip exercises the contract."
         ),
     )
+    parser.add_argument(
+        "--no-compression",
+        action="store_true",
+        help=(
+            "Serve with response compression disabled, so the server advertises "
+            "a present-but-empty VGI-Supported-Encodings. Backs the shared "
+            "conformance case that a server which says it speaks no compression "
+            "never compresses, whatever the client asks for."
+        ),
+    )
     args = parser.parse_args()
 
     enable_sticky = not args.no_sticky
@@ -134,6 +144,8 @@ def main() -> None:
         None if args.no_sticky_echo or not enable_sticky else {"x-vgi-conformance-echo": "conformance-fixed-marker"}
     )
 
+    compression_level = None if args.no_compression else 1
+
     if not args.fake_storage:
         # Plain HTTP server, no external storage.
         server = RpcServer(
@@ -145,7 +157,7 @@ def main() -> None:
             # serve_http() doesn't expose enable_sticky directly; fall through
             # to the make_wsgi_app + waitress path below when sticky is on so
             # the conformance default exercises the feature.
-            serve_http(server, host=args.host, port=args.port)
+            serve_http(server, host=args.host, port=args.port, compression_level=compression_level)
             return
         # Sticky-enabled default path. Mirrors the externalisation branch
         # below but without storage, so the canonical TestSticky group has
@@ -157,6 +169,7 @@ def main() -> None:
                 port = int(s.getsockname()[1])
         app = make_wsgi_app(
             server,
+            compression_level=compression_level,
             enable_sticky=True,
             sticky_echo_headers=sticky_echo_headers,
         )
@@ -202,6 +215,7 @@ def main() -> None:
     app = make_wsgi_app(
         server,
         upload_url_provider=backend,
+        compression_level=compression_level,
         max_request_bytes=max_request_bytes,
         max_upload_bytes=64 * 1024 * 1024,
         enable_sticky=enable_sticky,

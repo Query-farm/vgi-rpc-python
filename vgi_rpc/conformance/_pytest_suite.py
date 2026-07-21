@@ -1758,13 +1758,33 @@ class TestHttpCompressionNegotiationConformance:
         # zstd is in both headers, so the standard header carries it.
         assert resp.headers.get("Content-Encoding", "").strip().lower() == "zstd"  # type: ignore[attr-defined]
 
-    def test_empty_advertisement_means_never_compressed(self, conformance_http_port: int) -> None:
-        """A server advertising no codecs must not compress, however asked."""
-        advertised = _advertised_encodings(conformance_http_port)
-        if advertised is None or advertised:
-            pytest.skip("server advertises response codecs")
+    def test_empty_advertisement_means_never_compressed(self, request: pytest.FixtureRequest) -> None:
+        """A server advertising no codecs must not compress, however asked.
+
+        Runs against a *separate* server booted with compression disabled,
+        because the state under test is a server configuration that no
+        client request can induce.  ``identity`` (tested above) covers a
+        client's ability to demand an uncompressed body; only this server
+        emits the present-but-empty ``VGI-Supported-Encodings`` that
+        distinguishes "speaks no compression" from the absent header of a
+        legacy server -- a distinction clients act on, and one that has to
+        survive both the server's HTTP stack and the client's header
+        parsing to be worth anything.
+
+        Requested indirectly so a runner that does not yet provide the
+        fixture skips rather than erroring at collection.
+        """
+        try:
+            port = request.getfixturevalue("conformance_http_no_compression_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no compression-disabled server")
+
+        advertised = _advertised_encodings(port)
+        assert advertised is not None, "header must be present, not omitted"
+        assert advertised == [], f"expected an empty advertisement, got {advertised}"
+
         resp = self._echo(
-            conformance_http_port,
+            port,
             {"Accept-Encoding": "zstd, gzip", "X-VGI-Accept-Encoding": "zstd, gzip"},
         )
         assert _response_codec(resp) is None
