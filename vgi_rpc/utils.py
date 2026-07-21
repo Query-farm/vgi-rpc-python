@@ -24,6 +24,8 @@ ValidatedReader : Wrapper around RecordBatchStreamReader with configurable valid
 
 """
 
+import os
+import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, Field, dataclass
 from dataclasses import fields as dataclass_fields
@@ -88,6 +90,45 @@ class IpcValidation(Enum):
     NONE = "none"
     STANDARD = "standard"
     FULL = "full"
+
+    @classmethod
+    def from_env(cls, default: "IpcValidation | None" = None) -> "IpcValidation":
+        """Resolve a validation level from ``VGI_RPC_IPC_VALIDATION``.
+
+        Lets an operator trade validation for throughput at deploy time
+        without a code change.  ``FULL`` walks every buffer of every
+        incoming batch, which is real money on large Arrow payloads
+        (measured at ~7% of HTTP server time), but it is also the
+        defence against malformed attacker-supplied IPC — so the default
+        stays ``FULL`` and lowering it is an explicit, deliberate act.
+
+        Accepts ``none``, ``standard`` or ``full`` (case-insensitive).
+        An unrecognised value warns and falls back to *default* rather
+        than raising: the failure direction is *more* validation, never
+        silently less than the operator believes they configured.
+
+        Args:
+            default: Level to use when the variable is unset or invalid.
+                ``None`` means :attr:`FULL`.
+
+        Returns:
+            The resolved validation level.
+
+        """
+        fallback = cls.FULL if default is None else default
+        raw = os.environ.get("VGI_RPC_IPC_VALIDATION", "").strip().lower()
+        if not raw:
+            return fallback
+        try:
+            return cls(raw)
+        except ValueError:
+            warnings.warn(
+                f"VGI_RPC_IPC_VALIDATION={raw!r} is not one of "
+                f"{', '.join(m.value for m in cls)}; using {fallback.value}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return fallback
 
 
 def validate_batch(batch: pa.RecordBatch, ipc_validation: IpcValidation) -> None:

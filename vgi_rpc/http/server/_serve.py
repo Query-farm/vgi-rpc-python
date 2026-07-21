@@ -23,6 +23,26 @@ from ._sticky import drain_handle
 
 _logger = logging.getLogger("vgi_rpc.http")
 
+# waitress's defaults are tuned for small web payloads and are actively
+# hostile to Arrow bodies:
+#
+#   inbuf_overflow = 512 KiB — any larger request body is spooled to a
+#     *temp file on disk* and read back before the app ever sees it.  An
+#     8 MiB Arrow batch round-trips through the filesystem every request.
+#   recv_bytes = 8 KiB — an 8 MiB body is assembled from ~1000 recv()
+#     calls plus ~1000 buffer appends.
+#   send_bytes = 1 — one byte per socket write scheduling decision.
+#
+# Measured on an 8 MiB body with a trivial echo app (no VGI in the loop):
+# 19.8 ms/request of pure server overhead at the defaults, 4.5 ms with
+# these settings.  The spill buys no memory safety here anyway — the
+# compression middleware already decompresses the whole body into a
+# BytesIO — so trade the disk round-trip for RAM and bound the exposure
+# with max_request_bytes.
+_WAITRESS_IO_CHUNK = 1 << 20  # 1 MiB socket read/write chunks
+_WAITRESS_MIN_BUFFER = 16 << 20  # floor for the in-memory body buffer
+_WAITRESS_DEFAULT_BUFFER = 64 << 20  # used when no request cap is advertised
+
 
 def serve_http(
     server: RpcServer,
@@ -32,6 +52,7 @@ def serve_http(
     max_response_bytes: int | None = None,
     max_externalized_response_bytes: int | None = None,
     max_stream_response_bytes: int | None = None,
+    max_request_bytes: int | None = None,
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
@@ -71,6 +92,11 @@ def serve_http(
             storage per HTTP response.  See :func:`make_wsgi_app`.
         max_stream_response_bytes: **Deprecated** alias for
             ``max_response_bytes``.
+        max_request_bytes: Advertised via ``VGI-Max-Request-Bytes`` (see
+            :func:`make_wsgi_app`), and used here to size waitress's
+            in-memory body buffers.  When ``None``, buffers default to
+            64 MiB — large enough that Arrow bodies never spill to a
+            temp file, which is waitress's behaviour above 512 KiB.
         enable_sticky: See :func:`make_wsgi_app`.
         sticky_default_ttl: See :func:`make_wsgi_app`.
         sticky_echo_headers: See :func:`make_wsgi_app`.
@@ -109,6 +135,7 @@ def serve_http(
     app = make_wsgi_app(
         server,
         max_response_bytes=max_response_bytes,
+        max_request_bytes=max_request_bytes,
         max_externalized_response_bytes=max_externalized_response_bytes,
         enable_sticky=enable_sticky,
         sticky_default_ttl=sticky_default_ttl,
@@ -120,7 +147,17 @@ def serve_http(
 
     print(f"PORT:{port}", flush=True)
     print(f"Serving on http://{host}:{port}/", file=sys.stderr, flush=True)
-    _waitress.serve(app, host=host, port=port, _quiet=True)
+    body_buffer = max(_WAITRESS_MIN_BUFFER, max_request_bytes or _WAITRESS_DEFAULT_BUFFER)
+    _waitress.serve(
+        app,
+        host=host,
+        port=port,
+        _quiet=True,
+        inbuf_overflow=body_buffer,
+        outbuf_overflow=body_buffer,
+        recv_bytes=_WAITRESS_IO_CHUNK,
+        send_bytes=_WAITRESS_IO_CHUNK,
+    )
 
 
 def _install_drain_signal_handlers(

@@ -382,7 +382,7 @@ class RpcServer:
         server_id: str | None = None,
         server_version: str = "",
         enable_describe: bool = False,
-        ipc_validation: IpcValidation = IpcValidation.FULL,
+        ipc_validation: IpcValidation | None = None,
     ) -> None:
         """Initialize with a protocol type and its implementation.
 
@@ -399,7 +399,12 @@ class RpcServer:
             enable_describe: When ``True``, the server handles ``__describe__``
                 requests returning machine-readable method metadata.
             ipc_validation: Validation level for incoming IPC batches.
-                Defaults to ``FULL`` for maximum safety.
+                ``None`` (the default) resolves from the
+                ``VGI_RPC_IPC_VALIDATION`` environment variable
+                (``none`` / ``standard`` / ``full``), falling back to
+                ``FULL`` for maximum safety.  An explicit value always
+                wins over the environment — the variable is a deployment
+                knob, not an override of stated intent.
 
         """
         self._protocol = protocol
@@ -417,7 +422,7 @@ class RpcServer:
                 raise TypeError(f"{protocol.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
             self._protocol_version = raw_version
             self._protocol_version_parts = parse_version(raw_version)
-        self._ipc_validation = ipc_validation
+        self._ipc_validation = IpcValidation.from_env() if ipc_validation is None else ipc_validation
         self._methods = rpc_methods(protocol)
         self._external_config = external_location
         self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]

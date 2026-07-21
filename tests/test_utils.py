@@ -18,6 +18,7 @@ from vgi_rpc.utils import (
     ArrowSerializableDataclass,
     ArrowType,
     IPCError,
+    IpcValidation,
     Transient,
     _infer_arrow_type,
     _is_optional_type,
@@ -1005,3 +1006,52 @@ class TestTransient:
         restored = WithTransientFactory.deserialize_from_batch(batch, cm)
         assert restored.name == "stream"
         assert restored._cache == {}
+
+
+class TestIpcValidationFromEnv:
+    """``IpcValidation.from_env`` — the deploy-time validation knob."""
+
+    def test_unset_defaults_to_full(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Absent variable keeps the safe default."""
+        monkeypatch.delenv("VGI_RPC_IPC_VALIDATION", raising=False)
+        assert IpcValidation.from_env() is IpcValidation.FULL
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("none", IpcValidation.NONE),
+            ("standard", IpcValidation.STANDARD),
+            ("full", IpcValidation.FULL),
+            ("  STANDARD  ", IpcValidation.STANDARD),
+        ],
+    )
+    def test_recognised_values(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: IpcValidation
+    ) -> None:
+        """Values are case-insensitive and whitespace-tolerant."""
+        monkeypatch.setenv("VGI_RPC_IPC_VALIDATION", raw)
+        assert IpcValidation.from_env() is expected
+
+    def test_explicit_default_is_honoured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An explicit fallback replaces FULL when the variable is unset."""
+        monkeypatch.delenv("VGI_RPC_IPC_VALIDATION", raising=False)
+        assert IpcValidation.from_env(IpcValidation.NONE) is IpcValidation.NONE
+
+    def test_invalid_warns_and_falls_back_safe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A typo must never silently yield *less* validation than intended."""
+        monkeypatch.setenv("VGI_RPC_IPC_VALIDATION", "bogus")
+        with pytest.warns(RuntimeWarning, match="bogus"):
+            assert IpcValidation.from_env() is IpcValidation.FULL
+
+    def test_server_reads_env_but_explicit_arg_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The variable sets the default; stated intent in code outranks it."""
+        from vgi_rpc.rpc import RpcServer
+
+        from ._fixture_service import RpcFixtureService, RpcFixtureServiceImpl
+
+        monkeypatch.setenv("VGI_RPC_IPC_VALIDATION", "none")
+        assert RpcServer(RpcFixtureService, RpcFixtureServiceImpl()).ipc_validation is IpcValidation.NONE
+        explicit = RpcServer(
+            RpcFixtureService, RpcFixtureServiceImpl(), ipc_validation=IpcValidation.FULL
+        )
+        assert explicit.ipc_validation is IpcValidation.FULL
