@@ -136,7 +136,7 @@ def make_sync_client(
     otel_config: object | None = None,
     sentry_config: object | None = None,
     token_ttl: int = 3600,
-    compression_level: int | None = 3,
+    compression_level: int | None = 1,
     enable_not_found_page: bool = True,
     enable_landing_page: bool = True,
     enable_describe_page: bool = True,

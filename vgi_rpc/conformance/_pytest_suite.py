@@ -1606,6 +1606,177 @@ class TestHealth:
         assert rpc.status_code == 401, f"expected RPC endpoint to require auth, got {rpc.status_code}"
 
 
+def _unary_request_body(method_name: str, **kwargs: object) -> bytes:
+    """Serialize a unary conformance request as a complete Arrow IPC stream.
+
+    Lets these tests POST directly, with full control over the request
+    headers, instead of going through a client that would impose its own
+    ``Accept-Encoding``.  The protocol version is read off the protocol
+    class exactly as :class:`RpcClient` does — the server rejects a
+    request that omits it.
+    """
+    from io import BytesIO
+
+    from vgi_rpc.conformance._protocol import ConformanceService
+    from vgi_rpc.rpc import rpc_methods
+    from vgi_rpc.rpc._wire import _write_request
+
+    info = rpc_methods(ConformanceService)[method_name]
+    version = vars(ConformanceService).get("protocol_version")
+    buf = BytesIO()
+    _write_request(
+        buf,
+        method_name,
+        info.params_schema,
+        kwargs,
+        protocol_version=version if isinstance(version, str) else None,
+    )
+    return buf.getvalue()
+
+
+def _advertised_encodings(port: int) -> list[str] | None:
+    """Read ``VGI-Supported-Encodings`` from ``OPTIONS /health``.
+
+    Returns ``None`` when the header is absent (a legacy server predating
+    the advertisement), and a possibly-empty list when it is present.
+    Absent and present-but-empty are deliberately different answers.
+    """
+    import httpx
+
+    resp = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+    raw = resp.headers.get("VGI-Supported-Encodings")
+    if raw is None:
+        return None
+    return [t.strip().lower() for t in raw.split(",") if t.strip()]
+
+
+def _response_codec(resp: object) -> str | None:
+    """Return the codec a response claims, from either stamping header."""
+    headers = resp.headers  # type: ignore[attr-defined]
+    ce = headers.get("Content-Encoding") or headers.get("X-VGI-Content-Encoding")
+    return ce.strip().lower() if ce else None
+
+
+class TestHttpCompressionNegotiationConformance:
+    """Cross-language conformance for HTTP response-codec negotiation.
+
+    Every implementation must agree on how a response codec is chosen, so
+    that the DuckDB engine's cpp-httplib client and a browser ``fetch()``
+    both get a correct answer from any SDK.  The rules under test:
+
+    * ``X-VGI-Accept-Encoding`` outranks the generic ``Accept-Encoding``.
+      cpp-httplib injects ``deflate, gzip, br, zstd`` — gzip first — and
+      honouring that order instead of VGI's cost a 4.2x slower round-trip.
+    * ``identity`` is a first-class token: a client can explicitly demand
+      an uncompressed body.
+    * A codec chosen only because of the custom request header is stamped
+      on ``X-VGI-Content-Encoding``, since such a client's fetch layer
+      would mangle or auto-decode a standard ``Content-Encoding``.
+    * ``VGI-Supported-Encodings`` advertises what the server can actually
+      do.  Present-but-empty means "no compression"; absent means a legacy
+      server (assume zstd).
+
+    Capability-gated throughout: servers advertising no codecs (compression
+    disabled — the default in several SDKs) skip the codec-specific cases
+    but must still prove they send nothing compressed.
+    """
+
+    # Large and highly compressible, so it clears every implementation's
+    # minimum-size floor (Rust, for one, won't compress below 1 KiB).
+    PAYLOAD = "conformance-compression-probe " * 4096
+
+    def _echo(self, port: int, headers: dict[str, str]) -> object:
+        import httpx
+
+        from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
+
+        body = _unary_request_body("echo_string", value=self.PAYLOAD)
+        resp = httpx.post(
+            f"http://127.0.0.1:{port}/echo_string",
+            content=body,
+            headers={"Content-Type": _ARROW_CONTENT_TYPE, **headers},
+            timeout=30.0,
+        )
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
+        return resp
+
+    def test_supported_encodings_is_advertised(self, conformance_http_port: int) -> None:
+        """The header is present, lists only real codecs, and omits identity."""
+        advertised = _advertised_encodings(conformance_http_port)
+        if advertised is None:
+            pytest.skip("server does not advertise VGI-Supported-Encodings")
+        assert set(advertised) <= {"zstd", "gzip"}, advertised
+        # identity is always available, so advertising it carries no
+        # information and would wrongly imply it is a compressor.
+        assert "identity" not in advertised
+
+    def test_identity_forces_an_uncompressed_response(self, conformance_http_port: int) -> None:
+        """``identity`` first in the custom header wins over any codec after it."""
+        if _advertised_encodings(conformance_http_port) is None:
+            pytest.skip("server does not advertise VGI-Supported-Encodings")
+        resp = self._echo(
+            conformance_http_port,
+            {"X-VGI-Accept-Encoding": "identity", "Accept-Encoding": "gzip, zstd"},
+        )
+        assert _response_codec(resp) is None, "identity must not be answered with a codec"
+
+    def test_custom_header_alone_negotiates(self, conformance_http_port: int) -> None:
+        """The browser case: ``fetch()`` cannot set ``Accept-Encoding`` at all.
+
+        A codec reachable only via the custom header must be stamped on
+        ``X-VGI-Content-Encoding``, not ``Content-Encoding``.
+        """
+        advertised = _advertised_encodings(conformance_http_port)
+        if not advertised:
+            pytest.skip("server advertises no response codecs")
+        codec = advertised[0]
+        # httpx injects its own ``Accept-Encoding`` unless told otherwise —
+        # the same trap cpp-httplib sets.  Blanking it is what actually
+        # reproduces a browser, where the header cannot be set at all; leave
+        # it in and the codec is found in *both* lists and stamped on the
+        # standard header, quietly testing nothing.
+        resp = self._echo(
+            conformance_http_port,
+            {"X-VGI-Accept-Encoding": codec, "Accept-Encoding": ""},
+        )
+        assert _response_codec(resp) == codec
+        assert resp.headers.get("X-VGI-Content-Encoding", "").strip().lower() == codec  # type: ignore[attr-defined]
+
+    def test_custom_header_outranks_gzip_first_standard(self, conformance_http_port: int) -> None:
+        """The cpp-httplib regression: a gzip-first Accept-Encoding must not win."""
+        advertised = _advertised_encodings(conformance_http_port)
+        if not advertised or "zstd" not in advertised:
+            pytest.skip("server cannot produce zstd")
+        resp = self._echo(
+            conformance_http_port,
+            {
+                "Accept-Encoding": "deflate, gzip, br, zstd",
+                "X-VGI-Accept-Encoding": "zstd, gzip",
+            },
+        )
+        assert _response_codec(resp) == "zstd", "gzip listed first must not beat VGI's zstd preference"
+        # zstd is in both headers, so the standard header carries it.
+        assert resp.headers.get("Content-Encoding", "").strip().lower() == "zstd"  # type: ignore[attr-defined]
+
+    def test_empty_advertisement_means_never_compressed(self, conformance_http_port: int) -> None:
+        """A server advertising no codecs must not compress, however asked."""
+        advertised = _advertised_encodings(conformance_http_port)
+        if advertised is None or advertised:
+            pytest.skip("server advertises response codecs")
+        resp = self._echo(
+            conformance_http_port,
+            {"Accept-Encoding": "zstd, gzip", "X-VGI-Accept-Encoding": "zstd, gzip"},
+        )
+        assert _response_codec(resp) is None
+
+    def test_unproducible_codec_is_not_forced(self, conformance_http_port: int) -> None:
+        """Offering only a codec the server can't produce yields an uncompressed body."""
+        if _advertised_encodings(conformance_http_port) is None:
+            pytest.skip("server does not advertise VGI-Supported-Encodings")
+        resp = self._echo(conformance_http_port, {"Accept-Encoding": "br"})
+        assert _response_codec(resp) is None, "server must not claim a codec it was never offered"
+
+
 # ---------------------------------------------------------------------------
 # Introspection
 # ---------------------------------------------------------------------------

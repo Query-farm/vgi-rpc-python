@@ -91,7 +91,7 @@ def make_wsgi_app(
     otel_config: object | None = None,
     sentry_config: object | None = None,
     token_ttl: int = 3600,
-    compression_level: int | None = 3,
+    compression_level: int | None = 1,
     enable_not_found_page: bool = True,
     enable_landing_page: bool = True,
     enable_describe_page: bool = True,
@@ -178,9 +178,14 @@ def make_wsgi_app(
             older than this are rejected with HTTP 400.  Default is 3600
             (1 hour).  Set to ``0`` to disable expiry checking.
         compression_level: Zstandard compression level for HTTP request/
-            response bodies.  ``3`` (the default) installs
-            ``_CompressionMiddleware`` at zstd level 3 *and* gzip level 6
+            response bodies.  ``1`` (the default) installs
+            ``_CompressionMiddleware`` at zstd level 1 *and* gzip level 6
             so peers without zstd support negotiate gzip transparently.
+            Level 1 is the default rather than 3 because on Arrow IPC
+            bodies it measured 4.7x faster *and* produced a smaller
+            output than level 3 (8.41 MB body: 5.77 ms/4.219 MB at
+            level 1 vs 27.39 ms/4.384 MB at level 3) — for this data
+            shape it is not a speed/size tradeoff.
             Valid zstd range is 1-22.  ``None`` disables compression
             entirely (no codec is advertised, and bodies travel
             uncompressed).  Set ``VGI_HTTP_DISABLE_ZSTD=1`` in the
@@ -395,9 +400,16 @@ def make_wsgi_app(
     # client compares this against its own codec set and picks the first
     # mutually supported one for its request body.  Absent header ⇒
     # ``{zstd}`` (back-compat with pre-gzip servers).
-    if enabled_encodings:
-        capability_headers[SUPPORTED_ENCODINGS_HEADER] = ", ".join(e.value for e in enabled_encodings)
-        cors_expose.append(SUPPORTED_ENCODINGS_HEADER)
+    #
+    # Always emitted, including as an *empty* value when compression is
+    # disabled (``compression_level=None``).  Absent and present-but-empty
+    # mean different things: absent is a legacy server, for which clients
+    # assume ``{zstd}``, whereas empty is this server positively stating it
+    # speaks no compression.  Omitting it here would make a deliberately
+    # uncompressed server indistinguishable from an old one and get it
+    # sent zstd request bodies it cannot decode.
+    capability_headers[SUPPORTED_ENCODINGS_HEADER] = ", ".join(e.value for e in enabled_encodings)
+    cors_expose.append(SUPPORTED_ENCODINGS_HEADER)
     # Sticky session capability headers — advertised only when sticky is on
     # so OPTIONS /health responses cleanly distinguish sticky-capable
     # servers from non-sticky ones. The session response headers are

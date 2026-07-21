@@ -691,7 +691,7 @@ def http_connect[P](
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
-    compression_level: int | None = 3,
+    compression_level: int | None = 1,
 ) -> Iterator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -713,7 +713,7 @@ def http_connect[P](
         retry: Optional retry configuration for transient HTTP failures.
             When ``None`` (the default), no retries are attempted.
         compression_level: Zstandard compression level for request bodies.
-            ``3`` (the default) compresses requests and adds
+            ``1`` (the default) compresses requests and adds
             ``Content-Encoding: zstd``.  ``None`` disables request
             compression (httpx still auto-decompresses server responses).
 
@@ -1054,12 +1054,20 @@ class _HttpProxy:
         server, we can refine the cached codec set without an OPTIONS
         probe.  Returns the parsed list when present, else ``None``.
         """
-        raw = resp.headers.get(SUPPORTED_ENCODINGS_HEADER) or resp.headers.get(SUPPORTED_ENCODINGS_HEADER.lower())
-        if not raw:
+        raw = resp.headers.get(SUPPORTED_ENCODINGS_HEADER)
+        if raw is None:
+            raw = resp.headers.get(SUPPORTED_ENCODINGS_HEADER.lower())
+        if raw is None:
             return None
-        parsed = tuple(parse_encoding_list(raw))
-        if not parsed:
-            return None
+        if not raw.strip():
+            # Present but empty ⇒ server speaks no compression.  Cache that
+            # as an empty set rather than ignoring it, so we stop offering
+            # it compressed request bodies.
+            parsed = ()
+        else:
+            parsed = tuple(parse_encoding_list(raw))
+            if not parsed:
+                return None
         # Replace or augment the cached caps with the fresh codec list.
         if self._capabilities is None:
             self._capabilities = HttpServerCapabilities(supported_encodings=parsed)
@@ -1706,14 +1714,22 @@ def http_capabilities(
             with contextlib.suppress(ValueError):
                 max_upload = int(upload_bytes_raw)
 
-        supported_raw = headers.get(SUPPORTED_ENCODINGS_HEADER) or headers.get(SUPPORTED_ENCODINGS_HEADER.lower())
-        if supported_raw:
+        supported_raw = headers.get(SUPPORTED_ENCODINGS_HEADER)
+        if supported_raw is None:
+            supported_raw = headers.get(SUPPORTED_ENCODINGS_HEADER.lower())
+        if supported_raw is None:
+            # Absent ⇒ legacy server predating the header; assume zstd.
+            supported_encodings = (Encoding.ZSTD,)
+        elif not supported_raw.strip():
+            # Present but empty ⇒ the server positively states it speaks no
+            # compression.  Distinct from absent: sending it a zstd request
+            # body would fail, so advertise nothing rather than guessing.
+            supported_encodings = ()
+        else:
             parsed = tuple(parse_encoding_list(supported_raw))
             # Empty parse (e.g. server advertised codecs we don't recognise)
             # falls back to zstd-only — the historical behaviour.
             supported_encodings = parsed or (Encoding.ZSTD,)
-        else:
-            supported_encodings = (Encoding.ZSTD,)
 
         # Honour Cache-Control: max-age=N for refresh scheduling.
         cache_expires_at: float | None = None

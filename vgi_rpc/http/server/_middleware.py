@@ -338,9 +338,23 @@ class _CompressionMiddleware:
         """
         standard = parse_encoding_list(req.get_header("Accept-Encoding") or "")
         custom = parse_encoding_list(req.get_header("X-VGI-Accept-Encoding") or "")
-        # Honour the client's preference order; custom header takes precedence
-        # only in deciding which response header to stamp later.
-        for enc in standard + [e for e in custom if e not in standard]:
+        # Honour the client's preference order, with VGI's own header first:
+        # X-VGI-Accept-Encoding wins over the generic Accept-Encoding both in
+        # choosing the codec and in deciding which response header to stamp.
+        # HTTP clients (e.g. cpp-httplib, which the DuckDB extension uses) inject
+        # their own `Accept-Encoding: deflate, gzip, br, zstd` listing gzip before
+        # zstd; walking that list first picks gzip and silently ignores the
+        # zstd-first order VGI states in X-VGI-Accept-Encoding. gzip compression
+        # dominated large HTTP responses (432ms vs ~40ms of zstd for 200MB of
+        # Arrow bodies -- a 4.2x slower round-trip end to end).
+        for enc in custom + [e for e in standard if e not in custom]:
+            # ``identity`` is always producible, so reaching it first means the
+            # client explicitly asked for an uncompressed body — honour that
+            # rather than continuing on to a codec listed after it.  No
+            # content-encoding header is stamped for identity (see
+            # process_response): an untransformed body is just a body.
+            if enc is Encoding.IDENTITY:
+                return None, False
             if enc in self._levels:
                 return enc, enc in custom and enc not in standard
         return None, bool(custom)

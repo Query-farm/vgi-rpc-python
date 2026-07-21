@@ -1976,6 +1976,70 @@ class TestZstdCompression:
 # ---------------------------------------------------------------------------
 
 
+class TestResponseEncodingPreference:
+    """``_pick_response_encoding`` header precedence.
+
+    VGI's own ``X-VGI-Accept-Encoding`` outranks the generic ``Accept-Encoding``.
+    This matters because cpp-httplib (the DuckDB extension's HTTP client) injects
+    ``Accept-Encoding: deflate, gzip, br, zstd`` — gzip before zstd — and gzip
+    compression dominated large Arrow responses (a 4.2x slower round-trip).
+    """
+
+    @staticmethod
+    def _pick(**headers: str) -> tuple[str | None, bool]:
+        """Return (codec name or None, used_custom_header)."""
+        from vgi_rpc._codec import Encoding
+        from vgi_rpc.http.server._middleware import _CompressionMiddleware
+
+        mw = _CompressionMiddleware({Encoding.ZSTD: 3, Encoding.GZIP: 6})
+        chosen, used_custom = mw._pick_response_encoding(falcon.testing.create_req(headers=headers))
+        return (chosen.value if chosen is not None else None), used_custom
+
+    def test_custom_header_alone(self) -> None:
+        """Browser/WASM case: ``fetch()`` cannot set Accept-Encoding at all."""
+        assert self._pick(**{"X-VGI-Accept-Encoding": "zstd, gzip"}) == ("zstd", True)
+
+    def test_custom_outranks_gzip_first_standard(self) -> None:
+        """The cpp-httplib regression: gzip listed first must not win."""
+        # zstd appears in both headers, so the standard response header is used.
+        assert self._pick(
+            **{
+                "Accept-Encoding": "deflate, gzip, br, zstd",
+                "X-VGI-Accept-Encoding": "zstd, gzip",
+            }
+        ) == ("zstd", False)
+
+    def test_standard_only_is_still_honoured(self) -> None:
+        """A client sending only the generic header is still served compressed."""
+        assert self._pick(**{"Accept-Encoding": "gzip"}) == ("gzip", False)
+
+    def test_no_headers_means_uncompressed(self) -> None:
+        """No accept headers at all -> identity."""
+        assert self._pick() == (None, False)
+
+    def test_unproducible_codec_means_uncompressed(self) -> None:
+        """Client offers only a codec we cannot produce -> identity."""
+        assert self._pick(**{"Accept-Encoding": "br"}) == (None, False)
+
+    def test_q_values_are_stripped_not_honoured(self) -> None:
+        """q-params are parsed off; list order alone decides."""
+        assert self._pick(**{"X-VGI-Accept-Encoding": "zstd;q=0.5, gzip"}) == ("zstd", True)
+
+    def test_identity_first_wins(self) -> None:
+        """A client can explicitly demand an uncompressed body."""
+        assert self._pick(
+            **{"X-VGI-Accept-Encoding": "identity", "Accept-Encoding": "gzip, zstd"}
+        ) == (None, False)
+
+    def test_identity_after_codec_does_not_win(self) -> None:
+        """A codec listed before identity still wins."""
+        assert self._pick(**{"X-VGI-Accept-Encoding": "zstd, identity"}) == ("zstd", True)
+
+    def test_identity_in_standard_header(self) -> None:
+        """The generic header honours identity too."""
+        assert self._pick(**{"Accept-Encoding": "identity, gzip"}) == (None, False)
+
+
 class TestCompressionNegotiation:
     """Tests for the multi-codec ``_CompressionMiddleware`` negotiation."""
 
@@ -2111,6 +2175,36 @@ class TestCompressionNegotiation:
         # Response should not carry any Content-Encoding the client can't decode.
         ce = resp.headers.get("Content-Encoding") or resp.headers.get("X-VGI-Content-Encoding")
         assert ce is None or ce == "", ce
+        client.close()
+
+    def test_supported_encodings_empty_when_compression_disabled(self) -> None:
+        """A compression-disabled server advertises the header *empty*, not absent.
+
+        Absent means "legacy server, assume zstd", so omitting it here would
+        get this server sent zstd request bodies it cannot decode.
+        """
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=None,
+        )
+        resp = client.options(f"{_BASE_URL}{client.prefix}/health")
+        header = resp.headers.get("VGI-Supported-Encodings") or resp.headers.get("vgi-supported-encodings")
+        assert header is not None, "header must be present, not omitted"
+        assert header.strip() == "", header
+        client.close()
+
+    def test_client_reads_empty_supported_encodings_as_none(self) -> None:
+        """Present-but-empty parses to an empty codec set, not the zstd default."""
+        from vgi_rpc.http import http_capabilities
+
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            compression_level=None,
+        )
+        caps = http_capabilities(client=client)
+        assert caps.supported_encodings == ()
         client.close()
 
     def test_gzip_only_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:

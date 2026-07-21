@@ -34,10 +34,19 @@ class Encoding(enum.Enum):
 
     Wire names (``value``) match the tokens used in ``Content-Encoding`` /
     ``Accept-Encoding`` headers and in ``VGI-Supported-Encodings``.
+
+    ``IDENTITY`` is the no-op transform, not a compressor.  It exists so a
+    client can *explicitly* ask for an uncompressed response by listing it
+    in an accept header — otherwise "no compression" is only reachable by
+    accident, when nothing the client offers happens to be producible.
+    It is deliberately excluded from :func:`available_encodings` (and so
+    from the advertised ``VGI-Supported-Encodings`` set), since every
+    implementation can always do it and saying so carries no information.
     """
 
     ZSTD = "zstd"
     GZIP = "gzip"
+    IDENTITY = "identity"
 
 
 class DecompressionError(Exception):
@@ -182,7 +191,10 @@ def compress(encoding: Encoding, data: bytes, *, level: int | None = None) -> by
     """Compress *data* with the given codec.
 
     ``level`` defaults are codec-specific: zstd ``3``, gzip ``6``.
+    ``IDENTITY`` is the no-op transform and returns *data* unchanged.
     """
+    if encoding is Encoding.IDENTITY:
+        return data
     if encoding is Encoding.ZSTD:
         return _compress_body_zstd(data, _DEFAULT_ZSTD_LEVEL if level is None else level)
     if encoding is Encoding.GZIP:
@@ -191,7 +203,14 @@ def compress(encoding: Encoding, data: bytes, *, level: int | None = None) -> by
 
 
 def decompress(encoding: Encoding, data: bytes, *, max_output_size: int | None = None) -> bytes:
-    """Decompress *data* with the given codec, bounded by *max_output_size*."""
+    """Decompress *data* with the given codec, bounded by *max_output_size*.
+
+    ``IDENTITY`` returns *data* unchanged — ``Content-Encoding: identity``
+    is a valid request header meaning "no transform applied", so it must
+    pass through rather than 415.
+    """
+    if encoding is Encoding.IDENTITY:
+        return data
     if encoding is Encoding.ZSTD:
         return _decompress_body_zstd(data, max_output_size=max_output_size)
     if encoding is Encoding.GZIP:
