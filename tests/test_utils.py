@@ -1051,3 +1051,44 @@ class TestIpcValidationFromEnv:
         assert RpcServer(RpcFixtureService, RpcFixtureServiceImpl()).ipc_validation is IpcValidation.NONE
         explicit = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), ipc_validation=IpcValidation.FULL)
         assert explicit.ipc_validation is IpcValidation.FULL
+
+
+def test_empty_ipc_buffer_tolerated_as_none() -> None:
+    """A 0-length buffer for a pa.Schema / pa.RecordBatch field deserializes to None.
+
+    A lenient producer (the Rust/Go/Java SDKs, and what the DuckDB C++ client
+    tolerates) may emit an empty buffer for an absent nested Arrow field instead
+    of a full empty IPC stream — a real empty value still carries a schema
+    message. Regression: the proxy's catalog-response filtering used to fail
+    closed on such a MacroInfo, denying legitimate catalog refreshes.
+    """
+    conv = Inner._convert_value_for_deserialization
+    assert conv(b"", pa.RecordBatch) is None
+    assert conv(b"", pa.Schema) is None
+    assert conv(b"", pa.RecordBatch | None) is None  # unwraps Optional too
+    assert conv(None, pa.RecordBatch) is None  # None still None
+    # A real (non-empty) schema buffer still round-trips.
+    schema = pa.schema([pa.field("x", pa.int64())])
+    assert conv(schema.serialize().to_pybytes(), pa.Schema) == schema
+
+
+def test_deserialize_record_batch_tolerates_empty_and_schema_only() -> None:
+    """Empty + schema-only IPC input deserialize to a 0-row batch, not IPCError.
+
+    Lenient producers (the Rust/Go/Java SDKs, tolerated by the DuckDB C++ client)
+    encode an empty nested value — e.g. a scan function with no arguments — this
+    way. Regression: the proxy failed closed deserializing such ScanFunctionResults.
+    """
+    import pyarrow as pa
+
+    # 0-length buffer -> 0-column batch.
+    b, m = deserialize_record_batch(b"")
+    assert b.num_columns == 0 and b.num_rows == 0 and m is None
+
+    # Schema-only stream (schema written, no batch) -> 0-row batch of that schema.
+    schema = pa.schema([pa.field("arg_0", pa.int64())])
+    buf = BytesIO()
+    with pa.ipc.new_stream(buf, schema):
+        pass  # write the schema message, no batches
+    b2, _ = deserialize_record_batch(buf.getvalue())
+    assert b2.schema == schema and b2.num_rows == 0

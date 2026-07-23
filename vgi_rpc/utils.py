@@ -291,14 +291,29 @@ def deserialize_record_batch(
         if no custom metadata was attached to the batch.
 
     Raises:
-        IPCError: If no batches are found in the data.
+        IPCError: If no batches are found in a (non-empty) IPC stream.
 
     """
+    # A 0-length buffer means "empty" — a lenient producer (the Rust/Go/Java SDKs,
+    # and what the DuckDB C++ client tolerates) may omit the IPC stream entirely for
+    # an empty nested value (e.g. a scan function with no arguments) instead of
+    # serializing a schema-only empty batch. Return a 0-column batch rather than
+    # choking in open_stream ("was null or length 0").
+    if not data:
+        return pa.record_batch([], schema=pa.schema([])), None
     with ValidatedReader(ipc.open_stream(pa.BufferReader(data)), ipc_validation) as reader:
         try:
             batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         except StopIteration:
-            raise IPCError("No RecordBatch found in provided data") from None
+            # A schema-only stream (no batch message) is how lenient producers
+            # (the Rust/Go/Java SDKs, tolerated by the DuckDB C++ client) encode an
+            # empty value — e.g. a scan function with no arguments. Return a 0-row
+            # batch of the declared schema instead of raising.
+            schema = reader.schema
+            empty = pa.RecordBatch.from_arrays(
+                [pa.array([], type=f.type) for f in schema], schema=schema
+            )
+            return empty, None
 
         return batch, custom_metadata
 
@@ -987,12 +1002,23 @@ class ArrowSerializableDataclass:
         if inner_type is pa.Schema:
             if not isinstance(value, bytes):
                 raise TypeError(f"Expected bytes for pa.Schema deserialization, got {type(value).__name__}")
+            # A 0-length buffer means "absent/empty" — a genuinely empty schema still
+            # serializes to a full IPC schema message, so an empty buffer only comes
+            # from a producer that skipped the field. Tolerate it (matches the DuckDB
+            # C++ client) rather than choke in read_schema ("was null or length 0").
+            if len(value) == 0:
+                return None
             return pa.ipc.read_schema(pa.py_buffer(value))
 
         # Handle pa.RecordBatch reconstruction from bytes
         if inner_type is pa.RecordBatch:
             if not isinstance(value, bytes):
                 raise TypeError(f"Expected bytes for pa.RecordBatch deserialization, got {type(value).__name__}")
+            # As above: a 0-length buffer is an absent/empty batch (a real empty batch
+            # carries a schema message), so tolerate it as None instead of failing in
+            # open_stream ("Tried reading schema message, was null or length 0").
+            if len(value) == 0:
+                return None
             reader = ValidatedReader(pa.ipc.open_stream(value), ipc_validation)
             return reader.read_next_batch()
 
