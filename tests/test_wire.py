@@ -75,7 +75,10 @@ def test_write_request_extra_metadata_cannot_override_framework_keys() -> None:
     from vgi_rpc.metadata import RPC_METHOD_KEY
 
     body = write_request(
-        "init", _SCHEMA, {"request": b"x"}, protocol_version="2.3",
+        "init",
+        _SCHEMA,
+        {"request": b"x"},
+        protocol_version="2.3",
         extra_metadata={RPC_METHOD_KEY: b"forged", PROTOCOL_VERSION_KEY: b"9.9"},
     )
     rb = ipc.open_stream(BytesIO(body)).read_next_batch_with_custom_metadata()
