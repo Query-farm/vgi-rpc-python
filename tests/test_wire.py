@@ -53,6 +53,37 @@ def test_write_request_omits_protocol_version_when_none() -> None:
     assert md is None or md.get(PROTOCOL_VERSION_KEY) is None
 
 
+def test_write_request_carries_extra_metadata() -> None:
+    """extra_metadata rides the request batch so an intermediary can preserve it.
+
+    A proxy that re-serializes a request (e.g. stripping an argument) passes the
+    client's application metadata — notably the ``vgi.cache.*`` conditional-
+    revalidation validators — through extra_metadata so the worker still sees it.
+    """
+    extra = {b"vgi.cache.if_none_match": b'"etag-123"', b"vgi.cache.if_modified_since": b"Mon"}
+    body = write_request("init", _SCHEMA, {"request": b"x"}, protocol_version="2.3", extra_metadata=extra)
+    rb = ipc.open_stream(BytesIO(body)).read_next_batch_with_custom_metadata()
+    md = dict(rb.custom_metadata)
+    assert md.get(b"vgi.cache.if_none_match") == b'"etag-123"'
+    assert md.get(b"vgi.cache.if_modified_since") == b"Mon"
+    # Framework keys still win / are present.
+    assert md.get(PROTOCOL_VERSION_KEY) == b"2.3"
+
+
+def test_write_request_extra_metadata_cannot_override_framework_keys() -> None:
+    """A caller's extra_metadata never clobbers the method / version framing keys."""
+    from vgi_rpc.metadata import RPC_METHOD_KEY
+
+    body = write_request(
+        "init", _SCHEMA, {"request": b"x"}, protocol_version="2.3",
+        extra_metadata={RPC_METHOD_KEY: b"forged", PROTOCOL_VERSION_KEY: b"9.9"},
+    )
+    rb = ipc.open_stream(BytesIO(body)).read_next_batch_with_custom_metadata()
+    md = dict(rb.custom_metadata)
+    assert md.get(RPC_METHOD_KEY) == b"init"
+    assert md.get(PROTOCOL_VERSION_KEY) == b"2.3"
+
+
 def test_build_error_stream_encodes_exception() -> None:
     """build_error_stream carries the EXCEPTION marker + message the client decodes."""
     body = build_error_stream(PermissionError("denied: nope"))

@@ -62,6 +62,7 @@ def write_request(
     kwargs: dict[str, Any],
     *,
     protocol_version: str | None = None,
+    extra_metadata: dict[bytes, bytes] | None = None,
 ) -> bytes:
     """Frame a request as a complete IPC stream body for forwarding.
 
@@ -73,6 +74,11 @@ def write_request(
             request, so a versioned server's dispatch-boundary check still sees
             the originating client's version. Leave ``None`` to emit a request
             that is structurally exempt from that check (the codec omits the key).
+        extra_metadata: Additional batch custom_metadata to preserve — an
+            intermediary that re-serializes a request passes the client's
+            application metadata here so it survives the re-frame (e.g. the
+            ``vgi.cache.*`` conditional-revalidation validators). Framework keys
+            always win over it.
 
     Returns:
         The framed request IPC stream bytes.
@@ -81,7 +87,9 @@ def write_request(
     from vgi_rpc.rpc._wire import _write_request
 
     buf = BytesIO()
-    _write_request(buf, method_name, params_schema, kwargs, protocol_version=protocol_version)
+    _write_request(
+        buf, method_name, params_schema, kwargs, protocol_version=protocol_version, extra_metadata=extra_metadata
+    )
     return buf.getvalue()
 
 

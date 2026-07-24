@@ -158,6 +158,7 @@ def _write_request(
     *,
     shm: ShmSegment | None = None,
     protocol_version: str | None = None,
+    extra_metadata: dict[bytes, bytes] | None = None,
 ) -> None:
     """Write a request as a complete IPC stream (schema + 1 batch + EOS).
 
@@ -171,13 +172,21 @@ def _write_request(
     ``vgi_rpc.protocol_version``. Callers that emit non-VGI requests (CLI
     debug tools, HTTP upload-URL bootstrap) leave it at ``None`` so they
     are structurally exempt from the server's dispatch-boundary check.
+
+    *extra_metadata* carries additional batch custom_metadata keys — an
+    intermediary that re-serializes a request (e.g. a proxy stripping an
+    argument) passes the client's application metadata here so it survives the
+    re-frame (notably the ``vgi.cache.*`` conditional-revalidation validators).
+    Framework keys (method / version / shm / trace) always win over it.
     """
     arrays: list[pa.Array[Any]] = []
     for f in params_schema:
         val = _convert_for_arrow(kwargs.get(f.name))
         arrays.append(pa.array([val], type=f.type))
     batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
-    md: dict[bytes, bytes] = {RPC_METHOD_KEY: method_name.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION}
+    md: dict[bytes, bytes] = dict(extra_metadata) if extra_metadata else {}
+    md[RPC_METHOD_KEY] = method_name.encode()
+    md[REQUEST_VERSION_KEY] = REQUEST_VERSION
     if protocol_version is not None:
         md[PROTOCOL_VERSION_KEY] = protocol_version.encode()
     if shm is not None:

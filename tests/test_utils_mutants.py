@@ -160,14 +160,22 @@ class TestDeserializeErrorMessages:
         x_deserialize_record_batch__mutmut_7: message → uppercase
     """
 
-    def test_empty_ipc_stream_error_message(self) -> None:
-        """IPCError from empty IPC stream contains exact expected message."""
+    def test_empty_ipc_stream_tolerated_as_empty_batch(self) -> None:
+        """A schema-only IPC stream deserializes to an empty batch of that schema.
+
+        Lenient producers (the Rust/Go/Java SDKs) omit the batch for an empty
+        nested value, so a schema-only stream must decode to a zero-row batch
+        rather than raising — otherwise a strict consumer (the Cedar proxy) fails
+        closed on a legitimate response. (Formerly raised
+        ``IPCError("No RecordBatch found in provided data")``.)
+        """
         schema = pa.schema([pa.field("x", pa.int64())])
         buf = BytesIO()
         with pa.ipc.RecordBatchStreamWriter(buf, schema):
             pass
-        with pytest.raises(IPCError, match=r"^No RecordBatch found in provided data$"):
-            deserialize_record_batch(buf.getvalue())
+        batch, _ = deserialize_record_batch(buf.getvalue())
+        assert batch.num_rows == 0
+        assert batch.schema == schema
 
 
 # ---------------------------------------------------------------------------
