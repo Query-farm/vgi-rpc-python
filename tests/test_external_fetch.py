@@ -304,7 +304,9 @@ class TestPresignedRangeProbe:
         rejected — wasting a round trip and losing the probe's headers.
         """
         data = b"sigv2 payload"
-        url = "https://example-bucket.s3.amazonaws.com/key?AWSAccessKeyId=minioadmin&Signature=abc%3D&Expires=1785165674"
+        url = (
+            "https://example-bucket.s3.amazonaws.com/key?AWSAccessKeyId=minioadmin&Signature=abc%3D&Expires=1785165674"
+        )
         assert _is_presigned_url(url)
         # The same query shape MinIO hands back through boto3.
         assert _is_presigned_url("http://127.0.0.1:9000/b/k?AWSAccessKeyId=m&Signature=s%3D&Expires=1")
