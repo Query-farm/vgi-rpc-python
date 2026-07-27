@@ -15,7 +15,15 @@ import pytest
 import zstandard
 
 from tests._aiomock import CallbackResult, aiointercept, mock_aiohttp
-from vgi_rpc.external_fetch import FetchConfig, _compute_ranges, _ensure_pool, _head_probe, _reset_session, fetch_url
+from vgi_rpc.external_fetch import (
+    FetchConfig,
+    _compute_ranges,
+    _ensure_pool,
+    _head_probe,
+    _is_presigned_url,
+    _reset_session,
+    fetch_url,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -286,6 +294,52 @@ class TestPresignedRangeProbe:
 
             assert result == data
             assert seen_ranges == ["bytes=0-0"]
+
+    def test_sigv2_query_auth_is_recognized_as_presigned(self) -> None:
+        """SigV2 pre-signed URLs must take the Range probe, not HEAD.
+
+        boto3 emits the older ``AWSAccessKeyId``/``Signature``/``Expires`` query
+        form against several S3-compatible endpoints (MinIO among them). Those
+        URLs are method-bound like SigV4 ones, so a HEAD probe is always
+        rejected — wasting a round trip and losing the probe's headers.
+        """
+        data = b"sigv2 payload"
+        url = "https://example-bucket.s3.amazonaws.com/key?AWSAccessKeyId=minioadmin&Signature=abc%3D&Expires=1785165674"
+        assert _is_presigned_url(url)
+        # The same query shape MinIO hands back through boto3.
+        assert _is_presigned_url("http://127.0.0.1:9000/b/k?AWSAccessKeyId=m&Signature=s%3D&Expires=1")
+
+        seen_ranges: list[str] = []
+
+        def _probe_then_get(url_: Any, **kwargs: Any) -> CallbackResult:
+            headers = kwargs.get("headers", {})
+            range_header = headers.get("Range", "")
+            if range_header:
+                seen_ranges.append(range_header)
+                return CallbackResult(
+                    status=206,
+                    body=data[:1],
+                    headers={
+                        "Content-Range": f"bytes 0-0/{len(data)}",
+                        "Accept-Ranges": "bytes",
+                        "Content-Length": "1",
+                    },
+                )
+            return CallbackResult(status=200, body=data, headers={"Content-Length": str(len(data))})
+
+        with FetchConfig(parallel_threshold_bytes=10_000) as config:
+            with mock_aiohttp() as mock:
+                # No HEAD mock: a HEAD here would fail the test outright.
+                mock.get(url, callback=_probe_then_get, repeat=True)
+                result = fetch_url(url, config)
+
+            assert result == data
+            assert seen_ranges == ["bytes=0-0"]
+
+    def test_plain_url_is_not_presigned(self) -> None:
+        """A URL with no signing params still takes the HEAD probe path."""
+        assert not _is_presigned_url("https://example.com/object")
+        assert not _is_presigned_url("https://example.com/object?Expires=123")
 
     def test_presigned_probe_403_falls_back_to_plain_get(self) -> None:
         """If the probe is forbidden (403), the fetch falls back to plain GET."""
@@ -1013,6 +1067,35 @@ class TestFetchDecompression:
                 result = fetch_url(url, config)
 
             assert result == data
+
+    def test_delivering_get_supplies_encoding_when_probe_is_rejected(self) -> None:
+        """A probe that 403s must not cost us the codec.
+
+        Regression: pre-signed URLs are signed per HTTP method, so an origin can
+        answer ``403`` to the probe while serving the GET fine.  Taking the codec
+        from the probe alone returned still-compressed bytes, which then failed
+        SHA-256 verification in ``resolve_external_location`` — an externalized
+        payload that could never be read back.  Observed against MinIO with
+        compression enabled.
+        """
+        raw_data = b"payload that must come back decompressed"
+        compressed = zstandard.ZstdCompressor().compress(raw_data)
+        url = "https://example.com/probe-forbidden"
+        with FetchConfig(parallel_threshold_bytes=10_000_000) as config:
+            with mock_aiohttp() as mock:
+                mock.head(url, status=403)
+                mock.get(
+                    url,
+                    body=compressed,
+                    headers={
+                        "Content-Length": str(len(compressed)),
+                        "Content-Encoding": "zstd",
+                    },
+                )
+
+                result = fetch_url(url, config)
+
+            assert result == raw_data
 
     def test_head_probe_returns_content_encoding(self) -> None:
         """Verify _head_probe extracts Content-Encoding."""

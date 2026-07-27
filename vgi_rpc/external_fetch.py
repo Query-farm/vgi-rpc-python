@@ -297,8 +297,13 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
     Falls back to a plain GET when probe metadata is unavailable
     (or HEAD is unsupported by the origin).
 
-    If the HEAD response includes ``Content-Encoding: zstd``, the
-    downloaded bytes are automatically decompressed before returning.
+    When the delivering response names a codec in ``Content-Encoding``
+    (e.g. ``zstd``), the downloaded bytes are decompressed before
+    returning.  The header is read from the response that actually
+    carried the body, falling back to the probe's: a probe can be
+    rejected outright (a method-bound signature answering ``403`` to
+    HEAD), and trusting only the probe would then silently return
+    still-compressed bytes — which fail SHA-256 verification upstream.
     """
     if _is_presigned_url(url):
         content_length, accept_ranges, content_encoding = await _range_probe(url, client)
@@ -327,6 +332,9 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
         # Simple path: single GET
         async with client.get(url) as resp:
             resp.raise_for_status()
+            # The delivering response is authoritative for the codec: an
+            # origin that rejected the probe still names its encoding here.
+            content_encoding = resp.headers.get("Content-Encoding", "") or content_encoding
             data = await _read_response_body(resp, config)
 
     # Decompress if the server names a codec we know.  Cap decompressed
@@ -392,12 +400,22 @@ async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | No
 
 
 def _is_presigned_url(url: str) -> bool:
-    """Return True when URL query looks like S3/GCS pre-signed auth."""
+    """Return True when URL query looks like S3/GCS pre-signed auth.
+
+    Covers SigV4 (``X-Amz-Signature``/``X-Amz-Credential``, and the GCS
+    equivalents) and the older SigV2 query form
+    (``AWSAccessKeyId``/``Signature``/``Expires``), which boto3 still emits
+    against S3-compatible endpoints (MinIO, older gateways) depending on the
+    client's signature version.  All of them are signed per HTTP method, so a
+    HEAD probe would be rejected; they must take the Range-GET probe path.
+    """
     query_pairs = parse_qsl(urlparse(url).query, keep_blank_values=True)
     query_keys = {k for k, _ in query_pairs}
-    return ("X-Amz-Signature" in query_keys and "X-Amz-Credential" in query_keys) or (
+    sigv4 = ("X-Amz-Signature" in query_keys and "X-Amz-Credential" in query_keys) or (
         "X-Goog-Signature" in query_keys and "X-Goog-Credential" in query_keys
     )
+    sigv2 = "Signature" in query_keys and ("AWSAccessKeyId" in query_keys or "GoogleAccessId" in query_keys)
+    return sigv4 or sigv2
 
 
 def _content_length_from_content_range(content_range: str) -> int | None:

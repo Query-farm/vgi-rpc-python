@@ -41,6 +41,27 @@ The gate runs inside the `authenticate` callback and therefore inherits the fram
 
 Health probes come from load balancers and orchestrators directly, not through the proxy, so exempting them is required, not a concession. Implementations MUST NOT extend this list without an explicit configuration option.
 
+### 2.4 Mount prefix and dispatch order
+
+The RPC mount prefix is **operator configuration, not part of this contract**. A
+worker may serve at the root or under any prefix — implementations expose it as
+`prefix` / `SetPrefix` / `.prefix(...)`. Nothing here may assume `/vgi`, and a
+conformance runner declares its worker's prefix so shared tests address a route
+that actually exists. Asserting a rejection against a path the worker does not
+serve is how a test passes for the wrong reason.
+
+Two properties **are** normative:
+
+- **Authentication precedes method dispatch.** Within the prefix, an
+  unauthenticated request is refused before the method name is resolved, so a
+  caller cannot enumerate which methods a worker implements by comparing 401
+  against 404. Verified across all five ports.
+- **Behaviour outside the prefix is unspecified.** A request to a path the RPC
+  application does not serve may be refused (implementations whose auth
+  middleware is mounted app-wide) or 404'd (implementations that route to the
+  prefix first). Both disclose nothing — the prefix is public configuration —
+  and tests MUST NOT depend on either.
+
 ## 3. Token format
 
 ```
