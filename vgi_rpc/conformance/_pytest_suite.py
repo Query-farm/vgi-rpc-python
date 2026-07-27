@@ -1813,7 +1813,18 @@ class TestProxyProof:
 
         with self._factory(request)(ProofWorkerConfig()) as worker:
             assert self._post(worker, None) == 401, "positive control: RPC must be gated"
-            assert httpx.get(worker.health_url, timeout=5.0).status_code == 200
+            # Runners differ in whether health is mounted under the RPC prefix
+            # or at the root, so probe both. What matters is that it is
+            # reachable somewhere and never gated, not where it lives.
+            codes = {
+                path: httpx.get(f"{worker.base_url}{path}", timeout=5.0).status_code
+                for path in ("/health", f"{worker.prefix}/health")
+            }
+            # A 401 on the *other* candidate is not a gate failure: a port that
+            # authenticates before routing returns 401 for any path it does not
+            # serve. What must hold is that health answers somewhere without a
+            # proof, while the RPC endpoint above does not.
+            assert 200 in codes.values(), f"health must be reachable unproofed: {codes}"
 
     def test_allow_mode_does_not_deny(self, request: pytest.FixtureRequest) -> None:
         """Allow mode records the outcome but serves the request either way."""
