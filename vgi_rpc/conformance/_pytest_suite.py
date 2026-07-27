@@ -1610,11 +1610,18 @@ class TestHealth:
         assert health.status_code == 200, f"health must bypass auth, got {health.status_code}"
         assert health.json()["status"] == "ok"
 
-        # Address a route that actually exists. Auth middleware runs before
-        # routing, so posting to a nonexistent path would also yield 401 and
-        # this assertion would pass without proving anything about auth.
-        rpc = httpx.post(f"{url}/echo_int", content=b"", timeout=5.0)
-        assert rpc.status_code == 401, f"expected RPC endpoint to require auth, got {rpc.status_code}"
+        # Runners mount RPC at different prefixes, and they differ in whether
+        # auth runs before or after routing: a port that authenticates first
+        # returns 401 for any path (so asserting one fixed path proves nothing
+        # about auth), while a port that routes first returns 404 for a path it
+        # does not serve. Probe both candidate layouts and require that the real
+        # endpoint — wherever it lives — is refused, and that neither is served.
+        candidates = {
+            path: httpx.post(f"{url}{path}", content=b"", timeout=5.0).status_code
+            for path in ("/echo_int", "/vgi/echo_int")
+        }
+        assert 200 not in candidates.values(), f"RPC must not be served unauthenticated: {candidates}"
+        assert 401 in candidates.values(), f"expected an RPC endpoint to require auth, got {candidates}"
 
 
 class TestProxyProof:
