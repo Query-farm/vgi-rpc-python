@@ -26,10 +26,12 @@ with serve_pipe(MyService, MyServiceImpl()) as proxy:
 ```python
 # worker.py
 from vgi_rpc import run_server
+
 run_server(MyService, MyServiceImpl())
 
 # client.py
 from vgi_rpc import connect
+
 with connect(MyService, ["python", "worker.py"]) as proxy:
     result = proxy.add(a=1.0, b=2.0)
 ```

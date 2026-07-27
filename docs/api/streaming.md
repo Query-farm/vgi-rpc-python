@@ -23,10 +23,10 @@ from vgi_rpc import ExchangeState, AnnotatedBatch, OutputCollector, CallContext
 class RunningStatsState(ExchangeState):
     """All fields are automatically serialized between calls."""
 
-    count: int = 0                            # simple counter
-    total: float = 0.0                        # running accumulator
+    count: int = 0  # simple counter
+    total: float = 0.0  # running accumulator
     history: list[float] = field(default_factory=list)  # grows each call
-    label: str = ""                           # set once at init
+    label: str = ""  # set once at init
 
     def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
         """Each call sees the updated state from the previous call."""
@@ -128,8 +128,8 @@ class PaginatedQueryState(ProducerState):
 
     query: str
     page_size: int = 100
-    offset: int = 0        # persisted — increments each call
-    exhausted: bool = False # persisted — signals completion
+    offset: int = 0  # persisted — increments each call
+    exhausted: bool = False  # persisted — signals completion
 
     def produce(self, out: OutputCollector, ctx: CallContext) -> None:
         """Emit one page per call."""
@@ -186,11 +186,13 @@ class StatefulPipeline(ExchangeState):
         if sum(self.buffer) >= self.threshold and self.phase == Phase.COLLECTING:
             self.phase = Phase.PROCESSING
 
-        out.emit_pydict({
-            "phase": [self.phase.value],
-            "buffer_size": [len(self.buffer)],
-            "total": [sum(self.buffer)],
-        })
+        out.emit_pydict(
+            {
+                "phase": [self.phase.value],
+                "buffer_size": [len(self.buffer)],
+                "total": [sum(self.buffer)],
+            }
+        )
 ```
 
 Client side:

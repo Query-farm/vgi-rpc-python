@@ -13,7 +13,7 @@ Runnable scripts demonstrating key vgi-rpc features. Each example is self-contai
 The minimal starting point: define a Protocol, implement it, and call through a typed proxy using in-process pipe transport.
 
 ```python
---8<-- "examples/hello_world.py"
+--8 < --"examples/hello_world.py"
 ```
 
 ### Streaming
@@ -21,7 +21,7 @@ The minimal starting point: define a Protocol, implement it, and call through a 
 Producer streams (server pushes data, client iterates) and exchange streams (lockstep bidirectional communication). Shows `ProducerState`, `ExchangeState`, `OutputCollector`, and `out.finish()`.
 
 ```python
---8<-- "examples/streaming.py"
+--8 < --"examples/streaming.py"
 ```
 
 ### Structured Types
@@ -29,7 +29,7 @@ Producer streams (server pushes data, client iterates) and exchange streams (loc
 Using `ArrowSerializableDataclass` for complex parameters: dataclasses with enums, nested types, and optional fields. Demonstrates automatic Arrow schema inference.
 
 ```python
---8<-- "examples/structured_types.py"
+--8 < --"examples/structured_types.py"
 ```
 
 ## Transports
@@ -39,7 +39,7 @@ Using `ArrowSerializableDataclass` for complex parameters: dataclasses with enum
 Serve an RPC service over HTTP using Falcon + waitress. Shows `make_wsgi_app` with a WSGI server.
 
 ```python
---8<-- "examples/http_server.py"
+--8 < --"examples/http_server.py"
 ```
 
 ### HTTP Client
@@ -47,7 +47,7 @@ Serve an RPC service over HTTP using Falcon + waitress. Shows `make_wsgi_app` wi
 Connect to an HTTP RPC service using `http_connect`. The proxy is typed as the Protocol class.
 
 ```python
---8<-- "examples/http_client.py"
+--8 < --"examples/http_client.py"
 ```
 
 ### Subprocess Worker
@@ -55,7 +55,7 @@ Connect to an HTTP RPC service using `http_connect`. The proxy is typed as the P
 Entry point for a subprocess RPC worker. Uses `run_server` to serve over stdin/stdout.
 
 ```python
---8<-- "examples/subprocess_worker.py"
+--8 < --"examples/subprocess_worker.py"
 ```
 
 ### Subprocess Client
@@ -63,7 +63,7 @@ Entry point for a subprocess RPC worker. Uses `run_server` to serve over stdin/s
 Connect to a subprocess worker with `connect`. Shows error handling with `RpcError`.
 
 ```python
---8<-- "examples/subprocess_client.py"
+--8 < --"examples/subprocess_client.py"
 ```
 
 ## Testing
@@ -73,7 +73,7 @@ Connect to a subprocess worker with `connect`. Shows error handling with `RpcErr
 Unit-testing pattern using `serve_pipe()` — no network or subprocess needed. Tests both unary and streaming methods.
 
 ```python
---8<-- "examples/testing_pipe.py"
+--8 < --"examples/testing_pipe.py"
 ```
 
 ### Testing with HTTP Transport
@@ -81,7 +81,7 @@ Unit-testing pattern using `serve_pipe()` — no network or subprocess needed. T
 Unit-testing the full HTTP stack (including auth middleware) using `make_sync_client()` — no real HTTP server needed.
 
 ```python
---8<-- "examples/testing_http.py"
+--8 < --"examples/testing_http.py"
 ```
 
 ## Advanced Features
@@ -91,7 +91,7 @@ Unit-testing the full HTTP stack (including auth middleware) using `make_sync_cl
 HTTP authentication with Bearer tokens. Shows `authenticate` callback, `AuthContext`, `CallContext.auth.require_authenticated()`, and guarded methods.
 
 ```python
---8<-- "examples/auth.py"
+--8 < --"examples/auth.py"
 ```
 
 ### OAuth Discovery
@@ -101,7 +101,7 @@ Shows `OAuthResourceMetadata`, `jwt_authenticate()`, and client-side
 discovery via `http_oauth_metadata()`.
 
 ```python
---8<-- "examples/oauth_discovery.py"
+--8 < --"examples/oauth_discovery.py"
 ```
 
 ### Introspection
@@ -109,7 +109,7 @@ discovery via `http_oauth_metadata()`.
 Runtime service discovery with `enable_describe=True`. Shows `introspect()` for pipe transport and `http_introspect()` for HTTP.
 
 ```python
---8<-- "examples/introspection.py"
+--8 < --"examples/introspection.py"
 ```
 
 ### Shared Memory
@@ -117,5 +117,5 @@ Runtime service discovery with `enable_describe=True`. Shows `introspect()` for 
 Zero-copy shared memory transport with `ShmPipeTransport` and `ShmSegment`. Demonstrates the side-channel optimization for large batches between co-located processes.
 
 ```python
---8<-- "examples/shared_memory.py"
+--8 < --"examples/shared_memory.py"
 ```

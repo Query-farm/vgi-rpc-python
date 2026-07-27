@@ -693,14 +693,10 @@ The client uses the result as a context manager with `exchange()` for lockstep c
 ```python
 with serve_pipe(SumService, SumServiceImpl()) as proxy:
     with proxy.accumulate(initial=0.0) as session:  # session supports exchange() and close()
-        result = session.exchange(
-            AnnotatedBatch.from_pydict({"value": [1.0, 2.0]})
-        )
+        result = session.exchange(AnnotatedBatch.from_pydict({"value": [1.0, 2.0]}))
         print(result.batch.to_pydict())  # {'total': [3.0]}
 
-        result = session.exchange(
-            AnnotatedBatch.from_pydict({"value": [10.0]})
-        )
+        result = session.exchange(AnnotatedBatch.from_pydict({"value": [10.0]}))
         print(result.batch.to_pydict())  # {'total': [13.0]}
 ```
 
@@ -1041,10 +1037,12 @@ vgi-rpc reports unhandled server exceptions to Sentry with RPC context (method, 
 
 ```python
 import sentry_sdk
-sentry_sdk.init()                         # reads SENTRY_DSN if no dsn= passed
+
+sentry_sdk.init()  # reads SENTRY_DSN if no dsn= passed
 
 from vgi_rpc import RpcServer
-server = RpcServer(MyService, MyServiceImpl())   # Sentry already wired
+
+server = RpcServer(MyService, MyServiceImpl())  # Sentry already wired
 ```
 
 Setting `SENTRY_DSN` alone is **not** enough — the Sentry SDK does not auto-initialise on import. You must call `sentry_sdk.init()`; without an explicit `dsn=` it falls back to reading `SENTRY_DSN`. The check is gated on `sentry_sdk` being importable, so workers without the optional dep pay nothing. `sentry_sdk.init()` must run before `RpcServer(...)`; otherwise auto-attach is a no-op.
@@ -1208,8 +1206,8 @@ from vgi_rpc import RpcError
 try:
     proxy.failing_method()
 except RpcError as e:
-    print(e.error_type)        # "ValueError"
-    print(e.error_message)     # "something went wrong"
+    print(e.error_type)  # "ValueError"
+    print(e.error_message)  # "something went wrong"
     print(e.remote_traceback)  # full server-side traceback
 ```
 
@@ -1345,11 +1343,11 @@ storage = S3Storage(bucket="my-bucket", prefix="rpc-data/")
 config = ExternalLocationConfig(
     storage=storage,
     externalize_threshold_bytes=1_048_576,  # 1 MiB (default)
-    compression=Compression(),              # zstd level 3 by default
+    compression=Compression(),  # zstd level 3 by default
     fetch_config=FetchConfig(
-        chunk_size_bytes=8 * 1024 * 1024,    # 8 MiB chunks
-        max_parallel_requests=8,              # concurrent fetches
-        speculative_retry_multiplier=2.0,     # hedge slow chunks
+        chunk_size_bytes=8 * 1024 * 1024,  # 8 MiB chunks
+        max_parallel_requests=8,  # concurrent fetches
+        speculative_retry_multiplier=2.0,  # hedge slow chunks
     ),
 )
 
@@ -1365,8 +1363,8 @@ from vgi_rpc import S3Storage
 
 storage = S3Storage(
     bucket="my-bucket",
-    prefix="vgi-rpc/",               # key prefix (default)
-    presign_expiry_seconds=3600,      # signed URL lifetime (default)
+    prefix="vgi-rpc/",  # key prefix (default)
+    presign_expiry_seconds=3600,  # signed URL lifetime (default)
     endpoint_url="http://localhost:9000",  # for MinIO/LocalStack
 )
 ```
@@ -1378,9 +1376,9 @@ from vgi_rpc import GCSStorage
 
 storage = GCSStorage(
     bucket="my-bucket",
-    prefix="vgi-rpc/",               # key prefix (default)
-    presign_expiry_seconds=3600,      # signed URL lifetime (default)
-    project="my-gcp-project",        # optional GCP project ID
+    prefix="vgi-rpc/",  # key prefix (default)
+    presign_expiry_seconds=3600,  # signed URL lifetime (default)
+    project="my-gcp-project",  # optional GCP project ID
 )
 ```
 

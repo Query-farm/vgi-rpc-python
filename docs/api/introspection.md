@@ -36,6 +36,7 @@ with connect(Calculator, ["python", "worker.py"]) as proxy:
 
 # Client: query over HTTP
 from vgi_rpc import http_introspect
+
 desc = http_introspect("http://localhost:8080")
 ```
 

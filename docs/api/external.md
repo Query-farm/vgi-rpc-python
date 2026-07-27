@@ -60,9 +60,9 @@ storage = S3Storage(bucket="my-bucket", prefix="rpc-data/")
 config = ExternalLocationConfig(
     storage=storage,
     externalize_threshold_bytes=1_048_576,  # 1 MiB — batches above this go to S3
-    compression=Compression(),              # zstd level 3 by default
+    compression=Compression(),  # zstd level 3 by default
     fetch_config=FetchConfig(
-        chunk_size_bytes=8 * 1024 * 1024,   # 8 MiB parallel chunks
+        chunk_size_bytes=8 * 1024 * 1024,  # 8 MiB parallel chunks
         max_parallel_requests=8,
     ),
 )
@@ -86,7 +86,7 @@ from vgi_rpc import make_wsgi_app
 
 app = make_wsgi_app(
     server,
-    upload_url_provider=storage,       # enables __upload_url__ endpoint
+    upload_url_provider=storage,  # enables __upload_url__ endpoint
     max_upload_bytes=100 * 1024 * 1024,  # advertise 100 MiB max upload
 )
 ```
@@ -104,6 +104,7 @@ urls: list[UploadUrl] = request_upload_urls(
 
 # Upload large data directly to storage (bypasses RPC server)
 import httpx
+
 ipc_data = serialize_large_batch(my_batch)
 httpx.put(urls[0].upload_url, content=ipc_data)
 
@@ -171,12 +172,12 @@ from vgi_rpc import FetchConfig
 
 fetch_config = FetchConfig(
     parallel_threshold_bytes=64 * 1024 * 1024,  # 64 MiB
-    chunk_size_bytes=8 * 1024 * 1024,            # 8 MiB chunks
-    max_parallel_requests=8,                      # concurrent fetches
-    timeout_seconds=60.0,                         # overall deadline
-    max_fetch_bytes=256 * 1024 * 1024,            # 256 MiB hard cap
-    speculative_retry_multiplier=2.0,             # hedge at 2x median
-    max_speculative_hedges=4,                     # max hedge requests
+    chunk_size_bytes=8 * 1024 * 1024,  # 8 MiB chunks
+    max_parallel_requests=8,  # concurrent fetches
+    timeout_seconds=60.0,  # overall deadline
+    max_fetch_bytes=256 * 1024 * 1024,  # 256 MiB hard cap
+    speculative_retry_multiplier=2.0,  # hedge at 2x median
+    max_speculative_hedges=4,  # max hedge requests
 )
 ```
 

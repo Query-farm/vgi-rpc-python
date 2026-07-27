@@ -65,10 +65,9 @@ from cryptography import x509
 from vgi_rpc import AuthContext
 from vgi_rpc.http import mtls_authenticate, make_wsgi_app
 
+
 def validate(cert: x509.Certificate) -> AuthContext:
-    cn_attrs = cert.subject.get_attributes_for_oid(
-        x509.oid.NameOID.COMMON_NAME
-    )
+    cn_attrs = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
     cn = str(cn_attrs[0].value) if cn_attrs else ""
     if cn not in ALLOWED_SERVICES:
         raise ValueError(f"Unknown client: {cn}")
@@ -78,6 +77,7 @@ def validate(cert: x509.Certificate) -> AuthContext:
         principal=cn,
         claims={"serial": format(cert.serial_number, "x")},
     )
+
 
 auth = mtls_authenticate(validate=validate)
 ```
@@ -109,10 +109,14 @@ from vgi_rpc.http import mtls_authenticate_fingerprint, make_wsgi_app
 # Get with: openssl x509 -fingerprint -sha256 -noout -in cert.pem | tr -d ':'
 fingerprints = {
     "a1b2c3d4e5f6...": AuthContext(
-        domain="mtls", authenticated=True, principal="service-a",
+        domain="mtls",
+        authenticated=True,
+        principal="service-a",
     ),
     "f6e5d4c3b2a1...": AuthContext(
-        domain="mtls", authenticated=True, principal="service-b",
+        domain="mtls",
+        authenticated=True,
+        principal="service-b",
         claims={"role": "admin"},
     ),
 }
@@ -205,6 +209,7 @@ auth = mtls_authenticate_xfcc()
 from vgi_rpc import AuthContext
 from vgi_rpc.http._mtls import XfccElement
 
+
 def validate_spiffe(elem: XfccElement) -> AuthContext:
     if not elem.uri or not elem.uri.startswith("spiffe://"):
         raise ValueError("Missing SPIFFE ID")
@@ -214,6 +219,7 @@ def validate_spiffe(elem: XfccElement) -> AuthContext:
         principal=elem.uri,
         claims={"hash": elem.hash} if elem.hash else {},
     )
+
 
 auth = mtls_authenticate_xfcc(validate=validate_spiffe)
 ```
@@ -251,11 +257,15 @@ mtls_auth = mtls_authenticate_subject(
 )
 
 # API keys for human/CI access
-api_key_auth = bearer_authenticate_static(tokens={
-    "sk-ci-bot": AuthContext(
-        domain="apikey", authenticated=True, principal="ci-bot",
-    ),
-})
+api_key_auth = bearer_authenticate_static(
+    tokens={
+        "sk-ci-bot": AuthContext(
+            domain="apikey",
+            authenticated=True,
+            principal="ci-bot",
+        ),
+    }
+)
 
 # Try mTLS first, fall back to API key
 auth = chain_authenticate(mtls_auth, api_key_auth)

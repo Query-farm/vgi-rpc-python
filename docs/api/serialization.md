@@ -21,6 +21,7 @@ class Measurement(ArrowSerializableDataclass):
     value: float
     count: Annotated[int, ArrowType(pa.int32())]  # explicit Arrow type override
 
+
 # Auto-generated schema
 print(Measurement.ARROW_SCHEMA)
 # timestamp: string
