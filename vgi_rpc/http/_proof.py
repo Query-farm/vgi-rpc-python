@@ -91,11 +91,9 @@ class ProofError(PermissionError):
     swallows :class:`ValueError` to try the next credential; a precondition
     must not be swallowed that way, and ``PermissionError`` propagates.
 
-    Attributes:
-        reason: A code from the closed set in the specification. Safe to log
-            and to expose as a metric label; never safe to return to the
-            caller, since a request can steer it (``unknown_kid``).
-
+    ``reason`` carries a code from the closed set in the specification. It is
+    safe to log and to expose as a metric label, but never safe to return to
+    the caller, since a request can steer it (``unknown_kid``).
     """
 
     def __init__(self, reason: str, detail: str = "") -> None:
@@ -333,6 +331,12 @@ def parse_secrets(raw: str) -> dict[str, tuple[bytes, str]]:
 
     The ``kid`` doubles as the proxy's label, so attribution needs no extra
     configuration.
+
+    Args:
+        raw: The specification string.
+
+    Returns:
+        Maps each key id to its secret and label.
 
     Raises:
         ValueError: On any malformed entry — never a partial parse, which

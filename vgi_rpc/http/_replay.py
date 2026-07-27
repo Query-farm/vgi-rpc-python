@@ -43,10 +43,8 @@ class NonceCache:
     :class:`~collections.OrderedDict`, and sweeping from the front until the
     first live entry is both exact and amortized O(1) per insertion.
 
-    Attributes:
-        capacity: Maximum number of retained nonces.
-        ttl_seconds: How long a nonce is remembered.
-
+    ``capacity`` is the maximum number of retained nonces and ``ttl_seconds``
+    is how long each is remembered.
     """
 
     __slots__ = ("_clock", "_entries", "_evicted", "_lock", "_replays", "capacity", "ttl_seconds")

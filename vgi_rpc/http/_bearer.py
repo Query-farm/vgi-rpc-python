@@ -161,9 +161,8 @@ class PreconditionGate:
     bypassable, and that mistake is invisible in review and in testing until
     someone omits the gate's header and is served anyway.
 
-    Attributes:
-        name: Short identifier used in error messages and claims.
-
+    ``name`` is a short identifier used in error messages, and ``claims_key``
+    is where :func:`require_all` merges the gate's claims.
     """
 
     __slots__ = ("_fn", "claims_key", "name")
@@ -191,6 +190,12 @@ class PreconditionGate:
 
     def __call__(self, req: falcon.Request) -> Mapping[str, str]:
         """Verify the precondition, returning claims to merge.
+
+        Args:
+            req: The inbound request.
+
+        Returns:
+            Claims describing the verified precondition.
 
         Raises:
             PermissionError: If the precondition does not hold.
