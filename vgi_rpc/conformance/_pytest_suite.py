@@ -41,7 +41,7 @@ from vgi_rpc.conformance import (
     build_rich_header,
     run_describe_conformance,
 )
-from vgi_rpc.conformance.proof_harness import ProofUnsupported
+from vgi_rpc.conformance.proof_harness import ProofUnsupported, ProofWorker, ProofWorkerFactory
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pipe_pair
@@ -1634,14 +1634,15 @@ class TestProxyProof:
     """
 
     @staticmethod
-    def _factory(request: pytest.FixtureRequest) -> object:
+    def _factory(request: pytest.FixtureRequest) -> ProofWorkerFactory:
         try:
-            return request.getfixturevalue("proof_worker_factory")
+            factory: ProofWorkerFactory = request.getfixturevalue("proof_worker_factory")
         except pytest.FixtureLookupError:
             pytest.skip("runner provides no proof_worker_factory")
+        return factory
 
     @staticmethod
-    def _post(worker: object, token: str | None, method: str = "echo_int") -> int:
+    def _post(worker: ProofWorker, token: str | None, method: str = "echo_int") -> int:
         """POST a real, well-formed RPC body, returning the status code.
 
         A well-formed body matters: posting empty content to a path that does
@@ -1654,19 +1655,19 @@ class TestProxyProof:
         if token is not None:
             headers[_PROOF_HEADER] = token
         resp = httpx.post(
-            worker.rpc_url(method),  # type: ignore[attr-defined]
+            worker.rpc_url(method),
             content=_unary_request_body(method, value=1),
             headers=headers,
             timeout=5.0,
         )
         return resp.status_code
 
-    def _mint(self, worker: object, **kw: object) -> str:
+    def _mint(self, worker: ProofWorker, *, now: int | None = None, nonce: str | None = None) -> str:
         from vgi_rpc.conformance.proof_harness import CONFORMANCE_KID, secret_bytes
         from vgi_rpc.http import mint_proof
 
-        cfg = worker.config  # type: ignore[attr-defined]
-        return mint_proof(secret_bytes(), CONFORMANCE_KID, cfg.origin_id, **kw)  # type: ignore[arg-type]
+        cfg = worker.config
+        return mint_proof(secret_bytes(), CONFORMANCE_KID, cfg.origin_id, now=now, nonce=nonce)
 
     def test_valid_proof_accepted(self, request: pytest.FixtureRequest) -> None:
         """A proof minted by an independent implementation is accepted.
@@ -1677,14 +1678,14 @@ class TestProxyProof:
         """
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
             assert self._post(worker, self._mint(worker)) == 200
 
     def test_missing_proof_rejected(self, request: pytest.FixtureRequest) -> None:
         """Require mode refuses a request with no proof, and accepts one with."""
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
             assert self._post(worker, self._mint(worker)) == 200, "positive control failed"
             assert self._post(worker, None) == 401
 
@@ -1709,7 +1710,7 @@ class TestProxyProof:
         """
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
             status = self._post(worker, token)
             assert status != 500, f"malformed token produced a server error: {token!r}"
             assert status == 401
@@ -1718,7 +1719,7 @@ class TestProxyProof:
         """Mutating any signed field invalidates the proof."""
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
             base = self._mint(worker, now=None, nonce="AAAAAAAAAAAAAAAAAAAAAA")
             parts = base.split(".")
             for index, replacement in ((2, "1"), (3, "BBBBBBBBBBBBBBBBBBBBBB"), (4, "A" * 43)):
@@ -1735,7 +1736,7 @@ class TestProxyProof:
         from vgi_rpc.conformance.proof_harness import CONFORMANCE_KID, ProofWorkerConfig, secret_bytes
         from vgi_rpc.http import mint_proof
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
             assert self._post(worker, self._mint(worker)) == 200, "positive control failed"
             foreign = mint_proof(secret_bytes(), CONFORMANCE_KID, "some-other-worker")
             assert self._post(worker, foreign) == 401
@@ -1750,8 +1751,8 @@ class TestProxyProof:
 
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
-            skew = worker.config.skew_seconds  # type: ignore[attr-defined]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
+            skew = worker.config.skew_seconds
             now = int(time.time())
             assert self._post(worker, self._mint(worker)) == 200, "positive control failed"
             assert self._post(worker, self._mint(worker, now=now - skew - 60)) == 401, "expired accepted"
@@ -1763,7 +1764,7 @@ class TestProxyProof:
 
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
             now = int(time.time())
             token = self._mint(worker, now=now, nonce="Q0ZPUk1BTkNFTk9OQ0UxMQ")
             assert self._post(worker, token) == 200
@@ -1777,8 +1778,8 @@ class TestProxyProof:
         from vgi_rpc.http import mint_proof
 
         config = ProofWorkerConfig().with_second_key()
-        with self._factory(request)(config) as worker:  # type: ignore[operator]
-            origin = worker.config.origin_id  # type: ignore[attr-defined]
+        with self._factory(request)(config) as worker:
+            origin = worker.config.origin_id
             old = mint_proof(secret_bytes(), CONFORMANCE_KID, origin)
             new = mint_proof(secret_bytes("22" * 32), "conformance-proxy-v2", origin)
             assert self._post(worker, old) == 200, "old key rejected during overlap"
@@ -1789,8 +1790,8 @@ class TestProxyProof:
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig, secret_bytes
         from vgi_rpc.http import mint_proof
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
-            origin = worker.config.origin_id  # type: ignore[attr-defined]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
+            origin = worker.config.origin_id
             assert self._post(worker, mint_proof(secret_bytes(), "no-such-kid", origin)) == 401
 
     def test_health_and_options_exempt(self, request: pytest.FixtureRequest) -> None:
@@ -1803,9 +1804,9 @@ class TestProxyProof:
 
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
-        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+        with self._factory(request)(ProofWorkerConfig()) as worker:
             assert self._post(worker, None) == 401, "positive control: RPC must be gated"
-            assert httpx.get(worker.health_url, timeout=5.0).status_code == 200  # type: ignore[attr-defined]
+            assert httpx.get(worker.health_url, timeout=5.0).status_code == 200
 
     def test_allow_mode_does_not_deny(self, request: pytest.FixtureRequest) -> None:
         """Allow mode records the outcome but serves the request either way."""
@@ -1813,7 +1814,7 @@ class TestProxyProof:
 
         factory = self._factory(request)
         try:
-            ctx = factory(ProofWorkerConfig(mode="allow"))  # type: ignore[operator]
+            ctx = factory(ProofWorkerConfig(mode="allow"))
         except ProofUnsupported as exc:  # pragma: no cover - runner-dependent
             pytest.skip(str(exc))
         with ctx as worker:

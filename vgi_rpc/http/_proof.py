@@ -355,8 +355,7 @@ def parse_secrets(raw: str) -> dict[str, tuple[bytes, str]]:
             raise ValueError(f"secret for kid {kid!r} is not valid hex") from exc
         if len(secret) != _SECRET_LEN:
             raise ValueError(
-                f"secret for kid {kid!r} must be {_SECRET_LEN} bytes "
-                f"({_SECRET_LEN * 2} hex chars), got {len(secret)}",
+                f"secret for kid {kid!r} must be {_SECRET_LEN} bytes ({_SECRET_LEN * 2} hex chars), got {len(secret)}",
             )
         out[kid] = (secret, kid)
     if not out:

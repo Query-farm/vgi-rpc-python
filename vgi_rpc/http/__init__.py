@@ -32,17 +32,6 @@ from vgi_rpc.http._bearer import (
     chain_authenticate,
     require_all,
 )
-from vgi_rpc.http._proof import (
-    PROOF_HEADER,
-    PROOF_REQUIRED_HEADER,
-    ProofError,
-    ProxyProofConfig,
-    derive_secret,
-    mint_proof,
-    parse_secrets,
-    proxy_proof_gate,
-    verify_proof,
-)
 from vgi_rpc.http._client import (
     HttpServerCapabilities,
     HttpStreamSession,
@@ -84,6 +73,17 @@ from vgi_rpc.http._common import (
 )
 from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc
 from vgi_rpc.http._oauth import OAuthResourceMetadata
+from vgi_rpc.http._proof import (
+    PROOF_HEADER,
+    PROOF_REQUIRED_HEADER,
+    ProofError,
+    ProxyProofConfig,
+    derive_secret,
+    mint_proof,
+    parse_secrets,
+    proxy_proof_gate,
+    verify_proof,
+)
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
 from vgi_rpc.http._testing import (
     _SyncTestClient,
