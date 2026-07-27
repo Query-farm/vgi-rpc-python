@@ -12,11 +12,11 @@ import socket
 import sys
 import threading
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import falcon
 
-from vgi_rpc.rpc import RpcServer
+from vgi_rpc.rpc import AuthContext, RpcServer
 
 from ._factory import make_wsgi_app
 from ._sticky import drain_handle
@@ -54,6 +54,8 @@ def serve_http(
     max_stream_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
     compression_level: int | None = 1,
+    authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    token_key: bytes | None = None,
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
@@ -101,6 +103,15 @@ def serve_http(
         compression_level: zstd level for request/response bodies, or
             ``None`` to disable compression entirely.  See
             :func:`make_wsgi_app`.
+        authenticate: Per-request authenticate callback.  See
+            :func:`make_wsgi_app`.  Without this parameter the only way to
+            serve an authenticated worker is to call ``make_wsgi_app`` and
+            run waitress by hand, which is how workers end up shipping with
+            no authentication at all.
+        token_key: Stable AEAD key for sealed state tokens.  See
+            :func:`make_wsgi_app`.  When ``None`` a random per-process key is
+            generated, so tokens do not survive a restart or work across
+            processes.
         enable_sticky: See :func:`make_wsgi_app`.
         sticky_default_ttl: See :func:`make_wsgi_app`.
         sticky_echo_headers: See :func:`make_wsgi_app`.
@@ -142,6 +153,8 @@ def serve_http(
         max_request_bytes=max_request_bytes,
         compression_level=compression_level,
         max_externalized_response_bytes=max_externalized_response_bytes,
+        authenticate=authenticate,
+        token_key=token_key,
         enable_sticky=enable_sticky,
         sticky_default_ttl=sticky_default_ttl,
         sticky_echo_headers=sticky_echo_headers,

@@ -41,11 +41,16 @@ from vgi_rpc.conformance import (
     build_rich_header,
     run_describe_conformance,
 )
+from vgi_rpc.conformance.proof_harness import ProofUnsupported
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
 from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pipe_pair
 
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
+
+#: Duplicated rather than imported from ``vgi_rpc.http`` so the suite stays
+#: importable for runners that install vgi-rpc without the ``http`` extra.
+_PROOF_HEADER = "VGI-Proxy-Proof"
 
 pytestmark = pytest.mark.timeout(5)
 
@@ -1605,8 +1610,255 @@ class TestHealth:
         assert health.status_code == 200, f"health must bypass auth, got {health.status_code}"
         assert health.json()["status"] == "ok"
 
-        rpc = httpx.post(f"{url}/vgi/echo_int", content=b"", timeout=5.0)
+        # Address a route that actually exists. Auth middleware runs before
+        # routing, so posting to a nonexistent path would also yield 401 and
+        # this assertion would pass without proving anything about auth.
+        rpc = httpx.post(f"{url}/echo_int", content=b"", timeout=5.0)
         assert rpc.status_code == 401, f"expected RPC endpoint to require auth, got {rpc.status_code}"
+
+
+class TestProxyProof:
+    """Proxy-proof contract — see ``docs/proxy-proof-spec.md``.
+
+    A runner that supports this feature supplies one session-scoped fixture,
+    ``proof_worker_factory``: a callable taking a
+    :class:`~vgi_rpc.conformance.proof_harness.ProofWorkerConfig` and
+    returning a context manager yielding a
+    :class:`~vgi_rpc.conformance.proof_harness.ProofWorker`. Runners without
+    the feature omit the fixture and the whole group skips.
+
+    Every rejection test asserts a paired positive control against the same
+    worker and URL. Roughly two thirds of these assert 401, so without that
+    control a misconfigured fixture — or a URL that simply does not exist —
+    would make them all pass for the wrong reason.
+    """
+
+    @staticmethod
+    def _factory(request: pytest.FixtureRequest) -> object:
+        try:
+            return request.getfixturevalue("proof_worker_factory")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no proof_worker_factory")
+
+    @staticmethod
+    def _post(worker: object, token: str | None, method: str = "echo_int") -> int:
+        """POST a real, well-formed RPC body, returning the status code.
+
+        A well-formed body matters: posting empty content to a path that does
+        not exist also yields a rejection, which would make these assertions
+        vacuous.
+        """
+        import httpx
+
+        headers = {"content-type": "application/vnd.apache.arrow.stream"}
+        if token is not None:
+            headers[_PROOF_HEADER] = token
+        resp = httpx.post(
+            worker.rpc_url(method),  # type: ignore[attr-defined]
+            content=_unary_request_body(method, value=1),
+            headers=headers,
+            timeout=5.0,
+        )
+        return resp.status_code
+
+    def _mint(self, worker: object, **kw: object) -> str:
+        from vgi_rpc.conformance.proof_harness import CONFORMANCE_KID, secret_bytes
+        from vgi_rpc.http import mint_proof
+
+        cfg = worker.config  # type: ignore[attr-defined]
+        return mint_proof(secret_bytes(), CONFORMANCE_KID, cfg.origin_id, **kw)  # type: ignore[arg-type]
+
+    def test_valid_proof_accepted(self, request: pytest.FixtureRequest) -> None:
+        """A proof minted by an independent implementation is accepted.
+
+        The token is built here, not by the worker, so a port whose canonical
+        string is framed differently fails — which round-tripping inside one
+        implementation could never reveal.
+        """
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            assert self._post(worker, self._mint(worker)) == 200
+
+    def test_missing_proof_rejected(self, request: pytest.FixtureRequest) -> None:
+        """Require mode refuses a request with no proof, and accepts one with."""
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            assert self._post(worker, self._mint(worker)) == 200, "positive control failed"
+            assert self._post(worker, None) == 401
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "",
+            "garbage",
+            "v1.a.b.c",
+            "v1.a.b.c.d.e",
+            "v2.conformance-proxy.1.AAAAAAAAAAAAAAAAAAAAAA." + "A" * 43,
+            "v1.bad!kid.1.AAAAAAAAAAAAAAAAAAAAAA." + "A" * 43,
+            "v1.conformance-proxy.notanumber.AAAAAAAAAAAAAAAAAAAAAA." + "A" * 43,
+            "v1.conformance-proxy.1.short." + "A" * 43,
+        ],
+    )
+    def test_malformed_rejected_not_500(self, request: pytest.FixtureRequest, token: str) -> None:
+        """Malformed tokens are refused as 401, never 500.
+
+        A 5xx on adversarial input is a conformance failure in its own
+        right: it means the parser raised somewhere it was not expected to.
+        """
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            status = self._post(worker, token)
+            assert status != 500, f"malformed token produced a server error: {token!r}"
+            assert status == 401
+
+    def test_tampered_fields_rejected(self, request: pytest.FixtureRequest) -> None:
+        """Mutating any signed field invalidates the proof."""
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            base = self._mint(worker, now=None, nonce="AAAAAAAAAAAAAAAAAAAAAA")
+            parts = base.split(".")
+            for index, replacement in ((2, "1"), (3, "BBBBBBBBBBBBBBBBBBBBBB"), (4, "A" * 43)):
+                mutated = list(parts)
+                mutated[index] = replacement
+                assert self._post(worker, ".".join(mutated)) == 401, f"field {index} tamper accepted"
+
+    def test_wrong_origin_rejected(self, request: pytest.FixtureRequest) -> None:
+        """A proof minted for another worker does not verify here.
+
+        Audience binding: the origin id is folded into the MAC but never
+        transmitted, so it cannot be adjusted by the caller.
+        """
+        from vgi_rpc.conformance.proof_harness import CONFORMANCE_KID, ProofWorkerConfig, secret_bytes
+        from vgi_rpc.http import mint_proof
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            assert self._post(worker, self._mint(worker)) == 200, "positive control failed"
+            foreign = mint_proof(secret_bytes(), CONFORMANCE_KID, "some-other-worker")
+            assert self._post(worker, foreign) == 401
+
+    def test_expired_and_future_rejected(self, request: pytest.FixtureRequest) -> None:
+        """Both ends of the timestamp window are enforced.
+
+        The future case is the one that catches a verifier checking only an
+        upper bound, which would let a future-dated proof pass indefinitely.
+        """
+        import time
+
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            skew = worker.config.skew_seconds  # type: ignore[attr-defined]
+            now = int(time.time())
+            assert self._post(worker, self._mint(worker)) == 200, "positive control failed"
+            assert self._post(worker, self._mint(worker, now=now - skew - 60)) == 401, "expired accepted"
+            assert self._post(worker, self._mint(worker, now=now + skew + 60)) == 401, "future accepted"
+
+    def test_replayed_nonce_rejected(self, request: pytest.FixtureRequest) -> None:
+        """A replayed proof is refused; a fresh nonce at the same second is not."""
+        import time
+
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            now = int(time.time())
+            token = self._mint(worker, now=now, nonce="Q0ZPUk1BTkNFTk9OQ0UxMQ")
+            assert self._post(worker, token) == 200
+            assert self._post(worker, token) == 401, "replay accepted"
+            other = self._mint(worker, now=now, nonce="Q0ZPUk1BTkNFTk9OQ0UyMg")
+            assert self._post(worker, other) == 200, "distinct nonce in the same second must pass"
+
+    def test_rotation_overlap(self, request: pytest.FixtureRequest) -> None:
+        """Two keys verify simultaneously so a rotation loses no request."""
+        from vgi_rpc.conformance.proof_harness import CONFORMANCE_KID, ProofWorkerConfig, secret_bytes
+        from vgi_rpc.http import mint_proof
+
+        config = ProofWorkerConfig().with_second_key()
+        with self._factory(request)(config) as worker:  # type: ignore[operator]
+            origin = worker.config.origin_id  # type: ignore[attr-defined]
+            old = mint_proof(secret_bytes(), CONFORMANCE_KID, origin)
+            new = mint_proof(secret_bytes("22" * 32), "conformance-proxy-v2", origin)
+            assert self._post(worker, old) == 200, "old key rejected during overlap"
+            assert self._post(worker, new) == 200, "new key rejected during overlap"
+
+    def test_unknown_kid_rejected(self, request: pytest.FixtureRequest) -> None:
+        """A key id with no configured secret is refused."""
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig, secret_bytes
+        from vgi_rpc.http import mint_proof
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            origin = worker.config.origin_id  # type: ignore[attr-defined]
+            assert self._post(worker, mint_proof(secret_bytes(), "no-such-kid", origin)) == 401
+
+    def test_health_and_options_exempt(self, request: pytest.FixtureRequest) -> None:
+        """Health and CORS preflight stay reachable without a proof.
+
+        Load-balancer probes reach the worker directly rather than through
+        the proxy, so gating them would mark a healthy worker down.
+        """
+        import httpx
+
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:  # type: ignore[operator]
+            assert self._post(worker, None) == 401, "positive control: RPC must be gated"
+            assert httpx.get(worker.health_url, timeout=5.0).status_code == 200  # type: ignore[attr-defined]
+
+    def test_allow_mode_does_not_deny(self, request: pytest.FixtureRequest) -> None:
+        """Allow mode records the outcome but serves the request either way."""
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        factory = self._factory(request)
+        try:
+            ctx = factory(ProofWorkerConfig(mode="allow"))  # type: ignore[operator]
+        except ProofUnsupported as exc:  # pragma: no cover - runner-dependent
+            pytest.skip(str(exc))
+        with ctx as worker:
+            assert self._post(worker, None) == 200, "allow mode must not deny"
+            assert self._post(worker, self._mint(worker)) == 200
+
+
+class TestProxyProofOffMode:
+    """An unconfigured worker must be unaffected by the feature.
+
+    Not gated on ``proof_worker_factory``: it runs against the ordinary
+    conformance server on every runner from day one. If it is not green, then
+    "opt-in, off by default" is already false somewhere.
+    """
+
+    def test_unconfigured_worker_accepts_without_a_proof(self, conformance_http_port: int) -> None:
+        """No header, no gate, no change."""
+        import httpx
+
+        resp = httpx.post(
+            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            content=_unary_request_body("echo_int", value=1),
+            headers={"content-type": "application/vnd.apache.arrow.stream"},
+            timeout=5.0,
+        )
+        assert resp.status_code == 200
+
+    def test_unconfigured_worker_ignores_a_bogus_proof_header(self, conformance_http_port: int) -> None:
+        """A garbage proof header is ignored rather than parsed.
+
+        Catches a port that installs the verifier whenever the header is
+        present rather than whenever the feature is configured.
+        """
+        import httpx
+
+        resp = httpx.post(
+            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            content=_unary_request_body("echo_int", value=1),
+            headers={
+                "content-type": "application/vnd.apache.arrow.stream",
+                _PROOF_HEADER: "v1.whatever.0.not-a-real-nonce.nope",
+            },
+            timeout=5.0,
+        )
+        assert resp.status_code == 200
 
 
 def _unary_request_body(method_name: str, **kwargs: object) -> bytes:

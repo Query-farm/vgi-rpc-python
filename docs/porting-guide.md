@@ -194,6 +194,36 @@ ignore the budget.
 - **HTTP state-token format.** Tokens are AEAD-sealed (XChaCha20-Poly1305 or ChaCha20-Poly1305, depending on what's available natively in the target language). Each port is free to choose its own plaintext encoding — Python uses length-prefixed Arrow IPC, Go uses gob, TypeScript uses JSON+BigInt, Java uses CBOR, Rust uses length-prefixed bytes — because tokens are not expected to round-trip across language ports. The behavioral contract is per-port: round-trip integrity, cross-principal replay protection (via AEAD AAD or per-principal key derivation), and TTL enforcement after authenticity. See `vgi_rpc/http/server/_state_token.py` for the Python reference.
 - **Per-process server identity.** `server_id` is generated once per process lifetime, NOT per call. The same string must appear in every log record from the same instance.
 
+## HTTP proxy proof
+
+Proxy proof is an **opt-in additive feature**: a worker can refuse any request that did not arrive through a trusted proxy, which is verified by recomputing an HMAC over a timestamp, a nonce and the worker's own identifier. The full spec lives at [`docs/proxy-proof-spec.md`](proxy-proof-spec.md). A port may:
+
+- **Skip it entirely.** The canonical `TestProxyProof` conformance group is gated on the runner supplying a `proof_worker_factory` fixture; a port that omits the fixture skips the whole group cleanly. The `TestProxyProofOffMode` group is *not* gated and runs everywhere — it asserts an unconfigured worker is completely unaffected, which is the property "opt-in, off by default" actually means.
+- **Implement the verifier.** This is the whole feature for a worker. Everything needed is in each language's standard library: HMAC-SHA256 and a constant-time comparison. No new dependency was required in any of the five existing ports.
+
+### Getting it right
+
+The pieces that are easy to get subtly wrong, in the order they bite:
+
+1. **Frame the canonical string exactly.** It is NUL-separated: `"vgi.proxy.proof.v1" \0 kid \0 ts \0 nonce \0 origin_id`. A port that concatenates without separators round-trips perfectly against itself and fails against every other language. Verify against the golden vectors rather than your own minter — that is the only check that catches this.
+2. **Validate every field's charset before decoding, including the MAC.** Base64 decoders disagree about invalid input: Python's silently discards non-alphabet bytes while Go, Rust and Java raise. Without an explicit charset check one port reports `malformed` where another reports `bad_mac`, and the reason code is part of this contract.
+3. **Make the timestamp window two-sided.** `|now - ts| <= skew`, not just `now - ts <= skew`. An upper-bound-only check lets a future-dated proof pass indefinitely.
+4. **Bound the nonce cache by capacity as well as TTL.** A TTL bounds how long an entry lives, never how many arrive inside the window, so a TTL-only cache is a remote memory-exhaustion vector. Evict oldest on overflow rather than rejecting: a traffic burst should not become an outage.
+5. **Compose it as an AND, never through your chain combinator.** Every port's chain helper is first-success-wins, so a proof gate placed in a chain can be bypassed by any later credential. Expose a dedicated wrapper instead, and consider making the gate a distinct type your chain helper rejects at construction — the mistake is invisible in review and in testing until someone omits the header and is served anyway.
+6. **Never echo the rejection detail.** The caller controls `kid`; reflecting it puts attacker-supplied text in your response body. Log the reason, return a fixed message.
+7. **Keep the exemptions.** `OPTIONS`, `/.well-known/` and `{prefix}/health` stay reachable without a proof in every mode — load-balancer probes reach the worker directly, not through the proxy.
+
+### Conformance worker
+
+A port claiming support spawns a worker mirroring the reference CLI:
+
+```
+--http-proof --proof-secrets <kid>:<hex>,... --proof-origin-id <id> \
+             [--proof-mode off|allow|require] [--proof-skew <s>] [--proof-no-replay-cache]
+```
+
+and supplies a `proof_worker_factory` fixture returning a `ProofWorker` (port, prefix, echoed config). The `prefix` is mandatory: it is the only way a shared test can address a route that actually exists, and asserting a rejection against a path that does not exist is how a whole group passes for the wrong reason.
+
 ## HTTP sticky sessions
 
 HTTP sticky sessions are an **opt-in additive feature** layered on top of the stateless HTTP transport. The full spec lives at [`docs/sticky-sessions-spec.md`](sticky-sessions-spec.md). A port may choose to:

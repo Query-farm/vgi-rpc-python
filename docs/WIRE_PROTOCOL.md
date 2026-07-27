@@ -529,6 +529,7 @@ The response has one row per requested URL pair.
 |--------|-------------|
 | `Content-Type` | MUST be `application/vnd.apache.arrow.stream` |
 | `X-Request-ID` | Optional. Correlation ID echoed on response. If absent, server generates one. |
+| `VGI-Proxy-Proof` | Optional. Per-request HMAC proof that the request arrived through a trusted proxy. See [Proxy Proof](proxy-proof-spec.md). |
 
 ### Response headers
 
@@ -538,6 +539,7 @@ The response has one row per requested URL pair.
 | `VGI-Max-Request-Bytes` | Server-advertised maximum request body size (optional). |
 | `VGI-Upload-URL-Support` | `"true"` when upload URL endpoint is available (optional). |
 | `VGI-Max-Upload-Bytes` | Server-advertised maximum upload size (optional). |
+| `VGI-Proxy-Proof-Required` | `"true"` when the server rejects requests lacking a valid proxy proof (optional). |
 
 ### Unary call (HTTP)
 
@@ -699,6 +701,25 @@ When the server has an `authenticate` callback configured:
 - On failure (`ValueError` or `PermissionError`), the server returns **HTTP 401** with a **plain-text** body (NOT Arrow IPC), because no method has been resolved yet and no output schema is available.
 - Other exceptions from the callback propagate as HTTP 500.
 - Clients MUST detect 401 responses before attempting to parse Arrow IPC.
+
+#### Proxy proof (optional)
+
+A worker may additionally require that a request arrived through a trusted proxy. The proxy mints a
+per-request HMAC-SHA256 proof in a `VGI-Proxy-Proof` header; the worker verifies it against a shared
+per-worker secret.
+
+- It is a **precondition ANDed with** the `authenticate` callback above, never an alternative
+  credential — the caller's `Authorization` header is untouched and still carries the end user.
+- Failure maps to the same **HTTP 401 + plain-text body** as any other authenticate failure. The
+  body MUST NOT echo the reason or the claimed key id.
+- `OPTIONS`, `/.well-known/`, and `{prefix}/health` are exempt in all modes, so load-balancer
+  probes and capability discovery keep working.
+- A worker requiring proofs advertises `VGI-Proxy-Proof-Required: true` on every response.
+- Opt-in: an unconfigured worker reads no header, emits none, and is byte-identical to a worker
+  built before the feature existed.
+
+The token format, canonical MAC input, verifier algorithm, reason codes, and rotation procedure are
+normative in [the Proxy Proof Specification](proxy-proof-spec.md).
 
 ---
 

@@ -115,6 +115,7 @@ Some conformance tests target opt-in HTTP features. They run only when the serve
 | Capability header | Test group | Spec |
 |---|---|---|
 | `VGI-Sticky-Enabled: true` | `Sticky::*` | [sticky-sessions-spec.md](sticky-sessions-spec.md) |
+| `VGI-Proxy-Proof-Required: true` | `ProxyProof::*` | [proxy-proof-spec.md](proxy-proof-spec.md) |
 
 Filter for one group with `--filter`:
 

@@ -25,7 +25,24 @@ Optional dependencies: ``pip install vgi-rpc[http]``
 
 import contextlib
 
-from vgi_rpc.http._bearer import bearer_authenticate, bearer_authenticate_static, chain_authenticate
+from vgi_rpc.http._bearer import (
+    PreconditionGate,
+    bearer_authenticate,
+    bearer_authenticate_static,
+    chain_authenticate,
+    require_all,
+)
+from vgi_rpc.http._proof import (
+    PROOF_HEADER,
+    PROOF_REQUIRED_HEADER,
+    ProofError,
+    ProxyProofConfig,
+    derive_secret,
+    mint_proof,
+    parse_secrets,
+    proxy_proof_gate,
+    verify_proof,
+)
 from vgi_rpc.http._client import (
     HttpServerCapabilities,
     HttpStreamSession,
@@ -91,6 +108,17 @@ __all__ = [
     "bearer_authenticate",
     "bearer_authenticate_static",
     "chain_authenticate",
+    "PreconditionGate",
+    "require_all",
+    "PROOF_HEADER",
+    "PROOF_REQUIRED_HEADER",
+    "ProofError",
+    "ProxyProofConfig",
+    "derive_secret",
+    "mint_proof",
+    "parse_secrets",
+    "proxy_proof_gate",
+    "verify_proof",
     "DrainHandle",
     "drain_handle",
     "HttpRetryConfig",

@@ -43,6 +43,7 @@ _CONFORMANCE_PIPE = str(Path(__file__).parent / "serve_conformance_pipe.py")
 _CONFORMANCE_HTTP = str(Path(__file__).parent / "serve_conformance_http.py")
 _CONFORMANCE_HTTP_SHARED = str(Path(__file__).parent / "serve_conformance_http_shared.py")
 _CONFORMANCE_HTTP_AUTH = str(Path(__file__).parent / "serve_conformance_http_auth.py")
+_CONFORMANCE_HTTP_PROOF = str(Path(__file__).parent / "serve_conformance_http_proof.py")
 _CONFORMANCE_HTTP_STRICT = str(Path(__file__).parent / "serve_conformance_http_strict.py")
 _CONFORMANCE_UNIX = str(Path(__file__).parent / "serve_conformance_unix.py")
 _CONFORMANCE_UNIX_THREADED = str(Path(__file__).parent / "serve_conformance_unix_threaded.py")
@@ -602,6 +603,52 @@ def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> It
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def proof_worker_factory() -> Iterator[Callable[..., Any]]:
+    """Spawn conformance workers gated on proxy proof.
+
+    This is the reference implementation of the fixture every other-language
+    runner supplies so the shared ``TestProxyProof`` group can drive it. The
+    factory shape, rather than one fixture per configuration, is what lets the
+    suite add a case without touching five repositories.
+    """
+    from vgi_rpc.conformance.proof_harness import ProofWorker, ProofWorkerConfig
+
+    @contextlib.contextmanager
+    def spawn(config: ProofWorkerConfig) -> Iterator[ProofWorker]:
+        port = _free_port()
+        cmd = [
+            sys.executable,
+            _CONFORMANCE_HTTP_PROOF,
+            "--port",
+            str(port),
+            "--proof-mode",
+            config.mode,
+            "--proof-origin-id",
+            config.origin_id,
+            "--proof-secrets",
+            config.secrets,
+            "--proof-skew",
+            str(config.skew_seconds),
+            "--prefix",
+            "/vgi",
+        ]
+        if not config.replay_cache:
+            cmd.append("--proof-no-replay-cache")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            assert proc.stdout is not None
+            line = proc.stdout.readline().decode().strip()
+            assert line == f"PORT:{port}", f"Expected PORT:{port}, got: {line!r}"
+            _wait_for_http(port)
+            yield ProofWorker(port=port, prefix="/vgi", config=config)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    yield spawn
 
 
 @pytest.fixture(scope="session")
