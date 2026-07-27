@@ -134,7 +134,9 @@ The access log is a standard Python logger; attach any handler:
 import logging
 from logging.handlers import HTTPHandler
 
-logging.getLogger("vgi_rpc.access").addHandler(HTTPHandler("analytics.example.com", "/ingest", method="POST"))
+logging.getLogger("vgi_rpc.access").addHandler(
+    HTTPHandler("analytics.example.com", "/ingest", method="POST")
+)
 ```
 
 The recommended path for production deployments is still: file with rotation + Vector/Fluent Bit sidecar. Programmatic handlers are useful for tests, in-process aggregation, or integrating with a non-file destination already wired into your stack.

@@ -63,6 +63,11 @@ ignore = [
 
 [tool.ruff.format]
 quote-style = "double"
+# ruff >=0.16 formats Python code blocks embedded in Markdown. Our docs use
+# mkdocs `pymdownx.snippets` includes (`--8<-- "examples/foo.py"`) inside
+# ```python fences; ruff parses those as Python and rewrites them to
+# `--8 < --"..."`, silently breaking the docs build. Keep Markdown out.
+exclude = ["*.md"]
 
 [tool.mypy]
 python_version = "3.13"

@@ -108,7 +108,7 @@ This pattern means your vgi-rpc service can return **gigabyte-scale results** th
         external_location=ExternalLocationConfig(
             storage=storage,
             externalize_threshold_bytes=1_000_000,  # 1 MB
-            compression=Compression(level=3),  # zstd compression
+            compression=Compression(level=3),       # zstd compression
         ),
     )
     ```
@@ -193,8 +193,8 @@ For large **inputs** (client → server), enable upload URL vending so clients c
 app = make_wsgi_app(
     server,
     token_key=token_key,
-    upload_url_provider=storage,  # S3Storage/GCSStorage implement this
-    max_upload_bytes=500_000_000,  # 500 MB
+    upload_url_provider=storage,      # S3Storage/GCSStorage implement this
+    max_upload_bytes=500_000_000,     # 500 MB
 )
 ```
 

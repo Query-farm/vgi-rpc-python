@@ -98,14 +98,14 @@ A method body opens a session by handing the framework a state object:
 class MyServiceImpl:
     def open_query(self, sql: str, ctx) -> str:
         cursor = duckdb.connect().execute(sql)
-        ctx.open_session(cursor)  # framework mints + returns the token
+        ctx.open_session(cursor)               # framework mints + returns the token
         return "ok"
 
     def next_rows(self, n: int, ctx) -> bytes:
         return ctx.session.fetch_arrow_table(n).serialize().to_pybytes()
 
     def close_query(self, ctx) -> None:
-        ctx.close_session()  # closes cursor + evicts entry
+        ctx.close_session()                    # closes cursor + evicts entry
 ```
 
 On the client side, every session-using call lives inside a `with_session_token()` block — that's the opt-in signal the server requires (the leaked-session guard):
@@ -133,9 +133,8 @@ from vgi_rpc.http import make_wsgi_app
 from vgi_rpc.http.fly import auto_server_id, fly_sticky_echo_headers
 
 server = RpcServer(
-    MyService,
-    MyServiceImpl(),
-    server_id=auto_server_id(),  # ⇒ FLY_MACHINE_ID on Fly, random elsewhere
+    MyService, MyServiceImpl(),
+    server_id=auto_server_id(),                # ⇒ FLY_MACHINE_ID on Fly, random elsewhere
 )
 app = make_wsgi_app(
     server,

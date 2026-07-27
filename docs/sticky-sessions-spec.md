@@ -118,9 +118,9 @@ from vgi_rpc.http import drain_handle, make_wsgi_app
 app = make_wsgi_app(server, enable_sticky=True)
 handle = drain_handle(app)  # returns None when sticky is disabled
 if handle is not None:
-    handle.drain()  # flip the drain flag
+    handle.drain()       # flip the drain flag
     # ... wait for in-flight sessions to complete ...
-    handle.shutdown()  # invoke state.close() on every live session
+    handle.shutdown()    # invoke state.close() on every live session
 ```
 
 While the flag is set:
@@ -136,7 +136,6 @@ For pre-fork servers (gunicorn, uwsgi) operators wire their own hook against `dr
 # gunicorn config (gunicorn.conf.py)
 import time
 from vgi_rpc.http import drain_handle
-
 
 def worker_exit(server, worker):
     """gunicorn calls this when a worker is being retired."""

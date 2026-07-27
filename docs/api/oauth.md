@@ -57,13 +57,7 @@ If a client doesn't know the server's auth requirements upfront, it can
 discover them from a 401 response:
 
 ```python
-from vgi_rpc.http import (
-    parse_resource_metadata_url,
-    parse_client_id,
-    parse_client_secret,
-    parse_use_id_token_as_bearer,
-    fetch_oauth_metadata,
-)
+from vgi_rpc.http import parse_resource_metadata_url, parse_client_id, parse_client_secret, parse_use_id_token_as_bearer, fetch_oauth_metadata
 
 # 1. Make a request that returns 401
 resp = client.post("/vgi/my_method", ...)
@@ -119,7 +113,6 @@ Supports any validation logic: database lookups, introspection endpoints, expiry
 from vgi_rpc.http import bearer_authenticate, make_wsgi_app
 from vgi_rpc import AuthContext, RpcServer
 
-
 def validate(token: str) -> AuthContext:
     # Look up token in database, call an introspection endpoint, etc.
     user = db.get_user_by_api_key(token)
@@ -131,7 +124,6 @@ def validate(token: str) -> AuthContext:
         principal=user.name,
         claims={"role": user.role},
     )
-
 
 auth = bearer_authenticate(validate=validate)
 
@@ -154,7 +146,8 @@ from vgi_rpc import AuthContext, RpcServer
 
 tokens = {
     "key-abc123": AuthContext(domain="apikey", authenticated=True, principal="alice"),
-    "key-def456": AuthContext(domain="apikey", authenticated=True, principal="bob", claims={"role": "admin"}),
+    "key-def456": AuthContext(domain="apikey", authenticated=True, principal="bob",
+                              claims={"role": "admin"}),
 }
 
 auth = bearer_authenticate_static(tokens=tokens)
@@ -191,15 +184,11 @@ jwt_auth = jwt_authenticate(
 )
 
 # Also accept static API keys
-api_key_auth = bearer_authenticate_static(
-    tokens={
-        "sk-service-account": AuthContext(
-            domain="apikey",
-            authenticated=True,
-            principal="ci-bot",
-        ),
-    }
-)
+api_key_auth = bearer_authenticate_static(tokens={
+    "sk-service-account": AuthContext(
+        domain="apikey", authenticated=True, principal="ci-bot",
+    ),
+})
 
 # Try JWT first, fall back to API key lookup
 auth = chain_authenticate(jwt_auth, api_key_auth)
@@ -324,7 +313,7 @@ Extract the `device_code_client_id` / `device_code_client_secret` from a `WWW-Au
 from vgi_rpc.http import parse_device_code_client_id, parse_device_code_client_secret
 
 header = 'Bearer resource_metadata="https://...", device_code_client_id="cli-app", device_code_client_secret="s3cret"'
-parse_device_code_client_id(header)  # "cli-app"
+parse_device_code_client_id(header)      # "cli-app"
 parse_device_code_client_secret(header)  # "s3cret"
 ```
 

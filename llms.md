@@ -23,7 +23,6 @@ Every vgi-rpc service follows three steps: define a Protocol, implement it, conn
 from typing import Protocol
 from vgi_rpc import serve_pipe
 
-
 # 1. Define the interface
 class Calculator(Protocol):
     """Calculator service."""
@@ -32,7 +31,6 @@ class Calculator(Protocol):
         """Add two numbers."""
         ...
 
-
 # 2. Implement it
 class CalculatorImpl:
     """Calculator implementation."""
@@ -40,7 +38,6 @@ class CalculatorImpl:
     def add(self, a: float, b: float) -> float:
         """Add two numbers."""
         return a + b
-
 
 # 3. Connect — proxy is typed as Calculator
 with serve_pipe(Calculator, CalculatorImpl()) as proxy:
@@ -72,7 +69,6 @@ Override with `Annotated`:
 from typing import Annotated
 import pyarrow as pa
 from vgi_rpc import ArrowType
-
 
 def count(self, n: Annotated[int, ArrowType(pa.int32())]) -> int: ...
 ```
@@ -287,7 +283,6 @@ m = Measurement(timestamp="2025-01-01T00:00:00Z", value=42.0, tags=["a"])
 data = m.serialize_to_bytes()
 m2 = Measurement.deserialize_from_bytes(data)
 
-
 # Use directly as RPC parameters and return types
 class DataService(Protocol):
     def record(self, measurement: Measurement) -> str: ...
@@ -436,8 +431,8 @@ from vgi_rpc import RpcError
 try:
     proxy.failing_method()
 except RpcError as e:
-    print(e.error_type)  # "ValueError"
-    print(e.error_message)  # "something went wrong"
+    print(e.error_type)        # "ValueError"
+    print(e.error_message)     # "something went wrong"
     print(e.remote_traceback)  # full server-side traceback
 ```
 
@@ -496,8 +491,7 @@ from vgi_rpc import IpcValidation, RpcServer, connect
 server = RpcServer(MyService, MyServiceImpl(), ipc_validation=IpcValidation.FULL)
 
 # Client: lighter validation for trusted servers
-with connect(MyService, cmd, ipc_validation=IpcValidation.STANDARD) as proxy:
-    ...
+with connect(MyService, cmd, ipc_validation=IpcValidation.STANDARD) as proxy: ...
 ```
 
 Levels: `NONE` (no checks), `STANDARD` (structural), `FULL` (structural + data buffers, default).

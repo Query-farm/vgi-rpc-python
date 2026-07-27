@@ -10,12 +10,10 @@ If `sentry_sdk` is initialised in the worker process, vgi-rpc attaches default-c
 
 ```python
 import sentry_sdk
-
-sentry_sdk.init()  # reads SENTRY_DSN if no dsn= passed
+sentry_sdk.init()                         # reads SENTRY_DSN if no dsn= passed
 
 from vgi_rpc import RpcServer
-
-server = RpcServer(MyService, MyServiceImpl())  # auto-attached
+server = RpcServer(MyService, MyServiceImpl())   # auto-attached
 ```
 
 The check is gated on `sentry_sdk` already being importable in the process, so workers that have not opted into Sentry pay nothing.
@@ -29,7 +27,7 @@ Call `instrument_server_sentry()` explicitly with a `SentryConfig` to override t
 ```python
 from vgi_rpc.sentry import SentryConfig, instrument_server_sentry
 
-server = RpcServer(MyService, MyServiceImpl())  # auto-attached default
+server = RpcServer(MyService, MyServiceImpl())   # auto-attached default
 instrument_server_sentry(
     server,
     SentryConfig(custom_tags={"env": "prod"}, enable_performance=True),
@@ -81,7 +79,7 @@ Opt in to per-call argument recording with `SentryConfig(record_params=True)`. K
 ```python
 config = SentryConfig(
     record_params=True,
-    tag_params=("table", "format"),  # also duplicate as scope tags for Issues
+    tag_params=("table", "format"),     # also duplicate as scope tags for Issues
 )
 ```
 
