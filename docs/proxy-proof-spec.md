@@ -29,7 +29,25 @@ When mode is `require`, the server MUST advertise this on every response (cheape
 
 | Header | Value | Notes |
 |---|---|---|
-| `VGI-Proxy-Proof-Required` | `"true"` | Discovery flag; absent or `"false"` otherwise. Lets a proxy detect that it is minting proofs for a worker that is not checking them — otherwise a misconfiguration is silent. |
+| `VGI-Proxy-Proof-Required` | `"true"` | Discovery flag. Lets a proxy detect that it is minting proofs for a worker that is not checking them — otherwise a misconfiguration is silent. |
+
+Writers MUST emit it only in `require` mode — never as `"false"` in `off` or
+`allow`. Readers MUST treat an absent header as "not required", and SHOULD
+accept a literal `"false"` as the same thing for forward compatibility.
+
+It is advertisement only: it enables and enforces nothing, and a worker that
+emits it while its gate is misconfigured is still just a worker that 401s.
+
+**It is operator-declared, not derived.** The gate is installed through the
+framework's existing `authenticate` seam as an opaque callback (§3), so the
+server has no way to introspect it and discover the mode. Every implementation
+therefore takes the posture as its own server-configuration flag, set beside
+the gate. A port that tries to infer it from the callback will get it wrong
+for `require_all(gate, inner)` — which is the shape every real deployment uses.
+
+Treat it like the other capability headers (`VGI-Sticky-Enabled` and friends):
+emitted on every response including the exempt ones, and listed in
+`Access-Control-Expose-Headers`.
 
 ### 2.3 Exemptions
 

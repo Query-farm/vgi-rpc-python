@@ -51,6 +51,7 @@ ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 #: Duplicated rather than imported from ``vgi_rpc.http`` so the suite stays
 #: importable for runners that install vgi-rpc without the ``http`` extra.
 _PROOF_HEADER = "VGI-Proxy-Proof"
+_PROOF_REQUIRED_HEADER = "VGI-Proxy-Proof-Required"
 
 pytestmark = pytest.mark.timeout(5)
 
@@ -1825,6 +1826,66 @@ class TestProxyProof:
             # serve. What must hold is that health answers somewhere without a
             # proof, while the RPC endpoint above does not.
             assert 200 in codes.values(), f"health must be reachable unproofed: {codes}"
+
+    @staticmethod
+    def _health_headers(worker: ProofWorker) -> dict[str, str]:
+        """Return the response headers of whichever health path this runner serves.
+
+        Runners mount health under the RPC prefix or at the root; probing both
+        keeps the assertion about the header rather than about the layout.
+
+        Args:
+            worker: The spawned worker to probe.
+
+        Returns:
+            Lower-cased header names to values, from the first path answering 200.
+
+        """
+        import httpx
+
+        for path in ("/health", f"{worker.prefix}/health"):
+            resp = httpx.get(f"{worker.base_url}{path}", timeout=5.0)
+            if resp.status_code == 200:
+                return {k.lower(): v for k, v in resp.headers.items()}
+        raise AssertionError("no health endpoint answered 200")
+
+    def test_require_mode_advertises_the_capability(self, request: pytest.FixtureRequest) -> None:
+        """A ``require``-mode worker advertises ``VGI-Proxy-Proof-Required``.
+
+        Without this a proxy cannot tell an enforcing worker from one that
+        silently ignores the header — which is exactly the misconfiguration
+        that turns the whole feature into a no-op. The header carries no
+        enforcement itself; it is how an operator confirms the rollout landed.
+        """
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with self._factory(request)(ProofWorkerConfig()) as worker:
+            headers = self._health_headers(worker)
+            value = headers.get(_PROOF_REQUIRED_HEADER.lower())
+            assert value is not None, (
+                f"require-mode worker must advertise {_PROOF_REQUIRED_HEADER}; got {sorted(headers)}"
+            )
+            assert value.lower() == "true", f"expected 'true', got {value!r}"
+
+    def test_allow_mode_does_not_advertise_the_capability(self, request: pytest.FixtureRequest) -> None:
+        """Only ``require`` advertises it — ``allow`` never denies, so it must not.
+
+        The positive control lives in the previous test; if the header were
+        emitted unconditionally that one would pass while this one fails,
+        which is the point of asserting both postures.
+        """
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        factory = self._factory(request)
+        try:
+            ctx = factory(ProofWorkerConfig(mode="allow"))
+        except ProofUnsupported as exc:  # pragma: no cover - runner-dependent
+            pytest.skip(str(exc))
+        with ctx as worker:
+            headers = self._health_headers(worker)
+            assert _PROOF_REQUIRED_HEADER.lower() not in headers, (
+                f"allow mode must not advertise {_PROOF_REQUIRED_HEADER}"
+            )
 
     def test_allow_mode_does_not_deny(self, request: pytest.FixtureRequest) -> None:
         """Allow mode records the outcome but serves the request either way."""

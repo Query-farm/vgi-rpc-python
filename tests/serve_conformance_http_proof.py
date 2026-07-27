@@ -47,7 +47,12 @@ def main() -> None:
         )
         authenticate = require_all(proxy_proof_gate(config))
 
-    app = make_wsgi_app(server, authenticate=authenticate, prefix=args.prefix)
+    app = make_wsgi_app(
+        server,
+        authenticate=authenticate,
+        proxy_proof_required=args.proof_mode == "require",
+        prefix=args.prefix,
+    )
 
     print(f"PORT:{args.port}", flush=True)
     waitress.serve(app, host="127.0.0.1", port=args.port, _quiet=True)

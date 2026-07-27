@@ -115,7 +115,8 @@ Some conformance tests target opt-in HTTP features. They run only when the serve
 | Capability header | Test group | Spec |
 |---|---|---|
 | `VGI-Sticky-Enabled: true` | `Sticky::*` | [sticky-sessions-spec.md](sticky-sessions-spec.md) |
-| `VGI-Proxy-Proof-Required: true` | `ProxyProof::*` | [proxy-proof-spec.md](proxy-proof-spec.md) |
+
+Proxy proof is gated differently and is **not** reachable through `vgi-rpc-test`. Its tests spawn their own workers — several configurations per test (different modes, skews, key sets) — so pointing at one already-running server cannot express them. They run from the pytest suite only, gated on the runner supplying a `proof_worker_factory` fixture; a port without one skips the group cleanly. `VGI-Proxy-Proof-Required: true` is what an *operator or proxy* reads to confirm a deployed worker enforces (see [proxy-proof-spec.md](proxy-proof-spec.md) §2.2); the conformance suite asserts the header rather than being gated on it.
 
 Filter for one group with `--filter`:
 

@@ -45,6 +45,11 @@ SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings"
 SESSION_HEADER = "VGI-Session"
 SESSION_ACCEPT_HEADER = "VGI-Session-Accept"
 SESSION_CLOSE_HEADER = "VGI-Session-Close"
+# Proxy proof (see docs/proxy-proof-spec.md). The request header carries the
+# proof; the response header advertises that this worker requires one, so a
+# proxy can detect it is minting for a worker that is not checking.
+PROOF_HEADER = "VGI-Proxy-Proof"
+PROOF_REQUIRED_HEADER = "VGI-Proxy-Proof-Required"
 STICKY_ENABLED_HEADER = "VGI-Sticky-Enabled"
 STICKY_DEFAULT_TTL_HEADER = "VGI-Sticky-Default-TTL"
 STICKY_ECHO_HEADERS_HEADER = "VGI-Sticky-Echo-Headers"

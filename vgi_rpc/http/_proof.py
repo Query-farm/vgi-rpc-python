@@ -37,6 +37,7 @@ from typing import Literal
 import falcon
 
 from vgi_rpc.http._bearer import PreconditionGate
+from vgi_rpc.http._common import PROOF_HEADER, PROOF_REQUIRED_HEADER
 from vgi_rpc.http._replay import DEFAULT_CAPACITY, NonceCache
 
 __all__ = [
@@ -51,9 +52,6 @@ __all__ = [
 ]
 
 _logger = logging.getLogger(__name__)
-
-PROOF_HEADER = "VGI-Proxy-Proof"
-PROOF_REQUIRED_HEADER = "VGI-Proxy-Proof-Required"
 
 CLAIMS_KEY = "vgi_proxy_proof"
 GATE_NAME = "vgi_proxy_proof"

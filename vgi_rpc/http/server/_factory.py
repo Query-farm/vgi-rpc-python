@@ -27,6 +27,7 @@ from .._common import (
     MAX_REQUEST_BYTES_HEADER,
     MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
+    PROOF_REQUIRED_HEADER,
     RPC_ERROR_HEADER,
     SESSION_CLOSE_HEADER,
     SESSION_HEADER,
@@ -84,6 +85,7 @@ def make_wsgi_app(
     max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    proxy_proof_required: bool = False,
     cors_origins: str | Iterable[str] | None = None,
     cors_max_age: int | None = 7200,
     upload_url_provider: UploadUrlProvider | None = None,
@@ -149,6 +151,13 @@ def make_wsgi_app(
             ``ValueError`` (bad credentials) or ``PermissionError``
             (forbidden) on failure — these are mapped to HTTP 401.
             Other exceptions propagate as 500.
+        proxy_proof_required: Advertise ``VGI-Proxy-Proof-Required: true`` so a
+            proxy can tell it is minting proofs for a worker that is actually
+            checking them.  The gate itself is installed through
+            ``authenticate`` (see :func:`vgi_rpc.http.require_all`), which is an
+            opaque callable — the factory cannot introspect it, so the operator
+            states the posture here.  Purely advertisement: it does not enable
+            or enforce anything.
         cors_origins: Allowed origins for CORS.  Pass ``"*"`` to allow all
             origins, a single origin string like ``"https://example.com"``,
             or an iterable of origin strings.  ``None`` (the default)
@@ -435,6 +444,10 @@ def make_wsgi_app(
     # servers from non-sticky ones. The session response headers are
     # exposed via CORS so browser clients inside with_session_token()
     # can read VGI-Session / VGI-Session-Close from cross-origin responses.
+    if proxy_proof_required:
+        capability_headers[PROOF_REQUIRED_HEADER] = "true"
+        cors_expose.append(PROOF_REQUIRED_HEADER)
+
     if enable_sticky:
         capability_headers[STICKY_ENABLED_HEADER] = "true"
         capability_headers[STICKY_DEFAULT_TTL_HEADER] = str(int(sticky_default_ttl))

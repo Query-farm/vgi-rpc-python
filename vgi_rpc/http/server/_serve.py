@@ -55,6 +55,7 @@ def serve_http(
     max_request_bytes: int | None = None,
     compression_level: int | None = 1,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    proxy_proof_required: bool = False,
     token_key: bytes | None = None,
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
@@ -108,6 +109,8 @@ def serve_http(
             serve an authenticated worker is to call ``make_wsgi_app`` and
             run waitress by hand, which is how workers end up shipping with
             no authentication at all.
+        proxy_proof_required: Advertise ``VGI-Proxy-Proof-Required``.  See
+            :func:`make_wsgi_app`.
         token_key: Stable AEAD key for sealed state tokens.  See
             :func:`make_wsgi_app`.  When ``None`` a random per-process key is
             generated, so tokens do not survive a restart or work across
@@ -154,6 +157,7 @@ def serve_http(
         compression_level=compression_level,
         max_externalized_response_bytes=max_externalized_response_bytes,
         authenticate=authenticate,
+        proxy_proof_required=proxy_proof_required,
         token_key=token_key,
         enable_sticky=enable_sticky,
         sticky_default_ttl=sticky_default_ttl,
