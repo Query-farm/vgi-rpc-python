@@ -365,9 +365,15 @@ class TestSentryPerformance:
     """Sentry performance monitoring (transactions)."""
 
     @patch("vgi_rpc.sentry.sentry_sdk")
-    def test_transaction_created_when_enabled(self, mock_sdk: MagicMock) -> None:
-        """Transaction is started when enable_performance=True."""
+    def test_transaction_created_when_no_ambient_span(self, mock_sdk: MagicMock) -> None:
+        """A root transaction is started when this dispatch IS the trace root.
+
+        ``get_current_span() is None`` is what a pipe/stdio transport actually
+        looks like: no framework integration has opened anything, so there is no
+        trace to join and the dispatch must start its own.
+        """
         mock_sdk.get_current_scope.return_value = MagicMock()
+        mock_sdk.get_current_span.return_value = None
         mock_transaction = MagicMock()
         mock_sdk.start_transaction.return_value = mock_transaction
         config = SentryConfig(enable_performance=True)
@@ -378,13 +384,40 @@ class TestSentryPerformance:
         call_kwargs = mock_sdk.start_transaction.call_args
         assert call_kwargs[1]["name"] == "vgi_rpc/add"
         assert call_kwargs[1]["op"] == "rpc.server"
+        mock_sdk.start_span.assert_not_called()
         mock_transaction.set_status.assert_called_with("ok")
         mock_transaction.finish.assert_called_once()
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_child_span_when_ambient_transaction_exists(self, mock_sdk: MagicMock) -> None:
+        """THE distributed-tracing requirement: never open a second root.
+
+        Under HTTP the framework integration has already opened a transaction and
+        its WSGI/ASGI middleware already continued any inbound ``sentry-trace`` /
+        ``baggage``. Starting a transaction here would discard that parentage,
+        severing the caller's trace and billing two transactions for one request.
+        """
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        mock_sdk.get_current_span.return_value = MagicMock()  # framework transaction
+        mock_span = MagicMock()
+        mock_sdk.start_span.return_value = mock_span
+        config = SentryConfig(enable_performance=True)
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        _run_pipe_call(server, "add", kwargs={"a": 1, "b": 2})
+        mock_sdk.start_transaction.assert_not_called()
+        mock_sdk.start_span.assert_called_once()
+        call_kwargs = mock_sdk.start_span.call_args
+        assert call_kwargs[1]["name"] == "vgi_rpc/add"
+        assert call_kwargs[1]["op"] == "rpc.server"
+        mock_span.set_status.assert_called_with("ok")
+        mock_span.finish.assert_called_once()
 
     @patch("vgi_rpc.sentry.sentry_sdk")
     def test_transaction_error_status(self, mock_sdk: MagicMock) -> None:
         """Transaction gets error status on dispatch failure."""
         mock_sdk.get_current_scope.return_value = MagicMock()
+        mock_sdk.get_current_span.return_value = None
         mock_transaction = MagicMock()
         mock_sdk.start_transaction.return_value = mock_transaction
         config = SentryConfig(enable_performance=True)
@@ -393,6 +426,20 @@ class TestSentryPerformance:
         _run_pipe_call(server, "fail")
         mock_transaction.set_status.assert_called_with("internal_error")
         mock_transaction.finish.assert_called_once()
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_child_span_error_status(self, mock_sdk: MagicMock) -> None:
+        """A nested dispatch span still records failure."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        mock_sdk.get_current_span.return_value = MagicMock()
+        mock_span = MagicMock()
+        mock_sdk.start_span.return_value = mock_span
+        config = SentryConfig(enable_performance=True)
+        server = RpcServer(SentryTestService, SentryTestServiceImpl())
+        instrument_server_sentry(server, config)
+        _run_pipe_call(server, "fail")
+        mock_span.set_status.assert_called_with("internal_error")
+        mock_span.finish.assert_called_once()
 
     @patch("vgi_rpc.sentry.sentry_sdk")
     def test_performance_disabled_by_default(self, mock_sdk: MagicMock) -> None:

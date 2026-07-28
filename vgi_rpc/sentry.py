@@ -203,8 +203,14 @@ class SentryConfig:
 
     Attributes:
         enable_error_capture: Capture exceptions via ``sentry_sdk.capture_exception`` (default ``True``).
-        enable_performance: Start a Sentry transaction per dispatch.  **Opt-in** to avoid
+        enable_performance: Record a Sentry span per dispatch.  **Opt-in** to avoid
             duplicate tracing when used alongside OpenTelemetry and to conserve Sentry quota.
+            Under an HTTP transport this is a **child span** of the transaction the
+            framework integration already opened, so the dispatch stays inside the
+            caller's distributed trace (the WSGI/ASGI middleware continues any inbound
+            ``sentry-trace`` / ``baggage``).  Only when no ambient span exists —
+            pipe/stdio transport, or no framework integration — does it start a
+            transaction of its own.
         record_request_context: Set Sentry scope context with method name, server ID,
             and authentication info (default ``True``).
         custom_tags: Extra tags applied to every Sentry event.
@@ -409,9 +415,14 @@ def _maybe_auto_instrument(server: RpcServer) -> bool:
 
 @dataclass
 class _SentryHookToken:
-    """Internal token carrying transaction reference for on_dispatch_end."""
+    """Internal token carrying the dispatch span/transaction for on_dispatch_end.
 
-    transaction: sentry_sdk.tracing.Transaction | sentry_sdk.tracing.NoOpSpan | None
+    A ``Span`` under an HTTP transport (child of the framework's transaction), a
+    ``Transaction`` when this dispatch is the trace root. Both expose
+    ``set_status`` / ``finish``, so ``on_dispatch_end`` treats them alike.
+    """
+
+    transaction: sentry_sdk.tracing.Span | sentry_sdk.tracing.NoOpSpan | None
     method_name: str
     service: str
 
@@ -526,12 +537,35 @@ class _SentryDispatchHook:
                 if span is not None:
                     span.set_data(tag_name, hashed)
 
-        transaction: sentry_sdk.tracing.Transaction | sentry_sdk.tracing.NoOpSpan | None = None
+        transaction: sentry_sdk.tracing.Span | sentry_sdk.tracing.NoOpSpan | None = None
         if self._config.enable_performance:
-            transaction = sentry_sdk.start_transaction(
-                op=self._config.op_name,
-                name=f"vgi_rpc/{info.name}",
-            )
+            # Nest under the ambient transaction when one exists, rather than
+            # opening a second root.
+            #
+            # Under an HTTP transport the framework integration (Falcon/WSGI/
+            # ASGI) has already opened a transaction for this request, and
+            # ``SentryWsgiMiddleware`` continued any inbound ``sentry-trace`` /
+            # ``baggage`` on the way in — so the caller's trace is already live
+            # on the scope. ``start_transaction`` would have discarded that
+            # parentage and started a disconnected root, which both severs the
+            # distributed trace and bills a second transaction for one request.
+            # A child span keeps the whole call in the caller's trace.
+            #
+            # With no ambient span (pipe/stdio transport, or no framework
+            # integration installed) this dispatch *is* the root, so a real
+            # transaction is correct. There is nothing to continue from in that
+            # case: ``transport_metadata`` carries remote_addr/user_agent/cookies
+            # only, never trace headers.
+            if sentry_sdk.get_current_span() is not None:
+                transaction = sentry_sdk.start_span(
+                    op=self._config.op_name,
+                    name=f"vgi_rpc/{info.name}",
+                )
+            else:
+                transaction = sentry_sdk.start_transaction(
+                    op=self._config.op_name,
+                    name=f"vgi_rpc/{info.name}",
+                )
 
         return _SentryHookToken(
             transaction=transaction,
