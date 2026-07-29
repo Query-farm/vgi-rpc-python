@@ -75,6 +75,24 @@ Each session token is an AEAD-sealed envelope binding the session ID to its issu
 
 A session token forged by a third party will fail decryption (no key). A session token presented by a different principal than the one who opened it will fail AAD verification (cross-principal replay protection). A session token presented to a different worker will pass decryption but fail `server_id` comparison (no shared registry — that's a deliberate design choice for v1).
 
+### 3.1 Principal binding (normative)
+
+**Sessions are scoped to the principal that opened them.** An implementation MUST bind the session token to the request's authenticated identity through the AAD above, and a token presented under a different identity MUST fail — as `session_lost`, indistinguishable from a garbage token. Rejection MUST come from the AEAD open itself, not from a comparison performed after a successful decrypt; the registry's stored `principal_key` check is defense-in-depth behind that, not a substitute for it.
+
+This is not a new rule — it is the same binding stream-state tokens have carried since the v4 AAD, and the session token reuses it verbatim. It is stated normatively here because the property is invisible in the happy path: an implementation that dropped the identity tail passes every lifecycle test and leaks sessions across users. `TestSticky::test_cross_principal_replay_rejected` exists to make that failure visible; see §9.1.
+
+**What is bound, and what deliberately is not.** Only `domain` and `principal` feed the AAD. Claims do not. A JWT may refresh, `exp` / `jti` / `scope` may churn, and the bearer credential may rotate entirely without disturbing a live session, because only the stable identity (`sub`, a certificate CN, or whatever the deployment's auth hook resolves) is bound. Implementations MUST NOT extend the AAD with volatile per-request material.
+
+**Consequences implementers should expect.** Because identity is bound for the session's lifetime, a session does not survive a change of identity:
+
+- A session opened anonymously cannot be resumed once the caller authenticates, and vice versa.
+- A session does not cross a `domain` change — relevant to deployments that carry tenant context there.
+- Deployments that chain authenticators should keep `domain` / `principal` stable across the fallthrough, or callers whose credential type changes mid-session will see `session_lost`.
+
+Every one of these surfaces as a typed `session_lost` error, never as a silent bind to the wrong state, so the worst outcome is a forced reopen (§1, "always-raise on session loss"). Auth-hook implementations should therefore derive `principal` from stable identity material and never from the credential itself.
+
+**Binding is worth exactly as much as the authentication behind it.** On a server with no authentication configured, every request is anonymous, every session shares one `principal_key` bucket, and the AAD tail is identical for all callers — token secrecy is then the only control. That is a reason to configure authentication on sticky deployments, not a reason to weaken the binding.
+
 ## 4. Runtime API contract
 
 Methods on `CallContext`:
@@ -172,7 +190,9 @@ Most of the group runs against a single sticky worker. Three failure-path tests 
 | `conformance_http_sticky_peer_ports` | `(int, int)` | Two sticky workers sharing **one** AEAD token key | `test_token_from_other_worker_rejected` |
 | `conformance_http_sticky_auth_port` | `int` | Sticky, authenticates the principal named in the `X-Conformance-Principal` request header (absent header ⇒ anonymous) | `test_cross_principal_replay_rejected` |
 
-The shared key on the peer pair is deliberate: with per-process keys the peer would reject the token at decryption and the test would pass without ever exercising the `server_id` comparison. `X-Conformance-Principal` is a fixture convention, not part of the wire protocol — it exists only so the suite can present one worker's token under two identities. Ports are free to authenticate however they like as long as the two identities are distinguishable.
+The shared key on the peer pair is deliberate: with per-process keys the peer would reject the token at decryption and the test would pass without ever exercising the `server_id` comparison. `X-Conformance-Principal` is a fixture convention, not part of the wire protocol — it exists only so the suite can present one worker's token under two identities. Ports are free to authenticate however they like as long as the two identities are distinguishable, but the header name is fixed, because the suite sends it.
+
+These fixtures are currently optional so ports can adopt them incrementally. A port that advertises `VGI-Sticky-Enabled: true` SHOULD supply all three; `conformance_http_sticky_auth_port` in particular is what makes the §3.1 principal binding testable rather than merely asserted, and is expected to become required in a future revision.
 
 Each of these tests pairs its rejection with a positive control (the owning worker, or the owning principal, resuming the same token successfully), so a fixture that mints unusable tokens fails rather than passing green.
 
