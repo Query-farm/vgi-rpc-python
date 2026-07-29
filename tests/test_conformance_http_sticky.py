@@ -13,19 +13,27 @@ the canonical :class:`vgi_rpc.conformance.TestSticky` group.
 
 from __future__ import annotations
 
+import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+import falcon
 import pytest
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
 from vgi_rpc.conformance._types import _StickyCounter
-from vgi_rpc.http import http_capabilities, http_connect
+from vgi_rpc.http import http_capabilities, http_connect, make_wsgi_app
 from vgi_rpc.http._common import SESSION_ACCEPT_HEADER, SESSION_HEADER
 from vgi_rpc.http._testing import _SyncTestClient, make_sync_client
+from vgi_rpc.http.server._sticky import (
+    _ReaperThread,
+    _SessionRegistry,
+    _StickyMiddleware,
+)
 from vgi_rpc.rpc import (
+    AuthContext,
     CallContext,
     RpcError,
     RpcServer,
@@ -35,6 +43,11 @@ from vgi_rpc.rpc import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+# Explicit key so the principal-binding tests can share one app across two
+# clients (and two apps in the wrong-worker test) without the framework
+# minting a fresh per-process key underneath them.
+_TOKEN_KEY = b"sticky-test-key-32-bytes-long!!!"
 
 # Silence the per-process random token_key warning the framework emits when
 # a test omits an explicit key — tests don't run multi-process so the warning
@@ -597,7 +610,6 @@ class TestDrainHandle:
     def test_shutdown_invokes_state_close_on_live_sessions(self, sticky_client: _SyncTestClient) -> None:
         """``handle.shutdown()`` calls ``state.close()`` on every live session — the WSGI-teardown contract."""
         from vgi_rpc.http import drain_handle
-        from vgi_rpc.http.server._sticky import _SessionRegistry
 
         handle = drain_handle(sticky_client._client.app)
         assert handle is not None
@@ -706,3 +718,535 @@ class TestAccessLogSessionFields:
         last = captured_access_records[-1]
         assert "session_id" not in last
         assert "session_action" not in last
+
+
+# ---------------------------------------------------------------------------
+# Runtime API guards (CallContext.open_session / close_session)
+# ---------------------------------------------------------------------------
+#
+# These are contracts on the Python runtime API rather than the wire, so
+# they live here: expressing them cross-language would mean adding methods
+# to the conformance protocol that every port must then implement.
+
+
+class _GuardProtocol(Protocol):
+    """Service whose methods deliberately misuse the sticky runtime API."""
+
+    def double_open(self, value: int) -> int:
+        """Call ``ctx.open_session`` twice in one request."""
+        ...
+
+    def close_without_open(self, value: int) -> int:
+        """Call ``ctx.close_session`` with no session bound."""
+        ...
+
+    def open_with_ttl(self, value: int, ttl_ms: int) -> int:
+        """Open a session with a per-call TTL override."""
+        ...
+
+    def peek(self) -> int:
+        """Return the bound counter's value, or ``-1`` when nothing is bound."""
+        ...
+
+
+class _GuardImpl:
+    """Implementation backing :class:`_GuardProtocol`."""
+
+    def double_open(self, value: int, ctx: CallContext) -> int:
+        """Open twice — the second call must raise."""
+        ctx.open_session(_StickyCounter(value=value))
+        ctx.open_session(_StickyCounter(value=value))
+        return value
+
+    def close_without_open(self, value: int, ctx: CallContext) -> int:
+        """Close with nothing bound — documented as an idempotent no-op."""
+        ctx.close_session()
+        return value
+
+    def open_with_ttl(self, value: int, ttl_ms: int, ctx: CallContext) -> int:
+        """Open a session that expires after *ttl_ms*, ignoring the server default."""
+        ctx.open_session(_StickyCounter(value=value), ttl=ttl_ms / 1000.0)
+        return value
+
+    def peek(self, ctx: CallContext) -> int:
+        """Report the bound counter's value."""
+        counter = ctx.session
+        return counter.value if isinstance(counter, _StickyCounter) else -1
+
+
+@pytest.fixture
+def guard_client() -> Iterator[_SyncTestClient]:
+    """Sticky client serving :class:`_GuardProtocol` with a long default TTL.
+
+    The long default is what makes the per-call ``ttl=`` override
+    observable — an entry that ages out did so because the override took
+    effect, not because the server default elapsed.
+    """
+    server = RpcServer(_GuardProtocol, _GuardImpl())
+    client = make_sync_client(server, token_key=_TOKEN_KEY, enable_sticky=True, sticky_default_ttl=300.0)
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+class TestRuntimeApiGuards:
+    """``open_session`` / ``close_session`` misuse and per-call TTL (spec §4)."""
+
+    def test_double_open_raises(self, guard_client: _SyncTestClient) -> None:
+        """A second ``open_session`` in one request raises rather than orphaning the first."""
+        with (
+            http_connect(_GuardProtocol, client=guard_client) as proxy,
+            cast("Any", proxy).with_session_token() as sess,
+            pytest.raises(RpcError) as excinfo,
+        ):
+            sess.double_open(value=1)
+        assert excinfo.value.error_type == "RuntimeError"
+        assert "already active" in str(excinfo.value)
+
+    def test_close_without_open_is_noop(self, guard_client: _SyncTestClient) -> None:
+        """``close_session`` with nothing bound is an idempotent no-op, not an error."""
+        with (
+            http_connect(_GuardProtocol, client=guard_client) as proxy,
+            cast("Any", proxy).with_session_token() as sess,
+        ):
+            assert sess.close_without_open(value=7) == 7
+            # The no-op must not poison the view: a real session still opens.
+            assert sess.open_with_ttl(value=3, ttl_ms=60_000) == 3
+            assert sess.peek() == 3
+
+    def test_per_call_ttl_override_expires_early(self, guard_client: _SyncTestClient) -> None:
+        """``open_session(ttl=...)`` overrides the server default (300s here)."""
+        with (
+            http_connect(_GuardProtocol, client=guard_client) as proxy,
+            cast("Any", proxy).with_session_token() as sess,
+        ):
+            sess.open_with_ttl(value=11, ttl_ms=200)
+            assert sess.peek() == 11
+            time.sleep(0.5)
+            with pytest.raises(RpcError) as excinfo:
+                sess.peek()
+            assert excinfo.value.error_type == "SessionLostError", (
+                "a per-call ttl shorter than the server default must still expire the session"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Registry internals
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingState:
+    """Session state whose ``close()`` raises — eviction must survive it."""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self) -> None:
+        """Record the call, then raise."""
+        self.close_calls += 1
+        msg = "close() blew up"
+        raise RuntimeError(msg)
+
+
+class TestRegistryInternals:
+    """Direct coverage of ``_SessionRegistry`` branches the HTTP path reaches rarely."""
+
+    def test_get_evicts_expired_entry_inline(self) -> None:
+        """A lookup past the TTL evicts the entry and closes its state, returning ``None``."""
+        registry = _SessionRegistry(default_ttl=0.01)
+        counter = _StickyCounter(value=1)
+        session_id, _expires_at = registry.open(counter, ttl=0.01, principal_key="anon")
+        time.sleep(0.05)
+        assert registry.get(session_id, "anon") is None, "an aged-out entry must not resolve"
+        assert counter.closed is True, "inline eviction must invoke state.close()"
+        assert len(registry) == 0, "the expired entry must be removed, not just hidden"
+
+    def test_get_rejects_principal_mismatch(self) -> None:
+        """A live entry does not resolve for a different principal key.
+
+        Defense-in-depth behind the token's AAD binding: even a validly
+        sealed token must not bind to another principal's entry.
+        """
+        registry = _SessionRegistry(default_ttl=60.0)
+        counter = _StickyCounter(value=1)
+        session_id, _expires_at = registry.open(counter, ttl=None, principal_key="domain\x00alice")
+        assert registry.get(session_id, "domain\x00bob") is None
+        # Not evicted — the owner can still resolve it.
+        assert registry.get(session_id, "domain\x00alice") is not None
+        assert counter.closed is False
+
+    def test_close_returns_false_on_miss(self) -> None:
+        """Closing an unknown session id reports a miss instead of raising."""
+        registry = _SessionRegistry(default_ttl=60.0)
+        assert registry.close(b"\x00" * 12) is False
+
+    def test_state_close_exception_is_suppressed(self) -> None:
+        """A raising ``state.close()`` never escapes eviction, on any eviction path."""
+        registry = _SessionRegistry(default_ttl=60.0)
+        explicit = _ExplodingState()
+        sid, _ = registry.open(explicit, ttl=None, principal_key="anon")
+        assert registry.close(sid) is True
+        assert explicit.close_calls == 1
+
+        expiring = _ExplodingState()
+        registry.open(expiring, ttl=-1.0, principal_key="anon")  # already expired
+        assert registry.drain_expired() == 1
+        assert expiring.close_calls == 1
+
+        remaining = _ExplodingState()
+        registry.open(remaining, ttl=None, principal_key="anon")
+        registry.shutdown()
+        assert remaining.close_calls == 1
+        assert len(registry) == 0
+
+    def test_iteration_snapshots_live_ids(self) -> None:
+        """Iterating the registry yields the live session ids."""
+        registry = _SessionRegistry(default_ttl=60.0)
+        ids = {registry.open(_StickyCounter(value=i), ttl=None, principal_key="anon")[0] for i in range(3)}
+        assert set(registry) == ids
+
+    def test_open_rejected_while_draining(self) -> None:
+        """``open`` raises ``ServerDrainingError`` once the drain flag is set."""
+        from vgi_rpc.rpc import ServerDrainingError
+
+        registry = _SessionRegistry(default_ttl=60.0)
+        registry.set_draining(True)
+        with pytest.raises(ServerDrainingError):
+            registry.open(_StickyCounter(value=1), ttl=None, principal_key="anon")
+
+
+class TestReaperThread:
+    """The daemon sweep thread: it must evict, survive errors, and stop."""
+
+    def test_reaper_evicts_without_any_request(self) -> None:
+        """The reaper closes an aged-out session with no client traffic at all."""
+        registry = _SessionRegistry(default_ttl=0.05)
+        counter = _StickyCounter(value=1)
+        registry.open(counter, ttl=0.05, principal_key="anon")
+        reaper = _ReaperThread(registry, tick_seconds=0.02)
+        reaper.start()
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not counter.closed:
+                time.sleep(0.01)
+            assert counter.closed is True, "the reaper thread must evict expired sessions on its own"
+        finally:
+            reaper.stop()
+            reaper.join(timeout=5)
+        assert not reaper.is_alive(), "stop() must end the reaper at the next tick boundary"
+
+    def test_reaper_survives_a_failing_tick(self) -> None:
+        """An exception from one sweep must not kill the thread."""
+        failures: list[int] = []
+
+        class _FlakyRegistry(_SessionRegistry):
+            def drain_expired(self, now: float | None = None) -> int:
+                """Fail the first sweep, then behave."""
+                if not failures:
+                    failures.append(1)
+                    msg = "sweep exploded"
+                    raise RuntimeError(msg)
+                return super().drain_expired(now)
+
+        registry = _FlakyRegistry(default_ttl=0.05)
+        reaper = _ReaperThread(registry, tick_seconds=0.02)
+        reaper.start()
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not failures:
+                time.sleep(0.01)
+            assert failures, "the flaky sweep never ran"
+            # Give the thread a few more ticks; it must still be alive.
+            time.sleep(0.1)
+            counter = _StickyCounter(value=1)
+            registry.open(counter, ttl=0.01, principal_key="anon")
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not counter.closed:
+                time.sleep(0.01)
+            assert counter.closed is True, "the reaper must keep sweeping after a failed tick"
+        finally:
+            reaper.stop()
+            reaper.join(timeout=5)
+
+    def test_middleware_reaper_lifecycle_is_idempotent(self) -> None:
+        """``_ensure_reaper`` starts one thread; ``stop_reaper`` is safe to call twice."""
+        registry = _SessionRegistry(default_ttl=60.0)
+        middleware = _StickyMiddleware(registry, _TOKEN_KEY)
+        middleware._ensure_reaper()
+        first = middleware._reaper
+        assert first is not None and first.is_alive()
+        middleware._ensure_reaper()
+        assert middleware._reaper is first, "_ensure_reaper must not spawn a second thread"
+        middleware.stop_reaper()
+        middleware.stop_reaper()  # idempotent
+        first.join(timeout=5)
+        assert not first.is_alive()
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: distinct sessions must not serialize against each other
+# ---------------------------------------------------------------------------
+
+
+class _RendezvousProtocol(Protocol):
+    """Service used to prove two sessions execute concurrently."""
+
+    def open_it(self, value: int) -> int:
+        """Open a session holding *value*."""
+        ...
+
+    def rendezvous(self, tag: int) -> int:
+        """Block until another in-flight call reaches the same barrier."""
+        ...
+
+
+class _RendezvousImpl:
+    """Implementation whose ``rendezvous`` only returns if two calls run at once."""
+
+    def __init__(self, barrier: threading.Barrier) -> None:
+        self._barrier = barrier
+
+    def open_it(self, value: int, ctx: CallContext) -> int:
+        """Open a sticky session."""
+        ctx.open_session(_StickyCounter(value=value))
+        return value
+
+    def rendezvous(self, tag: int, ctx: CallContext) -> int:
+        """Wait for the peer call; raises ``BrokenBarrierError`` if it never arrives."""
+        self._barrier.wait(timeout=10)
+        return tag
+
+
+class TestDistinctSessionParallelism:
+    """Spec §5: different-session calls run in parallel; the registry lock is not a chokepoint."""
+
+    def test_two_sessions_execute_concurrently(self) -> None:
+        """Two calls on distinct sessions meet at a barrier — impossible if they serialized.
+
+        A timing assertion would be flaky; the barrier makes the contract
+        deterministic. If the framework serialized across sessions, the
+        first call would wait for a peer that cannot start, and both would
+        surface ``BrokenBarrierError``.
+        """
+        barrier = threading.Barrier(2)
+        server = RpcServer(_RendezvousProtocol, _RendezvousImpl(barrier))
+        client = make_sync_client(server, token_key=_TOKEN_KEY, enable_sticky=True, sticky_default_ttl=60.0)
+        try:
+            with (
+                http_connect(_RendezvousProtocol, client=client) as proxy,
+                cast("Any", proxy).with_session_token() as sess_a,
+                cast("Any", proxy).with_session_token() as sess_b,
+            ):
+                sess_a.open_it(value=1)
+                sess_b.open_it(value=2)
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    future_a = pool.submit(sess_a.rendezvous, tag=1)
+                    future_b = pool.submit(sess_b.rendezvous, tag=2)
+                    assert future_a.result(timeout=30) == 1
+                    assert future_b.result(timeout=30) == 2
+        finally:
+            client.close()
+
+
+# ---------------------------------------------------------------------------
+# Principal binding on the DELETE endpoint
+# ---------------------------------------------------------------------------
+#
+# The cross-principal *replay* contract is canonical and lives in the
+# TestSticky conformance group; what stays here is the Python-side check
+# that DELETE honours the same binding while remaining unprobeable.
+
+
+_PRINCIPAL_HEADER = "X-Test-Principal"
+
+
+def _principal_auth(req: falcon.Request) -> AuthContext:
+    """Map ``X-Test-Principal`` to an authenticated principal; anonymous when absent."""
+    principal = req.get_header(_PRINCIPAL_HEADER)
+    if not principal:
+        return AuthContext(domain=None, authenticated=False, principal=None)
+    return AuthContext(domain="test", authenticated=True, principal=principal)
+
+
+class TestSessionDeleteEndpointPrincipalBinding:
+    """``DELETE /vgi/__session__`` is principal-bound and idempotent (spec §2.5)."""
+
+    def test_delete_with_foreign_token_is_a_no_op(self) -> None:
+        """Another principal's DELETE returns 200 and leaves the session untouched.
+
+        200 rather than 404 is deliberate: a stolen token must not reveal
+        whether the session exists.
+        """
+        server = RpcServer(ConformanceService, ConformanceServiceImpl())
+        app = make_wsgi_app(
+            server,
+            token_key=_TOKEN_KEY,
+            enable_sticky=True,
+            sticky_default_ttl=60.0,
+            authenticate=_principal_auth,
+        )
+        alice = _SyncTestClient(app, default_headers={_PRINCIPAL_HEADER: "alice"})
+        bob = _SyncTestClient(app, default_headers={_PRINCIPAL_HEADER: "bob"})
+
+        with _connect(alice) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=5)
+            token = sess.detach()
+        assert token is not None
+
+        resp = bob.delete("/__session__", headers={SESSION_HEADER: token})
+        assert resp.status_code == 200, "a foreign DELETE must look like an idempotent no-op"
+
+        with _connect(alice) as proxy, proxy.with_session_token(token=token) as sess:
+            assert sess.increment_counter(by=1) == 6, "a foreign DELETE must not evict the session"
+            sess.close_counter()
+
+    def test_delete_by_owner_evicts(self) -> None:
+        """The owning principal's DELETE returns 204 and evicts the session."""
+        server = RpcServer(ConformanceService, ConformanceServiceImpl())
+        app = make_wsgi_app(
+            server,
+            token_key=_TOKEN_KEY,
+            enable_sticky=True,
+            sticky_default_ttl=60.0,
+            authenticate=_principal_auth,
+        )
+        alice = _SyncTestClient(app, default_headers={_PRINCIPAL_HEADER: "alice"})
+
+        with _connect(alice) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=5)
+            token = sess.detach()
+        assert token is not None
+
+        resp = alice.delete("/__session__", headers={SESSION_HEADER: token})
+        assert resp.status_code == 204
+
+        with (
+            _connect(alice) as proxy,
+            proxy.with_session_token(token=token) as sess,
+            pytest.raises(RpcError) as excinfo,
+        ):
+            sess.increment_counter(by=1)
+        assert excinfo.value.error_type == "SessionLostError"
+
+
+# ---------------------------------------------------------------------------
+# serve_http's SIGTERM / SIGINT drain wiring
+# ---------------------------------------------------------------------------
+
+
+class _Exited(Exception):
+    """Stand-in for ``os._exit`` so the handler aborts like the real thing."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(f"exit {code}")
+        self.code = code
+
+
+class _CapturedTimer:
+    """``threading.Timer`` stand-in that records the callback instead of scheduling it."""
+
+    calls: list[tuple[float, Any]] = []  # noqa: RUF012 — test-local recorder, not shared state
+
+    def __init__(self, interval: float, function: Any) -> None:
+        self.daemon = False
+        _CapturedTimer.calls.append((interval, function))
+
+    def start(self) -> None:
+        """Record-only: the test invokes the callback itself."""
+
+
+class TestDrainSignalHandlers:
+    """``serve_http``'s graceful-shutdown wiring (spec §7)."""
+
+    @staticmethod
+    def _sticky_app_and_registry() -> tuple[Any, Any]:
+        """Build a sticky WSGI app and return it with its session registry."""
+        from vgi_rpc.http import drain_handle
+
+        server = RpcServer(ConformanceService, ConformanceServiceImpl())
+        app = make_wsgi_app(server, token_key=_TOKEN_KEY, enable_sticky=True, sticky_default_ttl=60.0)
+        handle = drain_handle(app)
+        assert handle is not None
+        registry = handle.shutdown.__self__  # type: ignore[attr-defined]
+        return app, registry
+
+    @pytest.fixture
+    def signal_harness(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[int, Any]]:
+        """Capture installed signal handlers, timers, and exits instead of running them."""
+        import os
+        import signal
+
+        installed: dict[int, Any] = {}
+        _CapturedTimer.calls = []
+
+        def _fake_signal(sig: int, handler: Any) -> Any:
+            installed[sig] = handler
+            return None
+
+        def _fake_exit(code: int) -> None:
+            raise _Exited(code)
+
+        monkeypatch.setattr(signal, "signal", _fake_signal)
+        monkeypatch.setattr(threading, "Timer", _CapturedTimer)
+        monkeypatch.setattr(os, "_exit", _fake_exit)
+        yield installed
+        _CapturedTimer.calls = []
+
+    def test_no_handlers_installed_for_non_sticky_app(self, signal_harness: dict[int, Any]) -> None:
+        """A non-sticky app installs nothing — ``serve_http`` must not touch process signals."""
+        from vgi_rpc.http.server._serve import _install_drain_signal_handlers
+
+        server = RpcServer(ConformanceService, ConformanceServiceImpl())
+        app = make_wsgi_app(server, token_key=_TOKEN_KEY)  # no enable_sticky
+        _install_drain_signal_handlers(app, 30.0)
+        assert signal_harness == {}, "no drain handlers should be installed without sticky sessions"
+
+    def test_sigterm_drains_then_closes_sessions_after_grace(self, signal_harness: dict[int, Any]) -> None:
+        """SIGTERM flips the drain flag; the grace timer closes live sessions and exits 0."""
+        import signal as signal_mod
+
+        from vgi_rpc.http import drain_handle
+        from vgi_rpc.http.server._serve import _install_drain_signal_handlers
+
+        app, registry = self._sticky_app_and_registry()
+        counter = _StickyCounter(value=1)
+        registry.open(counter, ttl=None, principal_key="anon")
+
+        _install_drain_signal_handlers(app, 30.0)
+        assert signal_mod.SIGTERM in signal_harness, "SIGTERM handler must be installed"
+
+        handle = drain_handle(app)
+        assert handle is not None
+        assert handle.is_draining() is False
+
+        signal_harness[signal_mod.SIGTERM](int(signal_mod.SIGTERM), None)
+        assert handle.is_draining() is True, "the signal must flip the drain flag immediately"
+        assert counter.closed is False, "live sessions must survive until the grace period elapses"
+
+        assert len(_CapturedTimer.calls) == 1, "a single grace timer must be scheduled"
+        interval, on_grace_expired = _CapturedTimer.calls[0]
+        assert interval == 30.0
+
+        with pytest.raises(_Exited) as excinfo:
+            on_grace_expired()
+        assert excinfo.value.code == 0
+        assert counter.closed is True, "grace expiry must invoke state.close() on live sessions"
+        assert len(registry) == 0
+
+    def test_second_signal_exits_immediately(self, signal_harness: dict[int, Any]) -> None:
+        """A second signal during grace skips the wait and exits non-zero."""
+        import signal as signal_mod
+
+        from vgi_rpc.http.server._serve import _install_drain_signal_handlers
+
+        app, registry = self._sticky_app_and_registry()
+        counter = _StickyCounter(value=1)
+        registry.open(counter, ttl=None, principal_key="anon")
+
+        _install_drain_signal_handlers(app, 30.0)
+        handler = signal_harness[signal_mod.SIGINT]
+        handler(int(signal_mod.SIGINT), None)
+        with pytest.raises(_Exited) as excinfo:
+            handler(int(signal_mod.SIGINT), None)
+        assert excinfo.value.code == 1

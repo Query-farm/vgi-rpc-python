@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -416,6 +417,71 @@ def conformance_http_port() -> Iterator[int]:
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+@contextmanager
+def _spawn_conformance_http(*extra_args: str) -> Iterator[int]:
+    """Spawn a conformance HTTP worker with *extra_args*, yielding its port."""
+    proc = subprocess.Popen(
+        [*_conformance_http_cmd(), *extra_args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+        _wait_for_http(port)
+        yield port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+# Shared AEAD key for the sticky worker pair.  Both peers can decrypt each
+# other's tokens, which is the point: the rejection under test must come
+# from the server_id comparison, not from a failed decrypt.
+_STICKY_PEER_TOKEN_KEY = "5f" * 32
+
+
+@pytest.fixture(scope="session")
+def conformance_http_sticky_short_ttl_port() -> Iterator[int]:
+    """Spawn a sticky conformance HTTP worker with a ~1s default session TTL.
+
+    Backs the canonical ``TestSticky::test_expired_session_surfaces_session_lost``.
+    The main ``conformance_http_port`` worker uses the framework's 300s
+    default, which no test can outwait.
+    """
+    with _spawn_conformance_http("--sticky-ttl", "1.0") as port:
+        yield port
+
+
+@pytest.fixture(scope="session")
+def conformance_http_sticky_peer_ports() -> Iterator[tuple[int, int]]:
+    """Spawn two sticky conformance HTTP workers that share one AEAD token key.
+
+    Backs the canonical ``TestSticky::test_token_from_other_worker_rejected``.
+    Sharing the key is deliberate — it isolates the ``server_id`` check from
+    the decryption failure a per-process key would produce anyway.
+    """
+    with (
+        _spawn_conformance_http("--token-key", _STICKY_PEER_TOKEN_KEY) as port_a,
+        _spawn_conformance_http("--token-key", _STICKY_PEER_TOKEN_KEY) as port_b,
+    ):
+        yield port_a, port_b
+
+
+@pytest.fixture(scope="session")
+def conformance_http_sticky_auth_port() -> Iterator[int]:
+    """Spawn a sticky conformance HTTP worker that authenticates by header.
+
+    The worker maps ``X-Conformance-Principal: <name>`` to an authenticated
+    principal, so ``TestSticky::test_cross_principal_replay_rejected`` can
+    present one principal's session token as another principal.
+    """
+    with _spawn_conformance_http("--sticky-auth") as port:
+        yield port
 
 
 @pytest.fixture(scope="session")

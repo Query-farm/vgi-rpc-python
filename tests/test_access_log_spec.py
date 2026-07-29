@@ -12,11 +12,12 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import jsonschema
 import pyarrow as pa
@@ -32,7 +33,7 @@ from vgi_rpc.access_log_conformance import (
     main as conformance_main,
 )
 from vgi_rpc.logging_utils import VgiJsonFormatter
-from vgi_rpc.rpc import RpcError, serve_pipe
+from vgi_rpc.rpc import CallContext, RpcError, RpcServer, serve_pipe
 
 # ---------------------------------------------------------------------------
 # Service used to produce a representative access log
@@ -78,6 +79,56 @@ class _CountState(StreamState):
         self.remaining -= 1
         if self.remaining <= 0:
             out.finish()
+
+
+class _StickySvc(Protocol):
+    """Minimal sticky-session protocol: open, resume, close."""
+
+    def open_thing(self, initial: int) -> int:
+        """Open a session holding a counter."""
+        ...
+
+    def touch_thing(self, by: int) -> int:
+        """Mutate the session-bound counter."""
+        ...
+
+    def close_thing(self) -> int:
+        """Close the session, returning the counter's final value."""
+        ...
+
+
+@dataclass
+class _Thing:
+    """Session state for :class:`_StickySvc`."""
+
+    value: int
+
+    def close(self) -> None:
+        """Cleanup hook the registry invokes on eviction."""
+
+
+class _StickyImpl:
+    """Reference sticky impl driving the access log's session fields."""
+
+    def open_thing(self, initial: int, ctx: CallContext) -> int:
+        """Register a counter in a new session."""
+        ctx.open_session(_Thing(value=initial))
+        return initial
+
+    def touch_thing(self, by: int, ctx: CallContext) -> int:
+        """Increment the session's counter."""
+        thing = ctx.session
+        assert isinstance(thing, _Thing)
+        thing.value += by
+        return thing.value
+
+    def close_thing(self, ctx: CallContext) -> int:
+        """Close the session and report the final value."""
+        thing = ctx.session
+        assert isinstance(thing, _Thing)
+        final = thing.value
+        ctx.close_session()
+        return final
 
 
 class _Impl:
@@ -266,6 +317,47 @@ class TestLiveCapture:
         assert err["status"] == "error"
         assert err["error_type"] == "ValueError"
         assert err["error_message"] == "bang"
+
+    def test_sticky_session_records_pass_schema(self) -> None:
+        """Open / resume / close records carry schema-conformant sticky fields.
+
+        ``session_id`` and ``session_action`` are part of the cross-language
+        access-log contract, so a real sticky lifecycle has to validate
+        against ``access_log.schema.json`` — not just against hand-written
+        record dicts. Sticky and access logging are both HTTP-only, so this
+        runs over the in-process WSGI client.
+        """
+        from vgi_rpc.http import http_connect
+        from vgi_rpc.http._testing import make_sync_client
+
+        def run() -> None:
+            server = RpcServer(_StickySvc, _StickyImpl())
+            client = make_sync_client(
+                server,
+                token_key=b"access-log-sticky-key-32-bytes!!",
+                enable_sticky=True,
+                sticky_default_ttl=60.0,
+            )
+            try:
+                with (
+                    http_connect(_StickySvc, client=client) as proxy,
+                    cast("Any", proxy).with_session_token() as sess,
+                ):
+                    sess.open_thing(initial=4)
+                    sess.touch_thing(by=3)
+                    sess.close_thing()
+            finally:
+                client.close()
+
+        entries = self._capture(run)
+        violations = validate_access_logs(entries)
+        assert violations == [], f"violations: {violations}"
+
+        lifecycle = [e for e in entries if e["method"] in ("open_thing", "touch_thing", "close_thing")]
+        assert [e["session_action"] for e in lifecycle] == ["open", "resume", "close"]
+        session_ids = {e["session_id"] for e in lifecycle}
+        assert len(session_ids) == 1, f"one session must produce one id; got {session_ids}"
+        assert re.fullmatch(r"[0-9a-f]{24}", session_ids.pop()), "session_id must be 24 lowercase hex chars"
 
     def test_stream_records_pass_schema(self) -> None:
         """Stream init + continuations all conform; stream_id stable across them."""

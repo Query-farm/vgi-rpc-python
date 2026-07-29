@@ -162,6 +162,20 @@ vgi-rpc-test --url http://<server> --filter "Sticky::*"
 
 The group is capability-gated: servers without `VGI-Sticky-Enabled: true` skip every test in the group cleanly. The Python implementation passes all tests; cross-language ports that wire up sticky support must pass them too. See [`docs/porting-guide.md`](porting-guide.md) for the full porting checklist.
 
+### 9.1 Optional failure-path fixtures
+
+Most of the group runs against a single sticky worker. Three failure-path tests need a worker the default fixture cannot stand in for, so each looks up an **optional** fixture and skips when the runner doesn't supply it. A port claiming full sticky conformance should supply all three.
+
+| Fixture | Shape | Worker configuration | Test |
+|---|---|---|---|
+| `conformance_http_sticky_short_ttl_port` | `int` | Sticky, `VGI-Sticky-Default-TTL` ≤ 5 seconds | `test_expired_session_surfaces_session_lost` |
+| `conformance_http_sticky_peer_ports` | `(int, int)` | Two sticky workers sharing **one** AEAD token key | `test_token_from_other_worker_rejected` |
+| `conformance_http_sticky_auth_port` | `int` | Sticky, authenticates the principal named in the `X-Conformance-Principal` request header (absent header ⇒ anonymous) | `test_cross_principal_replay_rejected` |
+
+The shared key on the peer pair is deliberate: with per-process keys the peer would reject the token at decryption and the test would pass without ever exercising the `server_id` comparison. `X-Conformance-Principal` is a fixture convention, not part of the wire protocol — it exists only so the suite can present one worker's token under two identities. Ports are free to authenticate however they like as long as the two identities are distinguishable.
+
+Each of these tests pairs its rejection with a positive control (the owning worker, or the owning principal, resuming the same token successfully), so a fixture that mints unusable tokens fails rather than passing green.
+
 ## 10. Out of scope
 
 - **Cookie emission.** AWS ALB application-based stickiness and CloudFront sticky sessions both require a cookie set by the application. Operators on those platforms can front with Envoy / NGINX (header-hash policies on `VGI-Session`) or switch to NLB (flow-hash). Cookie emission can be added as an additive operator flag in a follow-up without changing the wire surface.

@@ -25,7 +25,25 @@ import falcon
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
 from vgi_rpc.external import Compression, ExternalLocationConfig
 from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
-from vgi_rpc.rpc import RpcServer
+from vgi_rpc.rpc import AuthContext, RpcServer
+
+# Header the sticky principal-binding conformance fixture reads to decide
+# which principal a request belongs to.  Documented in
+# ``docs/sticky-sessions-spec.md`` §9 so cross-language ports can boot an
+# equivalent fixture; the value is arbitrary, only the convention matters.
+_PRINCIPAL_HEADER = "X-Conformance-Principal"
+
+
+def _principal_from_header(req: falcon.Request) -> AuthContext:
+    """Map ``X-Conformance-Principal`` to an authenticated principal.
+
+    Requests without the header stay anonymous so unauthenticated probes
+    (``GET /health``, ``OPTIONS /__capabilities__``) keep working.
+    """
+    principal = req.get_header(_PRINCIPAL_HEADER)
+    if not principal:
+        return AuthContext(domain=None, authenticated=False, principal=None)
+    return AuthContext(domain="conformance", authenticated=True, principal=principal)
 
 
 class _TestDrainResource:
@@ -123,6 +141,35 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--sticky-ttl",
+        type=float,
+        default=None,
+        help=(
+            "Default sticky session TTL in seconds. A short value (~1s) backs "
+            "TestSticky::test_expired_session_surfaces_session_lost; omit for the "
+            "framework default."
+        ),
+    )
+    parser.add_argument(
+        "--token-key",
+        default=None,
+        help=(
+            "Hex-encoded AEAD token key. Two workers booted with the same key back "
+            "TestSticky::test_token_from_other_worker_rejected — the token decrypts "
+            "on the peer but must still be refused on server_id mismatch."
+        ),
+    )
+    parser.add_argument(
+        "--sticky-auth",
+        action="store_true",
+        default=False,
+        help=(
+            f"Install an authenticate callback mapping the {_PRINCIPAL_HEADER} header to "
+            "the request principal, so TestSticky::test_cross_principal_replay_rejected "
+            "can present one worker's session token as two different principals."
+        ),
+    )
+    parser.add_argument(
         "--no-compression",
         action="store_true",
         help=(
@@ -145,6 +192,11 @@ def main() -> None:
     )
 
     compression_level = None if args.no_compression else 1
+    token_key = bytes.fromhex(args.token_key) if args.token_key else None
+    authenticate = _principal_from_header if args.sticky_auth else None
+    # Mirror make_wsgi_app's own default so the plain worker keeps shipping
+    # the documented value in VGI-Sticky-Default-TTL.
+    sticky_default_ttl: float = 300.0 if args.sticky_ttl is None else float(args.sticky_ttl)
 
     if not args.fake_storage:
         # Plain HTTP server, no external storage.
@@ -172,6 +224,9 @@ def main() -> None:
             compression_level=compression_level,
             enable_sticky=True,
             sticky_echo_headers=sticky_echo_headers,
+            token_key=token_key,
+            authenticate=authenticate,
+            sticky_default_ttl=sticky_default_ttl,
         )
         # Test-only admin endpoint so canonical conformance tests can
         # trigger drain over the wire without sending SIGTERM.

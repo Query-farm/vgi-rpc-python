@@ -14,6 +14,7 @@ import datetime as _dt
 import math
 import os
 import threading
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -2510,6 +2511,20 @@ class TestSticky:
     sticky sessions. Tests exercise ``open_counter`` / ``increment_counter``
     / ``close_counter`` on the conformance service which themselves use
     the runtime API ``ctx.open_session`` / ``ctx.session`` / ``ctx.close_session``.
+
+    Most tests need only ``conformance_http_port``. The failure-path tests
+    at the end of the group need workers a normal fixture can't stand in
+    for, so each one looks up an **optional** fixture and skips when the
+    runner doesn't provide it:
+
+    * ``conformance_http_sticky_short_ttl_port`` — a sticky worker whose
+      advertised ``VGI-Sticky-Default-TTL`` is short enough (≤5s) for a
+      test to outwait, for expiry.
+    * ``conformance_http_sticky_peer_ports`` — ``(port_a, port_b)``: two
+      sticky workers sharing one AEAD token key, for the wrong-worker check.
+    * ``conformance_http_sticky_auth_port`` — a sticky worker that
+      authenticates the principal named in the ``X-Conformance-Principal``
+      request header, for cross-principal replay.
     """
 
     def _skip_unless_sticky(self, port: int) -> None:
@@ -2525,6 +2540,12 @@ class TestSticky:
         from vgi_rpc.http import http_connect
 
         return http_connect(ConformanceService, f"http://127.0.0.1:{port}")
+
+    def _connect_with_client(self, client: Any) -> Any:
+        """Open a connection over a caller-supplied HTTP client (used to pin a principal)."""
+        from vgi_rpc.http import http_connect
+
+        return http_connect(ConformanceService, client=client)
 
     def test_open_and_resume(self, conformance_http_port: int) -> None:
         """A session opened on one call is visible to subsequent calls echoing its token."""
@@ -2836,3 +2857,168 @@ class TestSticky:
             assert sess.increment_counter(by=2) == 20
             final = sess.close_counter()
             assert final == 20
+
+    # ------------------------------------------------------------------
+    # Failure paths: method exceptions, expiry, wrong worker, wrong principal
+    # ------------------------------------------------------------------
+    #
+    # Every test below pairs its rejection with a positive control on the
+    # same session, so a fixture that hands out broken tokens (or a client
+    # that silently drops them) cannot make the rejection pass for the
+    # wrong reason.
+
+    def test_session_survives_method_exception(self, conformance_http_port: int) -> None:
+        """A method that raises inside a session must not wedge the session.
+
+        Implementations that serialize same-session calls hold a lock for
+        the duration of dispatch (spec §5). If that lock leaks when the
+        method raises, every subsequent call on the session blocks
+        forever — so the follow-up call runs on a worker thread with a
+        deadline rather than hanging the suite.
+        """
+        self._skip_unless_sticky(conformance_http_port)
+        with self._connect(conformance_http_port) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=1)
+            with pytest.raises(RpcError):
+                sess.raise_value_error(message="boom inside a sticky session")
+
+            values: list[int] = []
+            failures: list[Exception] = []
+
+            def _probe() -> None:
+                try:
+                    values.append(sess.increment_counter(by=1))
+                except Exception as exc:
+                    failures.append(exc)
+
+            thread = threading.Thread(target=_probe, daemon=True)
+            thread.start()
+            thread.join(timeout=15)
+            assert not thread.is_alive(), (
+                "call after an in-session exception never completed — the per-session lock was not released"
+            )
+            assert not failures, f"call after an in-session exception failed: {failures[0]!r}"
+            assert values == [2], f"session state must survive a raising method; got {values}"
+            sess.close_counter()
+
+    def test_expired_session_surfaces_session_lost(self, request: pytest.FixtureRequest) -> None:
+        """A token presented after its TTL elapses is rejected as ``SessionLostError``.
+
+        Needs a worker whose advertised ``VGI-Sticky-Default-TTL`` is short
+        enough to outwait; runners supply one as the optional
+        ``conformance_http_sticky_short_ttl_port`` fixture and skip otherwise.
+        """
+        try:
+            port: int = request.getfixturevalue("conformance_http_sticky_short_ttl_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_sticky_short_ttl_port fixture")
+        self._skip_unless_sticky(port)
+
+        from vgi_rpc.http import http_capabilities
+
+        ttl = http_capabilities(base_url=f"http://127.0.0.1:{port}").sticky_default_ttl
+        assert ttl is not None, "sticky server must advertise VGI-Sticky-Default-TTL"
+        assert ttl <= 5, f"short-TTL fixture must advertise a TTL a test can outwait; got {ttl}s"
+
+        with self._connect(port) as proxy, proxy.with_session_token() as sess:
+            sess.open_counter(initial=1)
+            # Positive control: the session works before it ages out.
+            assert sess.increment_counter(by=1) == 2
+            time.sleep(ttl + 0.5)
+            with pytest.raises(RpcError) as excinfo:
+                sess.increment_counter(by=1)
+            assert excinfo.value.error_type == "SessionLostError", (
+                f"an expired session must surface SessionLostError, got {excinfo.value.error_type}"
+            )
+
+    def test_token_from_other_worker_rejected(self, request: pytest.FixtureRequest) -> None:
+        """A session token minted by worker A is refused by worker B (spec §3).
+
+        Sessions live in per-worker memory with no shared registry, so a
+        misrouted request must fail loudly rather than resolve to a
+        stranger's state. Runners supply two workers sharing one AEAD key
+        as ``conformance_http_sticky_peer_ports``; sharing the key is what
+        makes the test meaningful — the rejection has to come from the
+        ``server_id`` comparison, not from a decryption failure.
+        """
+        try:
+            ports: tuple[int, int] = request.getfixturevalue("conformance_http_sticky_peer_ports")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_sticky_peer_ports fixture")
+        port_a, port_b = ports
+        self._skip_unless_sticky(port_a)
+
+        import httpx
+
+        server_ids = {httpx.get(f"http://127.0.0.1:{p}/health", timeout=5.0).json()["server_id"] for p in ports}
+        assert len(server_ids) == 2, f"peer fixture must supply two distinct workers; got {server_ids}"
+
+        with self._connect(port_a) as proxy_a, proxy_a.with_session_token() as sess_a:
+            sess_a.open_counter(initial=5)
+            token = sess_a.detach()
+        assert token is not None
+
+        with (
+            self._connect(port_b) as proxy_b,
+            proxy_b.with_session_token(token=token) as sess_b,
+            pytest.raises(RpcError) as excinfo,
+        ):
+            sess_b.increment_counter(by=1)
+        assert excinfo.value.error_type == "SessionLostError", (
+            f"a token from another worker must surface SessionLostError, got {excinfo.value.error_type}"
+        )
+
+        # Positive control: the same token still resolves on its owner.
+        with self._connect(port_a) as proxy_a2, proxy_a2.with_session_token(token=token) as sess_a2:
+            assert sess_a2.increment_counter(by=1) == 6, "the owning worker must still honour the token"
+            sess_a2.close_counter()
+
+    def test_cross_principal_replay_rejected(self, request: pytest.FixtureRequest) -> None:
+        """One principal cannot resume another principal's session (spec §3, §6).
+
+        The session token is bound to its issuing principal via AAD, so a
+        stolen token replayed under a different identity must fail. Runners
+        supply ``conformance_http_sticky_auth_port``: a sticky worker that
+        authenticates the principal named in the
+        ``X-Conformance-Principal`` request header.
+        """
+        try:
+            port: int = request.getfixturevalue("conformance_http_sticky_auth_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_sticky_auth_port fixture")
+        self._skip_unless_sticky(port)
+
+        import httpx
+
+        base_url = f"http://127.0.0.1:{port}"
+        principal_header = "X-Conformance-Principal"
+
+        with (
+            httpx.Client(base_url=base_url, headers={principal_header: "alice"}) as alice_client,
+            self._connect_with_client(alice_client) as alice,
+            alice.with_session_token() as alice_sess,
+        ):
+            alice_sess.open_counter(initial=5)
+            assert alice_sess.increment_counter(by=1) == 6, "a principal must be able to use its own session"
+            token = alice_sess.detach()
+        assert token is not None
+
+        with (
+            httpx.Client(base_url=base_url, headers={principal_header: "bob"}) as bob_client,
+            self._connect_with_client(bob_client) as bob,
+            bob.with_session_token(token=token) as bob_sess,
+            pytest.raises(RpcError) as excinfo,
+        ):
+            bob_sess.increment_counter(by=100)
+        assert excinfo.value.error_type == "SessionLostError", (
+            f"a replayed cross-principal token must surface SessionLostError, got {excinfo.value.error_type}"
+        )
+
+        # Positive control: the rejection was about identity, not the token.
+        with (
+            httpx.Client(base_url=base_url, headers={principal_header: "alice"}) as alice_client2,
+            self._connect_with_client(alice_client2) as alice2,
+            alice2.with_session_token(token=token) as alice_sess2,
+        ):
+            assert alice_sess2.increment_counter(by=1) == 7, "the owning principal must still resume the session"
+            alice_sess2.close_counter()
