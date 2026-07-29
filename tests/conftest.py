@@ -452,8 +452,11 @@ def conformance_http_sticky_short_ttl_port() -> Iterator[int]:
     Backs the canonical ``TestSticky::test_expired_session_surfaces_session_lost``.
     The main ``conformance_http_port`` worker uses the framework's 300s
     default, which no test can outwait.
+
+    Passed as an integer, not ``1.0``: ``VGI-Sticky-Default-TTL`` is advertised
+    in whole seconds, and cross-language workers parse the flag as an integer.
     """
-    with _spawn_conformance_http("--sticky-ttl", "1.0") as port:
+    with _spawn_conformance_http("--sticky-ttl", "1") as port:
         yield port
 
 

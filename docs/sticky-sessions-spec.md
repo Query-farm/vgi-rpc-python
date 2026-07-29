@@ -186,11 +186,17 @@ Most of the group runs against a single sticky worker. Three failure-path tests 
 
 | Fixture | Shape | Worker configuration | Test |
 |---|---|---|---|
-| `conformance_http_sticky_short_ttl_port` | `int` | Sticky, `VGI-Sticky-Default-TTL` ≤ 5 seconds | `test_expired_session_surfaces_session_lost` |
-| `conformance_http_sticky_peer_ports` | `(int, int)` | Two sticky workers sharing **one** AEAD token key | `test_token_from_other_worker_rejected` |
-| `conformance_http_sticky_auth_port` | `int` | Sticky, authenticates the principal named in the `X-Conformance-Principal` request header (absent header ⇒ anonymous) | `test_cross_principal_replay_rejected` |
+| `conformance_http_sticky_short_ttl_port` | `int` | Sticky, `VGI-Sticky-Default-TTL` a positive integer ≤ 5 seconds | `test_expired_session_surfaces_session_lost` |
+| `conformance_http_sticky_peer_ports` | `(int, int)` | Two sticky workers sharing **one** AEAD token key and reporting **distinct `server_id`** from `GET /health` | `test_token_from_other_worker_rejected` |
+| `conformance_http_sticky_auth_port` | `int` | Sticky, mounted at the **same prefix as the plain worker**, authenticating the principal named in the `X-Conformance-Principal` request header (absent header ⇒ anonymous) | `test_cross_principal_replay_rejected` |
 
-The shared key on the peer pair is deliberate: with per-process keys the peer would reject the token at decryption and the test would pass without ever exercising the `server_id` comparison. `X-Conformance-Principal` is a fixture convention, not part of the wire protocol — it exists only so the suite can present one worker's token under two identities. Ports are free to authenticate however they like as long as the two identities are distinguishable, but the header name is fixed, because the suite sends it.
+Three details are load-bearing, and each has a way of being got subtly wrong:
+
+- **Shared key, distinct `server_id` on the peer pair.** With per-process keys the peer rejects the token at decryption and the test passes without ever reaching the `server_id` comparison it exists to exercise. The suite therefore asserts the two workers report different `server_id` before it asserts anything else — a worker that hardcodes its id cannot serve as both peers.
+- **Anonymous when the principal header is absent.** The suite probes `OPTIONS`/`GET /health` for capabilities before it authenticates anything, so an auth hook that rejects unauthenticated requests fails the group at the gate. Reject nothing; just resolve an identity when one is presented.
+- **Same prefix as the plain worker.** Ports whose existing reject-all auth fixture mounts under a prefix (e.g. `/vgi`) must not reuse that wiring here; the suite connects to the auth worker exactly as it connects to the plain one.
+
+`X-Conformance-Principal` is a fixture convention, not part of the wire protocol — it exists only so the suite can present one worker's token under two identities. Ports are free to authenticate however they like as long as the two identities are distinguishable, but the header name is fixed, because the suite sends it.
 
 These fixtures are currently optional so ports can adopt them incrementally. A port that advertises `VGI-Sticky-Enabled: true` SHOULD supply all three; `conformance_http_sticky_auth_port` in particular is what makes the §3.1 principal binding testable rather than merely asserted, and is expected to become required in a future revision.
 
