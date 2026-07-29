@@ -116,7 +116,19 @@ Some conformance tests target opt-in HTTP features. They run only when the serve
 |---|---|---|
 | `VGI-Sticky-Enabled: true` | `Sticky::*` | [sticky-sessions-spec.md](sticky-sessions-spec.md) |
 
-Proxy proof is gated differently and is **not** reachable through `vgi-rpc-test`. Its tests spawn their own workers — several configurations per test (different modes, skews, key sets) — so pointing at one already-running server cannot express them. They run from the pytest suite only, gated on the runner supplying a `proof_worker_factory` fixture; a port without one skips the group cleanly. `VGI-Proxy-Proof-Required: true` is what an *operator or proxy* reads to confirm a deployed worker enforces (see [proxy-proof-spec.md](proxy-proof-spec.md) §2.2); the conformance suite asserts the header rather than being gated on it.
+### Fixture-gated tests
+
+Some tests can't run against one already-running server, because the state under test *is* a server configuration — a short session TTL, two workers sharing a key, a worker that authenticates. Those are supplied by the runner as named pytest fixtures, so they are reachable from the pytest suite but not from `vgi-rpc-test --url`.
+
+| Fixture | Tests | Missing fixture means | Spec |
+|---|---|---|---|
+| `proof_worker_factory` | `TestProxyProof` | skip — the feature is wholly optional | [proxy-proof-spec.md](proxy-proof-spec.md) |
+| `conformance_http_no_compression_port` | `test_empty_advertisement_means_never_compressed` | skip | — |
+| `conformance_http_sticky_short_ttl_port`<br>`conformance_http_sticky_peer_ports`<br>`conformance_http_sticky_auth_port` | the three `TestSticky` failure paths | **fail**, if the server advertises `VGI-Sticky-Enabled` — skip otherwise | [sticky-sessions-spec.md](sticky-sessions-spec.md) §9.1 |
+
+The sticky row is the one to note: a port may decline sticky entirely, but a port that *claims* it cannot quietly omit the tests that prove sessions are refused when they should be. Everything else on this page skips silently when unsupplied, which is why the sticky fixtures name themselves in the failure message.
+
+`VGI-Proxy-Proof-Required: true` is what an *operator or proxy* reads to confirm a deployed worker enforces (see [proxy-proof-spec.md](proxy-proof-spec.md) §2.2); the conformance suite asserts the header rather than being gated on it.
 
 Filter for one group with `--filter`:
 

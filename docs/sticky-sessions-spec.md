@@ -180,9 +180,11 @@ vgi-rpc-test --url http://<server> --filter "Sticky::*"
 
 The group is capability-gated: servers without `VGI-Sticky-Enabled: true` skip every test in the group cleanly. The Python implementation passes all tests; cross-language ports that wire up sticky support must pass them too. See [`docs/porting-guide.md`](porting-guide.md) for the full porting checklist.
 
-### 9.1 Optional failure-path fixtures
+### 9.1 Failure-path fixtures
 
-Most of the group runs against a single sticky worker. Three failure-path tests need a worker the default fixture cannot stand in for, so each looks up an **optional** fixture and skips when the runner doesn't supply it. A port claiming full sticky conformance should supply all three.
+Most of the group runs against a single sticky worker. Three failure-path tests need a worker the default fixture cannot stand in for, and each looks its up by name.
+
+**A port that advertises `VGI-Sticky-Enabled: true` MUST supply all three.** Ports without sticky support skip the whole group as before — the requirement is conditional on the advertisement, not on running the suite. A server that claims sticky support and withholds these fixtures fails the group with a message naming the missing fixture, rather than skipping: silently dropping the session-loss coverage is the failure this group exists to prevent.
 
 | Fixture | Shape | Worker configuration | Test |
 |---|---|---|---|
@@ -198,9 +200,11 @@ Three details are load-bearing, and each has a way of being got subtly wrong:
 
 `X-Conformance-Principal` is a fixture convention, not part of the wire protocol — it exists only so the suite can present one worker's token under two identities. Ports are free to authenticate however they like as long as the two identities are distinguishable, but the header name is fixed, because the suite sends it.
 
-These fixtures are currently optional so ports can adopt them incrementally. A port that advertises `VGI-Sticky-Enabled: true` SHOULD supply all three; `conformance_http_sticky_auth_port` in particular is what makes the §3.1 principal binding testable rather than merely asserted, and is expected to become required in a future revision.
+`conformance_http_sticky_auth_port` in particular is what makes the §3.1 principal binding testable rather than merely asserted — without it, an implementation that dropped the identity tail from its AAD passes every other test in the group.
 
 Each of these tests pairs its rejection with a positive control (the owning worker, or the owning principal, resuming the same token successfully), so a fixture that mints unusable tokens fails rather than passing green.
+
+The Go, Java, Rust and TypeScript ports all supply the three fixtures, each driven by worker flags mirroring the Python reference's (`--sticky-ttl`, `--token-key`, `--sticky-auth`, plus `--server-id` where the worker would otherwise hardcode one).
 
 ## 10. Out of scope
 

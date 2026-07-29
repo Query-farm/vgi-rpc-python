@@ -88,6 +88,24 @@ class _TestDrainResource:
         resp.status = falcon.HTTP_204
 
 
+def _bind_listener(host: str, port: int) -> socket.socket:
+    """Bind a listening socket and keep it, so the port cannot be stolen.
+
+    Selecting a port by binding a probe socket, closing it, and letting the
+    server bind the number afterwards leaves a window in which another worker
+    starting concurrently can take that port. The loser's bind fails and its
+    process dies, but the fixture that spawned it still sees something
+    listening — the *winner* — and hands out a port served by the wrong
+    worker. That surfaces far away as an unrelated conformance failure (two
+    "distinct" sticky peers turning out to be one server, say). Binding once
+    and handing the live socket to waitress closes the window.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    return sock
+
+
 def main() -> None:
     """Start an HTTP server for the conformance service."""
     parser = argparse.ArgumentParser()
@@ -214,11 +232,8 @@ def main() -> None:
         # Sticky-enabled default path. Mirrors the externalisation branch
         # below but without storage, so the canonical TestSticky group has
         # a server to talk to in every conformance run.
-        port = args.port
-        if port == 0:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind((args.host, 0))
-                port = int(s.getsockname()[1])
+        listener = _bind_listener(args.host, args.port)
+        port = int(listener.getsockname()[1])
         app = make_wsgi_app(
             server,
             compression_level=compression_level,
@@ -237,7 +252,7 @@ def main() -> None:
             print("HTTP transport requires waitress: pip install vgi-rpc[http]", file=sys.stderr)
             sys.exit(1)
         print(f"PORT:{port}", flush=True)
-        waitress.serve(app, host=args.host, port=port, _quiet=True)
+        waitress.serve(app, sockets=[listener], _quiet=True)
         return
 
     # Externalization-enabled mode: wire both server-side externalization
@@ -260,11 +275,8 @@ def main() -> None:
         external_location=external_location,
     )
 
-    port = args.port
-    if port == 0:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((args.host, 0))
-            port = int(s.getsockname()[1])
+    listener = _bind_listener(args.host, args.port)
+    port = int(listener.getsockname()[1])
 
     max_request_bytes = args.max_request_bytes if args.max_request_bytes is not None else args.externalize_threshold
     app = make_wsgi_app(
@@ -286,7 +298,7 @@ def main() -> None:
         sys.exit(1)
 
     print(f"PORT:{port}", flush=True)
-    waitress.serve(app, host=args.host, port=port, _quiet=True)
+    waitress.serve(app, sockets=[listener], _quiet=True)
 
 
 if __name__ == "__main__":

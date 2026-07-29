@@ -2547,6 +2547,30 @@ class TestSticky:
 
         return http_connect(ConformanceService, client=client)
 
+    def _require_failure_path_fixture(self, request: pytest.FixtureRequest, name: str) -> Any:
+        """Return the named failure-path fixture, or decide between skip and fail.
+
+        Sticky is opt-in, so a runner with no sticky support skips. But a
+        server that advertises ``VGI-Sticky-Enabled: true`` and then withholds
+        these fixtures would silently drop the session-loss coverage — the
+        failure mode this group exists to prevent — so that is an error, not a
+        skip. See ``docs/sticky-sessions-spec.md`` §9.1.
+        """
+        try:
+            return request.getfixturevalue(name)
+        except pytest.FixtureLookupError:
+            pass
+        from vgi_rpc.http import http_capabilities
+
+        port: int = request.getfixturevalue("conformance_http_port")
+        if not http_capabilities(base_url=f"http://127.0.0.1:{port}").sticky_enabled:
+            pytest.skip("server does not advertise VGI-Sticky-Enabled — sticky conformance N/A")
+        pytest.fail(
+            f"server advertises VGI-Sticky-Enabled but the runner supplies no {name!r} fixture. "
+            "Ports claiming sticky support must supply all three failure-path fixtures — "
+            "see docs/sticky-sessions-spec.md §9.1.",
+        )
+
     def test_open_and_resume(self, conformance_http_port: int) -> None:
         """A session opened on one call is visible to subsequent calls echoing its token."""
         self._skip_unless_sticky(conformance_http_port)
@@ -2907,11 +2931,17 @@ class TestSticky:
         Needs a worker whose advertised ``VGI-Sticky-Default-TTL`` is short
         enough to outwait; runners supply one as the optional
         ``conformance_http_sticky_short_ttl_port`` fixture and skip otherwise.
+
+        The contract is that an expired session is refused, not that it is
+        refused to the millisecond. Implementations that track expiry in
+        whole seconds (the TTL is advertised in whole seconds, so this is a
+        reasonable choice) can keep a session alive for up to a second past
+        its nominal deadline, depending on where the open landed in the
+        current second. Evicting late is conformant; evicting *early* would
+        not be. Hence the extra second of slack below — without it this test
+        is a coin flip against any second-granularity port.
         """
-        try:
-            port: int = request.getfixturevalue("conformance_http_sticky_short_ttl_port")
-        except pytest.FixtureLookupError:
-            pytest.skip("runner provides no conformance_http_sticky_short_ttl_port fixture")
+        port: int = self._require_failure_path_fixture(request, "conformance_http_sticky_short_ttl_port")
         self._skip_unless_sticky(port)
 
         from vgi_rpc.http import http_capabilities
@@ -2924,7 +2954,8 @@ class TestSticky:
             sess.open_counter(initial=1)
             # Positive control: the session works before it ages out.
             assert sess.increment_counter(by=1) == 2
-            time.sleep(ttl + 0.5)
+            # ttl + 1s covers whole-second rounding, + 0.5s of scheduling slack.
+            time.sleep(ttl + 1.5)
             with pytest.raises(RpcError) as excinfo:
                 sess.increment_counter(by=1)
             assert excinfo.value.error_type == "SessionLostError", (
@@ -2941,10 +2972,7 @@ class TestSticky:
         makes the test meaningful — the rejection has to come from the
         ``server_id`` comparison, not from a decryption failure.
         """
-        try:
-            ports: tuple[int, int] = request.getfixturevalue("conformance_http_sticky_peer_ports")
-        except pytest.FixtureLookupError:
-            pytest.skip("runner provides no conformance_http_sticky_peer_ports fixture")
+        ports: tuple[int, int] = self._require_failure_path_fixture(request, "conformance_http_sticky_peer_ports")
         port_a, port_b = ports
         self._skip_unless_sticky(port_a)
 
@@ -2982,10 +3010,7 @@ class TestSticky:
         authenticates the principal named in the
         ``X-Conformance-Principal`` request header.
         """
-        try:
-            port: int = request.getfixturevalue("conformance_http_sticky_auth_port")
-        except pytest.FixtureLookupError:
-            pytest.skip("runner provides no conformance_http_sticky_auth_port fixture")
+        port: int = self._require_failure_path_fixture(request, "conformance_http_sticky_auth_port")
         self._skip_unless_sticky(port)
 
         import httpx
