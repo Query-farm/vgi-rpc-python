@@ -43,6 +43,13 @@ _WAITRESS_IO_CHUNK = 1 << 20  # 1 MiB socket read/write chunks
 _WAITRESS_MIN_BUFFER = 16 << 20  # floor for the in-memory body buffer
 _WAITRESS_DEFAULT_BUFFER = 64 << 20  # used when no request cap is advertised
 
+# waitress's own default is 4. A VGI request can hold its thread for the length
+# of a scan rather than the milliseconds a web request takes, so 4 concurrent
+# clients is enough to make every further one queue — measured as a worker
+# serializing six parallel clients that should have overlapped. 16 keeps the
+# thread cost trivial while removing that ceiling for ordinary fan-out.
+_DEFAULT_THREADS = 16
+
 
 def serve_http(
     server: RpcServer,
@@ -62,6 +69,7 @@ def serve_http(
     sticky_echo_headers: Mapping[str, str] | None = None,
     drain_grace_seconds: float = 30.0,
     install_signal_handlers: bool = True,
+    threads: int | None = None,
 ) -> None:
     """Serve an ``RpcServer`` over HTTP using waitress.
 
@@ -127,6 +135,11 @@ def serve_http(
             when embedding ``serve_http`` inside a larger process that
             already owns signal handling (rare; the default is correct
             for the standard "one process, serve until killed" deployment).
+        threads: Waitress worker threads, i.e. how many requests the server
+            handles concurrently before the rest queue.  ``None`` (the default)
+            resolves ``VGI_HTTP_THREADS``, then falls back to
+            ``_DEFAULT_THREADS``.  See :func:`_resolve_threads` for why
+            waitress's own default of 4 is too low here.
 
     """
     if max_stream_response_bytes is not None:
@@ -179,7 +192,49 @@ def serve_http(
         outbuf_overflow=body_buffer,
         recv_bytes=_WAITRESS_IO_CHUNK,
         send_bytes=_WAITRESS_IO_CHUNK,
+        threads=_resolve_threads(threads),
     )
+
+
+def _resolve_threads(threads: int | None) -> int:
+    """Decide waitress's worker-thread count.
+
+    Waitress defaults to **4**, which is tuned for short web requests and is far
+    too few for this workload: a VGI request can occupy its thread for the whole
+    of a scan, so four concurrent clients is enough to make every additional one
+    queue. That ceiling is invisible — it looks like the server being slow rather
+    than the server being full — and it is not otherwise reachable, because
+    ``serve_http`` never forwarded a ``threads`` value at all.
+
+    Resolution order: the explicit argument, then ``VGI_HTTP_THREADS``, then a
+    default of 16. The env var exists because a worker is usually launched by
+    something that does not own its argv (a container, a test harness), the same
+    reason ``VGI_WORKER_LOG_*`` exists.
+
+    Args:
+        threads: The caller's explicit value, or None to resolve from the
+            environment.
+
+    Returns:
+        The thread count to hand waitress.
+
+    Raises:
+        SystemExit: ``VGI_HTTP_THREADS`` is set to something that is not a
+            positive integer — silently falling back would hide the misconfig.
+
+    """
+    if threads is not None:
+        return threads
+    raw = os.environ.get("VGI_HTTP_THREADS")
+    if not raw:
+        return _DEFAULT_THREADS
+    try:
+        value = int(raw)
+    except ValueError:
+        sys.exit(f"VGI_HTTP_THREADS={raw!r} is not an integer")
+    if value < 1:
+        sys.exit(f"VGI_HTTP_THREADS={raw!r} must be >= 1")
+    return value
 
 
 def _install_drain_signal_handlers(
