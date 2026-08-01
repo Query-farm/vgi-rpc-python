@@ -103,6 +103,25 @@ def _compress_body_zstd(data: bytes, level: int) -> bytes:
     return zstandard.ZstdCompressor(level=level).compress(data)
 
 
+#: zstd reports "content size not stored in this frame" as ZSTD_CONTENTSIZE_UNKNOWN.
+#: python-zstandard surfaces that as the UNSIGNED value, not -1, so a plain
+#: ``!= -1`` test silently treats an unknown size as known and then fails inside
+#: the one-shot API with "could not determine content size in frame header".
+#: Streaming compressors (Arrow's CompressedOutputStream, and anything that
+#: cannot know the total upfront) always produce such frames.
+_ZSTD_CONTENTSIZE_UNKNOWN = 18446744073709551615
+
+
+def _zstd_content_size(data: bytes) -> int | None:
+    """Declared decompressed size of a zstd frame, or None when not stored."""
+    import zstandard
+
+    size = zstandard.get_frame_parameters(data).content_size
+    if size in (-1, _ZSTD_CONTENTSIZE_UNKNOWN):
+        return None
+    return int(size)
+
+
 def _decompress_body_zstd(data: bytes, *, max_output_size: int | None = None) -> bytes:
     """Decompress zstd-compressed *data* with optional output cap.
 
@@ -110,18 +129,24 @@ def _decompress_body_zstd(data: bytes, *, max_output_size: int | None = None) ->
     """
     import zstandard
 
+    declared = _zstd_content_size(data)
+
     if max_output_size is None:
+        # No declared size => a streaming frame; the one-shot API refuses those.
+        # The streaming reader handles both kinds.
+        if declared is None:
+            with zstandard.ZstdDecompressor().stream_reader(data) as reader:
+                return reader.read()
         return zstandard.ZstdDecompressor().decompress(data)
 
     # Refuse the frame up-front when the header claims more than allowed.
-    params = zstandard.get_frame_parameters(data)
-    if params.content_size != -1 and params.content_size > max_output_size:
+    if declared is not None and declared > max_output_size:
         raise zstandard.ZstdError(
-            f"Compressed frame declares decompressed size {params.content_size} bytes, "
+            f"Compressed frame declares decompressed size {declared} bytes, "
             f"which exceeds max_output_size={max_output_size}"
         )
 
-    if params.content_size != -1:
+    if declared is not None:
         return zstandard.ZstdDecompressor().decompress(data)
 
     decompressor = zstandard.ZstdDecompressor()

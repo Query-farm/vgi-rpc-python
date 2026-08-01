@@ -35,7 +35,14 @@ from vgi_rpc.rpc import (
     _generate_request_id,
     _TransportContext,
 )
-from vgi_rpc.rpc._common import _ANONYMOUS, TransportKind, _current_request_batch, _current_stream_id
+from vgi_rpc.rpc._common import (
+    _ANONYMOUS,
+    TransportKind,
+    _current_body_precompressed,
+    _current_request_batch,
+    _current_response_codec,
+    _current_stream_id,
+)
 
 from .._common import (
     _ARROW_CONTENT_TYPE,
@@ -379,6 +386,12 @@ class _CompressionMiddleware:
         """Decompress codec request bodies; record client response codec choice."""
         chosen, used_custom = self._pick_response_encoding(req)
         req.context.response_encoding = chosen
+        # Publish it so a streaming producer can compress INTO its IPC stream
+        # rather than have this middleware squeeze the finished body — the
+        # plaintext then never exists as a whole. Arrow names zstd/gzip the same
+        # way this enum does; anything else stays a post-hoc compress here.
+        _current_response_codec.set(chosen.value if chosen is not None and chosen.value in ("zstd", "gzip") else None)
+        _current_body_precompressed.set(False)
         req.context.use_custom_encoding_header = used_custom
 
         content_encoding = (req.get_header("Content-Encoding") or "").strip().lower()
@@ -431,6 +444,14 @@ class _CompressionMiddleware:
         if encoding is None:
             return
         if resp.content_type != _ARROW_CONTENT_TYPE:
+            return
+        if _current_body_precompressed.get():
+            # The producer already compressed into its stream; only the headers
+            # are left to set. Compressing again would double-encode the body.
+            if getattr(req.context, "use_custom_encoding_header", False):
+                resp.set_header("X-VGI-Content-Encoding", encoding.value)
+            else:
+                resp.set_header("Content-Encoding", encoding.value)
             return
         stream = resp.stream
         if stream is None:

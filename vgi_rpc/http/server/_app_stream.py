@@ -49,8 +49,10 @@ from vgi_rpc.rpc import (
 from vgi_rpc.rpc._common import (
     CallStatistics,
     HookToken,
+    _current_body_precompressed,
     _current_call_stats,
     _current_request_metadata,
+    _current_response_codec,
     _current_stream_id,
     _DispatchHook,
     _record_input,
@@ -338,7 +340,9 @@ def _run_http_producer_init(
         sink=sink,
         init_request_metadata=init_request_metadata,
     )
-    resp_buf.write(produce_buf.getvalue())
+    # `produce_buf` is a native BufferReader now; read it out to splice into the
+    # init response, which still carries a header written ahead of it.
+    resp_buf.write(produce_buf.read())
     resp_buf.seek(0)
     return resp_buf
 
@@ -537,6 +541,7 @@ def _run_stream_exchange_sync(
                 outcome.request_state_bytes = request_state_bytes
                 return _run_http_producer_turn(
                     app,
+                    owns_response_body=True,
                     schema=output_schema,
                     state=state_obj,
                     input_schema=input_schema,
@@ -763,7 +768,8 @@ def _run_http_producer_turn(
     outcome: _DispatchOutcome,
     sink: _ClientLogSink | None = None,
     init_request_metadata: pa.KeyValueMetadata | None = None,
-) -> BytesIO:
+    owns_response_body: bool = False,
+) -> pa.BufferReader:
     """Run one HTTP turn of a producer stream.
 
     A "turn" here means a single HTTP request/response cycle:
@@ -817,18 +823,50 @@ def _run_http_producer_turn(
             reset to the empty tick.  ``None`` on continuation turns.
 
     Returns:
-        The IPC response body as a ``BytesIO``, positioned at the start.
+        The IPC response body as a native ``pa.BufferReader``, positioned at the
+        start.
+
+        Native on purpose. ``ipc.new_stream`` over a Python file object wraps it
+        in pyarrow's ``PythonFile`` adapter, so every buffer Arrow emits during
+        ``write_batch`` calls back into Python and the C++ serializer cannot keep
+        the GIL released — which made that one ``write_batch`` 45% of a worker's
+        GIL-held time while being only 14% of its wall time. Writing into a
+        ``pa.BufferOutputStream`` and handing back a zero-copy reader over the
+        result keeps the whole serialize off the GIL, so concurrent stream turns
+        actually overlap. Falcon only needs ``read()``/``seek()`` from
+        ``resp.stream``, both of which ``BufferReader`` provides natively.
 
     """
     server_id = app._server.server_id
     protocol_name = app._server.protocol_name
-    resp_buf = BytesIO()
+    # Native sink — see the note in this function's docstring. `tell()` (used for
+    # the max_bytes check below) is supported; `seek()` is not needed on a
+    # write-only stream.
+    resp_buf = pa.BufferOutputStream()
+    # Compress INTO the IPC stream when a codec was negotiated, instead of
+    # building the whole plaintext body and squeezing it afterwards. Arrow's
+    # codec runs in C++ with the GIL released, and the uncompressed body never
+    # exists as a whole: benchmarked at 81 MB of transient per 50k-row batch
+    # versus 0, for the same output bytes and ~9% less CPU. The middleware skips
+    # its own pass when `_current_body_precompressed` is set.
+    # Only when this turn's output IS the whole response body. The init turn's
+    # output is spliced into a response that already carries a plaintext header
+    # (see the caller), so compressing here would yield a plaintext header
+    # followed by a compressed body — not a decodable frame.
+    codec = _current_response_codec.get() if owns_response_body else None
+    write_sink: Any = resp_buf
+    if codec is not None:
+        try:
+            write_sink = pa.CompressedOutputStream(resp_buf, codec)
+            _current_body_precompressed.set(True)
+        except Exception:  # noqa: BLE001 — unknown codec: fall back to plaintext
+            write_sink = resp_buf
     max_bytes = app._max_response_bytes
     max_external_bytes = app._max_externalized_response_bytes
     externalization_enabled = (
         app._server.external_config is not None and app._server.external_config.storage is not None
     )
-    with ipc.new_stream(resp_buf, schema) as writer:
+    with ipc.new_stream(write_sink, schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, schema)
         cumulative_bytes = 0
@@ -952,8 +990,12 @@ def _run_http_producer_turn(
             outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
             outcome.error_message = _truncate_error_message(exc)
             _write_error_batch(writer, schema, exc, server_id=server_id)
-    resp_buf.seek(0)
-    return resp_buf
+    # Close the codec BEFORE getvalue(): the compressed frame is only complete
+    # once the stream is finalised.
+    if write_sink is not resp_buf:
+        write_sink.close()
+    # Zero-copy: BufferReader wraps the accumulated buffer, it does not copy it.
+    return pa.BufferReader(resp_buf.getvalue())
 
 
 def _unpack_and_recover_state(
