@@ -20,22 +20,23 @@ Wire format::
 
     version (1 byte) || nonce (24 bytes) || ciphertext+tag
 
-Requires ``pynacl`` (the ``http`` extra). Import this module lazily if your
+Requires ``pycryptodome`` (the ``http`` extra). Import this module lazily if your
 code path also runs in environments without that extra installed.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import struct
 
-from nacl import bindings as _nacl
-from nacl.exceptions import CryptoError
+from Crypto.Cipher import ChaCha20_Poly1305
 
-# XChaCha20-Poly1305 IETF algorithm constants.
-_KEY_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_KEYBYTES  # 32
-_NONCE_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES  # 24
-_TAG_LEN = _nacl.crypto_aead_xchacha20poly1305_ietf_ABYTES  # 16
+# XChaCha20-Poly1305 algorithm constants. Fixed by the construction, so they are
+# written out rather than read back from the backend.
+_KEY_LEN = 32
+_NONCE_LEN = 24  # 24 bytes selects XChaCha20 (12 would be IETF ChaCha20)
+_TAG_LEN = 16
 _VERSION_LEN = 1
 _MIN_TOKEN_LEN = _VERSION_LEN + _NONCE_LEN + _TAG_LEN
 
@@ -85,9 +86,13 @@ def seal_bytes(payload: bytes, key: bytes, *, aad: bytes, version: int = 1) -> b
     if not 0 <= version <= 255:
         msg = f"version must fit in one byte, got {version}"
         raise ValueError(msg)
-    nonce = _nacl.randombytes(_NONCE_LEN)
-    ciphertext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_encrypt(payload, aad, nonce, normalize_key(key))
-    return struct.pack("B", version) + nonce + ciphertext
+    nonce = os.urandom(_NONCE_LEN)
+    cipher = ChaCha20_Poly1305.new(key=normalize_key(key), nonce=nonce)
+    cipher.update(aad)
+    ciphertext, tag = cipher.encrypt_and_digest(payload)
+    # libsodium returns ciphertext||tag as one buffer; PyCryptodome returns them
+    # separately. Concatenating reproduces the identical envelope layout.
+    return struct.pack("B", version) + nonce + ciphertext + tag
 
 
 def open_bytes(token: bytes, key: bytes, *, aad: bytes, version: int = 1) -> bytes:
@@ -111,10 +116,13 @@ def open_bytes(token: bytes, key: bytes, *, aad: bytes, version: int = 1) -> byt
         msg = "malformed or wrong-version token"
         raise SealError(msg)
     nonce = token[_VERSION_LEN : _VERSION_LEN + _NONCE_LEN]
-    ciphertext = token[_VERSION_LEN + _NONCE_LEN :]
+    body = token[_VERSION_LEN + _NONCE_LEN :]
+    ciphertext, tag = body[:-_TAG_LEN], body[-_TAG_LEN:]
+    cipher = ChaCha20_Poly1305.new(key=normalize_key(key), nonce=nonce)
+    cipher.update(aad)
     try:
-        plaintext: bytes = _nacl.crypto_aead_xchacha20poly1305_ietf_decrypt(ciphertext, aad, nonce, normalize_key(key))
-    except CryptoError as exc:
+        plaintext: bytes = cipher.decrypt_and_verify(ciphertext, tag)
+    except ValueError as exc:
         msg = "token verification failed"
         raise SealError(msg) from exc
     return plaintext
