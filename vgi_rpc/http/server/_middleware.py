@@ -53,6 +53,7 @@ from .._common import (
 from .._common import (
     decompress as _decompress_with_encoding,
 )
+from .._unauthorized import classify_auth_failure
 
 _logger = logging.getLogger("vgi_rpc.http")
 
@@ -228,6 +229,13 @@ class _AuthMiddleware:
     credentials) or ``PermissionError`` (forbidden) on failure.  Other
     exceptions propagate as 500s so that bugs in the callback are not
     silently swallowed as 401s.
+
+    A failure is classified into an :class:`AuthReason` and stashed on
+    ``req.context`` for the error serializer, which turns it into the
+    standardized 401 of ``docs/unauthorized-spec.md``.  Raising
+    :class:`vgi_rpc.http.AuthFailure` picks the code explicitly; a bare
+    ``ValueError`` lands on the unclassified fallback rather than being
+    guessed at from its message text.
     """
 
     __slots__ = ("_authenticate", "_exempt_prefixes", "_on_auth_failure", "_www_authenticate")
@@ -271,6 +279,11 @@ class _AuthMiddleware:
         try:
             auth = self._authenticate(req)
         except (ValueError, PermissionError) as exc:
+            # Classify before raising so the error serializer can put a code on
+            # the response. It reads req.context rather than re-deriving from
+            # the Falcon error, which by then has lost the original type.
+            reason = classify_auth_failure(exc)
+            req.context.vgi_auth_reason = reason
             _logger.warning(
                 "Auth failure from %s: %s",
                 req.remote_addr,
@@ -279,6 +292,7 @@ class _AuthMiddleware:
                     "remote_addr": req.remote_addr or "",
                     "error_type": type(exc).__name__,
                     "auth_error": str(exc),
+                    "auth_reason": reason.value,
                 },
             )
             if self._on_auth_failure is not None:

@@ -39,6 +39,7 @@ import falcon
 from vgi_rpc.http._bearer import PreconditionGate
 from vgi_rpc.http._common import PROOF_HEADER, PROOF_REQUIRED_HEADER
 from vgi_rpc.http._replay import DEFAULT_CAPACITY, NonceCache
+from vgi_rpc.http._unauthorized import REASON_ATTR, AuthReason
 
 __all__ = [
     "PROOF_HEADER",
@@ -98,6 +99,13 @@ class ProofError(PermissionError):
         """Create a proof failure carrying its reason code."""
         super().__init__(detail or reason)
         self.reason = reason
+        # What the *caller* is told: the coarse stage code, never `reason`.
+        # A 401 already said "proxy proof required" before this attribute
+        # existed, so this discloses nothing new — and it deliberately
+        # collapses every verifier outcome (no_proof, bad_mac, expired,
+        # unknown_kid) onto one value, keeping rejection uniform as
+        # docs/proxy-proof-spec.md §6 requires.
+        setattr(self, REASON_ATTR, AuthReason.PROXY_REQUIRED)
 
 
 def _b64(raw: bytes) -> str:
@@ -431,4 +439,12 @@ def proxy_proof_gate(
                 "reason": exc.reason,
             }
 
-    return PreconditionGate(gate, name=GATE_NAME, claims_key=CLAIMS_KEY)
+    return PreconditionGate(
+        gate,
+        name=GATE_NAME,
+        claims_key=CLAIMS_KEY,
+        # Only `require` can refuse, so only `require` should tell an operator
+        # a 401 might be the proxy's fault. In `allow` mode an absent proof
+        # never denies, and the note would misdirect them.
+        proxy_headers=(PROOF_HEADER,) if required else (),
+    )

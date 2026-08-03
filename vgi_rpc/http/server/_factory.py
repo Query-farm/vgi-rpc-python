@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -21,12 +21,15 @@ from vgi_rpc.rpc import AuthContext, RpcServer
 
 from .._common import (
     _SESSION_ENDPOINT,
+    AUTH_PROXY_REQUIRED_HEADER,
+    AUTH_REASON_HEADER,
     ECHO_HEADER_PREFIX,
     EXTERNALIZATION_ENABLED_HEADER,
     MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER,
     MAX_REQUEST_BYTES_HEADER,
     MAX_RESPONSE_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
+    PROOF_HEADER,
     PROOF_REQUIRED_HEADER,
     RPC_ERROR_HEADER,
     SESSION_CLOSE_HEADER,
@@ -39,8 +42,9 @@ from .._common import (
     Encoding,
     available_encodings,
 )
+from .._unauthorized import build_proxy_hint, proxy_headers_of
 from ._app import _HttpRpcApp
-from ._errors import _error_serializer, _make_not_found_sink
+from ._errors import _make_error_serializer, _make_not_found_sink
 from ._middleware import (
     _REQUEST_ID_HEADER,
     _AccessLogContextMiddleware,
@@ -86,6 +90,7 @@ def make_wsgi_app(
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     proxy_proof_required: bool = False,
+    proxy_auth_headers: Sequence[str] | None = None,
     cors_origins: str | Iterable[str] | None = None,
     cors_max_age: int | None = 7200,
     upload_url_provider: UploadUrlProvider | None = None,
@@ -157,7 +162,19 @@ def make_wsgi_app(
             ``authenticate`` (see :func:`vgi_rpc.http.require_all`), which is an
             opaque callable — the factory cannot introspect it, so the operator
             states the posture here.  Purely advertisement: it does not enable
-            or enforce anything.
+            or enforce anything.  Also contributes ``VGI-Proxy-Proof`` to the
+            proxy note described under ``proxy_auth_headers``.
+        proxy_auth_headers: Names of headers a trusted reverse proxy must
+            inject for authentication to succeed.  When any are known, every
+            401 this app emits carries ``VGI-Auth-Proxy-Required: true`` and a
+            note telling the reader to check the proxy configuration before
+            blaming the credential — the failure mode operators actually hit.
+            The built-in mTLS and proxy-proof authenticators declare their own
+            headers (see :func:`vgi_rpc.http.declare_proxy_headers`) and are
+            discovered automatically, so this is only needed for a custom
+            ``authenticate`` that reads a proxy-injected header.  The note is
+            fixed for the life of the app and identical on every 401, so it
+            discloses nothing about what failed on a given request.
         cors_origins: Allowed origins for CORS.  Pass ``"*"`` to allow all
             origins, a single origin string like ``"https://example.com"``,
             or an iterable of origin strings.  ``None`` (the default)
@@ -313,6 +330,19 @@ def make_wsgi_app(
         token_ttl,
         max_externalized_response_bytes=max_externalized_response_bytes,
     )
+    # Resolve the proxy-header dependency now, from the `authenticate` the
+    # caller passed. The PKCE branch below rebinds `authenticate` to a chained
+    # wrapper, and reading it after that point would work only because
+    # chain_authenticate propagates declarations — depending on that here
+    # would be a trap for anyone who later adds a wrapper that does not.
+    proxy_hint = build_proxy_hint(
+        [
+            *(proxy_auth_headers or ()),
+            *proxy_headers_of(authenticate),
+            *((PROOF_HEADER,) if proxy_proof_required else ()),
+        ]
+    )
+
     middleware: list[Any] = [
         _TransportNotifyMiddleware(server),
         _DrainRequestMiddleware(),
@@ -447,6 +477,14 @@ def make_wsgi_app(
     if proxy_proof_required:
         capability_headers[PROOF_REQUIRED_HEADER] = "true"
         cors_expose.append(PROOF_REQUIRED_HEADER)
+
+    # 401 explanation headers. Exposed but never advertised as capabilities:
+    # they describe a rejection, so emitting them on a 200 would be noise.
+    # Without the CORS exposure a browser client could not read the reason
+    # code off a cross-origin 401 and would be back to guessing from the body.
+    cors_expose.append(AUTH_REASON_HEADER)
+    if proxy_hint:
+        cors_expose.append(AUTH_PROXY_REQUIRED_HEADER)
 
     if enable_sticky:
         capability_headers[STICKY_ENABLED_HEADER] = "true"
@@ -595,7 +633,7 @@ def make_wsgi_app(
     if capability_headers:
         middleware.append(_CapabilitiesMiddleware(capability_headers))
     app: falcon.App[falcon.Request, falcon.Response] = falcon.App(middleware=middleware or None)
-    app.set_error_serializer(_error_serializer)
+    app.set_error_serializer(_make_error_serializer(proxy_hint))
 
     # OAuth well-known endpoint (must be before RPC routes)
     if _validated_oauth_metadata is not None:

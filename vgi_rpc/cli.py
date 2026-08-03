@@ -1087,7 +1087,7 @@ def _call_stream_http(
         header_batch: pa.RecordBatch | None = None
         resp_stream = BytesIO(resp.content)
         if method.has_header:
-            # Check for auth errors first (plain text, not Arrow IPC)
+            # Check for auth errors first (JSON envelope, not Arrow IPC)
             if resp.status_code == 401:
                 _open_response_stream(resp.content, resp.status_code, IpcValidation.FULL)
             header_batch = _read_raw_stream_header(resp_stream, IpcValidation.FULL, on_log)

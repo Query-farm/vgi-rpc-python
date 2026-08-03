@@ -9,7 +9,7 @@ Provides ``_SyncTestClient`` and ``make_sync_client`` which use
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -130,6 +130,8 @@ def make_sync_client(
     max_request_bytes: int | None = None,
     max_stream_response_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    proxy_proof_required: bool = False,
+    proxy_auth_headers: Sequence[str] | None = None,
     default_headers: dict[str, str] | None = None,
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
@@ -162,6 +164,8 @@ def make_sync_client(
         max_stream_response_bytes: **Deprecated** alias for
             ``max_response_bytes``.
         authenticate: See ``make_wsgi_app``.
+        proxy_proof_required: See ``make_wsgi_app``.
+        proxy_auth_headers: See ``make_wsgi_app``.
         default_headers: Headers merged into every request (e.g. auth tokens).
         upload_url_provider: See ``make_wsgi_app``.
         max_upload_bytes: See ``make_wsgi_app``.
@@ -192,6 +196,8 @@ def make_sync_client(
         max_stream_response_bytes=max_stream_response_bytes,
         max_request_bytes=max_request_bytes,
         authenticate=authenticate,
+        proxy_proof_required=proxy_proof_required,
+        proxy_auth_headers=proxy_auth_headers,
         upload_url_provider=upload_url_provider,
         max_upload_bytes=max_upload_bytes,
         otel_config=otel_config,

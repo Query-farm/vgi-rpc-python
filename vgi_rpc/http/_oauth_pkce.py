@@ -37,6 +37,7 @@ import httpx
 from vgi_rpc.rpc import AuthContext
 
 from ._common import _ERROR_PAGE_STYLE, _FONT_IMPORTS, _VGI_LOGO_HTML
+from ._unauthorized import AuthFailure, AuthReason
 
 logger = logging.getLogger(__name__)
 
@@ -1143,7 +1144,7 @@ def make_cookie_authenticate(
     def authenticate(req: falcon.Request) -> AuthContext:
         token = req.cookies.get(cookie_name)
         if not token:
-            raise ValueError("No auth cookie")
+            raise AuthFailure(AuthReason.MISSING_CREDENTIAL, "No auth cookie")
         # Temporarily inject the cookie token as an Authorization header
         # so the inner authenticator (JWT, bearer, etc.) can validate it.
         # Safe in synchronous WSGI — the environ is per-request and mutable.

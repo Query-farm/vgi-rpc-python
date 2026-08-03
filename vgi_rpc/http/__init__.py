@@ -52,6 +52,8 @@ from vgi_rpc.http._client import (
 )
 from vgi_rpc.http._common import (
     _ARROW_CONTENT_TYPE,
+    AUTH_PROXY_REQUIRED_HEADER,
+    AUTH_REASON_HEADER,
     MAX_REQUEST_BYTES_HEADER,
     MAX_UPLOAD_BYTES_HEADER,
     RPC_ERROR_HEADER,
@@ -90,6 +92,14 @@ from vgi_rpc.http._testing import (
     _SyncTestResponse,
     make_sync_client,
 )
+from vgi_rpc.http._unauthorized import (
+    AuthenticationError,
+    AuthFailure,
+    AuthReason,
+    build_proxy_hint,
+    declare_proxy_headers,
+    proxy_headers_of,
+)
 from vgi_rpc.http.server import make_wsgi_app, serve_http
 from vgi_rpc.http.server._sticky import DrainHandle, drain_handle
 
@@ -105,6 +115,14 @@ with contextlib.suppress(ImportError):
     )
 
 __all__ = [
+    "AUTH_PROXY_REQUIRED_HEADER",
+    "AUTH_REASON_HEADER",
+    "AuthFailure",
+    "AuthReason",
+    "AuthenticationError",
+    "build_proxy_hint",
+    "declare_proxy_headers",
+    "proxy_headers_of",
     "bearer_authenticate",
     "bearer_authenticate_static",
     "chain_authenticate",

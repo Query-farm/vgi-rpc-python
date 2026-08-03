@@ -136,6 +136,7 @@ nav:
     - Access Log Specification: access-log-spec.md
     - Sticky Sessions Specification: sticky-sessions-spec.md
     - Proxy Proof Specification: proxy-proof-spec.md
+    - Unauthorized Response Specification: unauthorized-spec.md
     - Log Shipping: log-shipping/README.md
     - Wire Protocol: WIRE_PROTOCOL.md
     - Conformance Testing: cross-language-conformance.md

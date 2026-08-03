@@ -16,6 +16,8 @@ from joserfc.jwk import KeySet, RSAKey, import_key
 
 from vgi_rpc import AuthContext, CallContext, RpcServer
 from vgi_rpc.http import (
+    AuthFailure,
+    AuthReason,
     bearer_authenticate,
     bearer_authenticate_static,
     chain_authenticate,
@@ -89,18 +91,24 @@ class TestBearerAuthenticate:
             auth_fn(req)
 
     def test_missing_header_raises(self) -> None:
-        """Missing Authorization header raises ValueError."""
+        """No Authorization header at all is reported as a missing credential."""
         auth_fn = bearer_authenticate(validate=lambda t: _ALICE)
         req = _make_req()
-        with pytest.raises(ValueError, match="Missing"):
+        with pytest.raises(AuthFailure, match="Missing") as exc_info:
             auth_fn(req)
+        assert exc_info.value.reason is AuthReason.MISSING_CREDENTIAL
 
     def test_non_bearer_scheme_raises(self) -> None:
-        """Non-Bearer scheme raises ValueError."""
+        """A non-Bearer scheme is an *invalid* credential, not a missing one.
+
+        The caller sent something; telling them to send a credential would be
+        the wrong advice, and the reason code is what a client branches on.
+        """
         auth_fn = bearer_authenticate(validate=lambda t: _ALICE)
         req = _make_req(authorization="Basic dXNlcjpwYXNz")
-        with pytest.raises(ValueError, match="Missing"):
+        with pytest.raises(AuthFailure, match="not a Bearer credential") as exc_info:
             auth_fn(req)
+        assert exc_info.value.reason is AuthReason.INVALID_CREDENTIAL
 
     def test_end_to_end_rpc(self) -> None:
         """Full round-trip: bearer auth -> RPC call -> identity returned."""

@@ -39,6 +39,15 @@ UPLOAD_URL_HEADER = "VGI-Upload-URL-Support"
 MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes"
 SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings"
 
+# Standardized 401 responses (see docs/unauthorized-spec.md). Both appear on
+# 401 responses only — they explain a rejection rather than advertise a
+# capability, so putting them on every response would be noise. Both are
+# CORS-exposed so a browser client can read them cross-origin.
+AUTH_REASON_HEADER = "VGI-Auth-Reason"
+"""Machine-readable reason code from the closed :class:`AuthReason` set."""
+AUTH_PROXY_REQUIRED_HEADER = "VGI-Auth-Proxy-Required"
+"""``true`` when this service's auth depends on headers a reverse proxy must inject."""
+
 # Sticky session header conventions (HTTP-only). The cookie equivalent
 # (Set-Cookie / vgi-session) is intentionally out of scope for v1 — headers
 # multiplex cleanly across concurrent sessions, cookies do not.
@@ -155,6 +164,14 @@ _ERROR_PAGE_STYLE = """\
   p {{ line-height: 1.7; color: #6b6b5a; }}
   .detail {{ margin-top: 12px; padding: 12px 16px; background: #f0ece0;
              border-radius: 6px; font-size: 0.9em; color: #6b6b5a; }}
+  .reason {{ display: inline-block; margin-bottom: 16px; padding: 3px 10px;
+             border-radius: 999px; background: #f0ece0; color: #6b6b5a;
+             font-family: 'JetBrains Mono', monospace; font-size: 0.8em; }}
+  .note {{ margin-top: 20px; padding: 14px 18px; background: #fdf6e3;
+           border: 1px solid #e0d7b8; border-left: 4px solid #b8860b;
+           border-radius: 6px; font-size: 0.9em; color: #6b6b5a;
+           text-align: left; line-height: 1.6; }}
+  .note strong {{ display: block; margin-bottom: 6px; color: #2c2c1e; }}
   footer {{ margin-top: 48px; padding: 20px 0; border-top: 1px solid #f0ece0;
             color: #6b6b5a; font-size: 0.85em; line-height: 1.8; }}
   footer a {{ color: #2d5016; font-weight: 600; }}

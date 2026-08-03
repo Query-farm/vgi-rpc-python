@@ -37,6 +37,7 @@ Define RPC interfaces as Python [`Protocol`](https://docs.python.org/3/library/t
 - **IPC validation** — configurable batch validation levels for untrusted data
 - **Large batch support** — transparent [externalization to S3/GCS](api/external.md) for oversized data
 - **HTTP response caps** — bound on-wire body size and external upload volume per call via [`max_response_bytes` and `max_externalized_response_bytes`](hosting.md)
+- **Standardized 401s** — every HTTP rejection carries a reason code from a closed set, plus a note when the cause is likely a missing reverse-proxy configuration — see [Unauthorized Responses](unauthorized-spec.md)
 - **Sticky sessions** — opt-in HTTP affinity binding stateful objects (cursors, model handles) to a client across calls — see [Sticky Sessions](sticky-sessions-spec.md)
 - **Per-call I/O statistics** — [`CallStatistics`](api/core.md#callstatistics) tracks batches, rows, and bytes for usage accounting (access log + [OTel](api/otel.md) spans)
 - **Wire protocol debug logging** — enable `vgi_rpc.wire` at DEBUG for full wire-level visibility — see [Logging](api/logging.md#wire-protocol-debugging)
