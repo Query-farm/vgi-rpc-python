@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from io import BytesIO
+from typing import Any
 
 import httpx
 import pyarrow as pa
@@ -34,6 +35,7 @@ from vgi_rpc.http._retry import (
     _options_with_retry,
     _parse_retry_after,
     _post_with_retry,
+    _request_with_retry,
 )
 from vgi_rpc.rpc import AnnotatedBatch, RpcError, RpcServer, _send_request, rpc_methods
 
@@ -776,3 +778,98 @@ class TestRequestUploadUrlsWithRetry:
             )
         # Verify retry happened: 1 failure + 1 success (which returns 404)
         assert wrapper.call_count == 2
+
+
+class TestStaleConnectionRetry:
+    """Retry behaviour for a keep-alive connection the peer already closed.
+
+    A server or load balancer may reap an idle persistent connection at any
+    moment, and that reap races the next request no matter how the client is
+    written — so the client has to recover rather than surface it. What makes
+    it recoverable is *when* it happens: httpx says "Server disconnected
+    without sending a response" only when the socket died before any response
+    byte arrived, which proves the request went unanswered and cannot have
+    been applied twice by a replay.
+    """
+
+    @staticmethod
+    def _stale() -> httpx.RemoteProtocolError:
+        return httpx.RemoteProtocolError("Server disconnected without sending a response.")
+
+    def test_stale_pooled_connection_is_retried(self) -> None:
+        """A disconnect before any response byte is replayed on a fresh connection."""
+        calls = {"n": 0}
+
+        def make_request() -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise self._stale()
+            return httpx.Response(200, text="ok")
+
+        resp = _request_with_retry(
+            make_request,
+            config=HttpRetryConfig(max_retries=2, backoff_base=0.001),
+            method_label="POST",
+            url="/x",
+            _sleep=lambda _: None,
+        )
+        assert resp.status_code == 200
+        assert calls["n"] == 2
+
+    def test_disconnect_mid_response_is_not_retried(self) -> None:
+        """A disconnect after bytes were flowing propagates instead of replaying.
+
+        The server may already have applied a non-idempotent POST, so this is
+        the case where a retry could double-apply. It must stay an error.
+        """
+        calls = {"n": 0}
+
+        def make_request() -> Any:
+            calls["n"] += 1
+            raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+
+        with pytest.raises(httpx.RemoteProtocolError):
+            _request_with_retry(
+                make_request,
+                config=HttpRetryConfig(max_retries=2, backoff_base=0.001),
+                method_label="POST",
+                url="/x",
+                _sleep=lambda _: None,
+            )
+        assert calls["n"] == 1, "must not replay a request the server may have applied"
+
+    def test_stale_connection_propagates_when_retries_exhausted(self) -> None:
+        """A peer that always disconnects still surfaces the error."""
+        calls = {"n": 0}
+
+        def make_request() -> Any:
+            calls["n"] += 1
+            raise self._stale()
+
+        with pytest.raises(httpx.RemoteProtocolError):
+            _request_with_retry(
+                make_request,
+                config=HttpRetryConfig(max_retries=2, backoff_base=0.001),
+                method_label="POST",
+                url="/x",
+                _sleep=lambda _: None,
+            )
+        assert calls["n"] == 3
+
+    def test_stale_connection_not_retried_when_disabled(self) -> None:
+        """``retry_on_connection_error=False`` opts out of this too."""
+        calls = {"n": 0}
+
+        def make_request() -> Any:
+            calls["n"] += 1
+            raise self._stale()
+
+        with pytest.raises(httpx.RemoteProtocolError):
+            _request_with_retry(
+                make_request,
+                config=HttpRetryConfig(max_retries=3, retry_on_connection_error=False, backoff_base=0.001),
+                method_label="POST",
+                url="/x",
+                _sleep=lambda _: None,
+            )
+        assert calls["n"] == 1

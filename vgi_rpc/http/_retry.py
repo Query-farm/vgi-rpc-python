@@ -229,6 +229,35 @@ def _request_with_retry(
     for attempt in range(config.max_retries + 1):
         try:
             resp = make_request()
+        except httpx.RemoteProtocolError as exc:
+            # A pooled keep-alive connection the peer had already closed.
+            # httpx raises this with "Server disconnected without sending a
+            # response" when the socket dies before ANY response byte arrives,
+            # which is the one disconnect we can retry safely: the request
+            # provably was not answered, so replaying it cannot duplicate an
+            # effect the caller already observed. RFC 9110 6.3 requires a
+            # client to cope with this -- a server or load balancer is free to
+            # reap an idle persistent connection at any moment, and it races
+            # the next request no matter how the client is written.
+            #
+            # Any other RemoteProtocolError means bytes were already flowing,
+            # so the server may well have applied a non-idempotent POST; those
+            # propagate rather than risk a double-apply.
+            if "without sending a response" not in str(exc):
+                raise
+            if not config.retry_on_connection_error or attempt >= config.max_retries:
+                raise
+            delay = _compute_delay(attempt, config, None)
+            _logger.debug(
+                "Stale pooled connection on %s %s (attempt %d/%d), retrying in %.2fs",
+                method_label,
+                url,
+                attempt + 1,
+                config.max_retries + 1,
+                delay,
+            )
+            _sleep(delay)
+            continue
         except (httpx.ConnectError, httpx.TimeoutException):
             if not config.retry_on_connection_error or attempt >= config.max_retries:
                 raise

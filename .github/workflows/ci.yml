@@ -38,9 +38,20 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --python ${{ matrix.python-version }}
 
+      # Windows runs at -n 2 rather than the -n auto in pyproject's addopts.
+      # The suite spawns real servers and talks to them over loopback, and on
+      # Windows a connection aborted by the peer is a hard WSAECONNABORTED
+      # (WinError 10053) where POSIX quietly delivers the response instead. At
+      # -n auto that shows up as an intermittent failure somewhere in
+      # TestExternalLocation -- a different test each run, which is the
+      # signature of contention rather than of a broken test. Halving the
+      # concurrency keeps the wall-clock win without sitting on that edge.
+      # A recurrence at -n 2 would mean the race is not purely load-driven and
+      # is worth chasing on a Windows box rather than papering over here.
       - name: Run tests with coverage
         run: >
           uv run --python ${{ matrix.python-version }} pytest
+          ${{ matrix.os == 'windows-latest' && '-n 2' || '' }}
           --cov=vgi_rpc
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
