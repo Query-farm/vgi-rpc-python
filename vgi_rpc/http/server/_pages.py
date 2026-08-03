@@ -31,8 +31,10 @@ _LANDING_HTML_TEMPLATE = (
          margin: 0 auto; padding: 60px 20px 0; color: #2c2c1e; text-align: center;
          background: #faf8f0; }}
   .logo {{ margin-bottom: 24px; }}
-  .logo img {{ width: 140px; height: 140px; border-radius: 50%;
-               box-shadow: 0 4px 24px rgba(0,0,0,0.12); }}
+  /* Sized by width with the height following, and a drop-shadow that traces
+     the alpha silhouette — see the note in http/_common.py. */
+  .logo img {{ width: 220px; height: auto;
+               filter: drop-shadow(0 4px 12px rgba(0,0,0,0.18)); }}
   h1 {{ color: #2d5016; margin-bottom: 8px; font-weight: 700; }}
   code {{ font-family: 'JetBrains Mono', monospace; background: #f0ece0;
           padding: 2px 6px; border-radius: 3px; font-size: 0.9em; color: #2c2c1e; }}
@@ -137,8 +139,8 @@ _DESCRIBE_HTML_TEMPLATE = (
   body {{ font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 900px;
          margin: 0 auto; padding: 40px 20px 0; color: #2c2c1e; background: #faf8f0; }}
   .header {{ text-align: center; margin-bottom: 40px; }}
-  .header .logo img {{ width: 80px; height: 80px; border-radius: 50%;
-                       box-shadow: 0 3px 16px rgba(0,0,0,0.10); }}
+  .header .logo img {{ width: 130px; height: auto;
+                       filter: drop-shadow(0 3px 8px rgba(0,0,0,0.15)); }}
   .header h1 {{ margin-bottom: 4px; color: #2d5016; font-weight: 700; }}
   .header .subtitle {{ color: #6b6b5a; font-size: 1.1em; margin-top: 0; }}
   .header .meta {{ color: #6b6b5a; font-size: 0.9em; }}

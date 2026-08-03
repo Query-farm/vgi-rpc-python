@@ -222,25 +222,29 @@
   margin-bottom: 1rem;
 }
 
+/* The mark is a landscape shield on transparency: sized by width with the
+   height left to follow, and shadowed with a drop-shadow that traces the alpha
+   silhouette. A box-shadow would outline the image box, not the shield. */
 .hero-logo-img {
-  border-radius: 50%;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
+  filter: drop-shadow(0 4px 18px rgba(0, 0, 0, 0.22));
   transition: transform 0.3s ease;
-  width: 200px;
-  height: 200px;
+  width: 320px;
+  height: auto;
 }
 
 .hero-logo-img:hover {
   transform: scale(1.05);
 }
 
-/* Header logo — bigger than default, clipped to circle */
+/* Header logo — bigger than default. `object-fit: cover` in a 3rem square used
+   to crop the round seal harmlessly; on the landscape shield it would cut off
+   the banner, so the box follows the mark instead of the mark being cropped
+   to the box. */
 .md-header__button.md-logo img,
 .md-nav__button.md-logo img {
-  height: 3rem;
-  width: 3rem;
-  border-radius: 50%;
-  object-fit: cover;
+  height: 2.4rem;
+  width: auto;
+  object-fit: contain;
 }
 
 /* ── D2 diagrams — constrain size and center ── */
