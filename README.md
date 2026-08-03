@@ -505,6 +505,7 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `enable_health_endpoint` | `True` | JSON health check at `GET {prefix}/health` (bypasses auth) |
 | `repo_url` | `None` | Source-repository link surfaced on the landing page |
 | `oauth_resource_metadata` | `None` | `OAuthResourceMetadata` for RFC 9728 discovery |
+| `proxy_auth_headers` | `None` | Headers a trusted reverse proxy must inject for auth to succeed. Adds a "check the proxy configuration" note to every [401](docs/unauthorized-spec.md). The built-in mTLS and proxy-proof authenticators are discovered automatically; this is for a custom `authenticate` |
 | `enable_sticky` | `False` | Enable HTTP [sticky sessions](docs/sticky-sessions-spec.md) — `ctx.open_session(state)` binds a Python object to the worker for the session token's lifetime |
 | `sticky_default_ttl` | `300.0` | Default session TTL in seconds for sticky sessions; overridable per-call via `ctx.open_session(state, ttl=...)` |
 | `sticky_echo_headers` | `None` | Headers the client replays on every subsequent request in the session (e.g. Fly.io routing) |

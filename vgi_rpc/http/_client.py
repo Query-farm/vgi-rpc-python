@@ -84,6 +84,15 @@ from ._common import (
     compress as _compress_with_encoding,
 )
 from ._retry import HttpRetryConfig, _options_with_retry, _post_with_retry
+from ._unauthorized import AuthenticationError, AuthReason
+
+# An unrecognised reason code means the server is newer than this client, not
+# that it is broken; fall back rather than raising out of the error path.
+_AUTH_REASONS = frozenset(reason.value for reason in AuthReason)
+
+# A non-JSON 401 body is someone else's error page. Keep enough to identify
+# the intermediary, not so much that it drowns the traceback.
+_MAX_UNAUTHORIZED_DETAIL = 500
 
 if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
@@ -207,6 +216,44 @@ def _build_pointer_request_body(original_body: bytes, location_url: str) -> byte
     return buf.getvalue()
 
 
+def _parse_unauthorized(content: bytes) -> AuthenticationError:
+    """Turn a 401 body into a typed error.
+
+    Accepts the standardized JSON envelope and degrades gracefully for
+    anything else, because a 401 can also come from an intermediary the
+    service never sees — a gateway, a WAF, an SSO portal — that has its own
+    idea of what an error body looks like.
+
+    Args:
+        content: The raw 401 response body.
+
+    Returns:
+        The error to raise.
+
+    """
+    payload: object = None
+    with contextlib.suppress(ValueError):
+        payload = json.loads(content)
+    if isinstance(payload, dict):
+        raw_reason = str(payload.get("reason", ""))
+        reason = AuthReason(raw_reason) if raw_reason in _AUTH_REASONS else AuthReason.UNAUTHORIZED
+        return AuthenticationError(
+            reason,
+            str(payload.get("detail", "")),
+            str(payload.get("proxy_hint", "")),
+        )
+
+    text = content.decode(errors="replace").strip()
+    if text[:9].lower() == "<!doctype" or text[:5].lower() == "<html":
+        # Some vgi-rpc server renders the styled 401 page for browsers, and an
+        # intermediary may do the same. Pasting a page of markup into an
+        # exception message buries whatever else the traceback was saying.
+        detail = "server returned an HTML 401 page instead of the JSON error envelope"
+    else:
+        detail = text[:_MAX_UNAUTHORIZED_DETAIL] or "unauthorized"
+    return AuthenticationError(AuthReason.UNAUTHORIZED, detail)
+
+
 def _open_response_stream(
     content: bytes,
     status_code: int,
@@ -223,8 +270,8 @@ def _open_response_stream(
         A ``ValidatedReader`` wrapping the IPC stream.
 
     Raises:
-        RpcError: If the server returns 401 (``AuthenticationError``) or
-            the response is not a valid Arrow IPC stream.
+        AuthenticationError: If the server returns 401.
+        RpcError: If the response is not a valid Arrow IPC stream.
 
     """
     if wire_http_logger.isEnabledFor(logging.DEBUG):
@@ -233,11 +280,11 @@ def _open_response_stream(
             status_code,
             len(content),
         )
-    # 401 responses are plain text (not Arrow IPC) because they are produced
-    # by _AuthMiddleware before any method is resolved, so no output schema
-    # is available.  We surface them as RpcError("AuthenticationError").
+    # 401 responses are not Arrow IPC: they are produced by _AuthMiddleware
+    # before any method is resolved, so no output schema is available.  The
+    # body is the JSON envelope of docs/unauthorized-spec.md.
     if status_code == HTTPStatus.UNAUTHORIZED:
-        raise RpcError("AuthenticationError", content.decode(errors="replace"), "")
+        raise _parse_unauthorized(content)
     try:
         return ValidatedReader(ipc.open_stream(BytesIO(content)), ipc_validation)
     except pa.ArrowInvalid:
@@ -1423,7 +1470,7 @@ class _HttpProxy:
             header = None
             resp_stream = BytesIO(resp.content)
             if info.header_type is not None:
-                # Check for auth errors first (plain text, not Arrow IPC)
+                # Check for auth errors first (JSON envelope, not Arrow IPC)
                 if resp.status_code == 401:
                     _open_response_stream(resp.content, resp.status_code, ipc_validation)
                 header = _read_stream_header(resp_stream, info.header_type, ipc_validation, on_log, ext_cfg)

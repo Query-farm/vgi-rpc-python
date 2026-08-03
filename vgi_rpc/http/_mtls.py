@@ -35,7 +35,10 @@ from urllib.parse import unquote
 
 import falcon
 
+from vgi_rpc.http._unauthorized import AuthFailure, AuthReason, declare_proxy_headers
 from vgi_rpc.rpc import AuthContext
+
+_XFCC_HEADER = "x-forwarded-client-cert"
 
 # ---------------------------------------------------------------------------
 # XFCC types and parser (no cryptography needed)
@@ -191,12 +194,15 @@ def mtls_authenticate_xfcc(
     """
 
     def authenticate(req: falcon.Request) -> AuthContext:
-        header_value = req.get_header("x-forwarded-client-cert")
+        header_value = req.get_header(_XFCC_HEADER)
         if not header_value:
-            raise ValueError("Missing x-forwarded-client-cert header")
+            # The client cannot fix this: the header is the proxy's to set.
+            # Reporting it as a missing *credential* would send an operator
+            # hunting for a certificate the caller already presented.
+            raise AuthFailure(AuthReason.PROXY_REQUIRED, f"Missing {_XFCC_HEADER} header")
         elements = _parse_xfcc(header_value)
         if not elements:
-            raise ValueError("Empty x-forwarded-client-cert header")
+            raise AuthFailure(AuthReason.INVALID_CREDENTIAL, f"Empty {_XFCC_HEADER} header")
         element = elements[0] if select_element == "first" else elements[-1]
         if validate is not None:
             return validate(element)
@@ -220,7 +226,7 @@ def mtls_authenticate_xfcc(
             claims=claims,
         )
 
-    return authenticate
+    return declare_proxy_headers(authenticate, _XFCC_HEADER)
 
 
 def _extract_cn(subject: str) -> str:
@@ -258,19 +264,23 @@ try:
             Parsed X.509 certificate.
 
         Raises:
-            ValueError: If the header is missing, not valid PEM, or unparseable.
+            AuthFailure: If the header is missing, not valid PEM, or
+                unparseable. An absent header is reported as
+                ``proxy_required`` rather than a missing credential — the
+                header is the proxy's to inject, so its absence points at the
+                deployment, not at the caller.
 
         """
         raw = req.get_header(header)
         if not raw:
-            raise ValueError(f"Missing {header} header")
+            raise AuthFailure(AuthReason.PROXY_REQUIRED, f"Missing {header} header")
         pem_str = unquote(raw)
         if not pem_str.startswith("-----BEGIN CERTIFICATE-----"):
-            raise ValueError("Header value is not a PEM certificate")
+            raise AuthFailure(AuthReason.INVALID_CREDENTIAL, "Header value is not a PEM certificate")
         try:
             return x509.load_pem_x509_certificate(pem_str.encode())
         except Exception as exc:
-            raise ValueError(f"Failed to parse PEM certificate: {exc}") from exc
+            raise AuthFailure(AuthReason.INVALID_CREDENTIAL, f"Failed to parse PEM certificate: {exc}") from exc
 
     def _check_cert_expiry(cert: x509.Certificate) -> None:
         """Validate certificate is within its validity period.
@@ -279,16 +289,16 @@ try:
             cert: Certificate to check.
 
         Raises:
-            ValueError: If the certificate is expired or not yet valid.
+            AuthFailure: If the certificate is expired or not yet valid.
 
         """
         import datetime
 
         now = datetime.datetime.now(datetime.UTC)
         if now < cert.not_valid_before_utc:
-            raise ValueError("Certificate is not yet valid")
+            raise AuthFailure(AuthReason.EXPIRED_CREDENTIAL, "Certificate is not yet valid")
         if now > cert.not_valid_after_utc:
-            raise ValueError("Certificate has expired")
+            raise AuthFailure(AuthReason.EXPIRED_CREDENTIAL, "Certificate has expired")
 
     def mtls_authenticate(
         *,
@@ -333,7 +343,7 @@ try:
                 _check_cert_expiry(cert)
             return validate(cert)
 
-        return authenticate
+        return declare_proxy_headers(authenticate, header)
 
     def mtls_authenticate_fingerprint(
         *,
@@ -383,7 +393,7 @@ try:
             fp = cert.fingerprint(hash_algo).hex()
             ctx = fingerprints.get(fp)
             if ctx is None:
-                raise ValueError(f"Unknown certificate fingerprint: {fp}")
+                raise AuthFailure(AuthReason.INVALID_CREDENTIAL, f"Unknown certificate fingerprint: {fp}")
             return ctx
 
         return mtls_authenticate(validate=validate, header=header, check_expiry=check_expiry)
@@ -430,7 +440,7 @@ try:
             cn_attrs = subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
             cn = str(cn_attrs[0].value) if cn_attrs else ""
             if allowed_subjects is not None and cn not in allowed_subjects:
-                raise ValueError(f"Subject CN {cn!r} not in allowed subjects")
+                raise AuthFailure(AuthReason.INSUFFICIENT_SCOPE, f"Subject CN {cn!r} not in allowed subjects")
             rfc4514 = subject.rfc4514_string()
             serial_hex = format(cert.serial_number, "x")
             not_valid_after = cert.not_valid_after_utc.isoformat()

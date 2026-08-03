@@ -196,6 +196,18 @@ ignore the budget.
 - **HTTP state-token format.** Tokens are AEAD-sealed (XChaCha20-Poly1305 or ChaCha20-Poly1305, depending on what's available natively in the target language). Each port is free to choose its own plaintext encoding — Python uses length-prefixed Arrow IPC, Go uses gob, TypeScript uses JSON+BigInt, Java uses CBOR, Rust uses length-prefixed bytes — because tokens are not expected to round-trip across language ports. The behavioral contract is per-port: round-trip integrity, cross-principal replay protection (via AEAD AAD or per-principal key derivation), and TTL enforcement after authenticity. See `vgi_rpc/http/server/_state_token.py` for the Python reference.
 - **Per-process server identity.** `server_id` is generated once per process lifetime, NOT per call. The same string must appear in every log record from the same instance.
 
+## HTTP unauthorized responses
+
+Every 401 a conformant HTTP server emits carries a coarse reason code from a closed set, on a `VGI-Auth-Reason` header and in a JSON body, plus a static note on services whose authentication depends on a reverse proxy. The full spec lives at [`docs/unauthorized-spec.md`](unauthorized-spec.md). The canonical `TestUnauthorized` group is capability-gated on `VGI-Auth-Reason`, so a port that has not adopted this skips cleanly.
+
+The pieces worth calling out:
+
+1. **Negotiate on `Accept`, and default to JSON.** `*/*` — what every RPC client sends — MUST resolve to the JSON envelope. A port may serve JSON to browsers too; it may never serve HTML to a client that did not ask for `text/html`. Getting this backwards is the pre-existing bug this spec was written to fix: the Python client used to paste an entire HTML page into an exception message.
+2. **Keep the reason set closed.** Six codes, listed in §3 of the spec. A failure that maps to none of them is `unauthorized`. A client switching on the code needs the set not to grow under it in a language it does not control.
+3. **The code names the stage, not the diagnosis.** Every proxy-proof outcome collapses onto `proxy_required` — this is what keeps the uniform-rejection rule of the proxy-proof spec intact while still telling an operator which layer refused.
+4. **Derive the proxy note from configuration, never from the request.** Emit it on every 401 from a proxy-dependent service, identically. That is what makes it safe to show, and it is still correct in the case it exists for: a proxy that is not forwarding the header 401s *everything*.
+5. **Carry declarations through composition.** If your chain / require-all helpers do not propagate an authenticator's proxy-header dependency, wrapping one silently drops the note — which is exactly the deployment where you needed it.
+
 ## HTTP proxy proof
 
 Proxy proof is an **opt-in additive feature**: a worker can refuse any request that did not arrive through a trusted proxy, which is verified by recomputing an HMAC over a timestamp, a nonce and the worker's own identifier. The full spec lives at [`docs/proxy-proof-spec.md`](proxy-proof-spec.md). A port may:

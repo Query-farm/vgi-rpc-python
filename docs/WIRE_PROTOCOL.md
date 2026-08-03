@@ -551,7 +551,7 @@ Response body: IPC stream (result_schema, 0..N log batches, 1 result/error batch
 
 HTTP 200: Success (even when the response contains an error batch)
 HTTP 400: Protocol error (bad IPC, missing metadata, param validation failure)
-HTTP 401: Authentication failure (plain-text body, NOT Arrow IPC)
+HTTP 401: Authentication failure (JSON envelope or HTML page, NOT Arrow IPC)
 HTTP 404: Unknown method
 HTTP 415: Wrong Content-Type
 HTTP 500: Server implementation error
@@ -698,7 +698,7 @@ is inside the ciphertext, so it cannot be tampered with independently.
 When the server has an `authenticate` callback configured:
 
 - The callback receives the HTTP request and returns an `AuthContext`.
-- On failure (`ValueError` or `PermissionError`), the server returns **HTTP 401** with a **plain-text** body (NOT Arrow IPC), because no method has been resolved yet and no output schema is available.
+- On failure (`ValueError` or `PermissionError`), the server returns **HTTP 401**. The body is NOT Arrow IPC — no method has been resolved yet, so no output schema is available. Its shape is the standardized envelope of `docs/unauthorized-spec.md`: a JSON object carrying a `reason` code from a closed set, mirrored on a `VGI-Auth-Reason` header, or the styled HTML page when the request's `Accept` asks for `text/html`.
 - Other exceptions from the callback propagate as HTTP 500.
 - Clients MUST detect 401 responses before attempting to parse Arrow IPC.
 
@@ -710,8 +710,9 @@ per-worker secret.
 
 - It is a **precondition ANDed with** the `authenticate` callback above, never an alternative
   credential — the caller's `Authorization` header is untouched and still carries the end user.
-- Failure maps to the same **HTTP 401 + plain-text body** as any other authenticate failure. The
-  body MUST NOT echo the reason or the claimed key id.
+- Failure maps to the same **HTTP 401** as any other authenticate failure, carrying the
+  `proxy_required` reason code. The body MUST NOT echo the verifier's reason or the claimed key
+  id — every proof outcome collapses onto that one code.
 - `OPTIONS`, `/.well-known/`, and `{prefix}/health` are exempt in all modes, so load-balancer
   probes and capability discovery keep working.
 - A worker requiring proofs advertises `VGI-Proxy-Proof-Required: true` on every response.
@@ -965,8 +966,8 @@ IPC Stream (error):
 | Type error in implementation | 400 Bad Request |
 
 > **Note**: Even for HTTP 400/500 responses, the response body is a valid
-> Arrow IPC stream containing an error batch, except for 401 (plain text)
-> and 415 (Falcon default response).
+> Arrow IPC stream containing an error batch, except for 401 (JSON or HTML,
+> per `docs/unauthorized-spec.md`) and 415 (Falcon default response).
 
 ---
 

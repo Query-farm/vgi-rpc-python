@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import dataclasses
 import hmac
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 import falcon
 
+from vgi_rpc.http._unauthorized import AuthFailure, AuthReason, declare_proxy_headers, merge_proxy_headers
 from vgi_rpc.rpc import AuthContext
 
 
@@ -35,7 +36,9 @@ def bearer_authenticate(
     Args:
         validate: Callable that receives the raw bearer token string and
             returns an ``AuthContext`` on success.  Must raise ``ValueError``
-            when the token is invalid or unknown.
+            when the token is invalid or unknown — raise
+            :class:`vgi_rpc.http.AuthFailure` to also choose the reason code
+            the 401 carries.
 
     Returns:
         A callback ``(falcon.Request) -> AuthContext`` suitable for
@@ -45,8 +48,10 @@ def bearer_authenticate(
 
     def authenticate(req: falcon.Request) -> AuthContext:
         auth_header = req.get_header("Authorization") or ""
+        if not auth_header:
+            raise AuthFailure(AuthReason.MISSING_CREDENTIAL, "Missing Authorization header")
         if not auth_header.startswith("Bearer "):
-            raise ValueError("Missing or invalid Authorization header")
+            raise AuthFailure(AuthReason.INVALID_CREDENTIAL, "Authorization header is not a Bearer credential")
         token = auth_header[7:]
         return validate(token)
 
@@ -90,7 +95,7 @@ def bearer_authenticate_static(
             if hmac.compare_digest(token_b, known) and match is None:
                 match = ctx
         if match is None:
-            raise ValueError("Unknown bearer token")
+            raise AuthFailure(AuthReason.INVALID_CREDENTIAL, "Unknown bearer token")
         return match
 
     return bearer_authenticate(validate=validate)
@@ -133,19 +138,49 @@ def chain_authenticate(
     def authenticate(req: falcon.Request) -> AuthContext:
         last_error: ValueError | None = None
         reasons: list[str] = []
+        codes: list[AuthReason] = []
         for auth_fn in authenticators:
             try:
                 return auth_fn(req)
             except ValueError as exc:
                 last_error = exc
                 reasons.append(str(exc) or type(exc).__name__)
+                codes.append(exc.reason if isinstance(exc, AuthFailure) else AuthReason.UNAUTHORIZED)
         # Surface every authenticator's reason. The middleware logs and returns
         # ``str(exc)``, so collapsing to a bare "nothing accepted it" would throw
         # away the only diagnostic an operator gets for a 401.
         detail = "; ".join(reasons)
-        raise ValueError(f"No authenticator accepted the request ({detail})") from last_error
+        raise AuthFailure(
+            _combine_reasons(codes),
+            f"No authenticator accepted the request ({detail})",
+        ) from last_error
 
+    declare_proxy_headers(authenticate, *merge_proxy_headers(*authenticators))
     return authenticate
+
+
+def _combine_reasons(codes: Sequence[AuthReason]) -> AuthReason:
+    """Reduce a chain's per-authenticator reason codes to the one the 401 carries.
+
+    Args:
+        codes: One code per authenticator, in the order they were tried.
+
+    Returns:
+        :attr:`AuthReason.MISSING_CREDENTIAL` only when *every* alternative
+        agreed the caller presented nothing — that is the case where telling
+        them to send a credential is actionable. As soon as one alternative
+        saw something and rejected it, that first substantive code wins, since
+        "you sent nothing" would be actively misleading advice.
+
+    """
+    if not codes:
+        return AuthReason.UNAUTHORIZED
+    if all(code is AuthReason.MISSING_CREDENTIAL for code in codes):
+        return AuthReason.MISSING_CREDENTIAL
+    for code in codes:
+        if code is not AuthReason.MISSING_CREDENTIAL:
+            return code
+    return AuthReason.UNAUTHORIZED
 
 
 class PreconditionGate:
@@ -165,7 +200,10 @@ class PreconditionGate:
     is where :func:`require_all` merges the gate's claims.
     """
 
-    __slots__ = ("_fn", "claims_key", "name")
+    # ``vgi_proxy_headers`` is the attribute _unauthorized.proxy_headers_of
+    # reads. It is a declared slot rather than something declare_proxy_headers
+    # sets, because setattr on a slotted instance would raise.
+    __slots__ = ("_fn", "claims_key", "name", "vgi_proxy_headers")
 
     def __init__(
         self,
@@ -173,6 +211,7 @@ class PreconditionGate:
         *,
         name: str,
         claims_key: str,
+        proxy_headers: Sequence[str] = (),
     ) -> None:
         """Wrap a gate callable.
 
@@ -182,11 +221,15 @@ class PreconditionGate:
                 failure — ``ValueError`` is swallowed by chain composition.
             name: Short identifier for error messages.
             claims_key: Key under which the gate's claims are merged.
+            proxy_headers: Names of headers a trusted reverse proxy must
+                inject for this gate to pass. Surfaced on the service's 401
+                responses as the proxy-configuration note.
 
         """
         self._fn = fn
         self.name = name
         self.claims_key = claims_key
+        self.vgi_proxy_headers = tuple(proxy_headers)
 
     def __call__(self, req: falcon.Request) -> Mapping[str, str]:
         """Verify the precondition, returning claims to merge.
@@ -250,4 +293,8 @@ def require_all(
         merged[gate.claims_key] = claims
         return dataclasses.replace(ctx, claims=merged)
 
+    # The gate is the usual source of a proxy-header dependency, but inner may
+    # have one too (mTLS behind a proof-carrying proxy), so both are carried
+    # forward — otherwise wrapping would silently drop the 401's proxy note.
+    declare_proxy_headers(authenticate, *merge_proxy_headers(gate, inner))
     return authenticate

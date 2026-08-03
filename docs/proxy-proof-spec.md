@@ -170,6 +170,8 @@ Steps 1–4 involve no MAC computation and MUST be performed first.
 
 **Rejection is uniform.** The response body MUST NOT contain the verifier's message, the reason code, or any echo of `kid` — an attacker controls that field. Detail goes to logs and metrics only. In `require` mode a failure maps to **HTTP 401**, matching every existing authenticate-callback failure in the framework.
 
+That 401 follows [`docs/unauthorized-spec.md`](unauthorized-spec.md), which is compatible with the paragraph above rather than an exception to it. Every outcome in the table above — `no_proof`, `malformed`, `unknown_kid`, `expired`, `not_yet_valid`, `bad_mac`, `replayed` — collapses onto the single reason code `proxy_required`, with an identical detail string. The code names the stage that refused the request, which the response already said by rejecting it at all; it never names which check was tripped. A `require`-mode worker also carries that spec's proxy-configuration note, again identical on every 401 and derived from configuration rather than from the request, so it cannot be used to probe anything.
+
 ## 7. Modes
 
 | Mode | Behavior |

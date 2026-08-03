@@ -22,11 +22,12 @@ import httpx
 
 try:
     from joserfc import jwt
-    from joserfc.errors import InvalidKeyIdError, JoseError
+    from joserfc.errors import ExpiredTokenError, InvalidKeyIdError, JoseError
     from joserfc.jwk import KeySet
 except ImportError as _exc:
     raise ImportError("jwt_authenticate requires joserfc: pip install vgi-rpc[oauth]") from _exc
 
+from vgi_rpc.http._unauthorized import AuthFailure, AuthReason
 from vgi_rpc.rpc import AuthContext
 
 logger = logging.getLogger(__name__)
@@ -147,10 +148,22 @@ def jwt_authenticate(
         registry.validate(decoded.claims)
         return dict(decoded.claims)
 
+    def _reject(token: str, exc: JoseError) -> AuthFailure:
+        """Log the claim mismatch and build the failure to raise.
+
+        An expired token is separated from a bad one because the two call for
+        different actions: refresh and retry, versus stop and re-authenticate.
+        """
+        _log_claim_mismatch(_peek_claims(token), exc)
+        reason = AuthReason.EXPIRED_CREDENTIAL if isinstance(exc, ExpiredTokenError) else AuthReason.INVALID_CREDENTIAL
+        return AuthFailure(reason, f"Invalid JWT: {exc}")
+
     def authenticate(req: falcon.Request) -> AuthContext:
         auth_header = req.get_header("Authorization") or ""
+        if not auth_header:
+            raise AuthFailure(AuthReason.MISSING_CREDENTIAL, "Missing Authorization header")
         if not auth_header.startswith("Bearer "):
-            raise ValueError("Missing or invalid Authorization header")
+            raise AuthFailure(AuthReason.INVALID_CREDENTIAL, "Authorization header is not a Bearer credential")
 
         token = auth_header[7:]
 
@@ -163,14 +176,10 @@ def jwt_authenticate(
             try:
                 claims = _decode_and_validate(token, keys)
             except JoseError as exc:
-                diag = _peek_claims(token)
-                _log_claim_mismatch(diag, exc)
-                raise ValueError(f"Invalid JWT: {exc}") from exc
+                raise _reject(token, exc) from exc
         except JoseError as exc:
             # Expired tokens, bad claims, etc. — no point refreshing keys
-            diag = _peek_claims(token)
-            _log_claim_mismatch(diag, exc)
-            raise ValueError(f"Invalid JWT: {exc}") from exc
+            raise _reject(token, exc) from exc
 
         principal = str(claims.get(principal_claim, ""))
         return AuthContext(

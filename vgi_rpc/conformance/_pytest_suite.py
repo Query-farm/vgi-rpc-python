@@ -53,6 +53,21 @@ ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 #: importable for runners that install vgi-rpc without the ``http`` extra.
 _PROOF_HEADER = "VGI-Proxy-Proof"
 _PROOF_REQUIRED_HEADER = "VGI-Proxy-Proof-Required"
+_AUTH_REASON_HEADER = "VGI-Auth-Reason"
+_AUTH_PROXY_REQUIRED_HEADER = "VGI-Auth-Proxy-Required"
+#: The closed set of docs/unauthorized-spec.md §3. Spelled out rather than
+#: derived from the enum so that a port silently widening the set in Python
+#: would still fail here.
+_AUTH_REASONS = frozenset(
+    {
+        "missing_credential",
+        "invalid_credential",
+        "expired_credential",
+        "insufficient_scope",
+        "proxy_required",
+        "unauthorized",
+    }
+)
 
 pytestmark = pytest.mark.timeout(5)
 
@@ -1624,6 +1639,167 @@ class TestHealth:
         }
         assert 200 not in candidates.values(), f"RPC must not be served unauthenticated: {candidates}"
         assert 401 in candidates.values(), f"expected an RPC endpoint to require auth, got {candidates}"
+
+
+class TestUnauthorized:
+    """Standardized 401 contract — see ``docs/unauthorized-spec.md``.
+
+    Runs against ``conformance_http_auth_port``, the same reject-all worker
+    ``TestHealth`` uses. The two proxy-note tests additionally need a worker
+    whose auth depends on a proxy, and borrow ``proof_worker_factory``.
+
+    The whole group is capability-gated on the server emitting
+    ``VGI-Auth-Reason``, so a port that has not adopted the contract skips
+    rather than fails. Every test that asserts on a rejection first confirms
+    the endpoint really is gated — a fixture pointed at a path that does not
+    exist would otherwise satisfy these assertions for the wrong reason.
+    """
+
+    @staticmethod
+    def _post(port: int, accept: str | None = None) -> Any:
+        """POST a well-formed unary body to whichever RPC path the runner serves.
+
+        Runners mount RPC at different prefixes and differ in whether auth
+        runs before or after routing, so both candidate layouts are probed and
+        the one that answers 401 is used.
+
+        Args:
+            port: Port of the auth-enforcing conformance worker.
+            accept: Value for the ``Accept`` header, or ``None`` to send none.
+
+        Returns:
+            The ``httpx.Response`` for the gated endpoint.
+
+        """
+        import httpx
+
+        headers = {"content-type": "application/vnd.apache.arrow.stream"}
+        if accept is not None:
+            headers["accept"] = accept
+        body = _unary_request_body("echo_int", value=1)
+        last: Any = None
+        for path in ("/echo_int", "/vgi/echo_int"):
+            last = httpx.post(f"http://127.0.0.1:{port}{path}", content=body, headers=headers, timeout=5.0)
+            if last.status_code == 401:
+                return last
+        pytest.fail(f"no RPC endpoint returned 401 on port {port}; last status {last.status_code}")
+
+    def _gated(self, port: int, accept: str | None = None) -> Any:
+        """Return a 401 response, skipping the test if the port predates this contract."""
+        resp = self._post(port, accept)
+        if _AUTH_REASON_HEADER.lower() not in resp.headers:
+            pytest.skip(f"server does not emit {_AUTH_REASON_HEADER}")
+        return resp
+
+    def test_reason_header_present(self, conformance_http_auth_port: int) -> None:
+        """Every 401 carries a machine-readable reason code."""
+        resp = self._gated(conformance_http_auth_port)
+        assert resp.headers[_AUTH_REASON_HEADER.lower()]
+
+    def test_reason_in_closed_set(self, conformance_http_auth_port: int) -> None:
+        """The code comes from the closed set, so a client can switch on it."""
+        resp = self._gated(conformance_http_auth_port)
+        reason = resp.headers[_AUTH_REASON_HEADER.lower()]
+        assert reason in _AUTH_REASONS, f"{reason!r} is not one of {sorted(_AUTH_REASONS)}"
+
+    def test_json_envelope_for_machine_clients(self, conformance_http_auth_port: int) -> None:
+        """A client that does not ask for HTML gets the JSON envelope."""
+        resp = self._gated(conformance_http_auth_port, accept="*/*")
+        assert resp.headers["content-type"].startswith("application/json"), resp.headers["content-type"]
+        body = resp.json()
+        assert body["error"] == "unauthorized"
+        assert body["reason"] in _AUTH_REASONS
+        assert isinstance(body["detail"], str)
+        # Header and body must agree, or a client reading one and logging the
+        # other reports two different stories about the same rejection.
+        assert body["reason"] == resp.headers[_AUTH_REASON_HEADER.lower()]
+
+    def test_html_page_for_browsers(self, conformance_http_auth_port: int) -> None:
+        """A browser gets a page, and the reason header survives negotiation.
+
+        Rendering a page is optional; answering an HTML request with JSON is
+        allowed, answering a JSON request with HTML is not. So this asserts
+        the content type is one of the two, and that the header — the part a
+        client actually parses — is there either way.
+        """
+        resp = self._gated(conformance_http_auth_port, accept="text/html,application/xhtml+xml")
+        content_type = resp.headers["content-type"]
+        assert content_type.startswith(("text/html", "application/json")), content_type
+        assert resp.headers[_AUTH_REASON_HEADER.lower()] in _AUTH_REASONS
+
+    def test_not_cached(self, conformance_http_auth_port: int) -> None:
+        """A 401 must not be held by a shared cache — the next attempt may be a 200."""
+        resp = self._gated(conformance_http_auth_port)
+        cache_control = resp.headers.get("cache-control", "")
+        assert "no-store" in cache_control or "no-cache" in cache_control, f"got {cache_control!r}"
+
+    def test_no_proxy_note_without_proxy_auth(self, conformance_http_auth_port: int) -> None:
+        """A service with no proxy dependency must stay quiet about proxies.
+
+        A note that shows up on every service is a note operators learn to
+        skip, which costs exactly the deployments it exists to help.
+        """
+        resp = self._gated(conformance_http_auth_port, accept="*/*")
+        assert _AUTH_PROXY_REQUIRED_HEADER.lower() not in resp.headers
+        assert "proxy_hint" not in resp.json()
+
+    def test_proxy_note_when_proxy_required(self, request: pytest.FixtureRequest) -> None:
+        """A require-mode proxy-proof worker explains that a proxy is involved."""
+        from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
+
+        with TestProxyProof._factory(request)(ProofWorkerConfig()) as worker:
+            resp = self._proof_post(worker, token=None)
+            if _AUTH_REASON_HEADER.lower() not in resp.headers:
+                pytest.skip(f"server does not emit {_AUTH_REASON_HEADER}")
+            assert resp.status_code == 401
+            assert resp.headers[_AUTH_PROXY_REQUIRED_HEADER.lower()] == "true"
+            assert resp.headers[_AUTH_REASON_HEADER.lower()] == "proxy_required"
+            assert resp.json()["proxy_hint"], "proxy_hint must be present and non-empty"
+
+    def test_proxy_rejection_is_uniform(self, request: pytest.FixtureRequest) -> None:
+        """Absent, malformed, and bad-MAC proofs are indistinguishable to the caller.
+
+        This is ``docs/proxy-proof-spec.md`` §6 asserted from the outside: the
+        reason code names the stage, never the verifier's diagnosis, so an
+        attacker cannot use the response to tell which check they tripped.
+        """
+        from vgi_rpc.conformance.proof_harness import CONFORMANCE_KID, ProofWorkerConfig, secret_bytes
+        from vgi_rpc.http import mint_proof
+
+        with TestProxyProof._factory(request)(ProofWorkerConfig()) as worker:
+            good = mint_proof(secret_bytes(), CONFORMANCE_KID, worker.config.origin_id)
+            # Positive control: without it, a worker that refuses everything
+            # would pass this test by refusing everything identically.
+            assert self._proof_post(worker, token=good).status_code == 200
+
+            tampered = good[:-1] + ("A" if good[-1] != "A" else "B")
+            responses = [
+                self._proof_post(worker, token=None),
+                self._proof_post(worker, token="not-a-proof"),
+                self._proof_post(worker, token=tampered),
+            ]
+            if _AUTH_REASON_HEADER.lower() not in responses[0].headers:
+                pytest.skip(f"server does not emit {_AUTH_REASON_HEADER}")
+
+            reasons = {r.headers[_AUTH_REASON_HEADER.lower()] for r in responses}
+            assert reasons == {"proxy_required"}, f"reason leaked the verifier's diagnosis: {reasons}"
+            details = {r.json()["detail"] for r in responses}
+            assert len(details) == 1, f"detail distinguishes proof failures: {details}"
+
+    @staticmethod
+    def _proof_post(worker: ProofWorker, *, token: str | None) -> Any:
+        """POST a well-formed unary body to a proof worker, optionally with a proof."""
+        import httpx
+
+        headers = {"content-type": "application/vnd.apache.arrow.stream", "accept": "*/*"}
+        if token is not None:
+            headers[_PROOF_HEADER] = token
+        return httpx.post(
+            worker.rpc_url("echo_int"),
+            content=_unary_request_body("echo_int", value=1),
+            headers=headers,
+            timeout=5.0,
+        )
 
 
 class TestProxyProof:
