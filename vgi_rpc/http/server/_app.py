@@ -14,8 +14,10 @@ are thin delegating wrappers so that :mod:`_resources` can keep calling
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from http import HTTPStatus
 from io import BytesIO, IOBase
+from typing import NamedTuple
 
 import falcon
 
@@ -25,6 +27,40 @@ from vgi_rpc.rpc import MethodNotImplementedError, RpcMethodInfo, RpcServer
 from .._common import _RpcHttpError
 from ._responses import _check_content_type
 from ._state_token import _CallStateCache, _resolve_state_types
+
+
+class _Dispatchers(NamedTuple):
+    """The three per-request entry points, bound once.
+
+    They live in sibling modules that import this one, so they cannot be
+    imported at module scope without a cycle. They used to be imported inside
+    each method instead, which is correct but runs on *every request* -- a
+    sys.modules lookup plus attribute binding per call, visible in a GIL
+    profile. Resolving once and caching keeps the cycle broken without paying
+    per request.
+    """
+
+    unary: Callable[..., tuple[BytesIO, HTTPStatus]]
+    stream_init: Callable[..., BytesIO]
+    stream_exchange: Callable[..., BytesIO]
+
+
+_DISPATCHERS: _Dispatchers | None = None
+
+
+def _dispatchers() -> _Dispatchers:
+    """Resolve and cache the sibling-module dispatch functions."""
+    global _DISPATCHERS
+    if _DISPATCHERS is None:
+        from ._app_stream import _run_stream_exchange_sync, _run_stream_init_sync
+        from ._app_unary import _run_unary_sync
+
+        _DISPATCHERS = _Dispatchers(
+            unary=_run_unary_sync,
+            stream_init=_run_stream_init_sync,
+            stream_exchange=_run_stream_exchange_sync,
+        )
+    return _DISPATCHERS
 
 
 class _HttpRpcApp:
@@ -94,18 +130,12 @@ class _HttpRpcApp:
 
     def _unary_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> tuple[BytesIO, HTTPStatus]:
         """Delegate to :func:`_app_unary._run_unary_sync`."""
-        from ._app_unary import _run_unary_sync
-
-        return _run_unary_sync(self, method_name, info, stream)
+        return _dispatchers().unary(self, method_name, info, stream)
 
     def _stream_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
         """Delegate to :func:`_app_stream._run_stream_init_sync`."""
-        from ._app_stream import _run_stream_init_sync
-
-        return _run_stream_init_sync(self, method_name, info, stream)
+        return _dispatchers().stream_init(self, method_name, info, stream)
 
     def _stream_exchange_sync(self, method_name: str, stream: IOBase) -> BytesIO:
         """Delegate to :func:`_app_stream._run_stream_exchange_sync`."""
-        from ._app_stream import _run_stream_exchange_sync
-
-        return _run_stream_exchange_sync(self, method_name, stream)
+        return _dispatchers().stream_exchange(self, method_name, stream)
