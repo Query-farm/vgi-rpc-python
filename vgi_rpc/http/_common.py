@@ -141,8 +141,12 @@ _ERROR_PAGE_STYLE = """\
          margin: 0 auto; padding: 60px 20px 0; color: #2c2c1e; text-align: center;
          background: #faf8f0; }}
   .logo {{ margin-bottom: 24px; }}
-  .logo img {{ width: 120px; height: 120px; border-radius: 50%;
-               box-shadow: 0 4px 24px rgba(0,0,0,0.12); }}
+  /* The mark is a landscape shield on transparency, so it is sized by width
+     with the height left to follow, and the shadow is a drop-shadow that
+     traces the alpha silhouette. A box-shadow would draw a rectangle's
+     shadow around a shield-shaped hole. */
+  .logo img {{ width: 170px; height: auto;
+               filter: drop-shadow(0 3px 10px rgba(0,0,0,0.18)); }}
   h1 {{ color: #2d5016; margin-bottom: 8px; font-weight: 700; }}
   code {{ font-family: 'JetBrains Mono', monospace; background: #f0ece0;
           padding: 2px 6px; border-radius: 3px; font-size: 0.9em; color: #2c2c1e; }}
