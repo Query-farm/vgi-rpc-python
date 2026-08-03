@@ -78,6 +78,26 @@ _SOURCE_BYTES_ATTR = "_vgi_source_bytes"
 #: or rewind the stream.
 _ROUNDTRIP_IMMUTABLE = frozenset({"InitRequest", "GlobalInitResponse", "BindRequest"})
 
+#: Deserialized `_ROUNDTRIP_IMMUTABLE` objects, keyed on the exact bytes they
+#: were built from. A producer stream re-sends byte-identical init state on
+#: every tick, and the worker read it ~15 times per tick after rebuilding it, so
+#: this removes the rebuild entirely rather than deferring it (measured: the
+#: objects ARE read every tick, so lazy materialization would have skipped
+#: nothing).
+#:
+#: Keyed on the bytes themselves — hashing 11 KB costs ~1 us against a ~500 us
+#: deserialize, and it means a changed payload simply misses rather than
+#: returning something stale.
+#:
+#: **This shares one object between concurrent turns**, which is safe only
+#: because these types are fixed for a stream's life — the client chooses the
+#: init call once and the token's seal pins it. Anything that mutates after
+#: deserialization must not be listed in `_ROUNDTRIP_IMMUTABLE`.
+_IMMUTABLE_CACHE: dict[bytes, object] = {}
+#: 0 disables the object cache (the source-bytes reuse on the serialize side is
+#: unaffected) — present so the two halves can be A/B'd in one binary.
+_IMMUTABLE_CACHE_MAX = 0 if os.environ.get("VGI_RPC_STATE_CACHE") == "0" else 256
+
 
 @runtime_checkable
 class _BytesSerializable(Protocol):
@@ -1061,6 +1081,9 @@ class ArrowSerializableDataclass:
         if isinstance(inner_type, type) and hasattr(inner_type, "deserialize_from_bytes") and isinstance(value, bytes):
             deserialize_method: object = getattr(inner_type, "deserialize_from_bytes")  # noqa: B009
             if callable(deserialize_method):
+                cached = _IMMUTABLE_CACHE.get(value) if _IMMUTABLE_CACHE_MAX else None
+                if cached is not None:
+                    return cached
                 obj = deserialize_method(value, ipc_validation)  # ty: ignore[call-top-callable]
                 # Remember what this was built from, so re-serializing it can
                 # skip the work — see the matching branch in
@@ -1070,6 +1093,13 @@ class ArrowSerializableDataclass:
                         object.__setattr__(obj, _SOURCE_BYTES_ATTR, value)
                     except (AttributeError, TypeError):
                         pass  # __slots__ / frozen without the attr — just re-serialize
+                    else:
+                        # Only cache once the object carries its source bytes, so
+                        # a cache hit and a fresh build serialize identically.
+                        if _IMMUTABLE_CACHE_MAX:
+                            if len(_IMMUTABLE_CACHE) >= _IMMUTABLE_CACHE_MAX:
+                                _IMMUTABLE_CACHE.clear()
+                            _IMMUTABLE_CACHE[value] = obj
                 return obj
 
         # Handle Enum reconstruction from name (uppercase) or value (legacy lowercase)
