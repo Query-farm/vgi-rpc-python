@@ -64,14 +64,29 @@ def _http_worker_cmd() -> list[str]:
     return [sys.executable, _SERVE_FIXTURE_HTTP]
 
 
-def _wait_for_http(port: int, timeout: float = 5.0) -> None:
-    """Poll until the HTTP server is accepting connections."""
+def _wait_for_http(port: int, timeout: float = 30.0) -> None:
+    """Poll until the HTTP server is accepting connections.
+
+    Retries on :class:`httpx.TransportError` rather than on connect errors
+    alone. "Not ready yet" has more than one shape: a server that has bound
+    its socket but has not begun serving *accepts* the connection and then
+    closes it, which arrives as ``RemoteProtocolError("Server disconnected
+    without sending a response")`` -- a sibling of ``ConnectError``, not a
+    subclass. Catching only connect errors let that escape the loop and fail
+    the fixture rather than retry. The window is narrow enough to be invisible
+    when servers start one at a time, and routine under ``-n auto``, where
+    several start at once on a loaded box.
+
+    The per-attempt timeout is deliberately much shorter than the deadline:
+    with both at 5s a single slow attempt consumed the entire budget, so the
+    loop got one try rather than many.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            _ = httpx.get(f"http://127.0.0.1:{port}/", timeout=5.0)
+            _ = httpx.get(f"http://127.0.0.1:{port}/", timeout=2.0)
             return
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+        except httpx.TransportError:
             time.sleep(0.1)
     raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
 
