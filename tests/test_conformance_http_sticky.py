@@ -1143,12 +1143,38 @@ class _Exited(Exception):
         self.code = code
 
 
+_REAL_TIMER = threading.Timer
+"""The genuine ``threading.Timer``, captured before any monkeypatching."""
+
+
 class _CapturedTimer:
-    """``threading.Timer`` stand-in that records the callback instead of scheduling it."""
+    """``threading.Timer`` stand-in that records the callback instead of scheduling it.
+
+    ``threading.Timer`` can only be intercepted globally -- the code under
+    test does ``import threading`` and calls ``threading.Timer(...)``, so it
+    resolves through the shared module every time. That makes this stub visible
+    to *every* subsystem that schedules a timer while it is installed, and one
+    of them matters: on a platform without ``SIGALRM`` (Windows) pytest-timeout
+    falls back to its thread method and arms its watchdog with a
+    ``threading.Timer`` of its own. Under ``timeout_func_only`` that arming
+    happens inside the test body, i.e. inside this patch, and it passes the
+    4-argument form -- which is how this stub started raising ``TypeError:
+    takes 3 positional arguments but 4 were given`` on Windows only.
+
+    So the stub captures the drain timer it exists for and hands everything
+    else to the real implementation, rather than assuming it is the only
+    caller.
+    """
 
     calls: list[tuple[float, Any]] = []  # noqa: RUF012 — test-local recorder, not shared state
 
-    def __init__(self, interval: float, function: Any) -> None:
+    def __new__(cls, interval: float, function: Any, *args: Any, **kwargs: Any) -> Any:
+        """Capture the drain-grace timer; delegate any other timer to the real one."""
+        if getattr(function, "__name__", "") != "_grace_expired":
+            return _REAL_TIMER(interval, function, *args, **kwargs)
+        return object.__new__(cls)
+
+    def __init__(self, interval: float, function: Any, *args: Any, **kwargs: Any) -> None:
         self.daemon = False
         _CapturedTimer.calls.append((interval, function))
 
