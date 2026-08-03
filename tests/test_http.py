@@ -482,15 +482,29 @@ class TestResumableServerStream:
 class TestStateTokenStateEncoding:
     """State-byte encoding for HTTP stream state tokens."""
 
-    def test_single_state_is_stored_as_raw_state_bytes(self) -> None:
-        """Single-state methods serialize raw state bytes without an envelope."""
+    def test_single_state_is_stored_without_an_envelope(self) -> None:
+        """Single-state methods store the state payload with no wrapper."""
+        from vgi_rpc.http.server._state_token import _deserialize_state_bytes
+        from vgi_rpc.utils import COMPACT_MARKER
+
         state = TransformState(factor=2.0)
-        raw = state.serialize_to_bytes()
         encoded = _serialize_state_bytes(state, TransformState)
-        assert encoded == raw
+
+        # TransformState is flat, so it takes the compact codec rather than
+        # Arrow IPC -- a one-row Arrow stream costs a schema message, a batch
+        # message and an EOS marker to carry a single float.
+        assert encoded[:1] == COMPACT_MARKER
+        state_cls, raw = _resolve_state_cls(encoded, TransformState)
+        assert state_cls is TransformState
+        assert raw == encoded  # no envelope was added
+        decoded = _deserialize_state_bytes(state_cls, raw, IpcValidation.NONE)
+        assert isinstance(decoded, TransformState)
+        assert decoded.factor == 2.0
 
     def test_union_state_uses_numeric_tag(self) -> None:
-        """Union-state methods serialize a numeric tag plus raw state bytes."""
+        """Union-state methods prefix a numeric tag; the payload follows unchanged."""
+        from vgi_rpc.http.server._state_token import _deserialize_state_bytes
+
         members = (TransformState, FailStreamState)
         state = FailStreamState(emitted=False)
         encoded = _serialize_state_bytes(state, members)
@@ -498,9 +512,41 @@ class TestStateTokenStateEncoding:
         assert encoded[:1] == b"\x00"
         state_cls, raw = _resolve_state_cls(encoded, members)
         assert state_cls is FailStreamState
-        decoded = state_cls.deserialize_from_bytes(raw, IpcValidation.NONE)
+        decoded = _deserialize_state_bytes(state_cls, raw, IpcValidation.NONE)
         assert isinstance(decoded, FailStreamState)
         assert decoded.emitted is False
+
+    def test_state_encoding_round_trips_for_both_codecs(self) -> None:
+        """Whichever codec a state class takes, the value survives the round trip.
+
+        The encoding is chosen per class -- flat states go compact, states
+        holding Arrow-native values keep Arrow IPC -- and the reader
+        dispatches on the payload's first byte. What must hold either way is
+        that the state comes back unchanged.
+        """
+        import pyarrow as pa
+
+        from vgi_rpc.http.server._state_token import _deserialize_state_bytes
+        from vgi_rpc.utils import COMPACT_MARKER, ArrowSerializableDataclass
+
+        @dataclass
+        class BatchHoldingState(StreamState):
+            """Not flat: an Arrow value has to go through the Arrow codec."""
+
+            payload: pa.RecordBatch | None = None
+
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+                raise NotImplementedError
+
+        assert issubclass(BatchHoldingState, ArrowSerializableDataclass)
+        batch = pa.RecordBatch.from_pydict({"n": [1, 2, 3]})
+        rich = BatchHoldingState(payload=batch)
+        encoded = _serialize_state_bytes(rich, BatchHoldingState)
+        assert encoded[:1] != COMPACT_MARKER, "a RecordBatch field must not take the compact path"
+        back = _deserialize_state_bytes(BatchHoldingState, encoded, IpcValidation.NONE)
+        assert isinstance(back, BatchHoldingState)
+        assert back.payload is not None
+        assert back.payload.equals(batch)
 
     def test_expired_token_400(self) -> None:
         """Token with a timestamp 2 hours in the past is rejected as expired."""

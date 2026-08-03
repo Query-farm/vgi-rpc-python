@@ -66,6 +66,7 @@ from ._responses import _current_response_status, _enforce_response_budgets
 from ._state_token import (
     _compute_aad,
     _compute_call_aad,
+    _deserialize_state_bytes,
     _mint_call_token,
     _mint_cursor_token,
     _open_call_token,
@@ -1127,7 +1128,7 @@ def _unpack_and_recover_state(
 
     try:
         state_cls, raw_state_bytes = _resolve_state_cls(state_bytes, state_info)
-        state_obj = state_cls.deserialize_from_bytes(raw_state_bytes, app._server.ipc_validation)
+        state_obj = _deserialize_state_bytes(state_cls, raw_state_bytes, app._server.ipc_validation)
         state_obj.bind_call_state(resolved.call_state)
         state_obj.rehydrate(app._server.implementation)
     except Exception as exc:

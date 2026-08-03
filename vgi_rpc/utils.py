@@ -24,7 +24,9 @@ ValidatedReader : Wrapper around RecordBatchStreamReader with configurable valid
 
 """
 
+import hashlib
 import os
+import struct
 import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, Field, dataclass
@@ -52,6 +54,7 @@ import pyarrow as pa
 from pyarrow import ipc
 
 __all__ = [
+    "COMPACT_MARKER",
     "IPC_WRITE_OPTIONS",
     "ArrowSerializableDataclass",
     "ArrowType",
@@ -59,10 +62,12 @@ __all__ = [
     "IPCError",
     "IpcValidation",
     "ValidatedReader",
+    "deserialize_compact",
     "deserialize_record_batch",
     "empty_batch",
     "new_ipc_stream",
     "read_single_record_batch",
+    "serialize_compact",
     "serialize_record_batch",
     "validate_batch",
 ]
@@ -672,6 +677,228 @@ def _row_encoder(cls: "type[ArrowSerializableDataclass]") -> _RowEncoder:
     return encoder
 
 
+# ---------------------------------------------------------------------------
+# Compact codec for flat dataclasses
+#
+# Arrow IPC is a columnar container: every stream carries a schema message, a
+# batch message, an end-of-stream marker and 8-byte alignment padding. Those
+# are fixed costs, and for a one-row record of scalars they dominate
+# completely -- a two-int state measured 416 bytes and 36us to encode, against
+# 16 bytes and 0.21us for the same two integers via struct.
+#
+# That is the wrong tool for a *record*, and stream cursor states are records:
+# a counter, an offset, an opaque blob. So flat dataclasses get a positional
+# binary encoding instead, and anything Arrow is actually good at (nested
+# dataclasses, RecordBatch, Schema, lists, maps, enums) keeps the Arrow path.
+#
+# Deliberately NOT a general replacement for serialize_to_bytes(): that method
+# is a published wire contract used for catalog opaque data and nested fields.
+# This is opt-in, for callers that own both ends of their bytes -- today the
+# HTTP state token, which is server-minted, opaque, and short-lived.
+# ---------------------------------------------------------------------------
+
+COMPACT_MARKER = b"\x01"
+"""First byte of a compact payload.
+
+Distinguishable from the alternatives by construction: an Arrow IPC stream
+starts with 0xFF (continuation indicator) and the state token's union
+envelope starts with 0x00, so a reader can dispatch on one byte without
+being told which encoding it was handed.
+"""
+
+_COMPACT_BYTES = 0
+_COMPACT_STR = 1
+_COMPACT_INT = 2
+_COMPACT_FLOAT = 3
+_COMPACT_BOOL = 4
+
+_COMPACT_KINDS: dict[object, int] = {
+    bytes: _COMPACT_BYTES,
+    str: _COMPACT_STR,
+    int: _COMPACT_INT,
+    float: _COMPACT_FLOAT,
+    bool: _COMPACT_BOOL,
+}
+
+
+class _CompactField(NamedTuple):
+    name: str
+    kind: int
+
+
+class _CompactPlan(NamedTuple):
+    """Per-class layout for the compact codec, or absent when unsupported."""
+
+    fields: tuple[_CompactField, ...]
+    fingerprint: int
+    """Hash over field names and kinds.
+
+    A positional encoding has no self-describing schema, so a class that
+    gains, loses or retypes a field would silently misparse older payloads --
+    a wrong-value failure, not an error. The fingerprint turns that into a
+    clean rejection.
+    """
+    transient_defaults: tuple[tuple[str, object, object], ...]
+    """``(name, default, default_factory)`` for transient fields."""
+
+
+def _compact_plan(cls: "type[ArrowSerializableDataclass]") -> "_CompactPlan | None":
+    """Return the compact layout for ``cls``, or ``None`` if it needs Arrow.
+
+    Supported: ``bytes``, ``str``, ``int``, ``float``, ``bool`` and ``| None``
+    of each. Everything else -- nested dataclasses, ``pa.RecordBatch``,
+    ``pa.Schema``, lists, dicts, enums -- falls back, because those are what
+    Arrow is for.
+
+    Args:
+        cls: The dataclass to plan for.
+
+    Returns:
+        The cached plan, or ``None`` when the class is not flat.
+
+    """
+    if "_cached_compact_plan" in cls.__dict__:
+        return cast("_CompactPlan | None", cls.__dict__["_cached_compact_plan"])
+
+    fields: list[_CompactField] = []
+    transient: list[tuple[str, object, object]] = []
+    supported = True
+    for field_plan in _serialization_plan(cls).fields:
+        if field_plan.transient:
+            transient.append((field_plan.name, field_plan.default, field_plan.default_factory))
+            continue
+        inner, _nullable = _is_optional_type(field_plan.unwrapped_type)
+        kind = _COMPACT_KINDS.get(inner)
+        if kind is None:
+            supported = False
+            break
+        fields.append(_CompactField(field_plan.name, kind))
+
+    plan: _CompactPlan | None = None
+    if supported:
+        digest = hashlib.blake2b("|".join(f"{f.name}:{f.kind}" for f in fields).encode(), digest_size=4).digest()
+        plan = _CompactPlan(
+            fields=tuple(fields),
+            fingerprint=struct.unpack("<I", digest)[0],
+            transient_defaults=tuple(transient),
+        )
+    cls._cached_compact_plan = plan
+    return plan
+
+
+def serialize_compact(obj: "ArrowSerializableDataclass") -> bytes | None:
+    """Encode ``obj`` with the compact codec, or ``None`` if it is not flat.
+
+    Args:
+        obj: The dataclass instance to encode.
+
+    Returns:
+        ``COMPACT_MARKER`` + fingerprint + positional fields, or ``None``
+        when the caller should fall back to :meth:`serialize_to_bytes`.
+
+    """
+    plan = _compact_plan(type(obj))
+    if plan is None:
+        return None
+    # Read through _to_row_dict() rather than getattr: subclasses override it
+    # to derive serialized fields from transient ones (VGI's stream states
+    # pack their user state into a bytes field there), and reading attributes
+    # directly would silently skip that and emit stale values -- a cursor that
+    # never advances, not an error. For a flat class the conversion inside is
+    # the identity fast path, so this costs nothing.
+    row = obj._to_row_dict()
+    out = [COMPACT_MARKER, struct.pack("<I", plan.fingerprint)]
+    for field in plan.fields:
+        value = row.get(field.name)
+        if value is None:
+            out.append(b"\x00")
+            continue
+        out.append(b"\x01")
+        if field.kind == _COMPACT_BYTES:
+            raw = cast("bytes", value)
+            out.append(struct.pack("<I", len(raw)))
+            out.append(raw)
+        elif field.kind == _COMPACT_STR:
+            encoded = cast("str", value).encode()
+            out.append(struct.pack("<I", len(encoded)))
+            out.append(encoded)
+        elif field.kind == _COMPACT_BOOL:
+            out.append(b"\x01" if value else b"\x00")
+        elif field.kind == _COMPACT_INT:
+            out.append(struct.pack("<q", value))
+        else:
+            out.append(struct.pack("<d", value))
+    return b"".join(out)
+
+
+def deserialize_compact(cls: "type[ArrowSerializableDataclass]", data: bytes) -> Any:
+    """Decode a payload produced by :func:`serialize_compact`.
+
+    Args:
+        cls: The dataclass to rebuild.
+        data: The compact payload, marker byte included.
+
+    Returns:
+        The reconstructed instance.
+
+    Raises:
+        IPCError: The class is not flat, the payload is truncated, or its
+            fingerprint does not match this class -- meaning the payload was
+            written against a different shape of the same class.
+
+    """
+    plan = _compact_plan(cls)
+    if plan is None:
+        msg = f"{cls.__name__} has no compact layout"
+        raise IPCError(msg)
+    if len(data) < 5 or data[:1] != COMPACT_MARKER:
+        msg = f"Malformed compact payload for {cls.__name__}"
+        raise IPCError(msg)
+    (fingerprint,) = struct.unpack_from("<I", data, 1)
+    if fingerprint != plan.fingerprint:
+        msg = f"Compact payload for {cls.__name__} was written against a different field layout"
+        raise IPCError(msg)
+
+    kwargs: dict[str, Any] = {}
+    pos = 5
+    size = len(data)
+    for field in plan.fields:
+        if pos >= size:
+            msg = f"Truncated compact payload for {cls.__name__}"
+            raise IPCError(msg)
+        present = data[pos]
+        pos += 1
+        if not present:
+            kwargs[field.name] = None
+            continue
+        if field.kind in (_COMPACT_BYTES, _COMPACT_STR):
+            (length,) = struct.unpack_from("<I", data, pos)
+            pos += 4
+            end = pos + length
+            if end > size:
+                msg = f"Truncated compact payload for {cls.__name__}"
+                raise IPCError(msg)
+            raw = data[pos:end]
+            pos = end
+            kwargs[field.name] = raw if field.kind == _COMPACT_BYTES else raw.decode()
+        elif field.kind == _COMPACT_BOOL:
+            kwargs[field.name] = bool(data[pos])
+            pos += 1
+        elif field.kind == _COMPACT_INT:
+            kwargs[field.name] = struct.unpack_from("<q", data, pos)[0]
+            pos += 8
+        else:
+            kwargs[field.name] = struct.unpack_from("<d", data, pos)[0]
+            pos += 8
+
+    for name, default, factory in plan.transient_defaults:
+        if default is not MISSING:
+            kwargs[name] = default
+        elif factory is not MISSING:
+            kwargs[name] = cast("Callable[[], object]", factory)()
+    return cls(**kwargs)
+
+
 def _is_optional_type(python_type: object) -> tuple[object, bool]:
     """Check if a type is Optional (X | None) and extract the inner type.
 
@@ -924,6 +1151,11 @@ class ArrowSerializableDataclass:
     # Per-class row-encoder cache, populated lazily by _row_encoder().
     # Same cls.__dict__ discipline as above.
     _cached_row_encoder: ClassVar["_RowEncoder | None"] = None
+
+    # Per-class compact-codec layout, populated lazily by _compact_plan().
+    # None means "not flat, use Arrow"; the key's presence in cls.__dict__ is
+    # what distinguishes "computed, unsupported" from "not yet computed".
+    _cached_compact_plan: ClassVar["_CompactPlan | None"] = None
 
     def _to_row_dict(self) -> dict[str, object]:
         """Convert instance to a dictionary for Arrow batch construction.
