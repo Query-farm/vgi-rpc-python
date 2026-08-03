@@ -25,7 +25,18 @@ Issues = "https://github.com/Query-farm/vgi-rpc-python/issues"
 Documentation = "https://vgi-rpc-python.query.farm/"
 
 [project.optional-dependencies]
-http = ["falcon>=3.0", "httpx>=0.24", "waitress>=2.0", "zstandard>=0.20", "pycryptodome>=3.20"]
+http = [
+    "falcon>=3.0",
+    "httpx>=0.24",
+    "waitress>=2.0",
+    "zstandard>=0.20",
+    "pycryptodome>=3.20",
+    # AEAD backend, selected by platform rather than at runtime -- see the
+    # BACKENDS section of vgi_rpc/crypto.py. PyNaCl is declared only where it
+    # measured faster for our token sizes; elsewhere PyCryptodome is used and
+    # this is simply not installed.
+    "pynacl>=1.6.0; sys_platform == 'linux'",
+]
 s3 = ["boto3>=1.28"]
 gcs = ["google-cloud-storage>=2.10"]
 cli = ["typer>=0.9", "httpx>=0.24", "filelock>=3.13"]
@@ -99,6 +110,12 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "waitress.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyNaCl ships no stubs. Only used behind the AEAD backend selection in
+# vgi_rpc.crypto, and only installed on platforms where it is the faster one.
+module = "nacl.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
