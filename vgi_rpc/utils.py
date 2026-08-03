@@ -32,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import MISSING, Field, dataclass
 from dataclasses import fields as dataclass_fields
 from enum import Enum
+from functools import lru_cache
 from io import BytesIO, IOBase
 from types import TracebackType, UnionType
 from typing import (
@@ -55,6 +56,7 @@ from pyarrow import ipc
 
 __all__ = [
     "COMPACT_MARKER",
+    "IPC_READ_OPTIONS",
     "IPC_WRITE_OPTIONS",
     "ArrowSerializableDataclass",
     "ArrowType",
@@ -214,12 +216,42 @@ class ValidatedReader:
         self._reader.__exit__(exc_type, exc_val, exc_tb)  # type: ignore[no-untyped-call]
 
 
-def empty_batch(schema: pa.Schema) -> pa.RecordBatch:
-    """Return an empty batch conforming to the schema."""
+IPC_READ_OPTIONS = ipc.IpcReadOptions()
+"""The framework's standard :class:`pyarrow.ipc.IpcReadOptions`.
+
+Built once. With ``options=None`` pyarrow allocates a fresh one per reader
+(``_ensure_default_ipc_read_options``), and we open readers per request.
+Small on its own; free to avoid.
+"""
+
+
+@lru_cache(maxsize=512)
+def _empty_batch_cached(schema: pa.Schema) -> pa.RecordBatch:
+    """Memoized :func:`empty_batch`. See there for why sharing is safe."""
     return pa.RecordBatch.from_arrays(
         [_empty_array(field.type) for field in schema],
         schema=schema,
     )
+
+
+def empty_batch(schema: pa.Schema) -> pa.RecordBatch:
+    """Return an empty batch conforming to the schema.
+
+    Cached per schema. A zero-row batch is a pure function of its schema and
+    Arrow batches are immutable, so one instance can be shared by every
+    caller and every thread — nobody can write to it.
+
+    Worth caching because it is per-request work whose cost scales with
+    column count: measured 3.9us for one column but 33.9us for twelve, since
+    each column needs its own zero-length array. The streaming path builds
+    one per continuation turn as the token-carrying sentinel, so a wide
+    output schema was paying that on every turn.
+
+    Bounded rather than unbounded: schemas are not always fixed per class the
+    way our other cache keys are — projection pushdown derives new ones per
+    query shape — so this caps rather than growing without limit.
+    """
+    return _empty_batch_cached(schema)
 
 
 def _empty_array(arrow_type: pa.DataType) -> "pa.Array[Any]":
@@ -371,7 +403,10 @@ def deserialize_record_batch(
     # choking in open_stream ("was null or length 0").
     if not data:
         return pa.record_batch([], schema=pa.schema([])), None
-    with ValidatedReader(ipc.open_stream(pa.BufferReader(data)), ipc_validation) as reader:
+    # Hand pyarrow the bytes directly: wrapping them in a BufferReader first
+    # costs an extra object and sends pyarrow down its path-like probe
+    # (_stringify_path) before it gets to the buffer. Measured 7.6us -> 5.7us.
+    with ValidatedReader(ipc.open_stream(data, options=IPC_READ_OPTIONS), ipc_validation) as reader:
         try:
             batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         except StopIteration:
@@ -409,7 +444,7 @@ def read_single_record_batch(
 
     """
     try:
-        with ValidatedReader(ipc.open_stream(stream), ipc_validation) as reader:
+        with ValidatedReader(ipc.open_stream(stream, options=IPC_READ_OPTIONS), ipc_validation) as reader:
             try:
                 batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
             except StopIteration:
@@ -1392,7 +1427,7 @@ class ArrowSerializableDataclass:
             # open_stream ("Tried reading schema message, was null or length 0").
             if len(value) == 0:
                 return None
-            reader = ValidatedReader(pa.ipc.open_stream(value), ipc_validation)
+            reader = ValidatedReader(pa.ipc.open_stream(value, options=IPC_READ_OPTIONS), ipc_validation)
             return reader.read_next_batch()
 
         # Handle types with deserialize_from_bytes class method
