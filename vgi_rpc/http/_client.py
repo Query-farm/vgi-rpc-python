@@ -55,7 +55,7 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.rpc._debug import fmt_batch, wire_http_logger
 from vgi_rpc.rpc._wire import _read_stream_header
-from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch
+from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch, new_ipc_stream
 
 from ._common import (
     _ARROW_CONTENT_TYPE,
@@ -202,7 +202,7 @@ def _build_pointer_request_body(original_body: bytes, location_url: str) -> byte
     pointer_batch, loc_md = make_external_location_batch(batch.schema, location_url)
     merged = merge_metadata(custom_metadata, loc_md)
     buf = BytesIO()
-    with ipc.new_stream(buf, batch.schema) as writer:
+    with new_ipc_stream(buf, batch.schema) as writer:
         writer.write_batch(pointer_batch, custom_metadata=merged)
     return buf.getvalue()
 
@@ -499,7 +499,7 @@ class HttpStreamSession:
         req_buf = BytesIO()
         state_md = self._token_metadata(self._state_bytes)
         merged = merge_metadata(cm_to_write, state_md)
-        with ipc.new_stream(req_buf, batch_to_write.schema) as writer:
+        with new_ipc_stream(req_buf, batch_to_write.schema) as writer:
             writer.write_batch(batch_to_write, custom_metadata=merged)
         body = self._maybe_externalize_request(req_buf.getvalue())
 
@@ -556,7 +556,7 @@ class HttpStreamSession:
         """Send a continuation request and return the new response reader."""
         req_buf = BytesIO()
         state_md = self._token_metadata(token)
-        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+        with new_ipc_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
         resp = _post_with_retry(
@@ -737,7 +737,7 @@ class HttpStreamSession:
             wire_http_logger.debug("HTTP stream cancel: method=%s", self._method)
         req_buf = BytesIO()
         cancel_md = self._token_metadata(token, cancel=True)
-        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+        with new_ipc_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=cancel_md)
         try:
             resp = self._client.post(
@@ -883,7 +883,7 @@ def http_introspect(
                 b"vgi_rpc.request_version": b"1",
             }
         )
-        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+        with new_ipc_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(
                 pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA),
                 custom_metadata=request_metadata,

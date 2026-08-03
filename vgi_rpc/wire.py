@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 import pyarrow.ipc as ipc
 
+from vgi_rpc.utils import new_ipc_stream
+
 if TYPE_CHECKING:
     from vgi_rpc.external import ServerExternalConfig
 
@@ -272,6 +274,6 @@ def write_unary_result(envelope_schema: pa.Schema, result_bytes: bytes) -> bytes
     """
     batch = pa.record_batch([pa.array([result_bytes], type=pa.binary())], schema=envelope_schema)
     buf = BytesIO()
-    with ipc.new_stream(buf, envelope_schema) as writer:
+    with new_ipc_stream(buf, envelope_schema) as writer:
         writer.write_batch(batch)
     return buf.getvalue()

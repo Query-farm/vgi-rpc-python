@@ -24,7 +24,7 @@ from vgi_rpc.rpc._transport import RpcTransport
 from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, rpc_methods
 from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_stream_header, _read_unary_response, _send_request
 from vgi_rpc.shm import ShmSegment, maybe_write_to_shm
-from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch
+from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch, new_ipc_stream
 
 # Exceptions that indicate the transport peer has disconnected or the IPC
 # data is truncated/corrupt.  Caught on the client side and wrapped into
@@ -121,7 +121,7 @@ class StreamSession:
 
         first_write = self._input_writer is None
         if self._input_writer is None:
-            self._input_writer = ipc.new_stream(self._writer_stream, batch_to_write.schema)
+            self._input_writer = new_ipc_stream(self._writer_stream, batch_to_write.schema)
             self._input_schema = batch_to_write.schema
         if wire_stream_logger.isEnabledFor(logging.DEBUG):
             wire_stream_logger.debug(
@@ -237,7 +237,7 @@ class StreamSession:
         if self._input_writer is not None:
             self._input_writer.close()
         else:
-            with ipc.new_stream(self._writer_stream, _EMPTY_SCHEMA):
+            with new_ipc_stream(self._writer_stream, _EMPTY_SCHEMA):
                 pass
         if self._output_reader is None:
             try:
@@ -269,7 +269,7 @@ class StreamSession:
         cancel_md = pa.KeyValueMetadata({CANCEL_KEY: b"1"})
         try:
             if self._input_writer is None:
-                with ipc.new_stream(self._writer_stream, _EMPTY_SCHEMA) as writer:
+                with new_ipc_stream(self._writer_stream, _EMPTY_SCHEMA) as writer:
                     writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=cancel_md)
             else:
                 schema = self._input_schema if self._input_schema is not None else _EMPTY_SCHEMA

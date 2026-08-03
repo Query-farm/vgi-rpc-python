@@ -51,6 +51,7 @@ from vgi_rpc.metadata import (
     merge_metadata,
     strip_keys,
 )
+from vgi_rpc.utils import new_ipc_stream
 
 __all__ = [
     "ShmAllocator",
@@ -105,7 +106,7 @@ class _ShmSink(RawIOBase):
     (memoryview format ``'b'``, signed).  We cast to unsigned ``'B'``
     before writing to the SHM memoryview.
 
-    Inherits from ``RawIOBase`` to satisfy ``ipc.new_stream()`` type
+    Inherits from ``RawIOBase`` to satisfy ``new_ipc_stream()`` type
     requirements.
     """
 
@@ -150,7 +151,7 @@ def _serialize_for_shm(batch: pa.RecordBatch) -> pa.Buffer:
     ``ShmSegment.allocate_and_write`` instead.
     """
     stream_sink = pa.BufferOutputStream()
-    writer = ipc.new_stream(stream_sink, batch.schema)
+    writer = new_ipc_stream(stream_sink, batch.schema)
     writer.write_batch(batch)
     writer.close()
     stream_buf = stream_sink.getvalue()
@@ -175,7 +176,7 @@ def _deserialize_from_shm(buf: pa.Buffer, schema: pa.Schema) -> pa.RecordBatch:
     """Deserialize a batch from SHM storage.
 
     For non-dictionary schemas, reads a full IPC stream written by
-    ``_ShmSink`` + ``ipc.new_stream()`` via ``ipc.open_stream()``.
+    ``_ShmSink`` + ``new_ipc_stream()`` via ``ipc.open_stream()``.
 
     For dictionary schemas, reconstructs a valid IPC stream by prepending
     a schema message and appending an EOS marker, then reads via
@@ -188,7 +189,7 @@ def _deserialize_from_shm(buf: pa.Buffer, schema: pa.Schema) -> pa.RecordBatch:
     # Dictionary path: reconstruct full IPC stream
     # 1. Create schema message bytes (new_stream + close = schema + EOS)
     schema_sink = pa.BufferOutputStream()
-    schema_writer = ipc.new_stream(schema_sink, schema)
+    schema_writer = new_ipc_stream(schema_sink, schema)
     schema_writer.close()
     schema_stream = schema_sink.getvalue().to_pybytes()
     schema_msg = schema_stream[: -len(_IPC_EOS)]  # strip trailing EOS
@@ -410,7 +411,7 @@ class ShmSegment:
     ) -> tuple[int, int] | None:
         """Serialize batch into the shared memory segment.
 
-        For non-dictionary batches, uses ``_ShmSink`` + ``ipc.new_stream()``
+        For non-dictionary batches, uses ``_ShmSink`` + ``new_ipc_stream()``
         to write an IPC stream directly into SHM — Arrow's C++ writer
         writes through the sink with minimal Python call overhead.
 
@@ -436,7 +437,7 @@ class ShmSegment:
             if offset is None:
                 return None
             sink = _ShmSink(shm_buf, offset)
-            writer = ipc.new_stream(sink, batch.schema)
+            writer = new_ipc_stream(sink, batch.schema)
             writer.write_batch(batch)
             writer.close()
             return offset, sink.bytes_written

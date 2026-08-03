@@ -51,7 +51,7 @@ from vgi_rpc.rpc import (
     _read_raw_stream_header,
     _write_request,
 )
-from vgi_rpc.utils import IpcValidation, ValidatedReader
+from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
 
 # ---------------------------------------------------------------------------
 # Output format enum
@@ -502,7 +502,7 @@ def _open_arrow_dest(config: _CliConfig) -> Iterator[IOBase]:
 
 def _write_arrow_output(config: _CliConfig, batch: pa.RecordBatch) -> None:
     """Write a single batch as a complete IPC stream to the configured destination."""
-    with _open_arrow_dest(config) as dest, ipc.new_stream(dest, batch.schema) as writer:
+    with _open_arrow_dest(config) as dest, new_ipc_stream(dest, batch.schema) as writer:
         writer.write_batch(batch)
 
 
@@ -616,7 +616,7 @@ def _run_stream_arrow(
     with _open_arrow_dest(config) as dest:
         # Write header as its own IPC stream if present
         if header_batch is not None:
-            with ipc.new_stream(dest, header_batch.schema) as hw:
+            with new_ipc_stream(dest, header_batch.schema) as hw:
                 hw.write_batch(header_batch)
 
         writer: ipc.RecordBatchStreamWriter | None = None
@@ -624,13 +624,13 @@ def _run_stream_arrow(
             if not has_input:
                 for ab in session:
                     if writer is None:
-                        writer = ipc.new_stream(dest, ab.batch.schema)
+                        writer = new_ipc_stream(dest, ab.batch.schema)
                     writer.write_batch(ab.batch)
             else:
                 for ab_input in _iter_exchange_inputs(config):
                     ab_output = session.exchange(ab_input)
                     if writer is None:
-                        writer = ipc.new_stream(dest, ab_output.batch.schema)
+                        writer = new_ipc_stream(dest, ab_output.batch.schema)
                     writer.write_batch(ab_output.batch)
         except RpcError as e:
             _emit_rpc_error(e)

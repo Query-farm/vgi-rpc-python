@@ -52,6 +52,7 @@ import pyarrow as pa
 from pyarrow import ipc
 
 __all__ = [
+    "IPC_WRITE_OPTIONS",
     "ArrowSerializableDataclass",
     "ArrowType",
     "Transient",
@@ -60,6 +61,7 @@ __all__ = [
     "ValidatedReader",
     "deserialize_record_batch",
     "empty_batch",
+    "new_ipc_stream",
     "read_single_record_batch",
     "serialize_record_batch",
     "validate_batch",
@@ -233,6 +235,69 @@ def _empty_array(arrow_type: pa.DataType) -> "pa.Array[Any]":
     return pa.nulls(0, type=arrow_type)  # type: ignore[call-overload, no-any-return]  # ty: ignore[no-matching-overload]
 
 
+def _build_write_options() -> ipc.IpcWriteOptions | None:
+    """Resolve this process's standard IPC write options, once.
+
+    Two reasons this exists rather than passing ``options=None`` everywhere:
+
+    First, it is the single place to state what the framework's IPC output
+    *is*.  Buffer-level compression stays off deliberately — the HTTP
+    transport compresses whole bodies and whole state tokens, where the
+    codec sees far more redundancy than it can find inside one column's
+    buffers, and doing both would spend CPU twice for nothing.
+
+    Second, it stops pyarrow re-deriving the same answer on every writer.
+    When ``options`` is ``None``, ``RecordBatchStreamWriter.__init__`` calls
+    ``_get_legacy_format_default``, which re-reads two environment variables
+    and allocates a fresh options object every time — ~1.07us, of which
+    ~0.78us is the ``os.environ`` lookups.  We build ~4 writers per HTTP
+    stream turn, and those variables are process-global legacy escape
+    hatches that cannot change under us.
+
+    Returns ``None`` — deferring to pyarrow's own path — when either legacy
+    escape hatch is set, rather than trying to mirror semantics we do not
+    own.
+
+    Returns:
+        The shared options object, or ``None`` to let pyarrow decide.
+
+    """
+    if os.environ.get("ARROW_PRE_0_15_IPC_FORMAT", "0") != "0":
+        return None
+    if os.environ.get("ARROW_PRE_1_0_METADATA_VERSION", "0") != "0":
+        return None
+    return ipc.IpcWriteOptions(compression=None)
+
+
+IPC_WRITE_OPTIONS: ipc.IpcWriteOptions | None = _build_write_options()
+"""The framework's standard :class:`pyarrow.ipc.IpcWriteOptions`.
+
+Shared by every IPC writer the framework opens.  See
+:func:`_build_write_options` for what it settles and why it is resolved once.
+"""
+
+
+def new_ipc_stream(sink: Any, schema: pa.Schema) -> ipc.RecordBatchStreamWriter:
+    """Open an Arrow IPC stream writer with the framework's standard options.
+
+    Use this in place of ``pyarrow.ipc.new_stream`` throughout the framework
+    so every stream we produce carries the same, stated options
+    (:data:`IPC_WRITE_OPTIONS`) instead of whatever pyarrow re-derives per
+    writer.  Signature-compatible with ``ipc.new_stream``: returns the writer,
+    so it works both as a context manager and as a long-lived writer.
+
+    Args:
+        sink: Destination — a ``pa.NativeFile``, Python file object, or any
+            other sink ``RecordBatchStreamWriter`` accepts.
+        schema: Schema for the stream.
+
+    Returns:
+        A writer for the given sink.
+
+    """
+    return ipc.RecordBatchStreamWriter(sink, schema, options=IPC_WRITE_OPTIONS)
+
+
 def serialize_record_batch(
     destination: IOBase,
     batch: pa.RecordBatch,
@@ -250,7 +315,7 @@ def serialize_record_batch(
         custom_metadata: Optional additional metadata to include.
 
     """
-    with ipc.RecordBatchStreamWriter(destination, batch.schema) as writer:
+    with ipc.RecordBatchStreamWriter(destination, batch.schema, options=IPC_WRITE_OPTIONS) as writer:
         writer.write_batch(batch, custom_metadata=custom_metadata)
 
 
@@ -385,7 +450,14 @@ def _validate_single_row_batch(
     if data.num_rows > 1:
         raise ValueError(f"Expected single-row RecordBatch for {class_name} deserialization, got {data.num_rows} rows")
 
-    first_row: dict[str, object] = data.to_pylist()[0]
+    # Column-at-a-time rather than ``to_pylist()[0]``.  ``to_pylist`` builds a
+    # list of row dicts for the whole batch through pyarrow's general
+    # converter; we want exactly one row, and reading each column's single
+    # scalar directly skips that machinery. Measured 1.6-1.7x faster on real
+    # payloads, with identical values. Driven off the *batch's* schema, not
+    # the class's, so a batch carrying unknown or missing columns still reads
+    # the same as before.
+    first_row: dict[str, object] = {name: data.column(index)[0].as_py() for index, name in enumerate(data.schema.names)}
 
     if required_fields:
         found_fields = set(first_row.keys())
@@ -553,6 +625,51 @@ def _serialization_plan(cls: "type[ArrowSerializableDataclass]") -> _Serializati
     plan = _SerializationPlan(fields=tuple(field_plans), required_fields=required_fields)
     cls._cached_serialization_plan = plan
     return plan
+
+
+class _RowEncoder(NamedTuple):
+    """Per-class inputs for building a one-row RecordBatch (see ``_row_encoder``)."""
+
+    schema: pa.Schema
+    names: tuple[str, ...]
+    types: tuple[pa.DataType, ...]
+    nulls: tuple["pa.Array[Any]", ...]
+    """A length-1 all-null array per column, reused for every unset field."""
+
+
+def _row_encoder(cls: "type[ArrowSerializableDataclass]") -> _RowEncoder:
+    """Return the cached per-class row encoder, computing it on first use.
+
+    The schema, its column names and types, and a length-1 null array per
+    column are all fixed once the class exists.  Arrow arrays are immutable,
+    so one null array per column can be shared by every batch that class
+    ever produces — including concurrently, across threads.
+
+    Kept separate from :func:`_serialization_plan` because this one needs
+    ``ARROW_SCHEMA``, and the plan deliberately does not: a class whose
+    schema cannot be generated should still be able to resolve its field
+    plan.
+
+    Args:
+        cls: The ``ArrowSerializableDataclass`` subclass to build for.
+
+    Returns:
+        The cached ``_RowEncoder`` for exactly this class.
+
+    """
+    cached = cls.__dict__.get("_cached_row_encoder")
+    if cached is not None:
+        return cast("_RowEncoder", cached)
+    schema = cls.ARROW_SCHEMA
+    types = tuple(field.type for field in schema)
+    encoder = _RowEncoder(
+        schema=schema,
+        names=tuple(schema.names),
+        types=types,
+        nulls=tuple(pa.nulls(1, type=arrow_type) for arrow_type in types),
+    )
+    cls._cached_row_encoder = encoder
+    return encoder
 
 
 def _is_optional_type(python_type: object) -> tuple[object, bool]:
@@ -804,6 +921,10 @@ class ArrowSerializableDataclass:
     # checks cls.__dict__, never this inherited default).
     _cached_serialization_plan: ClassVar[_SerializationPlan | None] = None
 
+    # Per-class row-encoder cache, populated lazily by _row_encoder().
+    # Same cls.__dict__ discipline as above.
+    _cached_row_encoder: ClassVar["_RowEncoder | None"] = None
+
     def _to_row_dict(self) -> dict[str, object]:
         """Convert instance to a dictionary for Arrow batch construction.
 
@@ -852,7 +973,7 @@ class ArrowSerializableDataclass:
         # Handle pa.RecordBatch -> serialize to bytes
         if isinstance(value, pa.RecordBatch):
             sink = pa.BufferOutputStream()
-            with ipc.RecordBatchStreamWriter(sink, value.schema) as writer:
+            with new_ipc_stream(sink, value.schema) as writer:
                 writer.write_batch(value)
             return sink.getvalue().to_pybytes()
 
@@ -890,12 +1011,34 @@ class ArrowSerializableDataclass:
     def _serialize(self) -> pa.RecordBatch:
         """Serialize this instance to a single-row RecordBatch.
 
+        Builds the row column-by-column rather than through
+        ``RecordBatch.from_pylist``.  ``from_pylist`` is pyarrow's fully
+        general Python-to-Arrow converter — it infers per value, walks
+        every column through the same machinery, and for a one-row batch
+        that machinery costs far more than the conversion.  Going per
+        column lets unset fields reuse a cached all-null array
+        (:func:`_row_encoder`) instead of converting ``None`` through the
+        general path, which matters because a wire dataclass is mostly
+        unset in practice: 15 of ``InitRequest``'s 17 columns on a plain
+        table scan.
+
+        Measured on real payloads: 3.8x faster for ``InitRequest``, 2.4x
+        for ``BindRequest``, with byte-identical output.
+
         Returns:
             A pa.RecordBatch containing one row with the instance's field values.
 
         """
         row_dict = self._to_row_dict()
-        return pa.RecordBatch.from_pylist([row_dict], schema=self.ARROW_SCHEMA)
+        encoder = _row_encoder(type(self))
+        arrays: list[pa.Array[Any]] = []
+        for index, name in enumerate(encoder.names):
+            value = row_dict.get(name)
+            if value is None:
+                arrays.append(encoder.nulls[index])
+            else:
+                arrays.append(pa.array([value], type=encoder.types[index]))
+        return pa.RecordBatch.from_arrays(arrays, schema=encoder.schema)
 
     def serialize(self, dest: IOBase) -> None:
         """Serialize this instance to an Arrow IPC stream.

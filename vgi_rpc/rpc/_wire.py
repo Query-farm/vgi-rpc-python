@@ -71,6 +71,7 @@ from vgi_rpc.utils import (
     ValidatedReader,
     _is_optional_type,
     empty_batch,
+    new_ipc_stream,
 )
 
 if TYPE_CHECKING:
@@ -205,7 +206,7 @@ def _write_request(
             fmt_kwargs(kwargs),
             fmt_metadata(custom_metadata),
         )
-    with ipc.new_stream(writer_stream, params_schema) as writer:
+    with new_ipc_stream(writer_stream, params_schema) as writer:
         writer.write_batch(batch, custom_metadata=custom_metadata)
 
 
@@ -248,7 +249,7 @@ def _write_error_stream(
     writer_stream: IOBase, schema: pa.Schema, exc: BaseException, server_id: str | None = None
 ) -> None:
     """Write a complete IPC stream containing just an error batch."""
-    with ipc.new_stream(writer_stream, schema) as writer:
+    with new_ipc_stream(writer_stream, schema) as writer:
         _write_error_batch(writer, schema, exc, server_id=server_id)
 
 
@@ -750,7 +751,7 @@ def _write_stream_header(
         batch, cm, _ext_bytes = maybe_externalize_batch(batch, None, external_config)
     else:
         cm = None
-    with ipc.new_stream(dest, batch.schema) as writer:
+    with new_ipc_stream(dest, batch.schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, batch.schema)
         if cm is not None:

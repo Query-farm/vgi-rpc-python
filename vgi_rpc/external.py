@@ -89,7 +89,7 @@ from vgi_rpc.metadata import (
     LOG_LEVEL_KEY,
     merge_metadata,
 )
-from vgi_rpc.utils import IpcValidation, ValidatedReader
+from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
 
 try:
     from opentelemetry import trace as _otel_trace
@@ -723,7 +723,7 @@ def maybe_externalize_collector(
 
     # Serialize all batches into one IPC stream
     buf = BytesIO()
-    with ipc.new_stream(buf, out.output_schema) as writer:
+    with new_ipc_stream(buf, out.output_schema) as writer:
         for ab in out.batches:
             if ab.custom_metadata is not None:
                 writer.write_batch(ab.batch, custom_metadata=ab.custom_metadata)
@@ -809,7 +809,7 @@ def maybe_externalize_batch(
 
     # Serialize the single batch as IPC stream
     buf = BytesIO()
-    with ipc.new_stream(buf, batch.schema) as writer:
+    with new_ipc_stream(buf, batch.schema) as writer:
         if custom_metadata is not None:
             writer.write_batch(batch, custom_metadata=custom_metadata)
         else:

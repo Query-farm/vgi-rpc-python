@@ -88,7 +88,7 @@ from vgi_rpc.transport_options import (
     TRANSPORT_OPTIONS_METHOD_NAME,
     worker_transport_metadata,
 )
-from vgi_rpc.utils import IpcValidation, ValidatedReader
+from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
 
 # ---------------------------------------------------------------------------
 # Server helpers
@@ -775,7 +775,7 @@ class RpcServer:
                     SERVER_ID_KEY: self._server_id.encode(),
                 }
                 empty = pa.RecordBatch.from_arrays([], schema=_EMPTY_SCHEMA)
-                with ipc.new_stream(transport.writer, _EMPTY_SCHEMA) as writer:
+                with new_ipc_stream(transport.writer, _EMPTY_SCHEMA) as writer:
                     writer.write_batch(empty, custom_metadata=caps_md)
                 auth, transport_md = _get_auth_and_metadata()
                 _emit_access_log(
@@ -899,7 +899,7 @@ class RpcServer:
         # Pre-built __describe__ batch — write directly, skip implementation call.
         if self._describe_batch is not None and info.name == "__describe__":
             _record_output(self._describe_batch)
-            with ipc.new_stream(transport.writer, self._describe_batch.schema) as writer:
+            with new_ipc_stream(transport.writer, self._describe_batch.schema) as writer:
                 writer.write_batch(self._describe_batch, custom_metadata=self._describe_metadata)
             auth, transport_md = _get_auth_and_metadata()
             _emit_access_log(
@@ -934,7 +934,7 @@ class RpcServer:
                 hook = None
         _hook_exc: BaseException | None = None
         try:
-            with ipc.new_stream(transport.writer, schema) as writer:
+            with new_ipc_stream(transport.writer, schema) as writer:
                 sink.flush_contents(writer, schema)
                 try:
                     result = getattr(self._impl, info.name)(**kwargs)
@@ -1047,7 +1047,7 @@ class RpcServer:
 
         prev_input: AnnotatedBatch | None = None
         try:
-            with ipc.new_stream(transport.writer, output_schema) as output_writer:
+            with new_ipc_stream(transport.writer, output_schema) as output_writer:
                 sink.flush_contents(output_writer, output_schema)
                 cumulative_bytes = 0
                 try:

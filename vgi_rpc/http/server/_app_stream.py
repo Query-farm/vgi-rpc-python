@@ -59,7 +59,7 @@ from vgi_rpc.rpc._common import (
     _record_input,
     _record_output,
 )
-from vgi_rpc.utils import ArrowSerializableDataclass, ValidatedReader, empty_batch
+from vgi_rpc.utils import ArrowSerializableDataclass, ValidatedReader, empty_batch, new_ipc_stream
 
 from .._common import _RpcHttpError
 from ._responses import _current_response_status, _enforce_response_budgets
@@ -432,7 +432,7 @@ def _run_http_exchange_init(
                 sink=sink,
                 method_name=method_name,
             )
-        with ipc.new_stream(resp_buf, output_schema) as writer:
+        with new_ipc_stream(resp_buf, output_schema) as writer:
             sink.flush_contents(writer, output_schema)
             state_metadata = pa.KeyValueMetadata({STATE_KEY: token, CALL_STATE_KEY: call_token})
             zero_batch = empty_batch(output_schema)
@@ -563,7 +563,7 @@ def _run_stream_exchange_sync(
                 except Exception:
                     _logger.debug("on_cancel hook failed", exc_info=True)
                 resp_buf = BytesIO()
-                with ipc.new_stream(resp_buf, output_schema):
+                with new_ipc_stream(resp_buf, output_schema):
                     pass
                 resp_buf.seek(0)
                 return resp_buf
@@ -745,7 +745,7 @@ def _run_http_exchange_turn(
         # Write response batches (log + data, in order).
         resp_buf = BytesIO()
         exchange_external_bytes = 0
-        with ipc.new_stream(resp_buf, output_schema) as writer:
+        with new_ipc_stream(resp_buf, output_schema) as writer:
             exchange_external_bytes = _flush_collector(writer, out, app._server.external_config)
 
         # Wire body cap — checked post-flush since BytesIO writes are free.
@@ -792,7 +792,7 @@ def _exchange_error_response(
     # so the documented hard-cap contract holds for stream-exchange.
     _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
     resp_buf = BytesIO()
-    with ipc.new_stream(resp_buf, output_schema) as err_writer:
+    with new_ipc_stream(resp_buf, output_schema) as err_writer:
         _write_error_batch(err_writer, output_schema, exc, server_id=server_id)
     resp_buf.seek(0)
     return resp_buf
@@ -924,7 +924,7 @@ def _run_http_producer_turn(
     externalization_enabled = (
         app._server.external_config is not None and app._server.external_config.storage is not None
     )
-    with ipc.new_stream(write_sink, schema) as writer:
+    with new_ipc_stream(write_sink, schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, schema)
         cumulative_bytes = 0

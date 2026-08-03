@@ -12,9 +12,9 @@ from io import BytesIO, IOBase
 
 import falcon
 import pyarrow as pa
-from pyarrow import ipc
 
 from vgi_rpc.rpc import _EMPTY_SCHEMA, _write_error_batch
+from vgi_rpc.utils import new_ipc_stream
 
 from .._common import _ARROW_CONTENT_TYPE, RPC_ERROR_HEADER, _RpcHttpError
 
@@ -110,7 +110,7 @@ def _error_response_stream(
 
     """
     buf = BytesIO()
-    with ipc.new_stream(buf, schema) as writer:
+    with new_ipc_stream(buf, schema) as writer:
         _write_error_batch(writer, schema, exc, server_id=server_id)
     buf.seek(0)
     return buf

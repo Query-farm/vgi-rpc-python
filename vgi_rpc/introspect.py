@@ -50,7 +50,7 @@ from vgi_rpc.rpc import (
     _dispatch_log_or_error,
     _drain_stream,
 )
-from vgi_rpc.utils import IpcValidation, ValidatedReader
+from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
 
 __all__ = [
     "DESCRIBE_METHOD_NAME",
@@ -448,7 +448,7 @@ def introspect(
     request_metadata = pa.KeyValueMetadata(
         {RPC_METHOD_KEY: DESCRIBE_METHOD_NAME.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION}
     )
-    with ipc.new_stream(transport.writer, _EMPTY_SCHEMA) as writer:
+    with new_ipc_stream(transport.writer, _EMPTY_SCHEMA) as writer:
         empty_batch = pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
         writer.write_batch(empty_batch, custom_metadata=request_metadata)
 

@@ -12,7 +12,6 @@ from io import BytesIO, IOBase
 from typing import TYPE_CHECKING, Literal
 
 import pyarrow as pa
-from pyarrow import ipc
 
 from vgi_rpc.external import predict_externalize_bytes_for_batch
 from vgi_rpc.metadata import PROTOCOL_VERSION_KEY
@@ -42,6 +41,7 @@ from vgi_rpc.rpc._common import (
     _DispatchHook,
     _record_output,
 )
+from vgi_rpc.utils import new_ipc_stream
 
 from .._common import _RpcHttpError
 from ._responses import _enforce_response_budgets
@@ -104,7 +104,7 @@ def _run_unary_sync(
         if describe_batch is not None and method_name == "__describe__":
             _record_output(describe_batch)
             resp_buf = BytesIO()
-            with ipc.new_stream(resp_buf, describe_batch.schema) as writer:
+            with new_ipc_stream(resp_buf, describe_batch.schema) as writer:
                 writer.write_batch(describe_batch, custom_metadata=app._server._describe_metadata)
             resp_buf.seek(0)
             auth, transport_metadata = _get_auth_and_metadata()
@@ -157,7 +157,7 @@ def _run_unary_sync(
         _hook_exc: BaseException | None = None
         try:
             external_bytes_written = 0
-            with ipc.new_stream(resp_buf, schema) as writer:
+            with new_ipc_stream(resp_buf, schema) as writer:
                 sink.flush_contents(writer, schema)
                 try:
                     result = getattr(app._server.implementation, method_name)(**kwargs)
@@ -220,7 +220,7 @@ def _run_unary_sync(
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
                     resp_buf = BytesIO()
-                    with ipc.new_stream(resp_buf, schema) as err_writer:
+                    with new_ipc_stream(resp_buf, schema) as err_writer:
                         _write_error_batch(err_writer, schema, overshoot, server_id=server_id)
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         finally:

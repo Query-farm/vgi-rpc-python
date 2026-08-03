@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Literal
 
 import falcon
 import pyarrow as pa
-from pyarrow import ipc
 
 from vgi_rpc.rpc import (
     MethodType,
@@ -28,6 +27,7 @@ from vgi_rpc.rpc import (
     _write_error_batch,
 )
 from vgi_rpc.rpc._common import CookieSpec, _current_response_cookies
+from vgi_rpc.utils import new_ipc_stream
 
 from .._common import (
     _ARROW_CONTENT_TYPE,
@@ -256,7 +256,7 @@ class _UploadUrlResource:
         error_type = ""
         _upload_exc: BaseException | None = None
         try:
-            with ipc.new_stream(resp_buf, _UPLOAD_URL_SCHEMA) as writer:
+            with new_ipc_stream(resp_buf, _UPLOAD_URL_SCHEMA) as writer:
                 sink.flush_contents(writer, _UPLOAD_URL_SCHEMA)
                 try:
                     urls = [provider.generate_upload_url(pa.schema([])) for _ in range(count)]
