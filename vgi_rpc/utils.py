@@ -66,19 +66,6 @@ __all__ = [
 ]
 
 
-#: Attribute holding the bytes a nested field was deserialized from.
-_SOURCE_BYTES_ATTR = "_vgi_source_bytes"
-
-#: Nested state types that are FIXED for the life of a stream, so re-serializing
-#: them must reproduce the bytes they arrived as. The client chooses the init
-#: call once, at init; every later turn echoes it back inside the sealed
-#: continuation token precisely so it cannot be changed mid-stream. Anything
-#: whose value legitimately changes per turn (the user state / scan cursor) must
-#: NOT be listed here — it would pin the first turn's value and silently stall
-#: or rewind the stream.
-_ROUNDTRIP_IMMUTABLE = frozenset({"InitRequest", "GlobalInitResponse", "BindRequest"})
-
-
 @runtime_checkable
 class _BytesSerializable(Protocol):
     """Protocol for objects that can serialize themselves to bytes."""
@@ -840,13 +827,7 @@ class ArrowSerializableDataclass:
             # ArrowSerializableDataclass, serialize to IPC bytes instead of
             # converting to a struct dict.
             if field_plan.binary_dataclass and isinstance(value, ArrowSerializableDataclass):
-                # Round-trip identity for stream-pinned nested state — see
-                # `_ROUNDTRIP_IMMUTABLE`. This is the branch `_init_call` and
-                # `_init_response` actually take (a binary-annotated nested
-                # dataclass never reaches `_convert_value_for_serialization`),
-                # so the cache has to be checked here to have any effect.
-                cached = getattr(value, _SOURCE_BYTES_ATTR, None)
-                value = cached if cached is not None else value.serialize_to_bytes()
+                value = value.serialize_to_bytes()
             else:
                 value = self._convert_value_for_serialization(value)
             row[field_plan.name] = value
@@ -883,24 +864,6 @@ class ArrowSerializableDataclass:
 
         # Handle objects with serialize_to_bytes() method
         if isinstance(value, _BytesSerializable):
-            # Round-trip identity: if this object was deserialized from bytes and
-            # its type is pinned for the life of a stream, re-emit those exact
-            # bytes instead of rebuilding them. A producer stream is stateless
-            # per turn — the whole state, including the init call, is sealed into
-            # the continuation token and echoed back every tick — so `_init_call`
-            # (11 KB of a 12.9 KB state) was being re-serialized 23+ times per
-            # scan to reproduce byte-for-byte what arrived. Measured at ~7 ms per
-            # tick, against 66 ms for the Azure read it accompanies.
-            #
-            # Restricted to `_ROUNDTRIP_IMMUTABLE` rather than applied to every
-            # nested dataclass: reusing source bytes is only correct while nobody
-            # mutates the object after deserialization, which is a contract these
-            # types have (the init call is fixed by the client at init and then
-            # pinned — that is what the token's AEAD seal enforces) and other
-            # state types do not.
-            cached = getattr(value, _SOURCE_BYTES_ATTR, None)
-            if cached is not None:
-                return cached
             return value.serialize_to_bytes()
 
         # Handle Enum -> .name (string representation of the enum member)
@@ -1061,16 +1024,7 @@ class ArrowSerializableDataclass:
         if isinstance(inner_type, type) and hasattr(inner_type, "deserialize_from_bytes") and isinstance(value, bytes):
             deserialize_method: object = getattr(inner_type, "deserialize_from_bytes")  # noqa: B009
             if callable(deserialize_method):
-                obj = deserialize_method(value, ipc_validation)  # ty: ignore[call-top-callable]
-                # Remember what this was built from, so re-serializing it can
-                # skip the work — see the matching branch in
-                # `_convert_value_for_serialization`.
-                if type(obj).__name__ in _ROUNDTRIP_IMMUTABLE:
-                    try:
-                        object.__setattr__(obj, _SOURCE_BYTES_ATTR, value)
-                    except (AttributeError, TypeError):
-                        pass  # __slots__ / frozen without the attr — just re-serialize
-                return obj
+                return deserialize_method(value, ipc_validation)  # ty: ignore[call-top-callable]
 
         # Handle Enum reconstruction from name (uppercase) or value (legacy lowercase)
         if isinstance(inner_type, type) and issubclass(inner_type, Enum):

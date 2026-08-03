@@ -217,29 +217,6 @@ _StateInfo = type[StreamState] | tuple[type[StreamState], ...]
 _UNION_STATE_MARKER = b"\x00"
 
 
-#: Memoized `pa.Schema.serialize()` results. Both schemas handed to
-#: `_mint_continuation_token` are frozen at init (see its docstring) but were
-#: re-serialized on EVERY turn — an output schema alone is ~4.3 KB of the 18 KiB
-#: token. Keyed on `id()` while holding a strong reference to the schema, so the
-#: id cannot be recycled onto a different object; identity is re-checked on hit,
-#: so a stale entry degrades to a recompute rather than a wrong answer.
-_SCHEMA_BYTES_CACHE: dict[int, tuple[pa.Schema, bytes]] = {}
-_SCHEMA_CACHE_MAX = 512
-
-
-def _schema_bytes(schema: pa.Schema) -> bytes:
-    """Serialize a per-stream schema, reusing the last result for that object."""
-    key = id(schema)
-    hit = _SCHEMA_BYTES_CACHE.get(key)
-    if hit is not None and hit[0] is schema:
-        return hit[1]
-    data: bytes = schema.serialize().to_pybytes()
-    if len(_SCHEMA_BYTES_CACHE) >= _SCHEMA_CACHE_MAX:
-        _SCHEMA_BYTES_CACHE.clear()
-    _SCHEMA_BYTES_CACHE[key] = (schema, data)
-    return data
-
-
 def _mint_continuation_token(
     state: StreamState,
     state_info: _StateInfo,
@@ -284,8 +261,8 @@ def _mint_continuation_token(
 
     """
     state_bytes = _serialize_state_bytes(state, state_info)
-    schema_bytes = _schema_bytes(output_schema)
-    input_schema_bytes = _schema_bytes(input_schema)
+    schema_bytes = output_schema.serialize().to_pybytes()
+    input_schema_bytes = input_schema.serialize().to_pybytes()
     token = _seal_state_token(
         state_bytes,
         schema_bytes,
