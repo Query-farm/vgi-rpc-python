@@ -1180,7 +1180,18 @@ class TestDrainSignalHandlers:
         installed: dict[int, Any] = {}
         _CapturedTimer.calls = []
 
+        # pytest-timeout arms its own SIGALRM handler around the test body, and
+        # because the suite sets `timeout_func_only` that happens *after* this
+        # fixture runs. Pass SIGALRM through to the real implementation rather
+        # than capturing it: swallowing it would both disable the timeout for
+        # these tests and pollute the drain-handler assertions below, which are
+        # only ever about SIGTERM/SIGINT. SIGALRM does not exist on Windows.
+        _real_signal = signal.signal
+        _sigalrm = getattr(signal, "SIGALRM", None)
+
         def _fake_signal(sig: int, handler: Any) -> Any:
+            if _sigalrm is not None and sig == _sigalrm:
+                return _real_signal(sig, handler)
             installed[sig] = handler
             return None
 

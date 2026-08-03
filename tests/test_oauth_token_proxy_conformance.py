@@ -61,6 +61,13 @@ CLIENT_ID = "my-client-id"
 CLIENT_SECRET = "my-client-secret"
 PREFIX = "/vgi"
 
+_POLL_INTERVAL = 0.01
+"""``serve_forever`` poll interval for the per-test servers in this module.
+
+Both servers here are function-scoped, so ``shutdown()``'s worst-case wait is
+paid once per test. Kept well below the stdlib's 0.5s default.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Mock IdP
@@ -125,7 +132,13 @@ class _MockIdP:
         self._server = HTTPServer(("127.0.0.1", 0), Handler)
         port = self._server.server_address[1]
         self.url = f"http://127.0.0.1:{port}"
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # poll_interval bounds how long shutdown() blocks waiting for the loop
+        # to notice the stop flag. The stdlib default (0.5s) is paid on every
+        # teardown of this function-scoped fixture -- across 8 tests x 3
+        # implementations that alone was ~12s of the suite's wall-clock.
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": _POLL_INTERVAL}, daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -194,7 +207,9 @@ def _python_server(idp_url: str) -> Iterator[str]:
     )
 
     httpd = make_server("127.0.0.1", port, app)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    # See the _MockIdP.start note: the default 0.5s poll_interval is charged to
+    # every teardown of this per-test server.
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": _POLL_INTERVAL}, daemon=True)
     thread.start()
     try:
         _wait_for_http(f"http://127.0.0.1:{port}{PREFIX}")

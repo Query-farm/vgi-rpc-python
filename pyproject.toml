@@ -176,9 +176,30 @@ unused-type-ignore-comment = "ignore"  # these comments are required by mypy
 python-version = "3.13"
 
 [tool.pytest.ini_options]
-addopts = "--mypy --ruff --timeout=50 --benchmark-disable -m 'not benchmark'"
+# -n auto: the suite is subprocess- and socket-heavy, so it spends much of its
+#   wall-clock blocked rather than computing. Server fixtures are session-scoped
+#   and bind ephemeral ports / uuid-suffixed socket paths, so each xdist worker
+#   builds its own isolated set with no cross-worker collisions.
+# --dist loadfile: distribute by module, not by individual test. Two reasons,
+#   both load-bearing:
+#     1. Session-scoped fixtures are per-*worker*. Splitting one module across
+#        workers makes each of them spawn its own copy of that module's server
+#        farm (test_conformance.py alone pulls in ~15 worker subprocesses), and
+#        that spawn storm is what pushes fixture setup past its budget.
+#     2. It preserves within-module test ordering, which the stats tests rely on.
+# --durations=25: keep the slowest tests visible. Without it, regressions in
+#   test runtime are invisible until the whole suite feels slow.
+addopts = "-n auto --dist loadfile --durations=25 --mypy --ruff --timeout=50 --benchmark-disable -m 'not benchmark'"
 markers = ["benchmark: performance benchmarks (deselected by default)"]
 testpaths = ["tests"]
+# Charge the timeout to the test body only, not to fixture setup/teardown.
+# The conformance suite's `pytest.mark.timeout(5)` (see
+# vgi_rpc/conformance/_pytest_suite.py) exists to catch a hung RPC call; without
+# this, that same 5s budget also has to cover session-scoped fixtures spawning
+# worker subprocesses. That was always fragile and became a hard failure under
+# `-n auto`, where several workers spawn their server farms at once and a cold
+# subprocess start easily exceeds 5s.
+timeout_func_only = true
 
 [tool.coverage.run]
 # Each subprocess writes to its own data file (.coverage.<hostname>.<pid>)
@@ -247,6 +268,7 @@ dev = [
     "pytest-mypy>=0.10",
     "pytest-ruff>=0.1",
     "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.6",
     "ruff>=0.1",
     "ty>=0.0.8",
     "typer>=0.9",

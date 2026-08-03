@@ -316,26 +316,26 @@ class TestPipeStats:
 
     def test_exchange_stream_stats(self, caplog: pytest.LogCaptureFixture) -> None:
         """Exchange stream counts exchange batches in stats."""
-        client_transport, server_transport = make_pipe_pair()
-        server = RpcServer(_StatsService, _StatsServiceImpl())
-        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
-        thread.start()
-        try:
-            with (
-                caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"),
-                RpcConnection(_StatsService, client_transport) as proxy,
-            ):
-                session = proxy.echo()
-                results = []
-                for val in [10, 20]:
-                    ab = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"x": [val]}))
-                    batch = session.exchange(ab)
-                    results.append(batch.batch.column("y")[0].as_py())
-                session.close()
-        finally:
-            client_transport.close()
-            thread.join(timeout=5)
-            server_transport.close()
+        # See test_describe_stats: the access record comes from the server
+        # thread, so the level must stay raised across the join.
+        with caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"):
+            client_transport, server_transport = make_pipe_pair()
+            server = RpcServer(_StatsService, _StatsServiceImpl())
+            thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+            thread.start()
+            try:
+                with RpcConnection(_StatsService, client_transport) as proxy:
+                    session = proxy.echo()
+                    results = []
+                    for val in [10, 20]:
+                        ab = AnnotatedBatch(batch=pa.RecordBatch.from_pydict({"x": [val]}))
+                        batch = session.exchange(ab)
+                        results.append(batch.batch.column("y")[0].as_py())
+                    session.close()
+            finally:
+                client_transport.close()
+                thread.join(timeout=5)
+                server_transport.close()
 
         assert results == [20, 40]
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
@@ -350,17 +350,21 @@ class TestPipeStats:
         """__describe__ path produces stats with 1 output batch."""
         from vgi_rpc.introspect import introspect
 
-        client_transport, server_transport = make_pipe_pair()
-        server = RpcServer(_StatsService, _StatsServiceImpl(), enable_describe=True)
-        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
-        thread.start()
-        try:
-            with caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"):
+        # The access record is emitted on the *server* thread, which can lag the
+        # client-side return. Keep the level raised until that thread is joined
+        # -- otherwise at_level restores the level first and the late record is
+        # filtered out before caplog ever sees it.
+        with caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"):
+            client_transport, server_transport = make_pipe_pair()
+            server = RpcServer(_StatsService, _StatsServiceImpl(), enable_describe=True)
+            thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+            thread.start()
+            try:
                 desc = introspect(client_transport)
-        finally:
-            client_transport.close()
-            thread.join(timeout=5)
-            server_transport.close()
+            finally:
+                client_transport.close()
+                thread.join(timeout=5)
+                server_transport.close()
 
         assert desc is not None
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
