@@ -548,6 +548,46 @@ class TestStateTokenStateEncoding:
         assert back.payload is not None
         assert back.payload.equals(batch)
 
+    def test_enum_valued_field_round_trips_like_the_arrow_codec(self) -> None:
+        """A value whose type diverges from its annotation still round-trips.
+
+        ``_to_row_dict()`` renders an ``Enum`` member as its ``.name`` string
+        whatever the member's mixin type, so a field annotated ``bytes`` and
+        holding a ``class Ns(bytes, Enum)`` member reaches the encoder as a
+        ``str``. A codec that took its field types from the annotation and
+        trusted them wrote the wrong type here; msgpack encodes the value it
+        is actually given, and decoding runs back through the same conversion
+        the Arrow path uses, so the two codecs agree.
+        """
+        import enum
+
+        from vgi_rpc.http.server._state_token import _deserialize_state_bytes
+
+        class Ns(bytes, enum.Enum):
+            ALPHA = b"_ns/alpha"
+
+        @dataclass
+        class EnumHoldingState(StreamState):
+            """Flat by annotation, but one field holds an Enum member."""
+
+            ns: bytes = b""
+
+            def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+                raise NotImplementedError
+
+        state = EnumHoldingState(ns=Ns.ALPHA)
+        compact = _deserialize_state_bytes(
+            EnumHoldingState,
+            _serialize_state_bytes(state, EnumHoldingState),
+            IpcValidation.NONE,
+        )
+        # Whatever the value decodes to, it must be what Arrow would have
+        # produced -- the transport must not change the object.
+        arrow = EnumHoldingState.deserialize_from_bytes(state.serialize_to_bytes())
+        assert isinstance(arrow, EnumHoldingState)
+        assert isinstance(compact, EnumHoldingState)
+        assert compact.ns == arrow.ns
+
     def test_expired_token_400(self) -> None:
         """Token with a timestamp 2 hours in the past is rejected as expired."""
         import time

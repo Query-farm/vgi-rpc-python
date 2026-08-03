@@ -1,6 +1,6 @@
 [project]
 name = "vgi-rpc"
-version = "0.31.0"
+version = "0.32.0"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -31,6 +31,11 @@ http = [
     "waitress>=2.0",
     "zstandard>=0.20",
     "pycryptodome>=3.20",
+    # State-token encoding for flat stream states (see the compact codec in
+    # vgi_rpc/utils.py). The HTTP state token is its only caller, so it lives
+    # here rather than in the core dependency set; without it the codec
+    # reports "not applicable" and states fall back to Arrow IPC.
+    "msgpack>=1.0",
     # AEAD backend, selected by platform rather than at runtime -- see the
     # BACKENDS section of vgi_rpc/crypto.py. PyNaCl is declared only where it
     # measured faster for our token sizes; elsewhere PyCryptodome is used and
@@ -106,6 +111,10 @@ warn_unreachable = false
 
 [[tool.mypy.overrides]]
 module = "falcon.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "msgpack.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
