@@ -14,7 +14,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO, IOBase
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -80,6 +80,15 @@ if TYPE_CHECKING:
     from ._app import _HttpRpcApp
 
 _logger = logging.getLogger("vgi_rpc.http")
+
+ResponseStream = BytesIO | pa.BufferReader
+"""What a dispatch shell hands back as the HTTP response body.
+
+Producer turns return a native ``pa.BufferReader`` so Arrow can serialize
+with the GIL released (see :func:`_run_http_producer_turn`); every other
+path builds a ``BytesIO``. Falcon only needs ``read()``/``seek()`` from
+``resp.stream``, which both provide.
+"""
 
 
 @dataclass
@@ -454,7 +463,7 @@ def _run_stream_exchange_sync(
     app: _HttpRpcApp,
     method_name: str,
     stream: IOBase,
-) -> BytesIO:
+) -> ResponseStream:
     """Run stream exchange synchronously.
 
     Dispatches to producer continuation or exchange based on input_schema
@@ -916,7 +925,11 @@ def _run_http_producer_turn(
     write_sink: Any = resp_buf
     if codec is not None:
         try:
-            write_sink = pa.CompressedOutputStream(resp_buf, codec)
+            # pyarrow types this parameter as a Literal of its supported
+            # codec names; ours is a negotiated Content-Encoding string. The
+            # except below is the real guard -- an unsupported name falls
+            # back to writing plaintext rather than failing the request.
+            write_sink = pa.CompressedOutputStream(resp_buf, cast("Any", codec))
             _current_body_precompressed.set(True)
         except Exception:
             write_sink = resp_buf

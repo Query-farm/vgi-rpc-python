@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from http import HTTPStatus
 from io import BytesIO, IOBase
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import falcon
 
@@ -26,6 +26,9 @@ from vgi_rpc.rpc import MethodNotImplementedError, RpcMethodInfo, RpcServer
 
 from .._common import _RpcHttpError
 from ._responses import _check_content_type
+
+if TYPE_CHECKING:
+    from ._app_stream import ResponseStream
 from ._state_token import _CallStateCache, _resolve_state_types
 
 
@@ -42,7 +45,7 @@ class _Dispatchers(NamedTuple):
 
     unary: Callable[..., tuple[BytesIO, HTTPStatus]]
     stream_init: Callable[..., BytesIO]
-    stream_exchange: Callable[..., BytesIO]
+    stream_exchange: Callable[..., ResponseStream]
 
 
 _DISPATCHERS: _Dispatchers | None = None
@@ -136,6 +139,6 @@ class _HttpRpcApp:
         """Delegate to :func:`_app_stream._run_stream_init_sync`."""
         return _dispatchers().stream_init(self, method_name, info, stream)
 
-    def _stream_exchange_sync(self, method_name: str, stream: IOBase) -> BytesIO:
+    def _stream_exchange_sync(self, method_name: str, stream: IOBase) -> ResponseStream:
         """Delegate to :func:`_app_stream._run_stream_exchange_sync`."""
         return _dispatchers().stream_exchange(self, method_name, stream)

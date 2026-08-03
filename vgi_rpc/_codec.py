@@ -113,7 +113,7 @@ _ZSTD_CONTENTSIZE_UNKNOWN = 18446744073709551615
 
 
 def _zstd_content_size(data: bytes) -> int | None:
-    """Declared decompressed size of a zstd frame, or None when not stored."""
+    """Return a zstd frame's declared decompressed size, or None when not stored."""
     import zstandard
 
     size = zstandard.get_frame_parameters(data).content_size
