@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import re
+import struct
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -32,6 +33,7 @@ from vgi_rpc.external import (
 )
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import (
+    CALL_STATE_KEY,
     CANCEL_KEY,
     STATE_KEY,
     merge_metadata,
@@ -252,6 +254,54 @@ def _open_response_stream(
 # ---------------------------------------------------------------------------
 
 
+def _encode_resume_token(state_bytes: bytes, call_state_bytes: bytes | None) -> bytes:
+    """Pack a stream's cursor and call tokens into one opaque resume blob.
+
+    Callers of :meth:`HttpStreamSession.next_with_token` treat the result as
+    unstructured bytes to hand to :meth:`HttpStreamSession.seek_to_token`,
+    possibly on another process. Both halves have to travel: the node that
+    serves the resumed turn may have no cached knowledge of this stream.
+
+    Layout::
+
+        [4 bytes : state_len (uint32 LE)] [state_bytes] [call_state_bytes]
+
+    Args:
+        state_bytes: The cursor token.
+        call_state_bytes: The call token, or ``None`` for a stream that has
+            none (nothing to resolve — the tail is simply empty).
+
+    Returns:
+        The packed resume token.
+
+    """
+    return struct.pack("<I", len(state_bytes)) + state_bytes + (call_state_bytes or b"")
+
+
+def _decode_resume_token(token: bytes) -> tuple[bytes, bytes | None]:
+    """Unpack a resume blob produced by :func:`_encode_resume_token`.
+
+    Args:
+        token: The packed resume token.
+
+    Returns:
+        ``(state_bytes, call_state_bytes)``; the second element is ``None``
+        when the blob carries no call token.
+
+    Raises:
+        ValueError: If the blob is truncated or its length prefix overruns.
+
+    """
+    if len(token) < 4:
+        raise ValueError("Malformed resume token: too short")
+    state_len = struct.unpack_from("<I", token, 0)[0]
+    end = 4 + state_len
+    if end > len(token):
+        raise ValueError("Malformed resume token: state length overruns the blob")
+    call = token[end:]
+    return token[4:end], call or None
+
+
 class HttpStreamSession:
     """Client-side handle for a stream over HTTP (both producer and exchange patterns).
 
@@ -264,6 +314,7 @@ class HttpStreamSession:
     """
 
     __slots__ = (
+        "_call_state_bytes",
         "_capabilities",
         "_client",
         "_compression_level",
@@ -289,6 +340,7 @@ class HttpStreamSession:
         output_schema: pa.Schema,
         on_log: Callable[[Message], None] | None = None,
         *,
+        call_state_bytes: bytes | None = None,
         external_config: ExternalLocationConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
         pending_batches: list[AnnotatedBatch] | None = None,
@@ -302,6 +354,11 @@ class HttpStreamSession:
         self._url_prefix = url_prefix
         self._method = method
         self._state_bytes = state_bytes
+        # The stream's call token: handed over once by /init and echoed on
+        # every subsequent request.  Unlike the cursor token it is never
+        # refreshed, so the server can resolve it from cache instead of
+        # re-parsing what cannot have changed.
+        self._call_state_bytes = call_state_bytes
         self._output_schema = output_schema
         self._on_log = on_log
         self._external_config = external_config
@@ -401,6 +458,21 @@ class HttpStreamSession:
             compression_level=self._compression_level,
         )
 
+    def _token_metadata(self, token: bytes, *, cancel: bool = False) -> pa.KeyValueMetadata:
+        """Build request metadata carrying the cursor token and the call token.
+
+        The call token is echoed on every request because the server does not
+        re-issue it; a request that omitted it would still succeed while the
+        server's call-state cache is warm and fail once it is not, which is
+        exactly the kind of load-dependent bug worth designing out.
+        """
+        md: dict[bytes, bytes] = {STATE_KEY: token}
+        if cancel:
+            md[CANCEL_KEY] = b"1"
+        if self._call_state_bytes is not None:
+            md[CALL_STATE_KEY] = self._call_state_bytes
+        return pa.KeyValueMetadata(md)
+
     def exchange(self, input_batch: AnnotatedBatch) -> AnnotatedBatch:
         """Send an input batch and receive the output batch.
 
@@ -425,7 +497,7 @@ class HttpStreamSession:
         # upload-URL flow.  The state token is on the outer batch, so
         # _build_pointer_request_body preserves it on the pointer.
         req_buf = BytesIO()
-        state_md = pa.KeyValueMetadata({STATE_KEY: self._state_bytes})
+        state_md = self._token_metadata(self._state_bytes)
         merged = merge_metadata(cm_to_write, state_md)
         with ipc.new_stream(req_buf, batch_to_write.schema) as writer:
             writer.write_batch(batch_to_write, custom_metadata=merged)
@@ -475,7 +547,7 @@ class HttpStreamSession:
                 self._state_bytes = new_state
 
         # Strip state token from user-visible metadata
-        user_cm = strip_keys(ab.custom_metadata, STATE_KEY)
+        user_cm = strip_keys(ab.custom_metadata, STATE_KEY, CALL_STATE_KEY)
 
         _drain_stream(reader)
         return AnnotatedBatch(batch=ab.batch, custom_metadata=user_cm)
@@ -483,7 +555,7 @@ class HttpStreamSession:
     def _send_continuation(self, token: bytes) -> ValidatedReader:
         """Send a continuation request and return the new response reader."""
         req_buf = BytesIO()
-        state_md = pa.KeyValueMetadata({STATE_KEY: token})
+        state_md = self._token_metadata(token)
         with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
@@ -554,6 +626,11 @@ class HttpStreamSession:
         for stateless, load-balanced relays that must not pin a scan to one
         process.
 
+        Since a stream's state travels as two tokens (call + cursor), the
+        value returned here is the *pair*, encoded as one opaque blob by
+        :func:`_encode_resume_token`. Treat it as unstructured bytes; only
+        :meth:`seek_to_token` needs to know its shape.
+
         Returns ``(None, None)`` at end-of-stream. Requires per-batch
         continuation tokens (the default server behaviour — i.e. the worker
         is not configured with ``max_response_bytes``); raises
@@ -572,7 +649,7 @@ class HttpStreamSession:
         if self._pending_batches:
             if len(self._pending_batches) > 1:
                 raise RuntimeError(_multi)
-            return self._pending_batches.pop(0), self._state_bytes
+            return self._pending_batches.pop(0), self._resume_token()
 
         if self._finished or self._state_bytes is None:
             self._finished = True
@@ -613,18 +690,26 @@ class HttpStreamSession:
             # No data this turn -> the producer finished (out.finish(), no token).
             self._finished = True
             return None, None
-        return data_ab, next_token
+        return data_ab, self._resume_token()
+
+    def _resume_token(self) -> bytes | None:
+        """Encode this session's current position as a single opaque blob."""
+        if self._state_bytes is None:
+            return None
+        return _encode_resume_token(self._state_bytes, self._call_state_bytes)
 
     def seek_to_token(self, token: bytes) -> None:
         """Reposition a freshly-initialised session to resume from ``token``.
 
         Discards any init-preloaded batches and points the session at the
-        given continuation token (as returned by :meth:`next_with_token`),
-        so the next :meth:`next_with_token` continues from exactly there.
-        Used to resume a scan on a new process/node.
+        given resume token (as returned by :meth:`next_with_token`), so the
+        next :meth:`next_with_token` continues from exactly there. Used to
+        resume a scan on a new process/node — which is why the call token
+        travels inside the blob too: the node that serves the resumed turn
+        may never have seen this stream's ``/init``.
         """
+        self._state_bytes, self._call_state_bytes = _decode_resume_token(token)
         self._pending_batches = []
-        self._state_bytes = token
         self._finished = False
 
     def close(self) -> None:
@@ -651,7 +736,7 @@ class HttpStreamSession:
         if wire_http_logger.isEnabledFor(logging.DEBUG):
             wire_http_logger.debug("HTTP stream cancel: method=%s", self._method)
         req_buf = BytesIO()
-        cancel_md = pa.KeyValueMetadata({STATE_KEY: token, CANCEL_KEY: b"1"})
+        cancel_md = self._token_metadata(token, cancel=True)
         with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=cancel_md)
         try:
@@ -866,6 +951,7 @@ def _init_http_stream_session(
     """
     output_schema = reader.schema
     state_bytes: bytes | None = None
+    call_state_bytes: bytes | None = None
     pending_batches: list[AnnotatedBatch] = []
     finished = False
 
@@ -877,12 +963,17 @@ def _init_http_stream_session(
                 finished = True
                 break
 
-            # Check for state token (zero-row batch with STATE_KEY)
+            # Check for the token sentinel (zero-row batch with STATE_KEY).
+            # /init is the only response that also carries CALL_STATE_KEY —
+            # the client keeps that token for the life of the stream.
             if batch.num_rows == 0 and custom_metadata is not None:
                 token = custom_metadata.get(STATE_KEY)
                 if token is not None:
                     if isinstance(token, bytes):
                         state_bytes = token
+                    call_token = custom_metadata.get(CALL_STATE_KEY)
+                    if isinstance(call_token, bytes):
+                        call_state_bytes = call_token
                     break
 
             # Dispatch log/error batches
@@ -907,6 +998,7 @@ def _init_http_stream_session(
         state_bytes=state_bytes,
         output_schema=output_schema,
         on_log=on_log,
+        call_state_bytes=call_state_bytes,
         external_config=external_config,
         ipc_validation=ipc_validation,
         pending_batches=pending_batches,
@@ -1086,26 +1178,32 @@ class _HttpProxy:
     ) -> HttpStreamSession:
         """Resume a producer stream from a continuation *token* without re-binding.
 
-        A continuation request (``POST /{method_name}/exchange`` carrying only the
-        ``STATE_KEY`` token) is fully self-describing: the server recovers the producer
-        state, schemas, and function identity from the signed token alone (see
+        A continuation request (``POST /{method_name}/exchange`` carrying the stream's
+        two tokens and nothing else) is fully self-describing: the server recovers the
+        producer state, schemas, and function identity from the signed tokens alone (see
         ``_run_stream_exchange_sync`` server-side), so no ``bind``/``init`` round-trip is
         needed. This is the cheap path for a stateless relay that holds a per-batch token
         and resumes on any connection/node — unlike ``init(...)`` which would produce and
         discard a fresh first turn before seeking.
+
+        *token* is the opaque blob from ``next_with_token()``, which packs both the
+        cursor and call tokens; the resuming node may never have seen this stream's
+        ``/init``, so it needs both.
 
         The returned session is positioned at *token*; the first ``next_with_token()``
         (or iteration) issues the continuation. ``output_schema`` is unused on the
         producer-continuation path (each response's IPC stream carries its own schema)
         and defaults to the empty schema.
         """
+        state_bytes, call_state_bytes = _decode_resume_token(token)
         return HttpStreamSession(
             client=self._client,
             url_prefix=self._url_prefix,
             method=method_name,
-            state_bytes=token,
+            state_bytes=state_bytes,
             output_schema=output_schema if output_schema is not None else _EMPTY_SCHEMA,
             on_log=self._on_log,
+            call_state_bytes=call_state_bytes,
             external_config=self._external_config,
             ipc_validation=self._ipc_validation,
             pending_batches=[],

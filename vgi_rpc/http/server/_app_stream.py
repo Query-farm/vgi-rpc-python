@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import secrets
 import time
 import uuid
 from collections.abc import Iterator, Mapping
@@ -20,7 +21,7 @@ from pyarrow import ipc
 
 from vgi_rpc.external import predict_externalize_bytes_for_collector, resolve_external_location
 from vgi_rpc.log import Message
-from vgi_rpc.metadata import CANCEL_KEY, PROTOCOL_VERSION_KEY, STATE_KEY, strip_keys
+from vgi_rpc.metadata import CALL_STATE_KEY, CANCEL_KEY, PROTOCOL_VERSION_KEY, STATE_KEY, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     _TICK_BATCH,
@@ -58,15 +59,19 @@ from vgi_rpc.rpc._common import (
     _record_input,
     _record_output,
 )
-from vgi_rpc.utils import ValidatedReader, empty_batch
+from vgi_rpc.utils import ArrowSerializableDataclass, ValidatedReader, empty_batch
 
 from .._common import _RpcHttpError
 from ._responses import _current_response_status, _enforce_response_budgets
 from ._state_token import (
     _compute_aad,
-    _mint_continuation_token,
-    _open_state_token,
+    _compute_call_aad,
+    _mint_call_token,
+    _mint_cursor_token,
+    _open_call_token,
+    _open_cursor_token,
     _resolve_state_cls,
+    _ResolvedCall,
     _StateInfo,
 )
 
@@ -268,6 +273,30 @@ def _run_stream_init_sync(
                 outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                 raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
 
+            # Mint the stream's call token once, here.  Everything it carries —
+            # the call state, both schemas, the stream id — is fixed for the
+            # life of the stream, so this is the only time any of it is
+            # serialized or sealed.  Continuations echo the token back and the
+            # server resolves it from cache; see ``_state_token`` for why that
+            # lookup is safe.
+            call_token, call_id, call_state_bytes = _mint_call_token(
+                result.call_state,
+                result.output_schema,
+                result.input_schema,
+                app._token_key,
+                auth,
+                stream_id,
+            )
+            # Warm the cache with the objects we already hold, so this stream's
+            # first continuation does not have to open the token it was just
+            # handed.
+            app._call_state_cache.put(
+                call_id,
+                auth,
+                _ResolvedCall(result.call_state, result.output_schema, result.input_schema, stream_id),
+                time.time(),
+            )
+
             if result.input_schema == _EMPTY_SCHEMA:
                 return _run_http_producer_init(
                     app,
@@ -276,6 +305,9 @@ def _run_stream_init_sync(
                     sink=sink,
                     method_name=method_name,
                     stream_id=stream_id,
+                    call_id=call_id,
+                    call_token=call_token,
+                    call_state_bytes=call_state_bytes,
                     auth=auth,
                     transport_metadata=transport_metadata,
                     outcome=outcome,
@@ -287,7 +319,8 @@ def _run_stream_init_sync(
                 state_info=state_info,
                 sink=sink,
                 method_name=method_name,
-                stream_id=stream_id,
+                call_id=call_id,
+                call_token=call_token,
                 auth=auth,
                 transport_metadata=transport_metadata,
                 outcome=outcome,
@@ -304,6 +337,9 @@ def _run_http_producer_init(
     sink: _ClientLogSink,
     method_name: str,
     stream_id: str,
+    call_id: bytes,
+    call_token: bytes,
+    call_state_bytes: bytes,
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
     outcome: _DispatchOutcome,
@@ -334,6 +370,9 @@ def _run_http_producer_init(
         input_schema=result.input_schema,
         method_name=method_name,
         stream_id=stream_id,
+        call_id=call_id,
+        call_token=call_token,
+        call_state_bytes=call_state_bytes,
         auth=auth,
         transport_metadata=transport_metadata,
         outcome=outcome,
@@ -355,36 +394,35 @@ def _run_http_exchange_init(
     state_info: _StateInfo,
     sink: _ClientLogSink,
     method_name: str,
-    stream_id: str,
+    call_id: bytes,
+    call_token: bytes,
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
     outcome: _DispatchOutcome,
 ) -> BytesIO:
-    """Init for an exchange stream — header (if declared) + signed continuation token.
+    """Init for an exchange stream — header (if declared) + the stream's two tokens.
 
-    Mints the first continuation token for this stream and writes a
-    zero-row sentinel batch carrying it in custom metadata.  The client
-    echoes the token on each subsequent ``POST /{method}/exchange`` call.
+    Writes a zero-row sentinel batch carrying both the call token (issued
+    exactly once, here) and the first cursor token.  The client echoes both
+    on each subsequent ``POST /{method}/exchange`` call; only the cursor
+    token is refreshed in the responses that follow.
     """
     server_id = app._server.server_id
     protocol_name = app._server.protocol_name
     try:
         state = result.state
         output_schema = result.output_schema
-        input_schema = result.input_schema
 
-        token, state_bytes = _mint_continuation_token(
+        token, state_bytes = _mint_cursor_token(
             state,
             state_info,
-            output_schema,
-            input_schema,
+            call_id,
             app._token_key,
             auth,
-            stream_id,
         )
         outcome.response_state_bytes = state_bytes
 
-        # Response: header (if declared) + zero-row batch carrying the token.
+        # Response: header (if declared) + zero-row batch carrying the tokens.
         resp_buf = BytesIO()
         if info.header_type is not None:
             _write_stream_header(
@@ -396,7 +434,7 @@ def _run_http_exchange_init(
             )
         with ipc.new_stream(resp_buf, output_schema) as writer:
             sink.flush_contents(writer, output_schema)
-            state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
+            state_metadata = pa.KeyValueMetadata({STATE_KEY: token, CALL_STATE_KEY: call_token})
             zero_batch = empty_batch(output_schema)
             _record_output(zero_batch)
             writer.write_batch(zero_batch, custom_metadata=state_metadata)
@@ -446,9 +484,10 @@ def _run_stream_exchange_sync(
         except pa.ArrowInvalid as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
 
-        # Extract state token before resolution — resolve_external_location
+        # Extract both tokens before resolution — resolve_external_location
         # replaces metadata with what was stored in the external IPC stream.
         token = custom_metadata.get(STATE_KEY) if custom_metadata is not None else None
+        call_token = custom_metadata.get(CALL_STATE_KEY) if custom_metadata is not None else None
 
         if token is None:
             raise _RpcHttpError(
@@ -456,18 +495,21 @@ def _run_stream_exchange_sync(
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
-        # Resolve auth up front: the state token's AAD is bound to the
-        # caller's identity, so we need auth to open it.
+        # Resolve auth up front: both tokens' AAD is bound to the caller's
+        # identity, so we need auth to open either.
         auth, transport_metadata = _get_auth_and_metadata()
 
-        # Open and verify the AEAD token, recover state + schemas + plaintext bytes.
+        # Open the cursor token, resolve the call it belongs to (cache hit in
+        # the common case), and rebuild the state object.
         (
             state_obj,
-            output_schema,
-            input_schema,
-            stream_id,
+            resolved_call,
+            call_id,
             request_state_bytes,
-        ) = _unpack_and_recover_state(app, token, state_info, auth)
+        ) = _unpack_and_recover_state(app, token, call_token, state_info, auth)
+        output_schema = resolved_call.output_schema
+        input_schema = resolved_call.input_schema
+        stream_id = resolved_call.stream_id
 
         is_producer = input_schema == _EMPTY_SCHEMA
 
@@ -547,6 +589,7 @@ def _run_stream_exchange_sync(
                     input_schema=input_schema,
                     method_name=method_name,
                     stream_id=stream_id,
+                    call_id=call_id,
                     auth=auth,
                     transport_metadata=transport_metadata,
                     outcome=outcome,
@@ -573,7 +616,7 @@ def _run_stream_exchange_sync(
                 input_batch=input_batch,
                 custom_metadata=custom_metadata,
                 method_name=method_name,
-                stream_id=stream_id,
+                call_id=call_id,
                 auth=auth,
                 transport_metadata=transport_metadata,
                 outcome=outcome,
@@ -592,12 +635,12 @@ def _run_http_exchange_turn(
     input_batch: pa.RecordBatch,
     custom_metadata: pa.KeyValueMetadata | None,
     method_name: str,
-    stream_id: str,
+    call_id: bytes,
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
     outcome: _DispatchOutcome,
 ) -> BytesIO:
-    """Run one HTTP exchange turn — lockstep input → output → refreshed token.
+    """Run one HTTP exchange turn — lockstep input → output → refreshed cursor token.
 
     Mirrors :func:`_run_http_producer_turn` for the exchange shape:
 
@@ -605,7 +648,8 @@ def _run_http_exchange_turn(
     - Coerces the inbound batch's schema against the declared input schema.
     - Runs ``state.process()`` exactly once with the budget snapshots
       surfaced on ``OutputCollector``.
-    - Mints a refreshed continuation token via :func:`_mint_continuation_token`.
+    - Mints a refreshed cursor token via :func:`_mint_cursor_token`.  The
+      call token is not re-issued; nothing it carries can have changed.
     - Pre-flights ``max_externalized_response_bytes`` so an oversize
       upload is refused before the storage round-trip.
     - Writes the response IPC stream and post-flush enforces the
@@ -641,7 +685,7 @@ def _run_http_exchange_turn(
         # input schema (strict on field set, tolerant of order/type).
         input_batch = _coerce_input_batch(input_batch, input_schema)
 
-        user_cm = strip_keys(resolved_cm, STATE_KEY)
+        user_cm = strip_keys(resolved_cm, STATE_KEY, CALL_STATE_KEY)
         ab_in = AnnotatedBatch(batch=input_batch, custom_metadata=user_cm)
 
         # Exchange is lockstep — one process() call, one output batch,
@@ -671,15 +715,14 @@ def _run_http_exchange_turn(
         if not out.finished:
             out.validate()
 
-        # Refresh the continuation token (state advanced; schemas unchanged).
-        updated_token, updated_state_bytes = _mint_continuation_token(
+        # Refresh the cursor token.  The call token is not re-issued: nothing
+        # it carries can have changed, and the client still holds it.
+        updated_token, updated_state_bytes = _mint_cursor_token(
             state,
             state_info,
-            output_schema,
-            input_schema,
+            call_id,
             app._token_key,
             auth,
-            stream_id,
         )
         outcome.response_state_bytes = updated_state_bytes
         out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
@@ -763,12 +806,15 @@ def _run_http_producer_turn(
     input_schema: pa.Schema,
     method_name: str,
     stream_id: str,
+    call_id: bytes,
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
     outcome: _DispatchOutcome,
     sink: _ClientLogSink | None = None,
     init_request_metadata: pa.KeyValueMetadata | None = None,
     owns_response_body: bool = False,
+    call_token: bytes | None = None,
+    call_state_bytes: bytes | None = None,
 ) -> pa.BufferReader:
     """Run one HTTP turn of a producer stream.
 
@@ -801,13 +847,15 @@ def _run_http_producer_turn(
         app: The HTTP app holding server + limit configuration.
         schema: The output schema for the stream.
         state: The stream state object.
-        input_schema: The input schema (stored in continuation tokens).
+        input_schema: The input schema (stored in the call token).
         method_name: The RPC method name (for logging context).
-        stream_id: The chain-correlation id baked into the continuation
-            token.  Generated fresh by the init turn and recovered from
-            the inbound token by exchange/continuation turns; passed in
-            explicitly so this helper does not depend on the
-            ``_current_stream_id`` contextvar.
+        stream_id: The chain-correlation id for this stream.  Generated
+            fresh by the init turn and recovered from the inbound call
+            token by continuation turns; passed in explicitly so this
+            helper does not depend on the ``_current_stream_id``
+            contextvar.
+        call_id: The stream's call id, baked into every cursor token this
+            turn mints so the next request can resolve its call state.
         auth: Authenticated identity for this request.
         transport_metadata: Transport metadata for the CallContext.
         outcome: The shared :class:`_DispatchOutcome` from the surrounding
@@ -821,6 +869,16 @@ def _run_http_producer_turn(
             ``process()`` call as the tick's ``custom_metadata`` (HTTP folds the
             first producer turn into ``/init``, so this is the first tick), then
             reset to the empty tick.  ``None`` on continuation turns.
+        owns_response_body: True when this turn's output IS the whole HTTP
+            body, which is what makes it safe to compress into the IPC
+            stream (see the codec note below).  False for the init turn,
+            whose output is spliced after a plaintext header.
+        call_token: The stream's sealed call token, passed only by the init
+            turn — the one response that hands it to the client.  ``None``
+            on continuation turns, which must not re-issue it.
+        call_state_bytes: The plaintext call state, passed alongside
+            ``call_token`` so the init turn's access-log record shows the
+            state that was issued.  ``None`` on continuation turns.
 
     Returns:
         The IPC response body as a native ``pa.BufferReader``, positioned at the
@@ -859,7 +917,7 @@ def _run_http_producer_turn(
         try:
             write_sink = pa.CompressedOutputStream(resp_buf, codec)
             _current_body_precompressed.set(True)
-        except Exception:  # noqa: BLE001 — unknown codec: fall back to plaintext
+        except Exception:
             write_sink = resp_buf
     max_bytes = app._max_response_bytes
     max_external_bytes = app._max_externalized_response_bytes
@@ -963,24 +1021,32 @@ def _run_http_producer_turn(
                 # buffer multiple batches until the HTTP body fills the cap.
                 should_continue = max_bytes is not None and resp_buf.tell() < max_bytes
                 if not should_continue:
-                    # Serialize state into a continuation token.
+                    # Serialize the cursor into a continuation token.  Only the
+                    # cursor: the call token was minted at /init and either the
+                    # client already holds it (continuation turns) or it rides
+                    # this same sentinel batch (the init turn, below).
                     state_info = app._state_types.get(method_name)
                     if state_info is None:
                         raise _RpcHttpError(
                             RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
                             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
-                    token, state_bytes = _mint_continuation_token(
+                    token, state_bytes = _mint_cursor_token(
                         state,
                         state_info,
-                        schema,
-                        input_schema,
+                        call_id,
                         app._token_key,
                         auth,
-                        stream_id,
                     )
                     outcome.response_state_bytes = state_bytes
-                    state_metadata = pa.KeyValueMetadata({STATE_KEY: token})
+                    token_md: dict[bytes, bytes] = {STATE_KEY: token}
+                    if call_token is not None:
+                        # Init turn — hand the client its one and only copy of
+                        # the call token, alongside the first cursor.
+                        token_md[CALL_STATE_KEY] = call_token
+                        if call_state_bytes:
+                            outcome.response_state_bytes = call_state_bytes + state_bytes
+                    state_metadata = pa.KeyValueMetadata(token_md)
                     continuation_batch = empty_batch(schema)
                     _record_output(continuation_batch)
                     writer.write_batch(continuation_batch, custom_metadata=state_metadata)
@@ -1001,44 +1067,141 @@ def _run_http_producer_turn(
 def _unpack_and_recover_state(
     app: _HttpRpcApp,
     token: bytes,
+    call_token: bytes | None,
     state_info: _StateInfo,
     auth: AuthContext | None,
-) -> tuple[StreamState, pa.Schema, pa.Schema, str, bytes]:
-    """Open an AEAD state token and recover state, output schema, and input schema.
+) -> tuple[StreamState, _ResolvedCall, bytes, bytes]:
+    """Open a cursor token, resolve its call, and rebuild the state object.
+
+    Order matters here, and it is the whole security argument for the
+    cache.  The cursor token is opened *first*; its AEAD tag covers the
+    ``call_id`` and its AAD covers the caller's identity.  Only then is
+    that authenticated ``call_id`` used as a cache key.  A client cannot
+    name a call id the server did not mint for it, so a cache hit can never
+    hand back another principal's call state — and on a hit the presented
+    call token is not consulted at all, which is exactly the work we are
+    trying to avoid.
+
+    On a miss (cold process, evicted entry, or a request load-balanced to a
+    node that never saw this stream's ``/init``) the client-supplied call
+    token is opened and verified, and its embedded ``call_id`` must match
+    the one the cursor named.
 
     Args:
-        app: The HTTP app providing the AEAD key, TTL, and server implementation.
-        token: The sealed state token bytes.
+        app: The HTTP app providing the AEAD key, TTL, cache, and server
+            implementation.
+        token: The sealed cursor token bytes.
+        call_token: The sealed call token echoed by the client.  May be
+            ``None`` when the cache is expected to hit; a miss then fails.
         state_info: A single concrete state class, or an ordered tuple of
             concrete classes for union types.  When a tuple is provided, the
             concrete class is resolved from the numeric tag embedded in
             ``state_bytes``.
-        auth: Authenticated identity for the current request.  The AEAD AAD
-            binds tokens to their issuing principal so state tokens cannot
-            be replayed across users.
+        auth: Authenticated identity for the current request.
 
     Returns:
-        ``(state_object, output_schema, input_schema, stream_id, state_bytes)``.
-        ``stream_id`` carries the chain identifier from the unpacked token
-        and must be threaded back into the next continuation token by
-        callers; the contextvar ``_current_stream_id`` is also updated as
-        a convenience for ambient telemetry observers (logger formatters,
-        OTel hooks).  ``state_bytes`` is the decrypted plaintext state
-        payload — returned so callers can surface it to the access log
-        (decrypted, opaque-envelope-independent) rather than the
-        on-the-wire ciphertext token.
+        ``(state_object, resolved_call, call_id, state_bytes)``.
+        ``state_bytes`` is the decrypted plaintext cursor payload —
+        returned so callers can surface it to the access log rather than
+        the on-the-wire ciphertext token.  The contextvar
+        ``_current_stream_id`` is set as a convenience for ambient
+        telemetry observers (logger formatters, OTel hooks).
 
     Raises:
-        _RpcHttpError: On malformed tokens, expired tokens, failed
+        _RpcHttpError: On malformed tokens, expired tokens, a cursor whose
+            call cannot be resolved, mismatched call ids, failed
             deserialization, or AEAD authenticity failure (which covers
             both tampering and cross-principal replay).
 
     """
-    state_bytes, schema_bytes, input_schema_bytes, stream_id = _open_state_token(
-        token, app._token_key, _compute_aad(auth), app._token_ttl
-    )
-    if stream_id:
-        _current_stream_id.set(stream_id)
+    state_bytes, call_id = _open_cursor_token(token, app._token_key, _compute_aad(auth), app._token_ttl)
+
+    now = time.time()
+    resolved = app._call_state_cache.get(call_id, auth, now)
+    if resolved is None:
+        resolved = _resolve_call_from_token(app, call_token, call_id, state_info, auth)
+        app._call_state_cache.put(call_id, auth, resolved, now)
+
+    if resolved.stream_id:
+        _current_stream_id.set(resolved.stream_id)
+
+    try:
+        state_cls, raw_state_bytes = _resolve_state_cls(state_bytes, state_info)
+        state_obj = state_cls.deserialize_from_bytes(raw_state_bytes, app._server.ipc_validation)
+        state_obj.bind_call_state(resolved.call_state)
+        state_obj.rehydrate(app._server.implementation)
+    except Exception as exc:
+        raise _RpcHttpError(
+            RuntimeError(f"Failed to deserialize state: {exc}"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        ) from exc
+
+    return state_obj, resolved, call_id, state_bytes
+
+
+def _declared_call_state_types(state_info: _StateInfo) -> dict[str, type[ArrowSerializableDataclass]]:
+    """Map class name → call-state class, over everything a method may declare.
+
+    A union stream method can mix members that carry call state with members
+    that do not — VGI's ``init`` returns exactly such a union, since a table
+    scan carries an init request while a buffered-finalize stream carries
+    only a cursor.  So the reader resolves the token's type name against
+    *this* map and nothing else: an unrecognised name is rejected rather
+    than looked up, which keeps a client-supplied string from selecting a
+    class.
+    """
+    members = state_info if isinstance(state_info, tuple) else (state_info,)
+    return {m.CALL_STATE_TYPE.__name__: m.CALL_STATE_TYPE for m in members if m.CALL_STATE_TYPE is not None}
+
+
+def _resolve_call_from_token(
+    app: _HttpRpcApp,
+    call_token: bytes | None,
+    expected_call_id: bytes,
+    state_info: _StateInfo,
+    auth: AuthContext | None,
+) -> _ResolvedCall:
+    """Open a client-supplied call token — the cache-miss path.
+
+    Args:
+        app: The HTTP app providing the AEAD key, TTL, and state types.
+        call_token: The sealed call token from ``CALL_STATE_KEY``.
+        expected_call_id: The call id the cursor token named.
+        state_info: The method's state class (or union tuple), which
+            declares the call-state type to deserialize into.
+        auth: Authenticated identity for the current request.
+
+    Returns:
+        The parsed :class:`_ResolvedCall`.
+
+    Raises:
+        _RpcHttpError: If the token is absent, fails to open, names a
+            different call, or carries schemas/call state that will not
+            deserialize.
+
+    """
+    if call_token is None:
+        raise _RpcHttpError(
+            RuntimeError("Missing call token in exchange request"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    (
+        call_state_bytes,
+        call_state_type,
+        schema_bytes,
+        input_schema_bytes,
+        token_call_id,
+        stream_id,
+    ) = _open_call_token(call_token, app._token_key, _compute_call_aad(auth), app._token_ttl)
+    # Constant-time compare: the ids are both server-minted and already
+    # authenticated, so this is belt-and-braces against a client pairing two
+    # of its own tokens from different streams.
+    if not secrets.compare_digest(token_call_id, expected_call_id):
+        raise _RpcHttpError(
+            RuntimeError("State token does not belong to the supplied call token"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
 
     try:
         output_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
@@ -1056,14 +1219,20 @@ def _unpack_and_recover_state(
             status_code=HTTPStatus.BAD_REQUEST,
         ) from exc
 
-    try:
-        state_cls, raw_state_bytes = _resolve_state_cls(state_bytes, state_info)
-        state_obj = state_cls.deserialize_from_bytes(raw_state_bytes, app._server.ipc_validation)
-        state_obj.rehydrate(app._server.implementation)
-    except Exception as exc:
-        raise _RpcHttpError(
-            RuntimeError(f"Failed to deserialize state: {exc}"),
-            status_code=HTTPStatus.BAD_REQUEST,
-        ) from exc
+    call_state: Any = None
+    if call_state_bytes:
+        call_state_cls = _declared_call_state_types(state_info).get(call_state_type)
+        if call_state_cls is None:
+            raise _RpcHttpError(
+                RuntimeError(f"Call token declares call-state type {call_state_type!r}, which this method does not"),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            call_state = call_state_cls.deserialize_from_bytes(call_state_bytes, app._server.ipc_validation)
+        except Exception as exc:
+            raise _RpcHttpError(
+                RuntimeError(f"Failed to deserialize call state: {exc}"),
+                status_code=HTTPStatus.BAD_REQUEST,
+            ) from exc
 
-    return state_obj, output_schema, input_schema, stream_id, state_bytes
+    return _ResolvedCall(call_state, output_schema, input_schema, stream_id)

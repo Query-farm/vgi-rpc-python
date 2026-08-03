@@ -17,6 +17,7 @@ import re
 import pyarrow as pa
 
 __all__ = [
+    "CALL_STATE_KEY",
     "CANCEL_KEY",
     "DESCRIBE_VERSION_KEY",
     "ERROR_KIND_KEY",
@@ -58,6 +59,13 @@ __all__ = [
 
 RPC_METHOD_KEY = b"vgi_rpc.method"
 STATE_KEY = b"vgi_rpc.stream_state#b64"
+# The stream's *call state* — the half of a stream's state that is fixed for
+# the life of the call (the init request, the resolved schemas). Minted once
+# by /init, echoed by the client on every subsequent request, and never
+# re-issued in a response: only STATE_KEY (the cursor) comes back per turn.
+# Splitting the two is what lets a continuation avoid re-serializing,
+# re-sealing, and re-parsing a payload that cannot have changed.
+CALL_STATE_KEY = b"vgi_rpc.call_state#b64"
 # Client-initiated stream cancellation. When present on an input batch,
 # the server skips process()/produce() and ends the stream cleanly
 # (invoking the state's optional on_cancel hook before breaking).

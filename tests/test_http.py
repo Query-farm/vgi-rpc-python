@@ -508,17 +508,18 @@ class TestStateTokenStateEncoding:
 
         import pyarrow as pa
 
-        from vgi_rpc.http.server._state_token import _compute_aad, _seal_state_token
+        from vgi_rpc.http.server._state_token import _compute_aad, _seal_cursor_token
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
         key = b"\x01" * 32
         old_time = int(time.time()) - 7200
-        token = _seal_state_token(
+        # The cursor token is opened first, so its TTL is what a stale
+        # continuation trips on — before the call token is ever consulted.
+        token = _seal_cursor_token(
             state_bytes=b"",
-            schema_bytes=b"",
-            input_schema_bytes=b"",
+            call_id=b"\x00" * 16,
             token_key=key,
             aad=_compute_aad(None),
             created_at=old_time,
@@ -551,20 +552,16 @@ class TestStateTokenStateEncoding:
 
         import pyarrow as pa
 
-        from vgi_rpc.http.server._state_token import _compute_aad, _seal_state_token
+        from vgi_rpc.http.server._state_token import _compute_aad, _seal_cursor_token
         from vgi_rpc.metadata import STATE_KEY
         from vgi_rpc.rpc import _EMPTY_SCHEMA
         from vgi_rpc.utils import empty_batch
 
         key = b"\x02" * 32
         old_time = int(time.time()) - 86400  # 24 hours ago
-        state_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
-        schema_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
-        input_bytes = _EMPTY_SCHEMA.serialize().to_pybytes()
-        token = _seal_state_token(
-            state_bytes=state_bytes,
-            schema_bytes=schema_bytes,
-            input_schema_bytes=input_bytes,
+        token = _seal_cursor_token(
+            state_bytes=_EMPTY_SCHEMA.serialize().to_pybytes(),
+            call_id=b"\x00" * 16,
             token_key=key,
             aad=_compute_aad(None),
             created_at=old_time,
@@ -595,43 +592,102 @@ class TestStateTokenStateEncoding:
         c.close()
 
     def test_seal_token_is_valid_utf8(self) -> None:
-        """Sealed state token is valid UTF-8 (base64-encoded)."""
-        from vgi_rpc.http.server._state_token import _compute_aad, _seal_state_token
+        """Both sealed token kinds are valid UTF-8 (base64-encoded)."""
+        from vgi_rpc.http.server._state_token import (
+            _compute_aad,
+            _compute_call_aad,
+            _seal_call_token,
+            _seal_cursor_token,
+        )
 
-        token = _seal_state_token(
+        cursor = _seal_cursor_token(
             state_bytes=b"\x00\xff\xfe",
-            schema_bytes=b"\x80\x81",
-            input_schema_bytes=b"\x90\x91",
+            call_id=b"\x01" * 16,
             token_key=b"\x03" * 32,
             aad=_compute_aad(None),
             created_at=0,
         )
-        # Token must be valid UTF-8 (base64 produces only ASCII)
-        token.decode("utf-8")  # Should not raise
+        call = _seal_call_token(
+            call_state_bytes=b"\x00\xff\xfe",
+            call_state_type="Whatever",
+            schema_bytes=b"\x80\x81",
+            input_schema_bytes=b"\x90\x91",
+            call_id=b"\x01" * 16,
+            stream_id="abc",
+            token_key=b"\x03" * 32,
+            aad=_compute_call_aad(None),
+            created_at=0,
+        )
+        # Tokens must be valid UTF-8 (base64 produces only ASCII)
+        cursor.decode("utf-8")  # Should not raise
+        call.decode("utf-8")  # Should not raise
 
     def test_seal_open_roundtrip_with_base64(self) -> None:
         """Seal and open produce consistent results through base64 encoding."""
         from vgi_rpc.http.server._state_token import (
             _compute_aad,
-            _open_state_token,
-            _seal_state_token,
+            _compute_call_aad,
+            _open_call_token,
+            _open_cursor_token,
+            _seal_call_token,
+            _seal_cursor_token,
         )
 
-        state = b"test-state-data"
-        schema = b"test-schema-data"
-        input_schema = b"test-input-schema"
         key = b"\x04" * 32
-        aad = _compute_aad(None)
+        call_id = b"\x0f" * 16
 
-        token = _seal_state_token(state, schema, input_schema, key, aad, 1000)
-        # Verify it's valid UTF-8
-        token.decode("utf-8")
+        cursor = _seal_cursor_token(b"test-state-data", call_id, key, _compute_aad(None), 1000)
+        cursor.decode("utf-8")  # valid UTF-8
+        state, recovered_call_id = _open_cursor_token(cursor, key, _compute_aad(None))
+        assert state == b"test-state-data"
+        assert recovered_call_id == call_id
 
-        s, sch, inp, sid = _open_state_token(token, key, aad)
-        assert s == state
-        assert sch == schema
-        assert inp == input_schema
-        assert sid == ""
+        call = _seal_call_token(
+            b"test-call-state",
+            "MyCallState",
+            b"test-schema-data",
+            b"test-input-schema",
+            call_id,
+            "sid-1",
+            key,
+            _compute_call_aad(None),
+            1000,
+        )
+        call.decode("utf-8")  # valid UTF-8
+        assert _open_call_token(call, key, _compute_call_aad(None)) == (
+            b"test-call-state",
+            "MyCallState",
+            b"test-schema-data",
+            b"test-input-schema",
+            call_id,
+            "sid-1",
+        )
+
+    def test_call_and_cursor_tokens_are_not_interchangeable(self) -> None:
+        """A call token cannot be presented as a cursor token, or vice versa.
+
+        The two AADs carry different version-tagged prefixes, so a swap fails
+        the AEAD tag check rather than decoding into a payload the reader
+        would misinterpret.
+        """
+        from vgi_rpc.http.server._state_token import (
+            _compute_aad,
+            _compute_call_aad,
+            _open_call_token,
+            _open_cursor_token,
+            _seal_call_token,
+            _seal_cursor_token,
+        )
+
+        key = b"\x0a" * 32
+        call_id = b"\x0b" * 16
+        cursor = _seal_cursor_token(b"s", call_id, key, _compute_aad(None), 1000)
+        call = _seal_call_token(b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(None), 1000)
+
+        with pytest.raises(Exception, match="verification failed"):
+            _open_call_token(cursor, key, _compute_call_aad(None))
+        with pytest.raises(Exception, match="verification failed"):
+            _open_cursor_token(call, key, _compute_aad(None))
 
     def test_tampered_nonce_fails_decrypt(self) -> None:
         """Flipping a byte in the nonce makes AEAD authentication fail."""
@@ -639,13 +695,13 @@ class TestStateTokenStateEncoding:
 
         from vgi_rpc.http.server._state_token import (
             _compute_aad,
-            _open_state_token,
-            _seal_state_token,
+            _open_cursor_token,
+            _seal_cursor_token,
         )
 
         key = b"\x05" * 32
         aad = _compute_aad(None)
-        token = _seal_state_token(b"s", b"sch", b"is", key, aad, 1000)
+        token = _seal_cursor_token(b"s", b"\x00" * 16, key, aad, 1000)
 
         raw = bytearray(base64.b64decode(token))
         # Flip a bit in the nonce (right after the single version byte).
@@ -653,7 +709,7 @@ class TestStateTokenStateEncoding:
         tampered = base64.b64encode(bytes(raw))
 
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_state_token(tampered, key, aad)
+            _open_cursor_token(tampered, key, aad)
 
     def test_tampered_ciphertext_fails_decrypt(self) -> None:
         """Flipping a byte in the ciphertext makes the Poly1305 tag check fail."""
@@ -661,13 +717,13 @@ class TestStateTokenStateEncoding:
 
         from vgi_rpc.http.server._state_token import (
             _compute_aad,
-            _open_state_token,
-            _seal_state_token,
+            _open_cursor_token,
+            _seal_cursor_token,
         )
 
         key = b"\x06" * 32
         aad = _compute_aad(None)
-        token = _seal_state_token(b"state", b"schema", b"input", key, aad, 1000)
+        token = _seal_cursor_token(b"state", b"\x00" * 16, key, aad, 1000)
 
         raw = bytearray(base64.b64decode(token))
         # Flip a bit deep in the ciphertext (well past version+nonce).
@@ -675,42 +731,52 @@ class TestStateTokenStateEncoding:
         tampered = base64.b64encode(bytes(raw))
 
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_state_token(tampered, key, aad)
+            _open_cursor_token(tampered, key, aad)
 
     def test_cross_principal_replay_fails(self) -> None:
         """A token minted for principal A cannot be opened with principal B's AAD."""
         from vgi_rpc.http.server._state_token import (
             _compute_aad,
-            _open_state_token,
-            _seal_state_token,
+            _compute_call_aad,
+            _open_call_token,
+            _open_cursor_token,
+            _seal_call_token,
+            _seal_cursor_token,
         )
         from vgi_rpc.rpc import AuthContext
 
         key = b"\x07" * 32
+        call_id = b"\x0c" * 16
         alice = AuthContext(domain="d", authenticated=True, principal="alice")
         bob = AuthContext(domain="d", authenticated=True, principal="bob")
 
-        token = _seal_state_token(b"s", b"sch", b"is", key, _compute_aad(alice), 1000)
+        token = _seal_cursor_token(b"s", call_id, key, _compute_aad(alice), 1000)
 
         # Alice's own AAD round-trips fine.
-        s, sch, inp, sid = _open_state_token(token, key, _compute_aad(alice))
-        assert (s, sch, inp, sid) == (b"s", b"sch", b"is", "")
+        assert _open_cursor_token(token, key, _compute_aad(alice)) == (b"s", call_id)
 
         # Bob cannot open Alice's token (same domain, different principal).
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_state_token(token, key, _compute_aad(bob))
+            _open_cursor_token(token, key, _compute_aad(bob))
 
         # Authenticated identity cannot impersonate anonymous either.
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_state_token(token, key, _compute_aad(None))
+            _open_cursor_token(token, key, _compute_aad(None))
+
+        # The call token is bound the same way — this is what stops a
+        # cross-principal cache probe from ever reaching a lookup.
+        call = _seal_call_token(b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(alice), 1000)
+        assert _open_call_token(call, key, _compute_call_aad(alice))[4] == call_id
+        with pytest.raises(Exception, match="verification failed"):
+            _open_call_token(call, key, _compute_call_aad(bob))
 
     def test_malformed_base64_returns_400(self) -> None:
         """A token whose body is not valid base64 surfaces as 400."""
-        from vgi_rpc.http.server._state_token import _compute_aad, _open_state_token
+        from vgi_rpc.http.server._state_token import _compute_aad, _open_cursor_token
 
         # ``!`` is not part of the standard base64 alphabet.
         with pytest.raises(Exception, match="Malformed state token"):
-            _open_state_token(b"!!!!not-base64!!!!", b"\x08" * 32, _compute_aad(None))
+            _open_cursor_token(b"!!!!not-base64!!!!", b"\x08" * 32, _compute_aad(None))
 
     def test_too_short_token_returns_400(self) -> None:
         """A token shorter than the minimum envelope size surfaces as 400.
@@ -721,11 +787,11 @@ class TestStateTokenStateEncoding:
         """
         import base64
 
-        from vgi_rpc.http.server._state_token import _compute_aad, _open_state_token
+        from vgi_rpc.http.server._state_token import _compute_aad, _open_cursor_token
 
-        too_short = base64.b64encode(b"\x04short")
+        too_short = base64.b64encode(b"\x05short")
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_state_token(too_short, b"\x09" * 32, _compute_aad(None))
+            _open_cursor_token(too_short, b"\x09" * 32, _compute_aad(None))
 
 
 # ---------------------------------------------------------------------------

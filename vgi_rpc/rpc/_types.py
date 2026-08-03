@@ -14,6 +14,7 @@ from types import MappingProxyType, TracebackType
 from typing import (
     Annotated,
     Any,
+    ClassVar,
     Self,
     get_args,
     get_origin,
@@ -362,12 +363,63 @@ class StreamState(ArrowSerializableDataclass, abc.ABC):
 
     Extends ``ArrowSerializableDataclass`` so that state can be serialized
     between requests (required for HTTP transport).
+
+    CALL STATE VS CURSOR STATE
+    --------------------------
+    Everything a ``StreamState`` serializes is re-serialized, re-sealed, and
+    re-parsed on *every* turn of an HTTP stream.  For most real streams the
+    bulk of that payload cannot change — the init request, the bound
+    arguments, the resolved schemas — and paying for it per turn is what
+    makes the HTTP transport scale badly under load.
+
+    So a stream may declare its immutable half separately as *call state*:
+    a second dataclass returned alongside the state on :class:`Stream`.  The
+    transport owns it end to end — it is serialized and sealed exactly once
+    at ``/init``, handed to the client under
+    :data:`~vgi_rpc.metadata.CALL_STATE_KEY`, echoed back on each request,
+    and never re-issued in a response.  The ``StreamState`` itself then
+    carries only the cursor: whatever genuinely advances per turn.
+
+    A state class opts in by setting :attr:`CALL_STATE_TYPE` and accepting
+    the object through :meth:`bind_call_state`.  Streams that declare no
+    call state behave exactly as before.
     """
+
+    CALL_STATE_TYPE: ClassVar[type[ArrowSerializableDataclass] | None] = None
+    """The call-state class this state expects, or ``None`` when it has none.
+
+    Read by the HTTP token layer to deserialize an inbound call token.  Must
+    match the type of the object passed as ``Stream.call_state``.
+    """
+
+    def bind_call_state(self, call_state: ArrowSerializableDataclass | None) -> None:
+        """Attach the stream's call state to this state object.
+
+        Called by *both* transports so ``process()`` can reach the call
+        state uniformly:
+
+        - pipe/subprocess: once, at stream construction — the state never
+          leaves the process, so this is the only call.
+        - HTTP: on every turn, after the call token is opened (or, far more
+          often, served from the call-state cache).
+
+        The default is a no-op, for states that declare no call state.
+        Implementations must treat the object as **immutable**: the HTTP
+        server hands the same instance to every concurrent turn that
+        presents the same token, so a mutation would leak across requests.
+
+        Args:
+            call_state: The stream's call state, or ``None``.
+
+        """
 
     def rehydrate(self, implementation: object) -> None:
         """Restore transient fields after deserialization.
 
-        Called by the HTTP server after deserializing state from a token.
+        Called by the HTTP server after deserializing state from a token,
+        and after :meth:`bind_call_state` — so an override may read the
+        call state to rebuild whatever it derives from it.
+
         Override in subclasses to restore non-serializable state
         (e.g., class references, runtime objects) using the server
         implementation for context.
@@ -476,6 +528,14 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
     state: S
     input_schema: pa.Schema = _EMPTY_SCHEMA
     header: H | None = None
+    call_state: ArrowSerializableDataclass | None = None
+    """The stream's immutable call state — see :class:`StreamState`.
+
+    When set, the HTTP transport seals it into a separate, single-issue
+    call token instead of round-tripping it inside the per-turn state
+    token.  Ignored by the pipe transport, which holds the state in
+    process and never serializes either half.
+    """
 
     def __iter__(self) -> Iterator[AnnotatedBatch]:
         """Iterate over output batches (client-side stub for producer streams).
