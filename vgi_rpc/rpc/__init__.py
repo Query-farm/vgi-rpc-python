@@ -73,6 +73,7 @@ the method signature — it does **not** appear in the Protocol definition.
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import logging
 import os
@@ -323,6 +324,8 @@ def _configure_access_log(
     max_record_bytes: int,
     server_id: str,
     sample_rate: float = 1.0,
+    use_async: bool = False,
+    queue_size: int = 10000,
 ) -> None:
     """Attach a handler to the ``vgi_rpc.access`` logger.
 
@@ -340,11 +343,15 @@ def _configure_access_log(
         server_id: Value substituted for the ``{server_id}`` placeholder.
         sample_rate: Fraction of successful calls to keep; ``1.0`` keeps all.
             See :class:`~vgi_rpc.logging_utils.AccessLogSampler`.
+        use_async: Hand records to a listener thread instead of writing them
+            inline.  See :class:`~vgi_rpc.logging_utils.DroppingQueueHandler`
+            for what this trades away.
+        queue_size: Bound on the async queue.  Ignored unless ``use_async``.
 
     """
     from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
-    from vgi_rpc.logging_utils import AccessLogSampler, VgiAccessLogFormatter
+    from vgi_rpc.logging_utils import AccessLogSampler, DroppingQueueHandler, VgiAccessLogFormatter
 
     resolved_path = path.format(pid=os.getpid(), server_id=server_id)
     parent = os.path.dirname(resolved_path)
@@ -370,7 +377,23 @@ def _configure_access_log(
         handler.addFilter(AccessLogSampler(sample_rate))
     access_logger = logging.getLogger("vgi_rpc.access")
     access_logger.setLevel(logging.INFO)
-    access_logger.addHandler(handler)
+    if use_async:
+        # The listener owns the file handler; the request thread only ever
+        # touches a bounded queue. Daemon so a hung listener cannot keep the
+        # process alive, and `respect_handler_level=False` because the file
+        # handler has no level of its own to respect.
+        import queue as _queue
+        from logging.handlers import QueueListener
+
+        record_queue: _queue.Queue[logging.LogRecord] = _queue.Queue(maxsize=queue_size)
+        listener = QueueListener(record_queue, handler)
+        listener.start()
+        if listener._thread is not None:  # daemon so a stuck writer cannot hold up exit
+            listener._thread.daemon = True
+        atexit.register(listener.stop)
+        access_logger.addHandler(DroppingQueueHandler(record_queue))
+    else:
+        access_logger.addHandler(handler)
 
 
 def run_server(protocol_or_server: type | RpcServer, implementation: object | None = None) -> None:
@@ -511,6 +534,23 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         ),
     )
     parser.add_argument(
+        "--access-log-async",
+        action="store_true",
+        default=os.environ.get("VGI_RPC_ACCESS_LOG_ASYNC", "").lower() in ("1", "true", "yes"),
+        help=(
+            "Write access-log records from a background thread so disk latency stays "
+            "out of the request path. The queue is bounded and full means drop; the "
+            "next record through carries 'dropped_records'. Trades durability: a crash "
+            "loses queued records. Env: VGI_RPC_ACCESS_LOG_ASYNC."
+        ),
+    )
+    parser.add_argument(
+        "--access-log-queue-size",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_ACCESS_LOG_QUEUE_SIZE", "10000")),
+        help="Bound on the async access-log queue (default 10000). Env: VGI_RPC_ACCESS_LOG_QUEUE_SIZE.",
+    )
+    parser.add_argument(
         "--access-log-sample",
         type=float,
         default=float(os.environ.get("VGI_RPC_ACCESS_LOG_SAMPLE", "1.0")),
@@ -606,6 +646,8 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             max_record_bytes=args.access_log_max_record_bytes,
             server_id=server.server_id,
             sample_rate=args.access_log_sample,
+            use_async=args.access_log_async,
+            queue_size=args.access_log_queue_size,
         )
 
     if args.http:

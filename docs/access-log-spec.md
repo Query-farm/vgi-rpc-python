@@ -85,7 +85,13 @@ These fields appear on HTTP transports only.
 | Field | Type | Condition |
 |---|---|---|
 | `server_version` | string | Present when the implementation knows its server *build* version (e.g. set from a build constant). |
-| `claims` | object | Present and non-empty when `authenticated == true` and the auth provider produced claims. JSON-serializable; nested values follow JSON conventions. |
+| `claims` | object | Present and non-empty when `authenticated == true` and the auth provider produced claims. JSON-serializable; nested values follow JSON conventions. **Emitters MUST redact sensitive claim values** — see below. |
+
+An access log outlives the token it describes by months or years, and is shipped to systems chosen for searchability rather than for holding personal data. Standard OIDC claims (`email`, `phone_number`, `given_name`, …) and credential-shaped ones (`*_token`, `*_key`, `password`) MUST NOT reach it verbatim.
+
+Redaction is **key-based**: match on the name a value arrived under, never on its content. A claim called `context` holding an email address is not caught, and cannot be without guessing at free text — a boundary worth stating rather than pretending to exceed.
+
+Replace values, do not drop keys. *Which* claims a credential carried is a question an audit log exists to answer; what they contained is not. The Python reference substitutes `"[redacted]"`, exposes the policy as `vgi_rpc.logging_utils.redact_claims`, and allows replacement via `set_claim_redactor` (with `no_redaction` for services that own their logs end to end). A redactor that raises MUST fail **closed** — drop the claims entirely rather than emit them unredacted.
 
 ### 4.6 Call statistics
 
@@ -123,6 +129,22 @@ All conditional behavior is keyed off `method_type` (and, for streams, whether t
 | `cancelled` present | Stream call cancelled by client. |
 | `error_message` non-empty | `status == "error"`. |
 
+### 4.8 Egress accounting
+
+Three byte figures answer three different questions, and conflating them is how an egress bill ends up wrong by orders of magnitude. The reference implementation measured only the middle pair until these were added.
+
+| Field | Type | Condition |
+|---|---|---|
+| `request_bytes` | integer | On-wire size of the request body as received, **before** decompression. What the peer actually sent. |
+| `response_bytes` | integer | On-wire size of the response body as sent, **after** compression. Absent when the size cannot be known (a streamed response with no content length). |
+| `externalized_bytes` | integer | Bytes uploaded to external storage during this call. Absent when nothing was externalised. |
+
+Contrast with §4.6's `input_bytes` / `output_bytes`, which measure **logical Arrow buffer sizes** — what the worker processed. Those are unaffected by compression and exclude externalised payloads entirely, so they are the wrong number for anything that costs money and the right number for capacity work.
+
+The gap is not marginal. A compressible 200 KB result measured 200,008 logical bytes and 183 bytes on the wire in the reference implementation — a factor of about 1,000. In the other direction, a call that externalises a 10 GB batch leaves a pointer batch of a few hundred bytes in the HTTP body; without `externalized_bytes` the 10 GB is invisible.
+
+**Implementation note.** `response_bytes` cannot be measured where the other fields are. A handler knows what it produced, but response compression runs afterwards, so a record emitted at handler time can only ever report the uncompressed body. An emitter MUST therefore defer emission until the final body exists — in the Python reference, a middleware installs a per-request sink, handlers append to it, and the middleware emits after compression has run. The cost is that a crash between handler and response loses that request's records; the alternative is a permanently wrong number.
+
 ## 5b. Truncation
 
 Downstream log shippers (Vector's `file` source, Fluent Bit's `tail` input) impose a per-line ceiling — Vector defaults to 100 KiB and Fluent Bit's `Buffer_Max_Size` defaults to 256 KiB. Lines longer than the shipper's ceiling are silently dropped.
@@ -137,10 +159,12 @@ To stay compatible, an emitter MAY enforce a per-record byte cap. When it does, 
 
 | Field | Type | Condition |
 |---|---|---|
-| `truncated` | boolean or `"record_too_large"` | Present iff field-shedding was applied. `true` = at least one optional field dropped. `"record_too_large"` = sentinel form; most optional fields dropped. |
+| `truncated` | `true`, `"record_too_large"`, or `"payload_omitted"` | Present iff the record does not carry everything it otherwise would. `true` = at least one optional field dropped to fit the size cap. `"record_too_large"` = sentinel form; most optional fields dropped. `"payload_omitted"` = **nothing was lost to a cap** — the emitter is simply not logging request payloads at this level. |
 | `original_request_bytes` | integer | Present when `request_data` was dropped due to truncation. Reports the character length of the dropped string. |
 
-A `unary` record carrying `truncated` is NOT required to also carry `request_data` — the schema relaxes that rule when truncation is signalled.
+A `unary` record carrying `truncated` is NOT required to also carry `request_data` — the schema relaxes that rule whichever marker is present.
+
+`"payload_omitted"` exists because the other two values were carrying two incompatible meanings. A normally-configured server does not log payloads at INFO, so it set `truncated: true` on essentially every unary record — leaving a consumer scanning for real data loss with nothing to filter on. Emitters that gate payload logging by level MUST use `"payload_omitted"` for that case and reserve `true` for genuine size-driven shedding. Consumers MUST treat the two differently.
 
 ## 5bb. Sampling
 
@@ -155,6 +179,20 @@ An emitter MAY log only a fraction of calls. Sampling is optional; an emitter th
 | `sample_rate` | number, `0 < r <= 1` | Present iff sampling is active (rate below 1). Absent when the emitter logs everything. Error records MAY lack it even under sampling, since they bypass the decision. |
 
 The Python reference implements this as a `logging.Filter` on the handler — not the logger, so an application's own handlers keep seeing every record — configured by `--access-log-sample` / `VGI_RPC_ACCESS_LOG_SAMPLE`, defaulting to `1.0`. An out-of-range rate fails at startup rather than at the first request, because `100` meaning "100%" would otherwise silently log everything.
+
+## 5bc. Asynchronous emission
+
+An emitter MAY hand records to a background writer so disk latency stays out of the request path. Optional; a synchronous emitter is conformant.
+
+An emitter that does MUST bound the queue and MUST NOT block when it is full. An unbounded queue turns a stalled disk into an OOM; a blocking put reintroduces exactly the latency the thread was meant to remove. Full therefore means drop.
+
+What makes dropping acceptable rather than silent corruption is that it is reported: the next record to get through MUST carry `dropped_records` (integer, count since the last successful enqueue). A log that loses records without saying so is worse than a slow one, because a consumer cannot tell a quiet period from a lossy one.
+
+| Field | Type | Condition |
+|---|---|---|
+| `dropped_records` | integer | Present on the first record enqueued after one or more were dropped. Reports how many were lost. |
+
+This trades durability: with a synchronous writer, a record on disk means the call completed; with a queue, a crash loses whatever is still in it. That is why the Python reference makes it opt-in (`--access-log-async`, `--access-log-queue-size`, default 10000) rather than the default — right for high throughput, wrong for audit.
 
 ## 5c. Encoding & atomicity
 

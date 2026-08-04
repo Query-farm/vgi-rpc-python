@@ -19,7 +19,7 @@ from typing import Any, Literal
 import pyarrow as pa
 from pyarrow import ipc
 
-from vgi_rpc.external import ExternalLocationConfig, resolve_external_location
+from vgi_rpc.external import ExternalLocationConfig, _current_externalized_bytes, resolve_external_location
 from vgi_rpc.metadata import (
     CANCEL_KEY,
     PROTOCOL_VERSION_KEY,
@@ -44,10 +44,12 @@ from vgi_rpc.rpc._common import (
     TransportKind,
     VersionError,
     _access_logger,
+    _current_access_sink,
     _current_call_stats,
     _current_request_batch,
     _current_request_id,
     _current_request_metadata,
+    _current_request_wire_bytes,
     _current_session_id,
     _current_sticky_action,
     _current_stream_id,
@@ -257,8 +259,13 @@ def _emit_access_log(
             if _access_logger.isEnabledFor(logging.DEBUG):
                 extra["request_data"] = encoded
             else:
+                # Distinct from the formatter's size-driven `true`: this
+                # record lost nothing to a cap, the deployment simply does
+                # not log payloads at INFO. Sharing one value made the
+                # marker fire on essentially every record and stop meaning
+                # anything to a consumer looking for real data loss.
                 extra["original_request_bytes"] = len(encoded)
-                extra["truncated"] = True
+                extra["truncated"] = "payload_omitted"
         # Stream correlation ID
         stream_id = _current_stream_id.get()
         if stream_id:
@@ -278,7 +285,15 @@ def _emit_access_log(
             extra["session_action"] = session_action
         # Auth claims
         if auth.claims:
-            extra["claims"] = dict(auth.claims)
+            # Redacted by key before the record exists. An access log
+            # outlives the token by years and is shipped to systems chosen
+            # for searchability, so `sub`/`email`/`phone` reaching it
+            # verbatim is a data-retention problem, not a debugging feature.
+            from vgi_rpc.logging_utils import apply_claim_redaction
+
+            redacted = apply_claim_redaction(auth.claims)
+            if redacted:
+                extra["claims"] = redacted
         # State tokens (HTTP transport only). Same DEBUG-gating as
         # request_data above: these are base64'd opaque blobs encoding the
         # worker's serialized cross-POST context — typically 8-12 KiB per
@@ -291,6 +306,17 @@ def _emit_access_log(
                 extra["request_state"] = base64.b64encode(request_state).decode()
             if response_state is not None:
                 extra["response_state"] = base64.b64encode(response_state).decode()
+        # Egress accounting. `input_bytes`/`output_bytes` below measure
+        # logical Arrow buffers -- what the worker processed. These measure
+        # what actually crossed the network, which is a different number in
+        # both directions: compression shrinks the body, and externalised
+        # payloads leave it entirely.
+        request_wire = _current_request_wire_bytes.get()
+        if request_wire >= 0:
+            extra["request_bytes"] = request_wire
+        externalized = _current_externalized_bytes.get()
+        if externalized:
+            extra["externalized_bytes"] = externalized
         if stats is not None:
             extra["input_batches"] = stats.input_batches
             extra["output_batches"] = stats.output_batches
@@ -298,13 +324,14 @@ def _emit_access_log(
             extra["output_rows"] = stats.output_rows
             extra["input_bytes"] = stats.input_bytes
             extra["output_bytes"] = stats.output_bytes
-        _access_logger.info(
-            "%s.%s %s",
-            protocol_name,
-            method_name,
-            status,
-            extra=extra,
-        )
+        message = f"{protocol_name}.{method_name} {status}"
+        sink = _current_access_sink.get()
+        if sink is not None:
+            # Deferred: the response body's on-wire size is not known until
+            # compression has run in middleware. The sink's owner emits.
+            sink.append((message, extra))
+        else:
+            _access_logger.info("%s", message, extra=extra)
     except Exception:
         _logger.debug("Access log emission failed", exc_info=True)
 

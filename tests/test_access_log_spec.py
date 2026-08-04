@@ -12,9 +12,11 @@ from __future__ import annotations
 import io
 import json
 import logging
+import queue
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -32,7 +34,16 @@ from vgi_rpc.access_log_conformance import (
 from vgi_rpc.access_log_conformance import (
     main as conformance_main,
 )
-from vgi_rpc.logging_utils import AccessLogSampler, VgiJsonFormatter
+from vgi_rpc.logging_utils import (
+    REDACTED,
+    AccessLogSampler,
+    DroppingQueueHandler,
+    VgiJsonFormatter,
+    apply_claim_redaction,
+    no_redaction,
+    redact_claims,
+    set_claim_redactor,
+)
 from vgi_rpc.rpc import CallContext, RpcError, RpcServer, serve_pipe
 from vgi_rpc.rpc._server import _current_trace_context
 
@@ -523,6 +534,138 @@ class TestAccessLogSampler:
         """A rate of 100 meaning '100%' must fail loudly, not log everything."""
         with pytest.raises(ValueError, match=r"between 0\.0 and 1\.0"):
             AccessLogSampler(bad)
+
+
+class TestClaimRedaction:
+    """Claims reach an access log that outlives the token by years."""
+
+    def test_credentials_are_redacted(self) -> None:
+        """The credential list matches what vgi_rpc.sentry redacts from kwargs."""
+        out = redact_claims({"access_token": "abc", "api_key": "k", "password": "p"})
+        assert set(out.values()) == {REDACTED}
+
+    def test_standard_oidc_pii_is_redacted(self) -> None:
+        """`email`/`phone`/`name` are the claims an OIDC provider actually sends."""
+        out = redact_claims({"email": "a@b.com", "phone_number": "+1", "given_name": "Ada"})
+        assert set(out.values()) == {REDACTED}
+
+    def test_keys_survive_redaction(self) -> None:
+        """Which claims the token carried is auditable; their values are not.
+
+        Dropping the key answers neither question. Keeping it answers the
+        one an audit log exists for.
+        """
+        out = redact_claims({"email": "a@b.com"})
+        assert list(out) == ["email"]
+        assert out["email"] == REDACTED
+
+    def test_non_sensitive_claims_pass_through(self) -> None:
+        """Redaction must not gut the record — `iss`/`aud`/`scope` stay."""
+        claims = {"iss": "https://idp", "aud": "svc", "scope": "read", "exp": 123}
+        assert redact_claims(claims) == claims
+
+    def test_value_matching_is_not_attempted(self) -> None:
+        """Key-based, like sentry's: free text holding PII is not caught.
+
+        Documented rather than fixed — matching on content means guessing,
+        and a redactor that sometimes catches things is worse than one whose
+        boundary is stated.
+        """
+        out = redact_claims({"context": "contact alice@example.com"})
+        assert out["context"] == "contact alice@example.com"
+
+    def test_a_raising_redactor_fails_closed(self) -> None:
+        """A broken redactor drops claims rather than emitting them raw."""
+
+        def boom(_claims: Mapping[str, object]) -> dict[str, object]:
+            raise RuntimeError("nope")
+
+        set_claim_redactor(boom)
+        try:
+            assert apply_claim_redaction({"email": "a@b.com"}) == {}
+        finally:
+            set_claim_redactor(redact_claims)
+
+    def test_redactor_is_replaceable(self) -> None:
+        """An internal service can opt out deliberately."""
+        set_claim_redactor(no_redaction)
+        try:
+            assert apply_claim_redaction({"email": "a@b.com"}) == {"email": "a@b.com"}
+        finally:
+            set_claim_redactor(redact_claims)
+
+
+class TestDroppingQueueHandler:
+    """Async emission must not lose records silently."""
+
+    def test_records_pass_through(self) -> None:
+        """The ordinary path enqueues."""
+        q: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=10)
+        h = DroppingQueueHandler(q)
+        h.emit(_record(request_id="r1"))
+        assert q.qsize() == 1
+
+    def test_full_queue_drops_instead_of_blocking(self) -> None:
+        """A stalled writer must not become request latency."""
+        q: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=1)
+        h = DroppingQueueHandler(q)
+        h.emit(_record(request_id="r1"))
+        h.emit(_record(request_id="r2"))  # would block on a plain QueueHandler
+        assert h.dropped == 1
+
+    def test_next_record_reports_the_loss(self) -> None:
+        """The count reaches the same file the lost records would have.
+
+        A log that loses records without saying so is worse than a slow
+        one — the consumer cannot tell a quiet period from a dropped one.
+        """
+        q: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=1)
+        h = DroppingQueueHandler(q)
+        h.emit(_record(request_id="r1"))
+        h.emit(_record(request_id="r2"))
+        h.emit(_record(request_id="r3"))
+        assert h.dropped == 2
+        q.get()  # drain, making room
+        h.emit(_record(request_id="r4"))
+        survivors = [q.get() for _ in range(q.qsize())]
+        assert any(getattr(r, "dropped_records", None) == 2 for r in survivors)
+        assert h.dropped == 0, "counter must reset once the loss is reported"
+
+
+class TestTruncationMarker:
+    """`truncated` distinguishes real loss from a configured omission."""
+
+    def test_schema_accepts_payload_omitted(self) -> None:
+        """The new value validates."""
+        rec = {**_MINIMAL_RECORD, "truncated": "payload_omitted"}
+        rec.pop("request_data")
+        rec["original_request_bytes"] = 4096
+        jsonschema.validate(rec, _load_schema())
+
+    def test_schema_still_accepts_the_size_driven_values(self) -> None:
+        """The two pre-existing meanings are unchanged."""
+        schema = _load_schema()
+        for value in (True, "record_too_large"):
+            rec = {**_MINIMAL_RECORD, "truncated": value}
+            rec.pop("request_data")
+            jsonschema.validate(rec, schema)
+
+    def test_schema_rejects_an_unknown_marker(self) -> None:
+        """The set stays closed so a consumer can switch on it."""
+        rec = {**_MINIMAL_RECORD, "truncated": "sort_of"}
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(rec, _load_schema())
+
+    def test_omission_is_distinguishable_from_size_loss(self) -> None:
+        """The common case is now separable, which is the whole point.
+
+        Before, a normally-configured server set `truncated: true` on
+        essentially every unary record, so a consumer scanning for real
+        data loss had nothing to filter on.
+        """
+        schema_values = {opt["const"] for opt in _load_schema()["properties"]["truncated"]["oneOf"]}
+        assert "payload_omitted" in schema_values
+        assert schema_values >= {True, "record_too_large", "payload_omitted"}
 
 
 class TestTraceCorrelation:

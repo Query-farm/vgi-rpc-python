@@ -48,6 +48,7 @@ from ._errors import _make_error_serializer, _make_not_found_sink
 from ._middleware import (
     _REQUEST_ID_HEADER,
     _AccessLogContextMiddleware,
+    _AccessLogEgressMiddleware,
     _AuthMiddleware,
     _CapabilitiesMiddleware,
     _CompressionMiddleware,
@@ -363,6 +364,9 @@ def make_wsgi_app(
     )
 
     middleware: list[Any] = [
+        # First in the list, so its process_response runs LAST -- after
+        # compression has produced the body whose size it reports.
+        _AccessLogEgressMiddleware(),
         _TransportNotifyMiddleware(server),
         _DrainRequestMiddleware(),
         _RequestIdMiddleware(),

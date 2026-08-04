@@ -158,14 +158,32 @@
       "type": "integer",
       "minimum": 0
     },
+    "request_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "On-wire size of the request body as received, before decompression. This is what the peer actually sent -- distinct from input_bytes, which measures logical Arrow buffers after decoding. Use this for egress/ingress accounting."
+    },
+    "response_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "On-wire size of the response body as sent, after compression. Distinct from output_bytes, which measures logical Arrow buffers and is routinely orders of magnitude larger. Absent when the size cannot be known (a streamed response with no content length)."
+    },
+    "externalized_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Bytes uploaded to external storage during this call. These never appear in the HTTP body -- only a pointer batch does -- so they are invisible to transport-level accounting and are frequently the largest of the three byte figures. Absent when nothing was externalised."
+    },
     "truncated": {
-      "description": "Set when the formatter shed fields to keep the line under a per-record cap. true = field-level truncation; \"record_too_large\" = the sentinel form where most optional fields were dropped.",
+      "description": "Set when the record does not carry everything it otherwise would. true = the formatter shed fields to fit a per-record size cap. \"record_too_large\" = the sentinel form, where most optional fields were dropped. \"payload_omitted\" = nothing was lost to a cap; the emitter is simply not logging request payloads at this level. Consumers looking for real data loss MUST distinguish \"payload_omitted\" from the other two, since it is the common case on a normally-configured server.",
       "oneOf": [
         {
           "const": true
         },
         {
           "const": "record_too_large"
+        },
+        {
+          "const": "payload_omitted"
         }
       ]
     },
@@ -193,6 +211,11 @@
         "close"
       ],
       "description": "Lifecycle action for the sticky session this request touched. 'open' = ctx.open_session was called; 'resume' = a valid VGI-Session token resolved to a live entry and dispatch ran; 'close' = ctx.close_session was called; 'none' (or absent) = the request did not interact with sticky machinery. Middleware-short-circuit cases (token validation failed; entry aged out) currently do not produce access-log records \u2014 they short-circuit before dispatch."
+    },
+    "dropped_records": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Records lost to a full async queue since the last successful enqueue. Present on the first record through after a drop."
     }
   },
   "allOf": [

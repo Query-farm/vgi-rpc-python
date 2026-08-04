@@ -28,6 +28,7 @@ from typing import Any
 
 import falcon
 
+from vgi_rpc.external import _current_externalized_bytes
 from vgi_rpc.rpc import (
     AuthContext,
     RpcServer,
@@ -39,8 +40,11 @@ from vgi_rpc.rpc import (
 from vgi_rpc.rpc._common import (
     _ANONYMOUS,
     TransportKind,
+    _access_logger,
+    _current_access_sink,
     _current_body_precompressed,
     _current_request_batch,
+    _current_request_wire_bytes,
     _current_response_codec,
     _current_stream_id,
 )
@@ -314,6 +318,87 @@ class _AuthMiddleware:
         token = getattr(req.context, "transport_token", None)
         if token is not None:
             _current_transport.reset(token)
+
+
+class _AccessLogEgressMiddleware:
+    """Measures what actually crossed the network, then emits the access log.
+
+    Access-log records used to be written by the handler that produced the
+    response, which is too early to know what the response weighed: response
+    compression runs afterwards, in :class:`_CompressionMiddleware`. A record
+    written at handler time can only report the uncompressed body, which is
+    the wrong number for anything that costs money.
+
+    So this installs a sink for the request's records, lets the handlers fill
+    it, and emits once the final body exists — stamping ``response_bytes``
+    on the way out. Registered first in the middleware list, which under
+    Falcon means its ``process_response`` runs last, after compression has
+    replaced the body.
+
+    Three numbers, three different questions:
+
+    * ``request_bytes`` / ``response_bytes`` — what crossed the wire, after
+      compression. This is the egress figure.
+    * ``input_bytes`` / ``output_bytes`` — logical Arrow buffers, i.e. what
+      the worker processed. Unaffected by compression.
+    * ``externalized_bytes`` — uploaded to external storage, which never
+      touches the HTTP body at all and is routinely the largest of the three.
+
+    A crash between handler and response loses that request's records. The
+    alternative — emit early and under-report — trades a rare loss for a
+    permanently wrong number.
+    """
+
+    def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
+        """Install the record sink and capture the request's on-wire size."""
+        req.context._access_sink_token = _current_access_sink.set([])
+        # content_length is the body as received: before decompression, and
+        # therefore the number of bytes the peer actually sent.
+        req.context._req_bytes_token = _current_request_wire_bytes.set(req.content_length or 0)
+        req.context._ext_bytes_token = _current_externalized_bytes.set(0)
+
+    @staticmethod
+    def _response_bytes(resp: falcon.Response) -> int | None:
+        """Return the final body size, or ``None`` when it cannot be known.
+
+        A streamed response has no length until it has been consumed, and
+        guessing one would be worse than omitting the field.
+        """
+        if resp.data is not None:
+            return len(resp.data)
+        if resp.text is not None:
+            return len(resp.text.encode("utf-8"))
+        if resp.content_length is not None:
+            return int(resp.content_length)
+        return None
+
+    def process_response(
+        self,
+        req: falcon.Request,
+        resp: falcon.Response,
+        resource: object,
+        req_succeeded: bool,
+    ) -> None:
+        """Stamp egress sizes onto the request's records and emit them."""
+        sink = _current_access_sink.get()
+        for token_attr, var in (
+            ("_access_sink_token", _current_access_sink),
+            ("_req_bytes_token", _current_request_wire_bytes),
+            ("_ext_bytes_token", _current_externalized_bytes),
+        ):
+            token = getattr(req.context, token_attr, None)
+            if token is not None:
+                var.reset(token)
+        if not sink:
+            return
+        response_bytes = self._response_bytes(resp)
+        for message, extra in sink:
+            if response_bytes is not None:
+                extra["response_bytes"] = response_bytes
+            try:
+                _access_logger.info("%s", message, extra=extra)
+            except Exception:  # pragma: no cover - a log must not fail a request
+                _logger.debug("Access log emission failed", exc_info=True)
 
 
 class _CompressionMiddleware:

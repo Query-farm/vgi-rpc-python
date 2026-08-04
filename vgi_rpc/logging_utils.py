@@ -22,9 +22,24 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import logging.handlers
+import re
+import threading
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from typing import Any
 
-__all__ = ["AccessLogSampler", "VgiAccessLogFormatter", "VgiJsonFormatter"]
+__all__ = [
+    "REDACTED",
+    "AccessLogSampler",
+    "DroppingQueueHandler",
+    "VgiAccessLogFormatter",
+    "VgiJsonFormatter",
+    "apply_claim_redaction",
+    "no_redaction",
+    "redact_claims",
+    "set_claim_redactor",
+]
 
 # Build the set of attribute names that every LogRecord has by default.
 # Anything *not* in this set was injected via ``extra``.
@@ -34,6 +49,90 @@ _DEFAULT_RECORD_ATTRS: frozenset[str] = frozenset(logging.LogRecord("", 0, "", 0
 }
 
 _RESERVED_KEYS: frozenset[str] = frozenset({"timestamp", "level", "logger", "message", "exception", "stack_info"})
+
+
+_DEFAULT_CLAIM_REDACT_RE = re.compile(
+    # Credentials — same list vgi_rpc.sentry redacts from kwargs, so the two
+    # observability paths do not disagree about what is sensitive.
+    r"password|token|secret|key|authorization"
+    # Standard OIDC claims that are personal data. An access log is retained
+    # far longer than a token lives, and shipped to systems chosen for
+    # searchability rather than for holding PII.
+    r"|email|phone|address|birthdate|gender"
+    r"|^name$|given_name|family_name|middle_name|nickname|preferred_username|picture|profile|website",
+    re.IGNORECASE,
+)
+"""Claim names whose *values* are replaced by :data:`REDACTED`."""
+
+REDACTED = "[redacted]"
+"""Placeholder substituted for a sensitive claim value."""
+
+
+def redact_claims(claims: Mapping[str, object]) -> dict[str, object]:
+    """Return *claims* with sensitive values replaced by :data:`REDACTED`.
+
+    Key-based, like :mod:`vgi_rpc.sentry`'s kwarg redactor: a value is
+    matched on the name it arrived under, never on its content.  A claim
+    called ``context`` holding an email address is not caught, and cannot be
+    without guessing at free text.
+
+    Values are **replaced rather than dropped** so the record still shows
+    which claims the credential carried.  "Was there an ``email`` claim on
+    this token?" is a question worth answering from an audit log; "what was
+    it?" is not.
+
+    Args:
+        claims: The authenticated principal's claims.
+
+    Returns:
+        A new dict with the same keys, sensitive values replaced.
+
+    """
+    return {k: (REDACTED if _DEFAULT_CLAIM_REDACT_RE.search(k) else v) for k, v in claims.items()}
+
+
+def no_redaction(claims: Mapping[str, object]) -> dict[str, object]:
+    """Pass claims through verbatim.  Only for logs you control end to end."""
+    return dict(claims)
+
+
+#: Applied to ``claims`` before it reaches an access-log record.  Replace via
+#: :func:`set_claim_redactor` when the default is wrong for a deployment --
+#: either too strict (an internal service that needs the values) or not
+#: strict enough (custom claim names carrying personal data).
+_claim_redactor: Callable[[Mapping[str, object]], dict[str, object]] = redact_claims
+
+
+def set_claim_redactor(redactor: Callable[[Mapping[str, object]], dict[str, object]]) -> None:
+    """Install the redactor applied to access-log ``claims``.
+
+    Args:
+        redactor: Callable taking the raw claims and returning what should
+            be logged.  Pass :func:`no_redaction` to disable redaction.
+
+    """
+    global _claim_redactor
+    _claim_redactor = redactor
+
+
+def apply_claim_redaction(claims: Mapping[str, object]) -> dict[str, object]:
+    """Apply the installed redactor, failing closed if it raises.
+
+    Args:
+        claims: The authenticated principal's raw claims.
+
+    Returns:
+        The redacted claims.  A redactor that raises must not take the
+        request down with it, but it must also not fail *open* silently --
+        so the failure is logged and the claims are dropped entirely rather
+        than emitted unredacted.
+
+    """
+    try:
+        return _claim_redactor(claims)
+    except Exception:
+        logging.getLogger("vgi_rpc").warning("claim redactor raised; dropping claims from the record", exc_info=True)
+        return {}
 
 
 class AccessLogSampler(logging.Filter):
@@ -111,6 +210,61 @@ class AccessLogSampler(logging.Filter):
             return False
         record.sample_rate = self._rate
         return True
+
+
+class DroppingQueueHandler(logging.handlers.QueueHandler):
+    """Non-blocking queue handler that reports what it dropped.
+
+    Writing the access log synchronously puts disk latency in the request
+    path: a slow or full volume shows up as slow RPCs, and rotation happens
+    inline. Handing records to a listener thread removes that, but only if
+    the queue is bounded and the enqueue never blocks -- an unbounded queue
+    turns a stalled disk into an OOM, and a blocking put reintroduces
+    exactly the latency the thread was supposed to remove.
+
+    So the queue is bounded and full means drop. What makes that acceptable
+    rather than silent corruption is the counter: the next record to get
+    through carries ``dropped_records``, so the loss is visible in the log
+    itself rather than only in a metric nobody exports. A log that loses
+    records without saying so is worse than one that is slow.
+
+    The trade this makes is durability: with a synchronous handler, a record
+    on disk means the call completed. Here a crash loses whatever is still
+    in the queue. That is why it is opt-in.
+    """
+
+    __slots__ = ("_dropped", "_lock")
+
+    def __init__(self, queue: Any) -> None:
+        """Wrap *queue*, starting with an empty drop count."""
+        super().__init__(queue)
+        self._dropped = 0
+        self._lock = threading.Lock()
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        """Enqueue *record*, or count it as dropped when the queue is full."""
+        with self._lock:
+            dropped = self._dropped
+            if dropped:
+                # Attribute the loss to the first record that gets through
+                # after it, so the count reaches the same file the losses
+                # would have.
+                record.dropped_records = dropped
+        try:
+            self.queue.put_nowait(record)
+        except Exception:
+            with self._lock:
+                self._dropped += 1
+            return
+        if dropped:
+            with self._lock:
+                self._dropped -= dropped
+
+    @property
+    def dropped(self) -> int:
+        """Records dropped since the last one that made it onto the queue."""
+        with self._lock:
+            return self._dropped
 
 
 class VgiJsonFormatter(logging.Formatter):

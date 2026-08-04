@@ -69,6 +69,7 @@ import hashlib
 import logging
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
@@ -130,6 +131,22 @@ def _sanitize_url(url: str) -> str:
     return urlunparse(parsed._replace(query="", fragment=""))
 
 
+#: Bytes uploaded to external storage during the call in flight.
+#:
+#: Externalised payloads never appear in the HTTP body -- only a pointer batch
+#: does -- so they are invisible to any accounting done at the transport. For
+#: egress they are usually the larger number by orders of magnitude, which is
+#: exactly why they need counting separately rather than folding into the body
+#: size. Incremented at the single upload choke point below; read and reset
+#: per request by the access log.
+_current_externalized_bytes: ContextVar[int] = ContextVar("vgi_rpc_externalized_bytes", default=0)
+
+
+def _count_externalized(n: int) -> None:
+    """Add *n* uploaded bytes to the current call's externalisation total."""
+    _current_externalized_bytes.set(_current_externalized_bytes.get() + n)
+
+
 def _traced_upload(
     ipc_bytes: bytes,
     schema: pa.Schema,
@@ -139,6 +156,10 @@ def _traced_upload(
     original_bytes: int | None = None,
 ) -> str:
     """Upload IPC bytes, wrapping in an OTel span if available."""
+    # Counted here rather than at the call sites: this is the one function
+    # every externalised payload passes through, so the total cannot drift
+    # from reality by someone adding a new upload path.
+    _count_externalized(len(ipc_bytes))
     if not _HAS_OTEL:
         return storage.upload(ipc_bytes, schema, content_encoding=content_encoding)
 

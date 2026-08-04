@@ -598,6 +598,25 @@ _current_request_metadata: ContextVar[pa.KeyValueMetadata | None] = ContextVar("
 _current_response_codec: ContextVar[str | None] = ContextVar("vgi_rpc_response_codec", default=None)
 _current_body_precompressed: ContextVar[bool] = ContextVar("vgi_rpc_body_precompressed", default=False)
 
+#: On-wire size of the request body as received, before any decompression.
+#: Set by the HTTP egress middleware; ``-1`` means "not measured", which is
+#: how every non-HTTP transport leaves it.
+_current_request_wire_bytes: ContextVar[int] = ContextVar("vgi_rpc_request_wire_bytes", default=-1)
+
+#: Deferred access-log records for the request in flight, or ``None`` when
+#: records should be emitted immediately.
+#:
+#: The response's on-wire size is not known when a handler finishes: response
+#: compression runs afterwards, in middleware. So under HTTP the egress
+#: middleware installs a sink here, ``_emit_access_log`` appends to it instead
+#: of logging, and the middleware emits once the final body exists. Every
+#: emit site is left alone by this — the choice of immediate-vs-deferred is
+#: made in one place, and any transport that installs no sink keeps logging
+#: inline.
+_current_access_sink: ContextVar[list[tuple[str, dict[str, object]]] | None] = ContextVar(
+    "vgi_rpc_access_sink", default=None
+)
+
 # Raw request batch bytes — set by _read_request() before deserialization,
 # included in the access log as base64 for full call-parameter capture.
 _current_request_batch: ContextVar[bytes | None] = ContextVar("vgi_rpc_request_batch", default=None)
