@@ -969,7 +969,7 @@ class TestHttpServerStreamAccessLog:
 class TestDrainStderr:
     """Tests for _drain_stderr error-handling paths."""
 
-    def test_oserror_during_iteration(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_oserror_during_iteration(self) -> None:
         """OSError while reading lines should be silently caught."""
         pipe = _FaultyPipe(OSError("fd closed"))
         _drain_stderr(cast("BinaryIO", pipe), logging.getLogger("test.drain"))
