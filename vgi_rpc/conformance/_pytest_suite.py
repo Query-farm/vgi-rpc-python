@@ -2984,6 +2984,217 @@ class TestColdCallStateCache:
 
 
 # ---------------------------------------------------------------------------
+# Token introspection conformance (HTTP-only, optional)
+# ---------------------------------------------------------------------------
+
+
+#: Path of the introspection endpoint, appended to the runner's prefix.
+_INTROSPECT_PATH = "/__introspect_token__"
+#: Header the conformance workers read to decide a request's principal.
+_PRINCIPAL_HEADER_NAME = "X-Conformance-Principal"
+#: Advertised on ``OPTIONS /health`` when the route is enabled.
+_INTROSPECT_ENABLED_HEADER = "VGI-Token-Introspection"
+
+#: Fixed values a runner supplying ``conformance_http_introspect_port`` must
+#: configure. The shared tests post the subject credential and assert the
+#: principal, so these are part of the fixture's contract, not decoration.
+_INTROSPECTOR = "conformance-introspector"
+_SUBJECT_TOKEN = "conformance-opaque-subject-token"
+_SUBJECT_PRINCIPAL = "subject@conformance.example"
+#: JWS-shaped and resolvable by the fixture — see the test that posts it.
+_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
+
+#: Statuses a caller may treat as final. Anything else — including a transport
+#: failure — must be retried rather than cached, which is the distinction the
+#: caller's negative cache is built on.
+_DEFINITIVE = (401, 403, 404)
+
+
+class TestTokenIntrospection:
+    """Resolving an opaque credential to a principal, for a fronting proxy.
+
+    A proxy terminating the only public listener must know which principal a
+    credential authenticates as before it can authorize anything. When the
+    credential is opaque it has to ask the worker.
+
+    What makes this group worth its length is that the answer is **an identity
+    assertion made by the thing being protected**, which the asker then acts on
+    using credentials the worker does not hold. It has to be trusted *more*
+    than the worker, so almost everything asserted here is a refusal.
+
+    Requested through an optional ``conformance_http_introspect_port``
+    fixture, configured with the module constants above. A port that does not
+    implement introspection omits it and this group skips;
+    :class:`TestTokenIntrospectionOffMode` still runs everywhere.
+    """
+
+    @staticmethod
+    def _port(request: pytest.FixtureRequest) -> int:
+        """Resolve the introspection-enabled worker's port, or skip."""
+        try:
+            port: int = request.getfixturevalue("conformance_http_introspect_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_introspect_port")
+        return port
+
+    @staticmethod
+    def _post(port: int, caller: str | None, body: object) -> Any:
+        """POST *body* to the introspection endpoint as *caller*."""
+        import httpx
+
+        headers = {"content-type": "application/json"}
+        if caller is not None:
+            headers[_PRINCIPAL_HEADER_NAME] = caller
+        for path in (_INTROSPECT_PATH, f"/vgi{_INTROSPECT_PATH}"):
+            resp = httpx.post(f"http://127.0.0.1:{port}{path}", json=body, headers=headers, timeout=5.0)
+            if resp.status_code != 404 or "not_enabled" not in resp.text:
+                return resp
+        return resp
+
+    def test_valid_credential_resolves(self, request: pytest.FixtureRequest) -> None:
+        """The endpoint's reason for existing."""
+        resp = self._post(self._port(request), _INTROSPECTOR, {"token": _SUBJECT_TOKEN})
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
+        body = resp.json()
+        assert body["principal"] == _SUBJECT_PRINCIPAL
+
+    def test_ttl_is_usable(self, request: pytest.FixtureRequest) -> None:
+        """``ttl_seconds`` exists so the *caller* caches; it must be a live number.
+
+        A non-finite or non-positive value silently disables a caller's cache
+        and turns every request into a round trip.
+        """
+        body = self._post(self._port(request), _INTROSPECTOR, {"token": _SUBJECT_TOKEN}).json()
+        ttl = body["ttl_seconds"]
+        assert isinstance(ttl, int | float)
+        assert ttl > 0
+        assert math.isfinite(ttl), "ttl_seconds must be finite: NaN silently disables a caller's cache"
+
+    def test_response_carries_no_claims(self, request: pytest.FixtureRequest) -> None:
+        """The most dangerous field this endpoint could grow.
+
+        A pass-through claims field would let a worker choose its caller's
+        tenant routing, its row scope, and its policy branch — the asker
+        derives everything it needs from the principal alone, and must keep
+        doing so. Asserted as a closed key set, so a port adding a field has
+        to come through this test.
+        """
+        body = self._post(self._port(request), _INTROSPECTOR, {"token": _SUBJECT_TOKEN}).json()
+        assert "claims" not in body
+        assert set(body) <= {"principal", "token_name", "ttl_seconds"}, f"unexpected keys: {sorted(body)}"
+
+    def test_unknown_credential_is_definitive(self, request: pytest.FixtureRequest) -> None:
+        """A caller must be able to negative-cache this without fear.
+
+        Definitive and transient are different answers: a caller that caches
+        an outage stops serving a live credential, and a caller that retries a
+        rejection hammers the worker.
+        """
+        resp = self._post(self._port(request), _INTROSPECTOR, {"token": "no-such-credential"})
+        assert resp.status_code in _DEFINITIVE, f"not a definitive rejection: {resp.status_code}"
+
+    @pytest.mark.parametrize("token", ["no-such-credential", "expired-credential", "!!malformed!!"])
+    def test_rejections_are_indistinguishable(self, request: pytest.FixtureRequest, token: str) -> None:
+        """Unknown, expired and malformed are one answer.
+
+        Reporting which would confirm that a guessed credential exists, which
+        is exactly the oracle the allowlist below exists to close.
+        """
+        port = self._port(request)
+        baseline = self._post(port, _INTROSPECTOR, {"token": "no-such-credential"})
+        resp = self._post(port, _INTROSPECTOR, {"token": token})
+        assert resp.status_code == baseline.status_code
+        assert resp.text == baseline.text, f"rejection for {token!r} is distinguishable"
+
+    def test_unauthenticated_caller_refused(self, request: pytest.FixtureRequest) -> None:
+        """No credential, no answer."""
+        resp = self._post(self._port(request), None, {"token": _SUBJECT_TOKEN})
+        assert resp.status_code in _DEFINITIVE
+        assert _SUBJECT_PRINCIPAL not in resp.text
+
+    def test_non_introspector_refused(self, request: pytest.FixtureRequest) -> None:
+        """The oracle test, and the one most likely to be skipped.
+
+        A deployment where *any* valid credential may introspect lets any user
+        test guesses of any other user's credential at unlimited rate, and
+        resolve a stolen one to its owner. Authentication is not the same
+        capability as introspection, and a port that checks only the former
+        passes every other test in this group.
+        """
+        resp = self._post(self._port(request), "someone-else", {"token": _SUBJECT_TOKEN})
+        assert resp.status_code in _DEFINITIVE, f"a non-introspector was answered: {resp.status_code}"
+        assert resp.status_code != 200
+        assert _SUBJECT_PRINCIPAL not in resp.text, "the principal leaked to an unauthorized caller"
+
+    def test_jws_shaped_subject_is_rejected(self, request: pytest.FixtureRequest) -> None:
+        """A locally-validated JWS must never be vouched for here.
+
+        Routing one through hands a third party a bearer token the asker may
+        itself have rejected — an expired access token is still live at its
+        issuer for other resources.
+        """
+        # The fixture's resolver *would* resolve this one. That is deliberate:
+        # against an unknown JWS a port with no shape guard rejects it as
+        # unknown and passes for the wrong reason. Resolvable, the guard is
+        # the only thing that can produce a rejection.
+        resp = self._post(self._port(request), _INTROSPECTOR, {"token": _JWS_TRAP_TOKEN})
+        assert resp.status_code in _DEFINITIVE
+        assert resp.status_code != 200, "a JWS-shaped subject was resolved"
+
+    @pytest.mark.parametrize("token", [_SUBJECT_TOKEN, "no-such-credential"])
+    def test_credential_never_appears_in_the_response(self, request: pytest.FixtureRequest, token: str) -> None:
+        """Neither a success nor a rejection may echo the subject credential."""
+        resp = self._post(self._port(request), _INTROSPECTOR, {"token": token})
+        assert token not in resp.text, "the credential was echoed back"
+
+    def test_capability_is_advertised(self, request: pytest.FixtureRequest) -> None:
+        """A proxy preflights at boot rather than discovering at first login."""
+        import httpx
+
+        port = self._port(request)
+        resp = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+        assert resp.headers.get(_INTROSPECT_ENABLED_HEADER.lower()) == "true"
+
+
+class TestTokenIntrospectionOffMode:
+    """A worker that did not enable introspection must resolve nothing.
+
+    Ungated: "off unless explicitly enabled" binds every port whether or not
+    it implements the feature, and it is the guard that stops a worker growing
+    a credential-to-identity oracle by upgrading a dependency.
+    """
+
+    def test_not_advertised_by_default(self, conformance_http_port: int) -> None:
+        """The absent capability header is how a proxy knows not to configure this."""
+        import httpx
+
+        resp = httpx.options(f"http://127.0.0.1:{conformance_http_port}/health", timeout=5.0)
+        assert _INTROSPECT_ENABLED_HEADER.lower() not in resp.headers
+
+    def test_disabled_worker_refuses_definitively(self, conformance_http_port: int) -> None:
+        """A caller must stop, not spin.
+
+        The answer has to be one a caller classifies as final. Anything else —
+        a 415 from a generic route that happens to catch the path, say — reads
+        as "retry later", so pointing a proxy at a worker without the feature
+        retries forever instead of failing at preflight.
+        """
+        import httpx
+
+        for path in (_INTROSPECT_PATH, f"/vgi{_INTROSPECT_PATH}"):
+            resp = httpx.post(
+                f"http://127.0.0.1:{conformance_http_port}{path}",
+                json={"token": "anything"},
+                headers={"content-type": "application/json"},
+                timeout=5.0,
+            )
+            assert resp.status_code in _DEFINITIVE, (
+                f"{path} answered {resp.status_code}; a caller would treat that as transient and retry forever"
+            )
+            assert resp.status_code != 200
+
+
+# ---------------------------------------------------------------------------
 # CORS conformance (HTTP-only)
 # ---------------------------------------------------------------------------
 

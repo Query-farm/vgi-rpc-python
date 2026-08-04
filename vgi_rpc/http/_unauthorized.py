@@ -101,6 +101,41 @@ class AuthFailure(ValueError):
         setattr(self, REASON_ATTR, reason)
 
 
+class AuthUnavailableError(Exception):
+    """An authenticator could not answer. Not a rejection.
+
+    "The credential is bad" and "I could not find out whether the credential
+    is bad" are different answers, and collapsing them is expensive in both
+    directions. A sidecar restart that surfaces as 401 makes every caller
+    re-authenticate at once; the DuckDB extension treats a second 401 after a
+    refresh as fatal, so a thirty-second blip becomes a fleet-wide re-login
+    storm. And a caller that negative-caches a rejection will cache an outage.
+
+    Deliberately **not** a :class:`ValueError`, which is the whole point:
+    :func:`~vgi_rpc.http.chain_authenticate` advances to the next
+    authenticator on ``ValueError``, so an outage raised as one is read as
+    "this credential isn't mine, try the next" and ends up as a 401 from the
+    end of the chain. Raised as this type it propagates, and
+    ``_AuthMiddleware`` renders ``503`` with ``Retry-After`` instead.
+
+    Raise it for transport failures, timeouts, and 5xx from a remote
+    authority. Do not raise it for a credential the authority answered about.
+    """
+
+    def __init__(self, detail: str = "", *, retry_after: int = 5) -> None:
+        """Create a transient-failure signal.
+
+        Args:
+            detail: Operator-facing text. Must not contain the credential.
+            retry_after: Seconds to advertise in ``Retry-After``. Keep it
+                short: it is a hint to retry, not a backoff schedule.
+
+        """
+        super().__init__(detail or "authentication service unavailable")
+        self.detail = detail
+        self.retry_after = retry_after
+
+
 class AuthenticationError(RpcError):
     """Client-side view of a 401, with the server's reason code unpacked.
 

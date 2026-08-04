@@ -9,7 +9,7 @@ Provides ``_SyncTestClient`` and ``make_sync_client`` which use
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -20,6 +20,7 @@ from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, RpcServer
 
 from .server import make_wsgi_app
+from .server._introspect import TokenResolver
 
 if TYPE_CHECKING:
     from vgi_rpc.http._oauth import OAuthResourceMetadata
@@ -149,6 +150,9 @@ def make_sync_client(
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
     call_state_cache_entries: int = 4096,
+    introspect_resolver: TokenResolver | None = None,
+    introspect_principals: Iterable[str] | None = None,
+    introspect_rate_limit: int = 20,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -185,6 +189,9 @@ def make_sync_client(
         sticky_echo_headers: See ``make_wsgi_app``.
         call_state_cache_entries: See ``make_wsgi_app``.  Pass ``0`` to force
             every stream continuation down the call-token miss path.
+        introspect_resolver: See ``make_wsgi_app``.
+        introspect_principals: See ``make_wsgi_app``.
+        introspect_rate_limit: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -217,5 +224,8 @@ def make_sync_client(
         sticky_default_ttl=sticky_default_ttl,
         sticky_echo_headers=sticky_echo_headers,
         call_state_cache_entries=call_state_cache_entries,
+        introspect_resolver=introspect_resolver,
+        introspect_principals=introspect_principals,
+        introspect_rate_limit=introspect_rate_limit,
     )
     return _SyncTestClient(app, default_headers=default_headers, prefix=prefix)

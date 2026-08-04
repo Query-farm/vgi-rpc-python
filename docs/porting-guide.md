@@ -236,6 +236,47 @@ Two further points the tests pin:
 - **Headers a plain worker never advertises.** The conditional capability headers — `VGI-Upload-URL-Support`, `VGI-Max-Upload-Bytes`, the size caps — are absent from a worker with no storage configured, so a missing exposure for them passes. **Point `conformance_http_cors_port` at a storage/upload-enabled worker**, not a bare one; `test_worker_advertises_the_optional_capabilities` fails the fixture if you don't.
 - **Headers that only ride failures.** `OPTIONS /health` is a success-path surface, so nothing advertises `X-VGI-RPC-Error`, `VGI-Auth-Reason`, or `X-Request-ID` — a derived check structurally cannot reach them. They are named explicitly in `_ALWAYS_EXPOSED` and asserted one at a time. `VGI-Auth-Reason` is the one to check first: without it a browser client cannot read the machine-readable half of a 401 and is back to parsing prose.
 
+## HTTP token introspection
+
+**Optional, and off unless explicitly enabled.** A port that does not implement it MUST still answer `POST {prefix}/__introspect_token__` with a status a caller treats as **definitive** — `401`, `403` or `404`. That requirement is not decoration: a caller classifying anything else as transient will retry forever against a worker that is never going to support the feature, so a `415` from a generic catch-all route turns a misconfiguration into an infinite loop instead of a preflight failure. The reference answers `404 {"error": "not_enabled"}`.
+
+The endpoint resolves an **opaque bearer credential** to a **principal**, for a reverse proxy that terminates the only public listener and must know which principal a credential authenticates as before it can authorize anything.
+
+```
+POST {prefix}/__introspect_token__
+Authorization: Bearer <introspector credential>
+Content-Type: application/json
+{"token": "<opaque subject credential>"}
+
+200  {"principal": "...", "token_name": "...", "ttl_seconds": 300}
+401/403/404  definitive   — the caller may cache this
+5xx / transport failure   — the caller MUST NOT cache this
+```
+
+### Why the guards are hard requirements
+
+The response is **an identity assertion made by the thing being protected**, and the asker acts on it using credentials the worker does not hold — storage credentials on a data-plane host, service-credential attachments in an entitlement resolver, policy-tier selection. "Trust it as much as you trust the worker" is the wrong frame: it must be trusted *more*, because it steers privileges the worker never has.
+
+1. **Never return claims.** The response is a closed set: `principal`, `token_name`, `ttl_seconds`. A pass-through claims field would let a worker choose its caller's tenant routing, its row scope, and its policy branch — the single most dangerous thing this feature could grow. Askers derive what they need from the principal alone.
+2. **The route is absent unless explicitly enabled.** No worker grows a credential-to-identity oracle by upgrading a dependency.
+3. **The introspector allowlist has no permissive default.** Authentication and introspection are different capabilities. A deployment where *any* valid credential may introspect lets any user test guesses of any other user's credential at unlimited rate, and resolve a stolen one to its owner. A port that checks only authentication passes every other test in the group — `test_non_introspector_refused` is the one that catches it.
+4. **Reject JWS-shaped subjects without resolving them.** A JWS is validated locally against a key set; routing one here hands a third party a bearer token the asker may itself have rejected, and an expired access token is still live at its issuer for other resources.
+5. **Uniform rejection.** Unknown, expired and malformed are one answer, byte for byte. Reporting which confirms that a guessed credential exists.
+6. **Never log the credential.** Digest it (SHA-256) for diagnostics. The conformance group asserts the credential is absent from responses; the reference asserts it against captured log output too, and a port should do the same locally.
+7. **Advertise on `/health`.** `VGI-Token-Introspection: true` when enabled, absent otherwise, so a proxy preflights at boot rather than at first login.
+
+Do **not** implement this by replaying the credential through the worker's own authenticate chain. It is the attractive design and it breaks four ways: a precondition gate wrapping the chain makes the replay unimplementable; it runs the worker's independently-configured audience/issuer set, so a credential the asker *rejected* could be accepted; cookie- and mTLS/IP-derived identity cannot be replayed at all, and a synthesized request carries the proxy's own address — silently elevating any address-allowlist member rather than failing cleanly; and it invents a fake-request contract every future authenticator must honour with no type to enforce it. Take a narrow `resolve(credential) -> principal | None` callable instead.
+
+### Definitive vs transient is normative
+
+"The credential is bad" and "I could not find out whether the credential is bad" are different answers, and a caller's cache depends on telling them apart. A rejection may be negative-cached; an outage must not be, or a worker restart takes the fleet down for the cache's lifetime. The reference adds `AuthUnavailableError`, which is deliberately **not** a `ValueError` so that `chain_authenticate` — which advances on `ValueError` — propagates it instead of reading it as "not my credential, try the next" and emerging as a 401 from the end of the chain. It surfaces as `503` with `Retry-After`. A port needs the equivalent distinction in whatever its chaining primitive is.
+
+### Conformance
+
+Supply an optional `conformance_http_introspect_port` fixture: a worker with introspection enabled, configured with the exact constants in `_pytest_suite.py` (`_INTROSPECTOR`, `_SUBJECT_TOKEN`, `_SUBJECT_PRINCIPAL`, `_JWS_TRAP_TOKEN`). Omit it and `TestTokenIntrospection` skips; `TestTokenIntrospectionOffMode` runs everywhere regardless, because "off unless enabled" binds every port.
+
+Note that `_JWS_TRAP_TOKEN` must be **resolvable** by your fixture's resolver. Against an unknown JWS a port with no shape guard rejects it as unknown and passes for the wrong reason; resolvable, the shape guard is the only thing that can produce a rejection.
+
 ## HTTP proxy proof
 
 Proxy proof is an **opt-in additive feature**: a worker can refuse any request that did not arrive through a trusted proxy, which is verified by recomputing an HMAC over a timestamp, a nonce and the worker's own identifier. The full spec lives at [`docs/proxy-proof-spec.md`](proxy-proof-spec.md). A port may:

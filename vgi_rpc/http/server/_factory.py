@@ -45,6 +45,14 @@ from .._common import (
 from .._unauthorized import build_proxy_hint, proxy_headers_of
 from ._app import _HttpRpcApp
 from ._errors import _make_error_serializer, _make_not_found_sink
+from ._introspect import (
+    INTROSPECT_ENABLED_HEADER,
+    INTROSPECT_ENDPOINT,
+    TokenResolver,
+    _IntrospectionDisabledResource,
+    _normalise_principals,
+    _TokenIntrospectionResource,
+)
 from ._middleware import (
     _REQUEST_ID_HEADER,
     _AccessLogContextMiddleware,
@@ -112,6 +120,9 @@ def make_wsgi_app(
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
     call_state_cache_entries: int = 4096,
+    introspect_resolver: TokenResolver | None = None,
+    introspect_principals: Iterable[str] | None = None,
+    introspect_rate_limit: int = 20,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -297,6 +308,26 @@ def make_wsgi_app(
             miss path, so a client that fails to echo
             :data:`~vgi_rpc.metadata.CALL_STATE_KEY` fails immediately
             instead of only once the cache goes cold in production.
+        introspect_resolver: Enables ``POST {prefix}/__introspect_token__``,
+            which resolves an opaque bearer credential to a principal for a
+            reverse proxy that must know the caller's identity before it can
+            authorize.  ``None`` (the default) leaves the route **absent** --
+            not merely refusing, absent -- so no worker grows a
+            credential-to-identity oracle by upgrading a dependency.
+            The callable returns a
+            :class:`~vgi_rpc.http.server._introspect.TokenIdentity` or ``None``,
+            and raises :class:`~vgi_rpc.http.AuthUnavailableError` when the
+            answer is not knowable, which a caller must retry rather than
+            cache.  It never returns claims; see the module docstring for why.
+        introspect_principals: Principals permitted to introspect.  Required
+            whenever ``introspect_resolver`` is set, with **no permissive
+            default**: authentication and introspection are different
+            capabilities, and a deployment where any valid credential may
+            introspect lets any user resolve any other user's credential to
+            its owner.
+        introspect_rate_limit: Introspection requests allowed per caller per
+            second (default 20).  Bounds, rather than closes, the oracle an
+            allowlisted-but-compromised caller still has.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -505,6 +536,21 @@ def make_wsgi_app(
     # they describe a rejection, so emitting them on a 200 would be noise.
     # Without the CORS exposure a browser client could not read the reason
     # code off a cross-origin 401 and would be back to guessing from the body.
+    # Introspection is validated here, before any route exists, so a
+    # misconfiguration fails at construction rather than at the first proxy
+    # preflight.
+    _introspect_principals: frozenset[str] = frozenset()
+    if introspect_resolver is not None:
+        _introspect_principals = _normalise_principals(introspect_principals)
+        capability_headers[INTROSPECT_ENABLED_HEADER] = "true"
+        cors_expose.append(INTROSPECT_ENABLED_HEADER)
+    elif introspect_principals:
+        raise ValueError(
+            "introspect_principals was given without introspect_resolver; the "
+            "route stays absent, so the allowlist would have no effect. Pass "
+            "both or neither."
+        )
+
     cors_expose.append(AUTH_REASON_HEADER)
     if proxy_hint:
         cors_expose.append(AUTH_PROXY_REQUIRED_HEADER)
@@ -725,6 +771,17 @@ def make_wsgi_app(
         app.add_route(f"{prefix}/describe", _DescribePageResource(describe_html))
 
     # Health endpoint — GET {prefix}/health
+    # Always routed, but only ever an oracle when a resolver exists. The
+    # disabled responder holds nothing and looks nothing up; it is there so a
+    # caller gets a definitive 404 instead of the 415 the generic `{method}`
+    # route would produce for a JSON body.
+    app.add_route(
+        f"{prefix}{INTROSPECT_ENDPOINT}",
+        _TokenIntrospectionResource(introspect_resolver, _introspect_principals, introspect_rate_limit)
+        if introspect_resolver is not None
+        else _IntrospectionDisabledResource(),
+    )
+
     if enable_health_endpoint:
         app.add_route(f"{prefix}/health", _HealthResource(server.server_id, server.protocol_name))
 

@@ -1214,6 +1214,53 @@ treat the zero-row pointer as empty input.
 
 ---
 
+## 16. Token Introspection (`POST {prefix}/__introspect_token__`)
+
+**HTTP-only. Optional. Absent unless explicitly enabled.**
+
+Resolves an **opaque bearer credential** to a **principal**, for a reverse proxy that terminates the only public listener and must know which principal a credential authenticates as before it can authorize. Not part of the Arrow RPC surface: it is JSON in and JSON out, because its consumer is an authorization layer, not an Arrow client.
+
+### Request
+
+```http
+POST {prefix}/__introspect_token__
+Authorization: Bearer <introspector credential>
+Content-Type: application/json
+
+{"token": "<opaque subject credential>"}
+```
+
+The body carries exactly one key. Implementations MUST cap it — the only legitimate content is one credential, and the generic request-size cap would otherwise admit megabytes into a JSON parse.
+
+### Response
+
+| Status | Meaning | Caller behaviour |
+|---|---|---|
+| `200` | Resolved. Body below. | Cache for `ttl_seconds`. |
+| `401` / `403` / `404` | **Definitive** — refused, or did not resolve. | MAY negative-cache. |
+| `5xx`, transport failure | **Transient** — could not answer. | MUST NOT cache; retry. |
+
+```json
+{"principal": "alice@example.com", "token_name": "laptop", "ttl_seconds": 300}
+```
+
+Exactly three keys. **A `claims` field MUST NEVER be returned** — see the porting guide for why this is the constraint the whole feature rests on. `ttl_seconds` MUST be finite and positive; `NaN` silently disables a caller's cache and turns every request into a round trip.
+
+The definitive/transient split is **normative**. A caller's negative cache depends on it: cache an outage and a worker restart takes the fleet down for the cache's lifetime; retry a rejection and the worker is hammered. A worker that has *not* enabled introspection MUST still answer definitively — `404` in the reference — rather than letting the path fall through to a generic route whose status a caller reads as transient.
+
+### Guards
+
+Normative for any implementation that enables the route:
+
+- The route is **absent** (or definitively refusing) unless explicitly enabled.
+- An **introspector-principal allowlist** with no permissive default. Authentication is not the same capability as introspection.
+- **JWS-shaped subjects are rejected without being resolved.**
+- **Uniform rejection**: unknown, expired and malformed are byte-identical answers.
+- The credential appears in **no** response, error message, log record, or span. Digest it (SHA-256) for diagnostics.
+- `VGI-Token-Introspection: true` on `/health` when enabled, absent otherwise.
+
+Conformance group: `TestTokenIntrospection` (optional fixture) and `TestTokenIntrospectionOffMode` (ungated).
+
 ## Appendix A: IPC Stream EOS Marker
 
 The end-of-stream marker is the 8-byte sequence:

@@ -58,7 +58,7 @@ from .._common import (
 from .._common import (
     decompress as _decompress_with_encoding,
 )
-from .._unauthorized import classify_auth_failure
+from .._unauthorized import AuthUnavailableError, classify_auth_failure
 
 _logger = logging.getLogger("vgi_rpc.http")
 
@@ -283,6 +283,19 @@ class _AuthMiddleware:
             return
         try:
             auth = self._authenticate(req)
+        except AuthUnavailableError as exc:
+            # Not a rejection: the authority could not be reached. A 401 here
+            # tells every caller to re-authenticate against a service that is
+            # simply down, and invites them to negative-cache an outage.
+            _logger.warning(
+                "Authentication unavailable: %s",
+                exc,
+                extra={"remote_addr": req.remote_addr or "", "error_type": type(exc).__name__},
+            )
+            raise falcon.HTTPServiceUnavailable(
+                description=str(exc),
+                retry_after=exc.retry_after,
+            ) from exc
         except (ValueError, PermissionError) as exc:
             # Classify before raising so the error serializer can put a code on
             # the response. It reads req.context rather than re-deriving from

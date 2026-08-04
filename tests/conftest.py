@@ -517,6 +517,18 @@ def conformance_http_cold_call_cache_port() -> Iterator[int]:
         yield port
 
 
+@pytest.fixture(scope="session")
+def conformance_http_introspect_port() -> Iterator[int]:
+    """Spawn a conformance HTTP worker with token introspection enabled.
+
+    Backs the shared ``TestTokenIntrospection`` group.  It needs its own
+    worker because the route is absent unless explicitly enabled -- which
+    ``TestTokenIntrospectionOffMode`` asserts against the default worker.
+    """
+    with _spawn_conformance_http("--introspect") as port:
+        yield port
+
+
 #: Origin the CORS conformance worker is configured to allow. Shared with the
 #: canonical ``TestCors`` group, which sends it as the ``Origin`` request
 #: header; a runner supplying its own worker must allow this exact value.

@@ -25,6 +25,7 @@ import falcon
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
 from vgi_rpc.external import Compression, ExternalLocationConfig
 from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
+from vgi_rpc.http.server._introspect import TokenIdentity
 from vgi_rpc.rpc import AuthContext, RpcServer
 
 # Header the sticky principal-binding conformance fixture reads to decide
@@ -44,6 +45,33 @@ def _principal_from_header(req: falcon.Request) -> AuthContext:
     if not principal:
         return AuthContext(domain=None, authenticated=False, principal=None)
     return AuthContext(domain="conformance", authenticated=True, principal=principal)
+
+
+#: Fixed conformance values for the token-introspection group.  A port
+#: supplying ``conformance_http_introspect_port`` MUST configure exactly these,
+#: since the shared tests post the subject credential and assert the principal.
+CONFORMANCE_INTROSPECTOR = "conformance-introspector"
+CONFORMANCE_SUBJECT_TOKEN = "conformance-opaque-subject-token"
+CONFORMANCE_SUBJECT_PRINCIPAL = "subject@conformance.example"
+CONFORMANCE_SUBJECT_TOKEN_NAME = "conformance-subject"
+CONFORMANCE_SUBJECT_TTL = 300
+#: A JWS-shaped credential the resolver *would* resolve.  Deliberately
+#: resolvable: if the fixture only offered an unknown JWS, a port with no shape
+#: guard would reject it as unknown and pass the test for the wrong reason.
+#: Made resolvable, the guard becomes observable -- a port that fails to reject
+#: JWS shapes answers 200 and fails.
+CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
+
+
+def _conformance_resolver(token: str) -> TokenIdentity | None:
+    """Resolve the one fixed subject credential the shared tests post."""
+    if token in (CONFORMANCE_SUBJECT_TOKEN, CONFORMANCE_JWS_TRAP_TOKEN):
+        return TokenIdentity(
+            principal=CONFORMANCE_SUBJECT_PRINCIPAL,
+            token_name=CONFORMANCE_SUBJECT_TOKEN_NAME,
+            ttl_seconds=CONFORMANCE_SUBJECT_TTL,
+        )
+    return None
 
 
 class _TestDrainResource:
@@ -209,6 +237,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--introspect",
+        action="store_true",
+        help=(
+            "Enable POST /__introspect_token__ with the fixed conformance "
+            "resolver and a single-principal introspector allowlist. Backs the "
+            "shared TestTokenIntrospection group; implies principal-header auth "
+            "so the allowlist has something to check."
+        ),
+    )
+    parser.add_argument(
         "--cors-origin",
         default=None,
         help=(
@@ -222,6 +260,8 @@ def main() -> None:
     args = parser.parse_args()
 
     call_state_cache_entries = 0 if args.no_call_state_cache else 4096
+    introspect_resolver = _conformance_resolver if args.introspect else None
+    introspect_principals = [CONFORMANCE_INTROSPECTOR] if args.introspect else None
     enable_sticky = not args.no_sticky
     # Fixed marker the canonical TestSticky::test_echo_header_round_trip
     # captures + replays. Operators wiring up real deployments use
@@ -234,7 +274,7 @@ def main() -> None:
 
     compression_level = None if args.no_compression else 1
     token_key = bytes.fromhex(args.token_key) if args.token_key else None
-    authenticate = _principal_from_header if args.sticky_auth else None
+    authenticate = _principal_from_header if (args.sticky_auth or args.introspect) else None
     # Mirror make_wsgi_app's own default so the plain worker keeps shipping
     # the documented value in VGI-Sticky-Default-TTL.
     sticky_default_ttl: float = 300.0 if args.sticky_ttl is None else float(args.sticky_ttl)
@@ -274,6 +314,8 @@ def main() -> None:
             sticky_default_ttl=sticky_default_ttl,
             call_state_cache_entries=call_state_cache_entries,
             cors_origins=args.cors_origin,
+            introspect_resolver=introspect_resolver,
+            introspect_principals=introspect_principals,
         )
         # Test-only admin endpoint so canonical conformance tests can
         # trigger drain over the wire without sending SIGTERM.
@@ -320,6 +362,8 @@ def main() -> None:
         enable_sticky=enable_sticky,
         sticky_echo_headers=sticky_echo_headers,
         cors_origins=args.cors_origin,
+        introspect_resolver=introspect_resolver,
+        introspect_principals=introspect_principals,
     )
     # Test-only admin endpoint (see _TestDrainResource for rationale).
     app.add_route("/__test_drain__", _TestDrainResource(drain_handle(app)))
