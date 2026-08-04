@@ -524,15 +524,27 @@ CONFORMANCE_CORS_ORIGIN = "https://conformance.example"
 
 
 @pytest.fixture(scope="session")
-def conformance_http_cors_port() -> Iterator[int]:
-    """Spawn a conformance HTTP server with CORS enabled for a known origin.
+def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Spawn a conformance HTTP server with CORS *and* storage enabled.
 
     Backs the shared ``TestCors`` group.  It needs its own worker because
     CORS is a *server configuration* no request can induce, and because the
     default conformance worker deliberately serves no CORS headers -- which
     ``TestCorsOffMode`` asserts.
+
+    Storage is on deliberately.  The exposure check derives what it expects
+    from what the worker advertises, so a *plain* worker under-tests it:
+    the conditional capability headers -- upload URLs, the size caps,
+    externalisation -- are never advertised, so a server that forgets to
+    expose them still passes.  Those are the likeliest to be missed
+    precisely because a default worker never exercises them.
     """
-    with _spawn_conformance_http("--cors-origin", CONFORMANCE_CORS_ORIGIN) as port:
+    with _spawn_conformance_http(
+        "--cors-origin",
+        CONFORMANCE_CORS_ORIGIN,
+        "--fake-storage",
+        conformance_fake_storage,
+    ) as port:
         yield port
 
 

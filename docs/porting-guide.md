@@ -222,10 +222,19 @@ Both halves matter, and they fail differently:
 1. **Response half — `Access-Control-Expose-Headers`.** A browser hides every response header not on this list from JavaScript. That covers the whole capability system (`VGI-Max-Response-Bytes`, `VGI-Supported-Encodings`, `VGI-Sticky-Enabled`, `VGI-Externalization-Enabled`, …), plus `VGI-Auth-Reason` on a 401, the session headers, and `X-VGI-RPC-Error` — which is how a client tells an error response from a result, so without it a browser client cannot distinguish the two at all. The rule is simply: **whatever you advertise, expose.** `test_advertised_capabilities_are_all_exposed` derives its expectation from what your server actually advertises on `OPTIONS /health`, so it adapts to your feature set rather than demanding features you never claimed.
 2. **Request half — `Access-Control-Allow-Headers`.** A browser refuses to *send* a header the preflight did not permit. Falcon echoes `Access-Control-Request-Headers` back, so the Python reference is permissive by construction; a port that hardcodes `Content-Type` instead will look completely healthy on ordinary calls and then silently break sticky sessions (`VGI-Session`, `VGI-Session-Accept`), proxy proof (`VGI-Proxy-Proof`), and encoding negotiation (`X-VGI-Accept-Encoding`). Echoing the request, returning an explicit list, or `*` are all conformant.
 
+3. **`Cross-Origin-Resource-Policy: cross-origin`** on every response, when CORS is configured. Correct CORS is *not* sufficient for a caller that has opted into cross-origin isolation: a page sending `Cross-Origin-Embedder-Policy: require-corp` — which any page using `SharedArrayBuffer` must — has its own fetches blocked unless each response also carries CORP. The server sees an ordinary successful response, so this fails invisibly from the operator's side. `cors_resource_policy` narrows it (`"same-site"`) or omits it (`None`); the conformance test requires the default, since reaching it means the port declared browser support.
+
 Two further points the tests pin:
 
 - `application/vnd.apache.arrow.stream` is not a CORS-safelisted `Content-Type`, so **every** RPC call is a preflighted request. There is no simple-request fast path to fall back on.
 - `Access-Control-Allow-Origin` must be on the *actual* response, not only the preflight. A browser re-checks it and discards the body without it, so a server that sets it on `OPTIONS` alone fails every real call while passing a naive preflight-only test.
+
+### Two blind spots the derived check cannot cover
+
+`test_advertised_capabilities_are_all_exposed` derives its expectation from `OPTIONS /health`, which makes it adapt to a port's feature set — but that also bounds what it can see, in two ways that produced real misses in the Go and Rust ports:
+
+- **Headers a plain worker never advertises.** The conditional capability headers — `VGI-Upload-URL-Support`, `VGI-Max-Upload-Bytes`, the size caps — are absent from a worker with no storage configured, so a missing exposure for them passes. **Point `conformance_http_cors_port` at a storage/upload-enabled worker**, not a bare one; `test_worker_advertises_the_optional_capabilities` fails the fixture if you don't.
+- **Headers that only ride failures.** `OPTIONS /health` is a success-path surface, so nothing advertises `X-VGI-RPC-Error`, `VGI-Auth-Reason`, or `X-Request-ID` — a derived check structurally cannot reach them. They are named explicitly in `_ALWAYS_EXPOSED` and asserted one at a time. `VGI-Auth-Reason` is the one to check first: without it a browser client cannot read the machine-readable half of a 401 and is back to parsing prose.
 
 ## HTTP proxy proof
 

@@ -1656,6 +1656,38 @@ class TestCors:
         resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
         assert "access-control-max-age" not in resp.headers
 
+    def test_resource_policy_default(self) -> None:
+        """A CORS-enabled server defaults to cross-origin resource policy."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_get("/", headers={"Origin": "http://example.com"})
+        assert resp.headers.get("cross-origin-resource-policy") == "cross-origin"
+
+    def test_resource_policy_custom(self) -> None:
+        """A deployment behind a same-site proxy can narrow the policy."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*", cors_resource_policy="same-site")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_get("/", headers={"Origin": "http://example.com"})
+        assert resp.headers.get("cross-origin-resource-policy") == "same-site"
+
+    def test_resource_policy_none_omits_header(self) -> None:
+        """``cors_resource_policy=None`` omits the header entirely."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test", cors_origins="*", cors_resource_policy=None)
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_get("/", headers={"Origin": "http://example.com"})
+        assert "cross-origin-resource-policy" not in resp.headers
+
+    def test_no_resource_policy_without_cors(self) -> None:
+        """Resource policy is part of the CORS opt-in, not independent of it."""
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        app = make_wsgi_app(server, token_key=b"test")
+        tc = falcon.testing.TestClient(app)
+        resp = tc.simulate_get("/", headers={"Origin": "http://example.com"})
+        assert "cross-origin-resource-policy" not in resp.headers
+
     def test_cors_max_age_not_on_post(self) -> None:
         """Access-Control-Max-Age is only set on OPTIONS, not regular requests."""
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())

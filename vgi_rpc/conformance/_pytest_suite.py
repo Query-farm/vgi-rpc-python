@@ -2992,6 +2992,17 @@ class TestColdCallStateCache:
 #: ``conformance_http_cors_port`` configures its worker with exactly this.
 _CORS_ORIGIN = "https://conformance.example"
 
+#: Headers that MUST be exposed even though nothing advertises them, because
+#: they ride error and rejection responses rather than the success path that
+#: ``OPTIONS /health`` describes. A check derived from advertisements cannot
+#: reach these by construction, so they are named.
+_ALWAYS_EXPOSED = frozenset({"x-vgi-rpc-error", "vgi-auth-reason", "x-request-id"})
+
+#: Value a CORS-enabled server is expected to send for
+#: ``Cross-Origin-Resource-Policy``. A server that has opted into serving
+#: cross-origin callers has, by construction, opted into this.
+_CORP_VALUE = "cross-origin"
+
 
 class TestCors:
     """Browser clients must be able to *read* what the server advertises.
@@ -3170,21 +3181,88 @@ class TestCors:
             f"add them to Access-Control-Expose-Headers (exposed: {sorted(exposed)})"
         )
 
-    def test_error_flag_is_exposed(self, request: pytest.FixtureRequest) -> None:
-        """``X-VGI-RPC-Error`` marks a 200 that is really a failure.
+    def test_worker_advertises_the_optional_capabilities(self, request: pytest.FixtureRequest) -> None:
+        """Guard the fixture itself: a bare worker under-tests the derived check.
 
-        It is how a client tells an error response from a result, so a
-        browser client that cannot read it cannot tell the two apart at
-        all. It rides every error response rather than being advertised on
-        ``/health``, so the derived check above would not catch it.
+        ``test_advertised_capabilities_are_all_exposed`` can only catch a
+        missing exposure for a header the worker actually advertises, so a
+        CORS fixture pointed at a plain worker silently skips the whole
+        conditional half of the capability set — externalisation, upload
+        URLs, the size caps. Those are exactly the exposures a port is most
+        likely to miss, because they are the ones its default worker never
+        exercises.
+
+        This asserts the fixture is pointed at a worker with those features
+        on. It is a test about test coverage, which is unusual, but the
+        alternative is a green suite that proves less than it appears to.
+        """
+        import httpx
+
+        port = self._port(request)
+        health = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+        advertised = {name.lower() for name in health.headers if name.lower().startswith(("vgi-", "x-vgi-"))}
+        assert "vgi-upload-url-support" in advertised, (
+            "the CORS worker advertises no upload-URL support, so the derived "
+            "exposure check never sees the storage capability headers — point "
+            f"conformance_http_cors_port at a storage-enabled worker (got {sorted(advertised)})"
+        )
+
+    def test_resource_policy_allows_cross_origin_embedders(self, request: pytest.FixtureRequest) -> None:
+        """CORS alone does not survive a cross-origin-isolated caller.
+
+        A page that sends ``Cross-Origin-Embedder-Policy: require-corp`` —
+        which any page using ``SharedArrayBuffer`` must — has its own
+        fetches blocked unless each response carries
+        ``Cross-Origin-Resource-Policy``. CORS being correct does not help,
+        and the server sees a perfectly ordinary successful response, so
+        this fails invisibly from the operator's side.
+        """
+        import httpx
+
+        port = self._port(request)
+        resp = httpx.post(
+            f"http://127.0.0.1:{port}/echo_int",
+            content=_unary_request_body("echo_int", value=1),
+            headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
+            timeout=5.0,
+        )
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
+        if "access-control-allow-origin" not in resp.headers:
+            pytest.skip("server does not implement CORS")
+        # Deliberately not skipped when absent. Reaching here means the port
+        # supplied the CORS fixture, i.e. declared browser support; a missing
+        # CORP is then a real gap, and skipping on absence would let exactly
+        # the servers that need fixing report green.
+        corp = resp.headers.get("cross-origin-resource-policy")
+        assert corp == _CORP_VALUE, (
+            f"Cross-Origin-Resource-Policy is {corp!r}, expected {_CORP_VALUE!r}; "
+            f"a caller under COEP require-corp has this response blocked without it"
+        )
+
+    @pytest.mark.parametrize("header", sorted(_ALWAYS_EXPOSED))
+    def test_failure_path_headers_are_exposed(self, request: pytest.FixtureRequest, header: str) -> None:
+        """Headers that only ride failures must be exposed too.
+
+        The derived check above can only see what ``OPTIONS /health``
+        advertises, which is a *success*-path surface. These headers appear
+        on errors and rejections instead, so nothing advertises them and a
+        derived check structurally cannot reach them — they have to be
+        named.
+
+        Each is load-bearing for a browser client and silent when missing:
+        ``X-VGI-RPC-Error`` is how a client tells an error response from a
+        result, ``VGI-Auth-Reason`` is the machine-readable half of a 401
+        (without it a browser client is back to parsing prose), and
+        ``X-Request-ID`` is what correlates a failure with the server's own
+        log. Each is asserted separately so a failure names the header.
         """
         preflight = self._preflight(self._port(request))
         if "access-control-allow-origin" not in preflight.headers:
             pytest.skip("server does not implement CORS")
         exposed = self._exposed(preflight)
-        assert "x-vgi-rpc-error" in exposed or "*" in exposed, (
-            f"X-VGI-RPC-Error not exposed; a browser client cannot distinguish "
-            f"an error from a result (exposed: {sorted(exposed)})"
+        assert header in exposed or "*" in exposed, (
+            f"{header} rides failure responses but is not exposed, so a browser "
+            f"client cannot read it (exposed: {sorted(exposed)})"
         )
 
 
@@ -3209,6 +3287,26 @@ class TestCorsOffMode:
         )
         assert "access-control-allow-origin" not in resp.headers, (
             "an unconfigured server must not grant cross-origin access"
+        )
+
+    def test_no_resource_policy_by_default(self, conformance_http_port: int) -> None:
+        """``Cross-Origin-Resource-Policy`` is part of the same opt-in.
+
+        It only means anything for a server serving cross-origin callers,
+        so a server that grants no cross-origin access has nothing to say
+        about resource policy either. Emitting it unconditionally would
+        also make the header useless as a signal that CORS is configured.
+        """
+        import httpx
+
+        resp = httpx.post(
+            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            content=_unary_request_body("echo_int", value=1),
+            headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
+            timeout=5.0,
+        )
+        assert "cross-origin-resource-policy" not in resp.headers, (
+            "a server with no CORS configured must not send a resource policy"
         )
 
 

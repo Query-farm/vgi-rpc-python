@@ -12,7 +12,8 @@ Each middleware is a thin wrapper around Falcon's ``process_request`` /
 * access-log contextvar reset (``_AccessLogContextMiddleware``)
 * authentication + transport metadata (``_AuthMiddleware``)
 * transparent content compression (zstd / gzip, ``_CompressionMiddleware``)
-* CORS ``Access-Control-Max-Age`` (``_CorsMaxAgeMiddleware``)
+* CORS extras — ``Access-Control-Max-Age`` + ``Cross-Origin-Resource-Policy``
+  (``_CorsExtrasMiddleware``)
 * capability headers (``_CapabilitiesMiddleware``)
 """
 
@@ -545,13 +546,32 @@ class _CompressionMiddleware:
             resp.set_header("Content-Encoding", encoding.value)
 
 
-class _CorsMaxAgeMiddleware:
-    """Falcon middleware that sets ``Access-Control-Max-Age`` on OPTIONS responses."""
+class _CorsExtrasMiddleware:
+    """Falcon middleware for the CORS headers Falcon's own does not set.
 
-    __slots__ = ("_max_age",)
+    Two headers, both only meaningful on a server that has opted into CORS,
+    which is why this is installed alongside ``falcon.CORSMiddleware``
+    rather than unconditionally:
 
-    def __init__(self, max_age: int) -> None:
-        self._max_age = str(max_age)
+    * ``Access-Control-Max-Age`` on preflight responses, so a browser stops
+      re-preflighting every call.  Every RPC call is preflighted -- the
+      Arrow content type is not CORS-safelisted -- so without this the
+      request count doubles.
+    * ``Cross-Origin-Resource-Policy`` on every response.  CORS alone is
+      not sufficient for a browser that has opted into cross-origin
+      isolation: a page sending ``Cross-Origin-Embedder-Policy:
+      require-corp`` has its *own* fetches blocked unless each response
+      also carries CORP, and the failure is invisible from the server side.
+      A server configured for cross-origin access wants ``cross-origin``;
+      the value is settable because a deployment fronted by a same-site
+      proxy may legitimately want to narrow it.
+    """
+
+    __slots__ = ("_max_age", "_resource_policy")
+
+    def __init__(self, max_age: int | None, resource_policy: str | None) -> None:
+        self._max_age = str(max_age) if max_age is not None else None
+        self._resource_policy = resource_policy
 
     def process_response(
         self,
@@ -560,9 +580,11 @@ class _CorsMaxAgeMiddleware:
         resource: object,
         req_succeeded: bool,
     ) -> None:
-        """Set Access-Control-Max-Age on preflight OPTIONS responses."""
-        if req.method == "OPTIONS":
+        """Set the preflight cache lifetime and the resource policy."""
+        if self._max_age is not None and req.method == "OPTIONS":
             resp.set_header("Access-Control-Max-Age", self._max_age)
+        if self._resource_policy is not None:
+            resp.set_header("Cross-Origin-Resource-Policy", self._resource_policy)
 
 
 class _CapabilitiesMiddleware:

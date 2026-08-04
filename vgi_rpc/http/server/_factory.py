@@ -51,7 +51,7 @@ from ._middleware import (
     _AuthMiddleware,
     _CapabilitiesMiddleware,
     _CompressionMiddleware,
-    _CorsMaxAgeMiddleware,
+    _CorsExtrasMiddleware,
     _DrainRequestMiddleware,
     _MaxRequestBytesMiddleware,
     _RequestIdMiddleware,
@@ -93,6 +93,7 @@ def make_wsgi_app(
     proxy_auth_headers: Sequence[str] | None = None,
     cors_origins: str | Iterable[str] | None = None,
     cors_max_age: int | None = 7200,
+    cors_resource_policy: str | None = "cross-origin",
     upload_url_provider: UploadUrlProvider | None = None,
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
@@ -186,6 +187,14 @@ def make_wsgi_app(
             preflight OPTIONS responses, in seconds.  ``7200`` (2 hours)
             by default.  ``None`` omits the header.  Only effective when
             ``cors_origins`` is set.
+        cors_resource_policy: Value for the ``Cross-Origin-Resource-Policy``
+            header, ``"cross-origin"`` by default.  CORS on its own is not
+            enough for a caller that has opted into cross-origin isolation:
+            a page sending ``Cross-Origin-Embedder-Policy: require-corp``
+            has its own fetches blocked unless each response also carries
+            CORP, and nothing on the server side reveals that.  Narrow it
+            to ``"same-site"`` behind a same-site proxy, or ``None`` to
+            omit the header.  Only effective when ``cors_origins`` is set.
         upload_url_provider: Optional provider for generating pre-signed
             upload URLs.  When set, the ``__upload_url__/init`` endpoint
             is enabled and ``VGI-Upload-URL-Support: true`` is advertised
@@ -533,8 +542,8 @@ def make_wsgi_app(
             "expose_headers": cors_expose,
         }
         middleware.append(falcon.CORSMiddleware(**cors_kwargs))
-        if cors_max_age is not None:
-            middleware.append(_CorsMaxAgeMiddleware(cors_max_age))
+        if cors_max_age is not None or cors_resource_policy is not None:
+            middleware.append(_CorsExtrasMiddleware(cors_max_age, cors_resource_policy))
     # OAuth PKCE browser flow — only when authenticate + OAuth metadata + client_id
     _pkce_active = False
     _pkce_user_info_html: str | None = None

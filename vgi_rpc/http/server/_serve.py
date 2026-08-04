@@ -73,6 +73,7 @@ def serve_http(
     call_state_cache_entries: int = 4096,
     cors_origins: str | Iterable[str] | None = None,
     cors_max_age: int | None = 7200,
+    cors_resource_policy: str | None = "cross-origin",
 ) -> None:
     """Serve an ``RpcServer`` over HTTP using waitress.
 
@@ -149,6 +150,9 @@ def serve_http(
             CORS headers at all.  See :func:`make_wsgi_app`.
         cors_max_age: Preflight cache lifetime in seconds.  Only meaningful
             when ``cors_origins`` is set.  See :func:`make_wsgi_app`.
+        cors_resource_policy: ``Cross-Origin-Resource-Policy`` value; needed
+            by callers under ``Cross-Origin-Embedder-Policy: require-corp``.
+            See :func:`make_wsgi_app`.
 
     """
     if max_stream_response_bytes is not None:
@@ -187,6 +191,7 @@ def serve_http(
         call_state_cache_entries=call_state_cache_entries,
         cors_origins=cors_origins,
         cors_max_age=cors_max_age,
+        cors_resource_policy=cors_resource_policy,
     )
 
     if install_signal_handlers and enable_sticky:
