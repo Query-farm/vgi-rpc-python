@@ -266,6 +266,14 @@ Two further points the tests pin:
 - **Headers a plain worker never advertises.** The conditional capability headers — `VGI-Upload-URL-Support`, `VGI-Max-Upload-Bytes`, the size caps — are absent from a worker with no storage configured, so a missing exposure for them passes. **Point `conformance_http_cors_port` at a storage/upload-enabled worker**, not a bare one; `test_worker_advertises_the_optional_capabilities` fails the fixture if you don't.
 - **Headers that only ride failures.** `OPTIONS /health` is a success-path surface, so nothing advertises `X-VGI-RPC-Error`, `VGI-Auth-Reason`, or `X-Request-ID` — a derived check structurally cannot reach them. They are named explicitly in `_ALWAYS_EXPOSED` and asserted one at a time. `VGI-Auth-Reason` is the one to check first: without it a browser client cannot read the machine-readable half of a 401 and is back to parsing prose.
 
+## The error flag must be sent, not just exposed
+
+A failed RPC answers **HTTP 200** — the error rides the body as an EXCEPTION batch, because the call reached the method and the method raised. The status line therefore says nothing, and `X-VGI-RPC-Error: true` is how a client tells a failure from a result without parsing the body.
+
+`TestErrorHeader` asserts both directions: an error response sets it, and a successful one does not. A flag set on every response carries no information, which is the same outage as never setting it.
+
+Until this existed the suite required the header in `Access-Control-Expose-Headers` and never checked any response carried it — a port could expose a header it never sends and pass.
+
 ## HTTP request-id correlation
 
 `X-Request-ID` on the response and `request_id` in the access log must name the same request. That agreement is the whole value of the field: an ID that appears on the response but not in the log, or differs between them, is worse than none — it looks like a working trail right up to the moment someone tries to follow it.

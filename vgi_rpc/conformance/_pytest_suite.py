@@ -2984,6 +2984,77 @@ class TestColdCallStateCache:
 
 
 # ---------------------------------------------------------------------------
+# Error flag on the wire (HTTP-only)
+# ---------------------------------------------------------------------------
+
+
+#: Marks a 200 that is really a failure.
+_RPC_ERROR_HEADER = "X-VGI-RPC-Error"
+
+
+class TestErrorHeader:
+    """``X-VGI-RPC-Error`` must actually be sent, not merely CORS-exposed.
+
+    A failed RPC returns **HTTP 200** — the error travels as an EXCEPTION
+    batch in a well-formed response body, because the call reached the method
+    and the method raised. So the status line says nothing, and this header is
+    how a client tells a failure from a result without parsing the body.
+
+    The suite required the header to appear in
+    ``Access-Control-Expose-Headers`` and never checked that any response
+    carries it: a port could expose a header it never sends and pass. Exposing
+    something you do not emit is not a smaller bug than not exposing it —
+    both leave a client unable to see the failure.
+
+    Normative in ``docs/porting-guide.md`` (500 is rewritten to 200 with this
+    header) and ``docs/sticky-sessions-spec.md`` §7.
+    """
+
+    @staticmethod
+    def _post(port: int, method: str, **kwargs: object) -> Any:
+        """POST a unary call, returning the raw response."""
+        import httpx
+
+        for path in (f"/{method}", f"/vgi/{method}"):
+            resp = httpx.post(
+                f"http://127.0.0.1:{port}{path}",
+                content=_unary_request_body(method, **kwargs),
+                headers={"content-type": "application/vnd.apache.arrow.stream"},
+                timeout=10.0,
+            )
+            if resp.status_code != 404:
+                return resp
+        return resp
+
+    def test_error_response_sets_the_flag(self, conformance_http_port: int) -> None:
+        """A method that raises answers 200 with the flag set."""
+        resp = self._post(conformance_http_port, "raise_value_error", message="boom")
+        assert resp.status_code == 200, (
+            f"a raising method must still answer 200 — the error rides the body, not the status "
+            f"(got {resp.status_code})"
+        )
+        flag = resp.headers.get(_RPC_ERROR_HEADER.lower())
+        assert flag is not None, (
+            f"{_RPC_ERROR_HEADER} absent on an error response; a client sees 200 and reads a failure as a result"
+        )
+        assert flag.lower() == "true", f"expected 'true', got {flag!r}"
+
+    def test_success_response_does_not_set_the_flag(self, conformance_http_port: int) -> None:
+        """The flag must discriminate.
+
+        A header set on every response carries no information — it would make
+        every result look like a failure, which is the same outage as the
+        reverse.
+        """
+        resp = self._post(conformance_http_port, "echo_int", value=1)
+        assert resp.status_code == 200
+        flag = resp.headers.get(_RPC_ERROR_HEADER.lower())
+        assert flag is None or flag.lower() != "true", (
+            f"{_RPC_ERROR_HEADER}={flag!r} on a successful call; the flag must distinguish failure from success"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Request-ID correlation (HTTP-only)
 # ---------------------------------------------------------------------------
 
