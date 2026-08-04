@@ -14,7 +14,8 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any, Literal
+from io import BytesIO
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -191,6 +192,37 @@ def _current_trace_context() -> tuple[str, str]:
         return "", ""
 
 
+def _request_wire_bytes(captured: object) -> bytes:
+    """Return the request as a self-contained Arrow IPC stream.
+
+    ``docs/access-log-spec.md`` §4.3 requires ``request_data`` to decode
+    through ``pyarrow.ipc.open_stream``. ``RecordBatch.serialize()`` does not
+    satisfy that: it writes a single encapsulated *message*, with no schema
+    message ahead of it, so a conformant reader fails with "Expected IPC
+    message of type schema". It also drops the batch's custom_metadata, which
+    is where the dispatch method and request version live.
+
+    So transports that have the original bytes hand them straight through --
+    free, byte-faithful, and metadata intact. Only transports that cannot
+    (pipe/unix read from a shared stream with no discrete body) fall back to
+    re-framing the batch, and that path is reached solely at DEBUG.
+
+    Args:
+        captured: Raw wire bytes, or the parsed request batch.
+
+    Returns:
+        Bytes that decode through ``pyarrow.ipc.open_stream``.
+
+    """
+    if isinstance(captured, bytes):
+        return captured
+    batch = cast("pa.RecordBatch", captured)
+    buf = BytesIO()
+    with new_ipc_stream(buf, batch.schema) as writer:
+        writer.write_batch(batch, custom_metadata=_current_request_metadata.get())
+    return buf.getvalue()
+
+
 def _emit_access_log(
     protocol_name: str,
     method_name: str,
@@ -253,18 +285,25 @@ def _emit_access_log(
         # When omitted, mark the record `truncated: true` and surface the
         # original size so the access-log schema's "unary requires
         # request_data unless truncated" invariant holds.
-        request_data = _current_request_batch.get()
-        if request_data is not None:
-            encoded = base64.b64encode(request_data).decode()
+        request_batch = _current_request_batch.get()
+        if request_batch is not None:
+            # Serialized here rather than at read time: this whole function
+            # already returned early when the access logger is off, so the
+            # cost now falls only on servers that asked for it.
+            raw = _request_wire_bytes(request_batch)
             if _access_logger.isEnabledFor(logging.DEBUG):
-                extra["request_data"] = encoded
+                extra["request_data"] = base64.b64encode(raw).decode()
             else:
+                # base64 length is a pure function of the byte count, so
+                # encoding the payload just to measure it is work for a
+                # number that is one multiplication away.
+                encoded_len = 4 * ((len(raw) + 2) // 3)
                 # Distinct from the formatter's size-driven `true`: this
                 # record lost nothing to a cap, the deployment simply does
                 # not log payloads at INFO. Sharing one value made the
                 # marker fire on essentially every record and stop meaning
                 # anything to a consumer looking for real data loss.
-                extra["original_request_bytes"] = len(encoded)
+                extra["original_request_bytes"] = encoded_len
                 extra["truncated"] = "payload_omitted"
         # Stream correlation ID
         stream_id = _current_stream_id.get()

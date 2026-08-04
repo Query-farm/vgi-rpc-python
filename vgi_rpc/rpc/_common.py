@@ -619,7 +619,15 @@ _current_access_sink: ContextVar[list[tuple[str, dict[str, object]]] | None] = C
 
 # Raw request batch bytes — set by _read_request() before deserialization,
 # included in the access log as base64 for full call-parameter capture.
-_current_request_batch: ContextVar[bytes | None] = ContextVar("vgi_rpc_request_batch", default=None)
+#: The request batch, for access-log enrichment.
+#:
+#: The *batch*, not its serialized bytes: serializing it costs ~0.6us on every
+#: request, and the only consumer is the access log, which is off entirely on
+#: a default server and drops the payload anyway at INFO. Stashing the object
+#: defers that work behind the guard the access log already has, and holds no
+#: extra memory -- the batch is alive for the request either way, where a
+#: bytes copy was not.
+_current_request_batch: ContextVar[Any | None] = ContextVar("vgi_rpc_request_batch", default=None)
 
 # Stream correlation ID — set by _serve_stream() / HTTP init path,
 # carried in the HTTP state token for exchange/produce correlation.

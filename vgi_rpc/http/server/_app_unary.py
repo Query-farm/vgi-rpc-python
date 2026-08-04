@@ -56,7 +56,7 @@ def _run_unary_sync(
     app: _HttpRpcApp,
     method_name: str,
     info: RpcMethodInfo,
-    stream: IOBase,
+    stream: IOBase | pa.NativeFile,
 ) -> tuple[BytesIO, HTTPStatus]:
     """Run a unary method synchronously.
 

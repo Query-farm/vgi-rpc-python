@@ -14,6 +14,7 @@ import falcon
 import pyarrow as pa
 
 from vgi_rpc.rpc import _EMPTY_SCHEMA, _write_error_batch
+from vgi_rpc.rpc._common import _current_request_batch
 from vgi_rpc.utils import new_ipc_stream
 
 from .._common import _ARROW_CONTENT_TYPE, RPC_ERROR_HEADER, _RpcHttpError
@@ -135,7 +136,7 @@ def _set_http_status(resp: falcon.Response, status_code: HTTPStatus) -> None:
         resp.status = str(status_code.value)
 
 
-def _get_request_stream(req: falcon.Request) -> IOBase:
+def _get_request_stream(req: falcon.Request) -> IOBase | pa.NativeFile:
     """Return the request body stream, using the decompressed stream if available.
 
     When ``_CompressionMiddleware`` is active and the request body was
@@ -150,10 +151,16 @@ def _get_request_stream(req: falcon.Request) -> IOBase:
         A readable binary stream for the request body.
 
     """
-    stream: IOBase | None = getattr(req.context, "decompressed_stream", None)
+    stream: IOBase | pa.NativeFile | None = getattr(req.context, "decompressed_stream", None)
     if stream is not None:
         return stream
-    return req.bounded_stream
+    # Uncompressed: read the bounded body once and hand Arrow a native
+    # buffer. Arrow consumes the whole stream regardless -- an IPC message
+    # cannot be parsed incrementally here -- so this trades nothing for
+    # keeping the reads in C++ instead of calling back into Python.
+    body = req.bounded_stream.read()
+    _current_request_batch.set(body)
+    return pa.BufferReader(body)
 
 
 def _set_error_response(

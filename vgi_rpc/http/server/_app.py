@@ -20,6 +20,7 @@ from io import BytesIO, IOBase
 from typing import TYPE_CHECKING, NamedTuple
 
 import falcon
+import pyarrow as pa
 
 from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import MethodNotImplementedError, RpcMethodInfo, RpcServer
@@ -138,14 +139,16 @@ class _HttpRpcApp:
             )
         return info
 
-    def _unary_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> tuple[BytesIO, HTTPStatus]:
+    def _unary_sync(
+        self, method_name: str, info: RpcMethodInfo, stream: IOBase | pa.NativeFile
+    ) -> tuple[BytesIO, HTTPStatus]:
         """Delegate to :func:`_app_unary._run_unary_sync`."""
         return _dispatchers().unary(self, method_name, info, stream)
 
-    def _stream_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase) -> BytesIO:
+    def _stream_init_sync(self, method_name: str, info: RpcMethodInfo, stream: IOBase | pa.NativeFile) -> BytesIO:
         """Delegate to :func:`_app_stream._run_stream_init_sync`."""
         return _dispatchers().stream_init(self, method_name, info, stream)
 
-    def _stream_exchange_sync(self, method_name: str, stream: IOBase) -> ResponseStream:
+    def _stream_exchange_sync(self, method_name: str, stream: IOBase | pa.NativeFile) -> ResponseStream:
         """Delegate to :func:`_app_stream._run_stream_exchange_sync`."""
         return _dispatchers().stream_exchange(self, method_name, stream)

@@ -18,6 +18,8 @@ Exit code 0 if all entries pass, 1 if any violations are found.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import sys
 from dataclasses import dataclass
@@ -48,6 +50,83 @@ def _load_schema() -> dict[str, Any]:
     return schema
 
 
+def _check_request_data(index: int, method: str, entry: dict[str, object]) -> list[Violation]:
+    """Check that ``request_data`` round-trips as an Arrow IPC stream.
+
+    Schema validation cannot reach this: to JSON Schema the field is just a
+    string. But ``docs/access-log-spec.md`` §4.3 calls round-trip
+    equivalence *the* conformance test for it, and until this existed
+    nothing checked — the Python reference shipped
+    ``RecordBatch.serialize()``, a bare encapsulated message with no schema
+    ahead of it, which fails ``open_stream`` outright. Every port could have
+    picked a different wrong answer and all of them would have passed.
+
+    Deliberately checks round-trip, not bytes: a port is free to use
+    whatever encoding its Arrow library produces, so long as a reader gets
+    the batch back.
+
+    Args:
+        index: Position of the entry in the log.
+        method: The record's method name, for the violation message.
+        entry: The parsed record.
+
+    Returns:
+        Violations found (empty when the field is absent or valid).
+
+    """
+    raw = entry.get("request_data")
+    if raw is None:
+        return []
+    if not isinstance(raw, str):
+        return [Violation(index, method, "request_data", f"must be a base64 string, got {type(raw).__name__}")]
+    try:
+        # validate=True rejects non-alphabet characters rather than skipping
+        # them, and strict padding is required by the spec.
+        decoded = base64.b64decode(raw, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        return [Violation(index, method, "request_data", f"not valid base64 (RFC 4648, padding required): {exc}")]
+    if not decoded:
+        return [Violation(index, method, "request_data", "decoded to zero bytes")]
+
+    try:
+        import pyarrow as pa
+        from pyarrow import ipc
+    except ImportError:  # pragma: no cover - pyarrow is a hard dependency
+        return []
+
+    try:
+        reader = ipc.open_stream(pa.BufferReader(decoded))
+    except Exception as exc:
+        return [
+            Violation(
+                index,
+                method,
+                "request_data",
+                f"does not decode as a self-contained Arrow IPC stream "
+                f"(schema message then record batch message): {type(exc).__name__}: {exc}. "
+                f"A single encapsulated message -- what RecordBatch.serialize() produces -- is not a stream.",
+            )
+        ]
+    try:
+        batch = reader.read_next_batch()
+    except StopIteration:
+        return [Violation(index, method, "request_data", "stream decoded but contained no record batch")]
+    except Exception as exc:
+        return [
+            Violation(index, method, "request_data", f"record batch could not be read: {type(exc).__name__}: {exc}")
+        ]
+    if batch.num_rows != 1:
+        return [
+            Violation(
+                index,
+                method,
+                "request_data",
+                f"request batch must carry exactly one row of parameters, got {batch.num_rows}",
+            )
+        ]
+    return []
+
+
 def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
     """Validate parsed access log entries against the JSON Schema.
 
@@ -65,6 +144,7 @@ def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
         for err in validator.iter_errors(entry):
             path = "/".join(str(p) for p in err.absolute_path) or "<root>"
             violations.append(Violation(i, method, path, err.message))
+        violations.extend(_check_request_data(i, method, entry))
     return violations
 
 

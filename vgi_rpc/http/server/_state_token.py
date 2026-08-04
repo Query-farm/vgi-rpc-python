@@ -51,6 +51,7 @@ from http import HTTPStatus
 from typing import get_args, get_origin, get_type_hints
 
 import pyarrow as pa
+import zstandard
 
 from vgi_rpc import crypto
 from vgi_rpc.rpc import AuthContext, MethodType, RpcServer, Stream, StreamState
@@ -85,6 +86,39 @@ _MIN_CURSOR_PLAINTEXT_LEN = _TIMESTAMP_LEN + _CALL_ID_LEN + _HEADER_LEN
 # on these payload sizes and slightly smaller; the levels that compress
 # materially better (9, 19) cost 8x and 84x the CPU for a few hundred bytes.
 _TOKEN_ZSTD_LEVEL = 3
+
+#: Per-thread zstd codecs for token payloads.
+#:
+#: The level is fixed at import, so a compressor is reusable — and building
+#: one per call is not free next to the compression itself: measured 1.04us
+#: to construct-and-compress a token payload against 0.67us reusing the
+#: instance, on a path that runs once per stream turn.
+#:
+#: Per *thread* rather than one shared instance because python-zstandard does
+#: not promise that two threads may call into one codec object at the same
+#: time, and this runs on a WSGI thread pool. A thread-local costs one dict
+#: lookup and removes the question.
+_codecs = threading.local()
+
+
+def _compressor() -> zstandard.ZstdCompressor:
+    """Return this thread's token compressor, building it on first use."""
+    codec = getattr(_codecs, "compressor", None)
+    if codec is None:
+        codec = zstandard.ZstdCompressor(level=_TOKEN_ZSTD_LEVEL)
+        _codecs.compressor = codec
+    return codec
+
+
+def _decompressor() -> zstandard.ZstdDecompressor:
+    """Return this thread's token decompressor, building it on first use."""
+    codec = getattr(_codecs, "decompressor", None)
+    if codec is None:
+        codec = zstandard.ZstdDecompressor()
+        _codecs.decompressor = codec
+    return codec
+
+
 # Guard against a decompression bomb. The plaintext is authenticated before we
 # ever decompress it, so this is defence against a framework bug rather than an
 # attacker — but an unbounded decompress in a request path is not worth having.
@@ -107,9 +141,7 @@ def _pack_plaintext(plaintext: bytes) -> bytes:
         A one-byte codec tag followed by the (possibly compressed) payload.
 
     """
-    import zstandard
-
-    packed = zstandard.ZstdCompressor(level=_TOKEN_ZSTD_LEVEL).compress(plaintext)
+    packed = _compressor().compress(plaintext)
     if len(packed) < len(plaintext):
         return _CODEC_ZSTD + packed
     return _CODEC_RAW + plaintext
@@ -138,10 +170,8 @@ def _unpack_plaintext(data: bytes) -> bytes:
     if tag != _CODEC_ZSTD:
         raise _RpcHttpError(RuntimeError("Malformed token payload"), status_code=HTTPStatus.BAD_REQUEST)
 
-    import zstandard
-
     try:
-        return zstandard.ZstdDecompressor().decompress(body, max_output_size=_MAX_TOKEN_PLAINTEXT_BYTES)
+        return _decompressor().decompress(body, max_output_size=_MAX_TOKEN_PLAINTEXT_BYTES)
     except zstandard.ZstdError as exc:
         raise _RpcHttpError(
             RuntimeError("Malformed token payload"),

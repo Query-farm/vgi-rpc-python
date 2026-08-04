@@ -164,6 +164,23 @@ class _Impl:
 # ---------------------------------------------------------------------------
 
 
+def _valid_request_data() -> str:
+    """Return a spec-valid ``request_data``: base64 of a real Arrow IPC stream.
+
+    The fixtures used ``"QQ=="`` — base64 of the single byte ``"A"`` — which
+    passed only because nothing decoded the field. Now that the validator
+    round-trips it, a fixture has to carry something a reader can actually
+    open, which is also what makes these tests mean anything.
+    """
+    import base64
+
+    batch = pa.record_batch([pa.array(["x"])], schema=pa.schema([pa.field("v", pa.string())]))
+    buf = io.BytesIO()
+    with pa.ipc.new_stream(buf, batch.schema) as writer:
+        writer.write_batch(batch)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def _format_record(record: logging.LogRecord) -> dict[str, Any]:
     """Format a captured record through VgiJsonFormatter and parse back to dict."""
     formatter = VgiJsonFormatter()
@@ -217,7 +234,7 @@ class TestValidator:
             "duration_ms": 1.23,
             "status": "ok",
             "error_type": "",
-            "request_data": "QQ==",
+            "request_data": _valid_request_data(),
         }
 
     def test_minimal_unary_record_passes(self) -> None:
@@ -465,7 +482,7 @@ _MINIMAL_RECORD: dict[str, Any] = {
     "duration_ms": 1.23,
     "status": "ok",
     "error_type": "",
-    "request_data": "QQ==",
+    "request_data": _valid_request_data(),
 }
 
 
@@ -534,6 +551,94 @@ class TestAccessLogSampler:
         """A rate of 100 meaning '100%' must fail loudly, not log everything."""
         with pytest.raises(ValueError, match=r"between 0\.0 and 1\.0"):
             AccessLogSampler(bad)
+
+
+class TestRequestDataRoundTrip:
+    """``request_data`` must decode through ``pyarrow.ipc.open_stream``.
+
+    Spec §4.3 calls round-trip equivalence "the conformance test", and
+    nothing checked it: the validator does not inspect the field's content
+    and the fixtures above use the placeholder ``"QQ=="``. The reference
+    implementation emitted ``RecordBatch.serialize()`` -- a bare
+    encapsulated message with no schema ahead of it -- so a reader following
+    the spec got ``OSError: Expected IPC message of type schema``, and the
+    batch's ``vgi_rpc.method`` / ``vgi_rpc.request_version`` metadata was
+    dropped on the way.
+    """
+
+    @staticmethod
+    def _emitted_request_data(use_http: bool) -> bytes:
+        """Drive one real call at DEBUG and return the decoded ``request_data``."""
+        import base64
+
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger("vgi_rpc.access")
+        handler = _Capture()
+        previous = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            if use_http:
+                from vgi_rpc.http import http_connect
+                from vgi_rpc.http._testing import make_sync_client
+
+                client = make_sync_client(RpcServer(_Svc, _Impl()), token_key=b"k" * 32)
+                try:
+                    with http_connect(_Svc, "http://x", client=client) as proxy:
+                        proxy.greet(name="World")
+                finally:
+                    client.close()
+            else:
+                with serve_pipe(_Svc, _Impl()) as proxy:
+                    proxy.greet(name="World")
+            greets = [r for r in records if getattr(r, "method", None) == "greet"]
+            assert greets, "no access-log record for greet"
+            raw = getattr(greets[0], "request_data", None)
+            assert isinstance(raw, str), "request_data missing at DEBUG"
+            return base64.b64decode(raw)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous)
+
+    @pytest.mark.parametrize("use_http", [True, False], ids=["http", "pipe"])
+    def test_decodes_through_open_stream(self, use_http: bool) -> None:
+        """The bytes a consumer receives must open as an Arrow IPC stream."""
+        from pyarrow import ipc
+
+        data = self._emitted_request_data(use_http)
+        reader = ipc.open_stream(pa.BufferReader(data))
+        batch, _ = reader.read_next_batch_with_custom_metadata()
+        assert batch.num_rows == 1
+
+    @pytest.mark.parametrize("use_http", [True, False], ids=["http", "pipe"])
+    def test_preserves_dispatch_metadata(self, use_http: bool) -> None:
+        """The method and request version survive into the log.
+
+        Re-serializing the parsed batch dropped these; the raw wire bytes
+        carry them, and a reader replaying an archived request needs them.
+        """
+        from pyarrow import ipc
+
+        data = self._emitted_request_data(use_http)
+        reader = ipc.open_stream(pa.BufferReader(data))
+        _batch, md = reader.read_next_batch_with_custom_metadata()
+        keys = {k.decode() for k in dict(md or {})}
+        assert "vgi_rpc.method" in keys, f"dispatch metadata lost: {sorted(keys)}"
+
+    @pytest.mark.parametrize("use_http", [True, False], ids=["http", "pipe"])
+    def test_column_data_matches_the_request(self, use_http: bool) -> None:
+        """Round-trip equivalence: the decoded batch is the call's arguments."""
+        from pyarrow import ipc
+
+        data = self._emitted_request_data(use_http)
+        reader = ipc.open_stream(pa.BufferReader(data))
+        batch, _ = reader.read_next_batch_with_custom_metadata()
+        assert batch.column("name")[0].as_py() == "World"
 
 
 class TestClaimRedaction:

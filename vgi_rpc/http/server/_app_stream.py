@@ -199,7 +199,7 @@ def _run_stream_init_sync(
     app: _HttpRpcApp,
     method_name: str,
     info: RpcMethodInfo,
-    stream: IOBase,
+    stream: IOBase | pa.NativeFile,
 ) -> BytesIO:
     """Run stream init synchronously.
 
@@ -462,7 +462,7 @@ def _run_http_exchange_init(
 def _run_stream_exchange_sync(
     app: _HttpRpcApp,
     method_name: str,
-    stream: IOBase,
+    stream: IOBase | pa.NativeFile,
 ) -> ResponseStream:
     """Run stream exchange synchronously.
 

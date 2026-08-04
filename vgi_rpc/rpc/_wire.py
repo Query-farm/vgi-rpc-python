@@ -353,7 +353,7 @@ def _write_result_batch(
 
 
 def _read_request(
-    reader_stream: IOBase,
+    reader_stream: IOBase | pa.NativeFile,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     external_config: ExternalLocationConfig | None = None,
     shm: ShmSegment | None = None,
@@ -409,9 +409,13 @@ def _read_request(
     # tear down the worker connection.
     _drain_stream(reader)
     _current_request_metadata.set(custom_metadata)
-    # Stash the raw request batch bytes for access log enrichment.
-    # Cost is bounded by the request batch size (one row of parameters), not data batch size.
-    _current_request_batch.set(batch.serialize().to_pybytes())
+    # Stash the batch for access-log enrichment -- but only when the
+    # transport has not already captured the raw wire bytes, which are
+    # cheaper and more faithful (see _request_wire_bytes). Serializing here
+    # would also charge every request for a payload the access log discards
+    # at INFO and never asks for when disabled, which is the default.
+    if _current_request_batch.get() is None:
+        _current_request_batch.set(batch)
     _record_input(batch)
     if wire_request_logger.isEnabledFor(logging.DEBUG):
         wire_request_logger.debug(
