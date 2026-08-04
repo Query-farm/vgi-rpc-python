@@ -403,6 +403,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "writing this file (typically via its own --access-log flag)."
         ),
     )
+    access_group.add_argument(
+        "--require-request-data",
+        action="store_true",
+        help=(
+            "Also require that unary records actually carry request_data. Without "
+            "this the field is only checked when present, so a worker that never "
+            "emits it passes. Run the worker's access log at DEBUG."
+        ),
+    )
 
     # Other
     parser.add_argument("--version", "-V", action="store_true", help="Show version and exit")
@@ -415,11 +424,13 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
-def _validate_access_log(path: str) -> bool:
+def _validate_access_log(path: str, *, require_request_data: bool = False) -> bool:
     """Validate a JSONL access log file against the schema.
 
     Args:
         path: Path to a JSONL file written by the worker under test.
+        require_request_data: Also require unary records to carry
+            ``request_data``, not merely to be valid when present.
 
     Returns:
         True if every ``vgi_rpc.access`` entry in the file conforms,
@@ -444,6 +455,26 @@ def _validate_access_log(path: str) -> bool:
     if not entries:
         sys.stderr.write(f"--access-log: no vgi_rpc.access entries found in {path}\n")
         return False
+
+    if require_request_data:
+        # Presence, not just validity. The schema lets a record opt out of
+        # request_data by declaring `truncated`, which every emitter does at
+        # INFO -- so a validator that only checks well-formed-when-present
+        # passes a log that never carries the field at all. That is the same
+        # shape as checking a CORS expose list without checking the header:
+        # the rule is enforced everywhere except where it applies.
+        unary = [e for e in entries if e.get("method_type") == "unary"]
+        if not unary:
+            sys.stderr.write("--require-request-data: no unary records to check\n")
+            return False
+        missing = [e for e in unary if "request_data" not in e]
+        if missing:
+            methods = sorted({str(e.get("method", "?")) for e in missing})
+            sys.stderr.write(
+                f"--require-request-data: {len(missing)}/{len(unary)} unary records carry no "
+                f"request_data (methods: {', '.join(methods[:6])}). Emit the access log at DEBUG.\n"
+            )
+            return False
 
     violations = validate_access_logs(entries)
     if violations:
@@ -558,7 +589,7 @@ def main(argv: list[str] | None = None) -> None:
             # Optional access-log conformance check
             access_log_ok = True
             if args.access_log:
-                access_log_ok = _validate_access_log(args.access_log)
+                access_log_ok = _validate_access_log(args.access_log, require_request_data=args.require_request_data)
 
             # Exit code
             sys.exit(0 if suite.success and access_log_ok else 1)

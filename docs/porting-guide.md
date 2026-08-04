@@ -60,6 +60,36 @@ Run `vgi-rpc-test --list` to see the test surface. ~150 tests cover unary, strea
 4. Exit code 0 means: every test passed AND every access-log record validated.
 5. Wire that command into your CI.
 
+### Run it at DEBUG, and require the payload
+
+```bash
+vgi-rpc-test --cmd "./your-worker --access-log /tmp/conformance.log --access-log-debug" \
+             --access-log /tmp/conformance.log \
+             --require-request-data
+```
+
+Two additions, and both exist because of a bug that shipped:
+
+`request_data` is the heaviest field in the record and most emitters gate it
+behind DEBUG. Validate at INFO and the field is simply absent, so every rule
+governing it goes unexercised — the validator checks it is *well-formed when
+present*, which a log that never carries it satisfies trivially. `--require-request-data`
+turns that into a failure. It is the same shape as asserting a CORS expose
+list without ever asserting the header: the rule is enforced everywhere except
+where it applies.
+
+Include a **zero-parameter method** in the filter (`void*`). A method with no
+arguments sends an empty schema and no row — see §4.3 — and a validator that
+demands one row unconditionally rejects it. That is not hypothetical: v0.36.1
+shipped exactly that rule, failed the Python reference's own `void_noop`
+records, and reported a correct Java port as non-conformant. Nothing caught it
+because `vgi-rpc-conformance` had no `--access-log` flag, so the reference
+implementation was the one that could never be run through its own validator.
+
+**Run this in CI, not by hand.** Access-log conformance drifted precisely
+because verification was manual: four people checked it by inspection and the
+rule was still wrong.
+
 ## Recommended port path
 
 In order, smallest-blast-radius first:

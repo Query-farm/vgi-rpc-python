@@ -613,6 +613,83 @@ class TestReferenceWorkerValidatesItself:
         violations = validate_access_logs([record])
         assert violations == [], f"the reference worker fails its own validator: {violations}"
 
+    def test_shipped_reference_worker_validates_end_to_end(self, tmp_path: Path) -> None:
+        """Drive the *shipped* reference worker through the reference validator.
+
+        The pre-existing end-to-end test used a ``tests/`` fixture worker at
+        INFO, where ``request_data`` is never emitted — so it validated
+        records in which the field was absent, and the rule governing it went
+        unexercised. Four people then verified this by hand, which is not a
+        mechanism.
+
+        This runs ``vgi-rpc-conformance`` itself, at DEBUG, with
+        ``--require-request-data`` so a log that simply never carries the
+        field fails rather than passes. It covers ``void_*``, which is where
+        the zero-parameter rule bites.
+        """
+        log_path = tmp_path / "reference.log"
+        worker = f"{sys.executable} -m vgi_rpc.conformance._cli --access-log {log_path} --access-log-debug"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "vgi_rpc.conformance._test_cli",
+                "--cmd",
+                worker,
+                "--access-log",
+                str(log_path),
+                "--require-request-data",
+                "--filter",
+                "scalar*,void*",
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert proc.returncode == 0, f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}"
+        assert "--access-log: PASS" in proc.stderr
+
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        unary = [r for r in records if r.get("method_type") == "unary"]
+        assert unary, "no unary records emitted"
+        assert all("request_data" in r for r in unary), "DEBUG must emit request_data on every unary record"
+        assert any(str(r.get("method", "")).startswith("void") for r in unary), (
+            "a zero-parameter method must be exercised — that is the case the shipped rule rejected"
+        )
+
+    def test_require_request_data_fails_a_log_without_it(self, tmp_path: Path) -> None:
+        """The new flag must actually fail, or it is decoration.
+
+        At INFO the reference omits ``request_data`` legitimately (the schema
+        permits opting out via ``truncated``), so this is exactly the log the
+        old test was passing.
+        """
+        log_path = tmp_path / "info.log"
+        worker = f"{sys.executable} -m vgi_rpc.conformance._cli --access-log {log_path}"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "vgi_rpc.conformance._test_cli",
+                "--cmd",
+                worker,
+                "--access-log",
+                str(log_path),
+                "--require-request-data",
+                "--filter",
+                "scalar*",
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert proc.returncode != 0, "a log with no request_data must fail --require-request-data"
+        assert "--require-request-data" in proc.stderr
+
     def test_conformance_cli_can_emit_an_access_log(self) -> None:
         """The reference worker exposes the flag that makes the above testable.
 
