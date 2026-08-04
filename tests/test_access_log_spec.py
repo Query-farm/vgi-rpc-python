@@ -32,8 +32,9 @@ from vgi_rpc.access_log_conformance import (
 from vgi_rpc.access_log_conformance import (
     main as conformance_main,
 )
-from vgi_rpc.logging_utils import VgiJsonFormatter
+from vgi_rpc.logging_utils import AccessLogSampler, VgiJsonFormatter
 from vgi_rpc.rpc import CallContext, RpcError, RpcServer, serve_pipe
+from vgi_rpc.rpc._server import _current_trace_context
 
 # ---------------------------------------------------------------------------
 # Service used to produce a representative access log
@@ -433,6 +434,128 @@ def test_violation_dataclass_shape() -> None:
     """Violation has the documented public fields."""
     v = Violation(entry_index=0, method="m", path="p", message="msg")
     assert (v.entry_index, v.method, v.path, v.message) == (0, "m", "p", "msg")
+
+
+#: A schema-valid unary record, used as the base for field-level checks.
+_MINIMAL_RECORD: dict[str, Any] = {
+    "timestamp": "2026-01-01T00:00:00.000Z",
+    "level": "INFO",
+    "logger": "vgi_rpc.access",
+    "message": "Svc.greet ok",
+    "server_id": "abc123",
+    "protocol": "Svc",
+    "protocol_hash": "0" * 64,
+    "method": "greet",
+    "method_type": "unary",
+    "principal": "",
+    "auth_domain": "",
+    "authenticated": False,
+    "remote_addr": "",
+    "duration_ms": 1.23,
+    "status": "ok",
+    "error_type": "",
+    "request_data": "QQ==",
+}
+
+
+def _record(**extra: object) -> logging.LogRecord:
+    """Build an access-log record carrying *extra* as attributes."""
+    rec = logging.LogRecord("vgi_rpc.access", logging.INFO, __file__, 1, "m", None, None)
+    for key, value in extra.items():
+        setattr(rec, key, value)
+    return rec
+
+
+class TestAccessLogSampler:
+    """Sampling must not cost you the records you keep logs for."""
+
+    def test_full_rate_keeps_everything(self) -> None:
+        """The default rate is a pass-through."""
+        s = AccessLogSampler(1.0)
+        assert all(s.filter(_record(request_id=f"r{i}", status="ok")) for i in range(200))
+
+    def test_zero_rate_still_keeps_errors(self) -> None:
+        """Errors are never sampled away, even at rate 0.
+
+        A rate below 1 exists because successful calls repeat, which is
+        exactly what failures do not. Dropping one error in ten leaves a
+        consumer unable to say whether an error count fell because a fix
+        landed or because the dice went the other way.
+        """
+        s = AccessLogSampler(0.0)
+        assert not s.filter(_record(request_id="r1", status="ok"))
+        assert s.filter(_record(request_id="r1", status="error"))
+
+    def test_decision_is_stable_for_one_stream(self) -> None:
+        """Every record of a stream shares its init's fate.
+
+        Random per-record sampling shreds a multi-record call into
+        fragments that read as data loss downstream — and the calls most
+        likely to be split are the long streams worth studying.
+        """
+        s = AccessLogSampler(0.5)
+        for stream in (f"s{i}" for i in range(40)):
+            verdicts = {s.filter(_record(stream_id=stream, request_id=f"r{n}", status="ok")) for n in range(6)}
+            assert len(verdicts) == 1, f"stream {stream} was split across the sample boundary"
+
+    def test_stream_id_wins_over_request_id(self) -> None:
+        """Keying prefers stream_id, so continuations group by call not request."""
+        s = AccessLogSampler(0.5)
+        a = s.filter(_record(stream_id="same", request_id="differs-1", status="ok"))
+        b = s.filter(_record(stream_id="same", request_id="differs-2", status="ok"))
+        assert a == b
+
+    def test_rate_rides_on_kept_records(self) -> None:
+        """A consumer scaling counts needs the divisor in-band."""
+        s = AccessLogSampler(0.5)
+        kept = [r for r in (_record(request_id=f"r{i}", status="ok") for i in range(200)) if s.filter(r)]
+        assert kept, "rate 0.5 kept nothing across 200 records"
+        assert all(getattr(r, "sample_rate", None) == 0.5 for r in kept)
+
+    def test_rate_is_roughly_honoured(self) -> None:
+        """The hash is a sampler, not just a filter that passes everything."""
+        s = AccessLogSampler(0.25)
+        kept = sum(1 for i in range(4000) if s.filter(_record(request_id=f"r{i}", status="ok")))
+        assert 800 < kept < 1200, f"kept {kept}/4000, expected ~1000"
+
+    @pytest.mark.parametrize("bad", [-0.1, 1.1, 2.0])
+    def test_rejects_out_of_range(self, bad: float) -> None:
+        """A rate of 100 meaning '100%' must fail loudly, not log everything."""
+        with pytest.raises(ValueError, match=r"between 0\.0 and 1\.0"):
+            AccessLogSampler(bad)
+
+
+class TestTraceCorrelation:
+    """Access-log records carry the trace join key when one exists."""
+
+    def test_absent_without_a_span(self) -> None:
+        """No active trace means no fields — not empty strings."""
+        trace_id, span_id = _current_trace_context()
+        assert (trace_id, span_id) == ("", "")
+
+    def test_hex_format_when_tracing(self) -> None:
+        """IDs are W3C-shaped, which is what the schema pattern enforces."""
+        pytest.importorskip("opentelemetry.sdk")
+        from opentelemetry.sdk.trace import TracerProvider
+
+        provider = TracerProvider()
+        with provider.get_tracer("test").start_as_current_span("s"):
+            trace_id, span_id = _current_trace_context()
+        assert re.fullmatch(r"[0-9a-f]{32}", trace_id), trace_id
+        assert re.fullmatch(r"[0-9a-f]{16}", span_id), span_id
+
+    def test_schema_accepts_the_trace_fields(self) -> None:
+        """The schema patterns match what the implementation emits."""
+        schema = _load_schema()
+        props = schema["properties"]
+        assert props["trace_id"]["pattern"] == "^[0-9a-f]{32}$"
+        assert props["span_id"]["pattern"] == "^[0-9a-f]{16}$"
+        jsonschema.validate({**_MINIMAL_RECORD, "trace_id": "a" * 32, "span_id": "b" * 16}, schema)
+
+    def test_schema_rejects_malformed_trace_id(self) -> None:
+        """A port emitting a dashed UUID must fail, not pass silently."""
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({**_MINIMAL_RECORD, "trace_id": "not-a-trace-id"}, _load_schema())
 
 
 #: The four JSON envelope fields, which the porting guide counts separately

@@ -75,6 +75,8 @@ These fields appear on HTTP transports only.
 |---|---|---|
 | `http_status` | integer | The HTTP response status code (e.g. 200, 401, 404, 500). |
 | `request_id` | string | Per-request correlation ID. Implementations SHOULD propagate inbound `X-Request-ID` if present, otherwise mint a UUID. |
+| `trace_id` | string | W3C trace ID, 32 lowercase hex characters, of the span this call ran under. Present when the server participates in a trace. This is the join key to the surrounding distributed trace — `request_id` only correlates records within one service, so without this a log line and the span describing the same call cannot be matched. Read it from whatever span is current rather than from anything the framework threads through, so a record correlates with an application-opened span as readily as a framework-opened one. |
+| `span_id` | string | W3C span ID, 16 lowercase hex characters. Emitted together with `trace_id` — both or neither. |
 | `request_state` | string | Base64 of the **decrypted** stream state's Arrow IPC payload on stream continuations. Absent on `init`. The on-wire token is an opaque AEAD ciphertext; servers MUST log the plaintext state bytes (or an envelope thereof for union-tagged states), not the ciphertext, so log readers can decode the state without holding the server's `token_key`. |
 | `response_state` | string | Base64 of the **decrypted** outbound state's Arrow IPC payload on stream `init` and continuations that produce a continuation token. Absent on the terminal continuation that closes the stream and on unary calls. Symmetric with `request_state`: log readers see plaintext, not the AEAD ciphertext that travels on the wire. |
 
@@ -139,6 +141,20 @@ To stay compatible, an emitter MAY enforce a per-record byte cap. When it does, 
 | `original_request_bytes` | integer | Present when `request_data` was dropped due to truncation. Reports the character length of the dropped string. |
 
 A `unary` record carrying `truncated` is NOT required to also carry `request_data` — the schema relaxes that rule when truncation is signalled.
+
+## 5bb. Sampling
+
+An emitter MAY log only a fraction of calls. Sampling is optional; an emitter that does not implement it simply never emits `sample_rate`. An emitter that does MUST hold to three rules, each of which is the difference between a sampler that helps and one that quietly costs someone an incident.
+
+1. **Never sample errors.** A rate below 1 exists because successful calls are repetitive, which is exactly what failures are not. `status == "error"` records MUST always be emitted regardless of rate. A consumer must be able to read a fall in error count as a fix landing, not as the dice going the other way.
+2. **Decide deterministically, per call — not per record.** The decision MUST be a function of a stable identifier for the call, keyed on `stream_id` when present and `request_id` otherwise, so that every record of one stream shares its `init`'s fate. Random per-record sampling shreds a multi-record call into fragments indistinguishable from data loss, and the calls most likely to be split are the long streams most worth studying.
+3. **Carry the rate in-band.** Every sampled-in record MUST carry `sample_rate`. A consumer counting calls has to divide by it, and a rate discoverable only from a deployment's flags is a rate that gets guessed wrong.
+
+| Field | Type | Condition |
+|---|---|---|
+| `sample_rate` | number, `0 < r <= 1` | Present iff sampling is active (rate below 1). Absent when the emitter logs everything. Error records MAY lack it even under sampling, since they bypass the decision. |
+
+The Python reference implements this as a `logging.Filter` on the handler — not the logger, so an application's own handlers keep seeing every record — configured by `--access-log-sample` / `VGI_RPC_ACCESS_LOG_SAMPLE`, defaulting to `1.0`. An out-of-range rate fails at startup rather than at the first request, because `100` meaning "100%" would otherwise silently log everything.
 
 ## 5c. Encoding & atomicity
 

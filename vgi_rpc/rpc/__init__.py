@@ -322,6 +322,7 @@ def _configure_access_log(
     when: str | None,
     max_record_bytes: int,
     server_id: str,
+    sample_rate: float = 1.0,
 ) -> None:
     """Attach a handler to the ``vgi_rpc.access`` logger.
 
@@ -329,10 +330,21 @@ def _configure_access_log(
     If ``max_bytes`` > 0 a ``RotatingFileHandler`` is used; if ``when`` is
     set a ``TimedRotatingFileHandler`` is used; otherwise a plain
     ``FileHandler`` (current default behaviour).
+
+    Args:
+        path: Destination path, with ``{pid}`` / ``{server_id}`` placeholders.
+        max_bytes: Rotate at this size; ``0`` disables size rotation.
+        backup_count: Rotated files to retain.
+        when: Time-rotation interval, or ``None``.
+        max_record_bytes: Per-record size cap for the formatter.
+        server_id: Value substituted for the ``{server_id}`` placeholder.
+        sample_rate: Fraction of successful calls to keep; ``1.0`` keeps all.
+            See :class:`~vgi_rpc.logging_utils.AccessLogSampler`.
+
     """
     from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
-    from vgi_rpc.logging_utils import VgiAccessLogFormatter
+    from vgi_rpc.logging_utils import AccessLogSampler, VgiAccessLogFormatter
 
     resolved_path = path.format(pid=os.getpid(), server_id=server_id)
     parent = os.path.dirname(resolved_path)
@@ -352,6 +364,10 @@ def _configure_access_log(
         handler = logging.FileHandler(resolved_path, mode="a", encoding="utf-8")
 
     handler.setFormatter(VgiAccessLogFormatter(max_record_bytes=max_record_bytes))
+    if sample_rate < 1.0:
+        # On the handler rather than the logger: a logger-level filter would
+        # also suppress records for any handler the application attached.
+        handler.addFilter(AccessLogSampler(sample_rate))
     access_logger = logging.getLogger("vgi_rpc.access")
     access_logger.setLevel(logging.INFO)
     access_logger.addHandler(handler)
@@ -495,6 +511,17 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         ),
     )
     parser.add_argument(
+        "--access-log-sample",
+        type=float,
+        default=float(os.environ.get("VGI_RPC_ACCESS_LOG_SAMPLE", "1.0")),
+        help=(
+            "Fraction of successful calls to log, 0.0-1.0 (default 1.0 = all). "
+            "Errors are always logged. The decision is keyed on stream/request id, "
+            "so every record of one stream shares it. Sampled records carry "
+            "'sample_rate' so counts can be scaled. Env: VGI_RPC_ACCESS_LOG_SAMPLE."
+        ),
+    )
+    parser.add_argument(
         "--max-response-bytes",
         type=int,
         default=int(os.environ.get("VGI_RPC_MAX_RESPONSE_BYTES", "0")) or None,
@@ -538,6 +565,12 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     if args.access_log_max_bytes and args.access_log_when:
         raise SystemExit("--access-log-max-bytes and --access-log-when are mutually exclusive")
 
+    if not 0.0 <= args.access_log_sample <= 1.0:
+        # Fail at startup rather than at the first request: a rate of 100
+        # meaning "100%" would otherwise silently log everything, and a
+        # negative one would silently log nothing.
+        raise SystemExit(f"--access-log-sample must be between 0.0 and 1.0, got {args.access_log_sample}")
+
     if args.unix is not None or args.tcp is not None:
         raw_flag = "--unix" if args.unix is not None else "--tcp"
         http_only_violations: list[str] = []
@@ -572,6 +605,7 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             when=args.access_log_when,
             max_record_bytes=args.access_log_max_record_bytes,
             server_id=server.server_id,
+            sample_rate=args.access_log_sample,
         )
 
     if args.http:

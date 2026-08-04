@@ -56,7 +56,10 @@
       "minLength": 1
     },
     "method_type": {
-      "enum": ["unary", "stream"]
+      "enum": [
+        "unary",
+        "stream"
+      ]
     },
     "principal": {
       "type": "string"
@@ -75,7 +78,10 @@
       "minimum": 0
     },
     "status": {
-      "enum": ["ok", "error"]
+      "enum": [
+        "ok",
+        "error"
+      ]
     },
     "error_type": {
       "type": "string"
@@ -93,6 +99,16 @@
     "request_id": {
       "type": "string",
       "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "W3C trace ID of the span this call ran under, 32 lowercase hex characters. Present when the server participates in a trace; absent otherwise. This is the join key between an access-log record and the surrounding distributed trace -- request_id only correlates within one service."
+    },
+    "span_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "W3C span ID for this call, 16 lowercase hex characters. Present whenever trace_id is; the two are emitted together or not at all."
     },
     "http_status": {
       "type": "integer",
@@ -145,9 +161,19 @@
     "truncated": {
       "description": "Set when the formatter shed fields to keep the line under a per-record cap. true = field-level truncation; \"record_too_large\" = the sentinel form where most optional fields were dropped.",
       "oneOf": [
-        {"const": true},
-        {"const": "record_too_large"}
+        {
+          "const": true
+        },
+        {
+          "const": "record_too_large"
+        }
       ]
+    },
+    "sample_rate": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Fraction of successful calls the emitting server was keeping when this record was written. Present only when sampling is active (a rate below 1). A consumer counting calls from a sampled log MUST divide by it. Errors are never sampled, so error records may be absent this field even when sampling is on."
     },
     "original_request_bytes": {
       "type": "integer",
@@ -156,59 +182,102 @@
     },
     "session_id": {
       "type": "string",
-      "description": "Sticky session ID (12-byte hex, 24 chars). Present when the request was bound to a sticky session — i.e. carried a VGI-Session header that resolved to a live registry entry, or the method called ctx.open_session/close_session.",
+      "description": "Sticky session ID (12-byte hex, 24 chars). Present when the request was bound to a sticky session \u2014 i.e. carried a VGI-Session header that resolved to a live registry entry, or the method called ctx.open_session/close_session.",
       "pattern": "^[0-9a-f]{24}$"
     },
     "session_action": {
-      "enum": ["none", "open", "resume", "close"],
-      "description": "Lifecycle action for the sticky session this request touched. 'open' = ctx.open_session was called; 'resume' = a valid VGI-Session token resolved to a live entry and dispatch ran; 'close' = ctx.close_session was called; 'none' (or absent) = the request did not interact with sticky machinery. Middleware-short-circuit cases (token validation failed; entry aged out) currently do not produce access-log records — they short-circuit before dispatch."
+      "enum": [
+        "none",
+        "open",
+        "resume",
+        "close"
+      ],
+      "description": "Lifecycle action for the sticky session this request touched. 'open' = ctx.open_session was called; 'resume' = a valid VGI-Session token resolved to a live entry and dispatch ran; 'close' = ctx.close_session was called; 'none' (or absent) = the request did not interact with sticky machinery. Middleware-short-circuit cases (token validation failed; entry aged out) currently do not produce access-log records \u2014 they short-circuit before dispatch."
     }
   },
   "allOf": [
     {
       "description": "status=error requires non-empty error_message",
       "if": {
-        "properties": {"status": {"const": "error"}},
-        "required": ["status"]
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        },
+        "required": [
+          "status"
+        ]
       },
       "then": {
-        "required": ["error_message"],
+        "required": [
+          "error_message"
+        ],
         "properties": {
-          "error_message": {"minLength": 1}
+          "error_message": {
+            "minLength": 1
+          }
         }
       }
     },
     {
       "description": "status=ok forbids non-empty error_type",
       "if": {
-        "properties": {"status": {"const": "ok"}},
-        "required": ["status"]
+        "properties": {
+          "status": {
+            "const": "ok"
+          }
+        },
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
-          "error_type": {"const": ""}
+          "error_type": {
+            "const": ""
+          }
         }
       }
     },
     {
       "description": "method_type=stream requires stream_id",
       "if": {
-        "properties": {"method_type": {"const": "stream"}},
-        "required": ["method_type"]
+        "properties": {
+          "method_type": {
+            "const": "stream"
+          }
+        },
+        "required": [
+          "method_type"
+        ]
       },
       "then": {
-        "required": ["stream_id"]
+        "required": [
+          "stream_id"
+        ]
       }
     },
     {
       "description": "method_type=unary requires request_data unless the record was truncated",
       "if": {
-        "properties": {"method_type": {"const": "unary"}},
-        "required": ["method_type"],
-        "not": {"required": ["truncated"]}
+        "properties": {
+          "method_type": {
+            "const": "unary"
+          }
+        },
+        "required": [
+          "method_type"
+        ],
+        "not": {
+          "required": [
+            "truncated"
+          ]
+        }
       },
       "then": {
-        "required": ["request_data"]
+        "required": [
+          "request_data"
+        ]
       }
     },
     {
@@ -217,12 +286,36 @@
         {
           "not": {
             "anyOf": [
-              {"required": ["input_batches"]},
-              {"required": ["output_batches"]},
-              {"required": ["input_rows"]},
-              {"required": ["output_rows"]},
-              {"required": ["input_bytes"]},
-              {"required": ["output_bytes"]}
+              {
+                "required": [
+                  "input_batches"
+                ]
+              },
+              {
+                "required": [
+                  "output_batches"
+                ]
+              },
+              {
+                "required": [
+                  "input_rows"
+                ]
+              },
+              {
+                "required": [
+                  "output_rows"
+                ]
+              },
+              {
+                "required": [
+                  "input_bytes"
+                ]
+              },
+              {
+                "required": [
+                  "output_bytes"
+                ]
+              }
             ]
           }
         },

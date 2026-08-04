@@ -147,6 +147,48 @@ def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc:
     return error_type
 
 
+#: Resolved once: ``None`` until first use, then the OTel span accessor or
+#: ``False`` when OpenTelemetry is not installed.  A per-call import attempt
+#: would be the single most expensive thing in this function on the common
+#: path where OTel is absent.
+_get_current_span: Any = None
+
+
+def _current_trace_context() -> tuple[str, str]:
+    """Return ``(trace_id, span_id)`` as W3C hex, or empty strings.
+
+    Correlating an access-log record with the trace it belongs to is the
+    join every other observability tool assumes exists, and it costs two
+    fields.  Read from whatever span is current rather than from anything
+    this framework threads through, so a record correlates with a span
+    opened by the application as readily as one opened by
+    :mod:`vgi_rpc.otel`.
+
+    Returns:
+        Lowercase hex ``(trace_id, span_id)`` — 32 and 16 characters — for a
+        valid recording span, otherwise two empty strings.  Never raises:
+        an observability failure must not surface as a request failure.
+
+    """
+    global _get_current_span
+    if _get_current_span is None:
+        try:
+            from opentelemetry.trace import get_current_span
+
+            _get_current_span = get_current_span
+        except ImportError:
+            _get_current_span = False
+    if _get_current_span is False:
+        return "", ""
+    try:
+        ctx = _get_current_span().get_span_context()
+        if not ctx.is_valid:
+            return "", ""
+        return f"{ctx.trace_id:032x}", f"{ctx.span_id:016x}"
+    except Exception:  # pragma: no cover - defensive; OTel API shape drift
+        return "", ""
+
+
 def _emit_access_log(
     protocol_name: str,
     method_name: str,
@@ -193,6 +235,12 @@ def _emit_access_log(
         request_id = _current_request_id.get()
         if request_id:
             extra["request_id"] = request_id
+        # Trace correlation. request_id only joins records within this
+        # service; these join them to the surrounding distributed trace.
+        trace_id, span_id = _current_trace_context()
+        if trace_id:
+            extra["trace_id"] = trace_id
+            extra["span_id"] = span_id
         if http_status is not None:
             extra["http_status"] = http_status
         # Raw request batch bytes (set by _read_request for unary/stream-init).

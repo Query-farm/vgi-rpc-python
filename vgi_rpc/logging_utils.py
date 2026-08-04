@@ -19,11 +19,12 @@ This module is **not** auto-imported by ``vgi_rpc``; import it explicitly::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
 
-__all__ = ["VgiAccessLogFormatter", "VgiJsonFormatter"]
+__all__ = ["AccessLogSampler", "VgiAccessLogFormatter", "VgiJsonFormatter"]
 
 # Build the set of attribute names that every LogRecord has by default.
 # Anything *not* in this set was injected via ``extra``.
@@ -33,6 +34,83 @@ _DEFAULT_RECORD_ATTRS: frozenset[str] = frozenset(logging.LogRecord("", 0, "", 0
 }
 
 _RESERVED_KEYS: frozenset[str] = frozenset({"timestamp", "level", "logger", "message", "exception", "stack_info"})
+
+
+class AccessLogSampler(logging.Filter):
+    """Drop a deterministic fraction of access-log records.
+
+    Three decisions shape this, and each is the difference between a
+    sampler that helps and one that quietly costs you an incident:
+
+    **Errors are never sampled.**  A rate below 1 exists because the
+    successful calls are repetitive, which is exactly what failures are
+    not.  Sampling away one error in ten leaves a consumer unable to say
+    whether an error count fell because a fix landed or because the dice
+    went the other way.
+
+    **The decision is deterministic, keyed on the call.**  Hashing an
+    identifier rather than calling a PRNG means a stream's continuations
+    share the fate of their ``init``: either the whole call is in the log
+    or none of it is.  Random per-record sampling shreds multi-record
+    calls into fragments that read as data loss, and the records most
+    likely to be split are the long streams worth studying.
+
+    **The rate rides on every sampled record** as ``sample_rate``.  A
+    consumer counting requests from a sampled log has to divide by it, and
+    a rate discoverable only from a deployment's flags is a rate that gets
+    guessed wrong.
+
+    Attach to the handler, not the logger: a logger-level filter would also
+    suppress records for any other handler an application has attached.
+    """
+
+    __slots__ = ("_rate", "_threshold")
+
+    def __init__(self, rate: float) -> None:
+        """Create a sampler passing ``rate`` of non-error records.
+
+        Args:
+            rate: Fraction to keep, ``0.0`` to ``1.0``.  ``1.0`` keeps
+                everything (the filter still runs but always passes).
+
+        Raises:
+            ValueError: If ``rate`` is outside ``0.0`` to ``1.0``.
+
+        """
+        if not 0.0 <= rate <= 1.0:
+            raise ValueError(f"sample rate must be between 0.0 and 1.0, got {rate}")
+        super().__init__()
+        self._rate = rate
+        # Compare against a 32-bit hash prefix; exact enough for sampling
+        # and keeps the decision to one hash plus one integer compare.
+        self._threshold = int(rate * 0xFFFFFFFF)
+
+    @staticmethod
+    def _key(record: logging.LogRecord) -> str:
+        """Return the identifier the sample decision is keyed on.
+
+        ``stream_id`` first so every record of one stream shares a fate,
+        then ``request_id``.  A record with neither is keyed on its own
+        identity, which degrades to per-record sampling rather than
+        dropping the record on the floor.
+        """
+        for attr in ("stream_id", "request_id"):
+            value = getattr(record, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        return f"{record.created}:{record.thread}"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return ``True`` to keep *record*."""
+        if self._rate >= 1.0:
+            return True
+        if getattr(record, "status", None) == "error":
+            return True
+        digest = hashlib.blake2b(self._key(record).encode("utf-8"), digest_size=4).digest()
+        if int.from_bytes(digest, "big") > self._threshold:
+            return False
+        record.sample_rate = self._rate
+        return True
 
 
 class VgiJsonFormatter(logging.Formatter):
