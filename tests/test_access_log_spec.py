@@ -433,3 +433,45 @@ def test_violation_dataclass_shape() -> None:
     """Violation has the documented public fields."""
     v = Violation(entry_index=0, method="m", path="p", message="msg")
     assert (v.entry_index, v.method, v.path, v.message) == (0, "m", "p", "msg")
+
+
+#: The four JSON envelope fields, which the porting guide counts separately
+#: from the structured ones. Named here so the split is explicit rather than
+#: an arithmetic constant.
+_ENVELOPE_FIELDS = frozenset({"timestamp", "level", "logger", "message"})
+
+
+class TestPortingGuideMatchesSchema:
+    """The porting guide's required-field list must track the schema.
+
+    The guide restates the schema's ``required`` array in prose, which is
+    the right call for a document someone reads before writing any code --
+    but a hand-maintained copy of a machine-readable list drifts, and this
+    one did: ``protocol_hash`` was added to the schema and never to the
+    guide, so a porter following it built records that failed validation on
+    a field the guide never mentioned.
+    """
+
+    @staticmethod
+    def _guide() -> str:
+        return (Path(__file__).parent.parent / "docs" / "porting-guide.md").read_text()
+
+    def test_every_required_field_is_documented(self) -> None:
+        """A required field the guide never names is one a porter will omit."""
+        required = set(_load_schema()["required"])
+        guide = self._guide()
+        missing = sorted(f for f in required if f"`{f}`" not in guide)
+        assert not missing, (
+            f"required by access_log.schema.json but absent from the porting guide: {missing} — "
+            f"a porter following the guide would emit records failing validation"
+        )
+
+    def test_stated_count_matches_the_schema(self) -> None:
+        """The stated count is what a porter checks their work against."""
+        structured = set(_load_schema()["required"]) - _ENVELOPE_FIELDS
+        guide = self._guide()
+        stated = {int(n) for n in re.findall(r"(\d+) always-required fields", guide)}
+        assert stated, "porting guide no longer states an always-required field count"
+        assert stated == {len(structured)}, (
+            f"porting guide says {sorted(stated)} always-required fields, schema has {len(structured)}"
+        )

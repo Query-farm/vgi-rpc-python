@@ -38,7 +38,7 @@ This is the conformance proof for observability. The full spec is in [`access-lo
 
 - One record per RPC call (or per stream init / per stream continuation).
 - JSON-Lines (NDJSON), UTF-8.
-- 11 always-required fields: `server_id`, `protocol`, `method`, `method_type`, `principal`, `auth_domain`, `authenticated`, `remote_addr`, `duration_ms`, `status`, `error_type` plus the four envelope fields `timestamp` (RFC 3339 UTC ms-precision), `level` (`"INFO"`), `logger` (`"vgi_rpc.access"`), `message`.
+- 12 always-required fields: `server_id`, `protocol`, `protocol_hash`, `method`, `method_type`, `principal`, `auth_domain`, `authenticated`, `remote_addr`, `duration_ms`, `status`, `error_type` plus the four envelope fields `timestamp` (RFC 3339 UTC ms-precision), `level` (`"INFO"`), `logger` (`"vgi_rpc.access"`), `message` — 16 keys in total on every record. `protocol_hash` is the one most easily missed: it is what lets a consumer reading archived JSONL decide whether a cached schema decoder still applies, so it is required even though nothing in a single record's own content needs it.
 - Conditional fields keyed off `method_type` and `status` — never off method names.
 - `request_data`: base64 of a self-contained Arrow IPC stream of the request batch. Round-trip equivalence is the test, not byte equivalence — your Arrow library's serialization is fine.
 
@@ -68,7 +68,7 @@ In order, smallest-blast-radius first:
 2. **Conformance service implementation.** Translate the protocol class. Run the full unary test set.
 3. **Streaming.** Producer streams first (no client input), then exchange streams.
 4. **HTTP transport.** State-token signing and replay protection.
-5. **Access log.** Add a hook around dispatch that emits the JSON record. Begin with the 11 always-required fields; add conditional fields as you wire them up.
+5. **Access log.** Add a hook around dispatch that emits the JSON record. Begin with the 12 always-required fields; add conditional fields as you wire them up.
 6. **External-location and shared-memory transports** if you need them. For SHM, implement the `__transport_options__` handshake on both sides: a worker reports `vgi_rpc.transport.shm = "true"`; a client negotiates once per worker (caching the result) and only writes SHM pointer batches when the worker confirmed support, else it stays on the pipe. See [WIRE_PROTOCOL §15](WIRE_PROTOCOL.md).
 7. **Unix / TCP socket transports** if you need them. Both reuse the raw Arrow-IPC framing (no HTTP envelope); they differ only in the listening socket. The worker accepts `--unix PATH` / `--tcp [HOST:]PORT`, defaults the TCP host to loopback (`127.0.0.1`), and emits a `UNIX:<path>` / `TCP:<host>:<port>` discovery line on stdout once bound. Drive conformance with `vgi-rpc-test --unix <path>` / `--tcp <host>:<port>`. TCP carries **no auth/TLS** — it is for trusted networks only; use HTTP otherwise.
 
