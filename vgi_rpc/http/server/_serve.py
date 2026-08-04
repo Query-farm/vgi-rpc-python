@@ -12,7 +12,7 @@ import socket
 import sys
 import threading
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 import falcon
 
@@ -71,6 +71,8 @@ def serve_http(
     install_signal_handlers: bool = True,
     threads: int | None = None,
     call_state_cache_entries: int = 4096,
+    cors_origins: str | Iterable[str] | None = None,
+    cors_max_age: int | None = 7200,
 ) -> None:
     """Serve an ``RpcServer`` over HTTP using waitress.
 
@@ -143,6 +145,10 @@ def serve_http(
             waitress's own default of 4 is too low here.
         call_state_cache_entries: Size of the per-process call-state cache;
             ``0`` disables it.  See :func:`make_wsgi_app`.
+        cors_origins: Allowed CORS origins; ``None`` (the default) serves no
+            CORS headers at all.  See :func:`make_wsgi_app`.
+        cors_max_age: Preflight cache lifetime in seconds.  Only meaningful
+            when ``cors_origins`` is set.  See :func:`make_wsgi_app`.
 
     """
     if max_stream_response_bytes is not None:
@@ -179,6 +185,8 @@ def serve_http(
         sticky_default_ttl=sticky_default_ttl,
         sticky_echo_headers=sticky_echo_headers,
         call_state_cache_entries=call_state_cache_entries,
+        cors_origins=cors_origins,
+        cors_max_age=cors_max_age,
     )
 
     if install_signal_handlers and enable_sticky:

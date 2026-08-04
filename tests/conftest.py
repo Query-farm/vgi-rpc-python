@@ -517,6 +517,25 @@ def conformance_http_cold_call_cache_port() -> Iterator[int]:
         yield port
 
 
+#: Origin the CORS conformance worker is configured to allow. Shared with the
+#: canonical ``TestCors`` group, which sends it as the ``Origin`` request
+#: header; a runner supplying its own worker must allow this exact value.
+CONFORMANCE_CORS_ORIGIN = "https://conformance.example"
+
+
+@pytest.fixture(scope="session")
+def conformance_http_cors_port() -> Iterator[int]:
+    """Spawn a conformance HTTP server with CORS enabled for a known origin.
+
+    Backs the shared ``TestCors`` group.  It needs its own worker because
+    CORS is a *server configuration* no request can induce, and because the
+    default conformance worker deliberately serves no CORS headers -- which
+    ``TestCorsOffMode`` asserts.
+    """
+    with _spawn_conformance_http("--cors-origin", CONFORMANCE_CORS_ORIGIN) as port:
+        yield port
+
+
 @pytest.fixture(scope="session")
 def conformance_http_no_compression_port() -> Iterator[int]:
     """Spawn a conformance HTTP server with response compression disabled.

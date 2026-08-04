@@ -2984,6 +2984,235 @@ class TestColdCallStateCache:
 
 
 # ---------------------------------------------------------------------------
+# CORS conformance (HTTP-only)
+# ---------------------------------------------------------------------------
+
+
+#: Origin the CORS conformance worker must allow. A runner supplying
+#: ``conformance_http_cors_port`` configures its worker with exactly this.
+_CORS_ORIGIN = "https://conformance.example"
+
+
+class TestCors:
+    """Browser clients must be able to *read* what the server advertises.
+
+    Every capability this framework exposes over HTTP is carried on a
+    response header — the size caps, the compression set, the sticky
+    advert, the 401 reason code, the ``X-VGI-RPC-Error`` flag. A browser
+    hides every one of those from JavaScript unless the server names it in
+    ``Access-Control-Expose-Headers``.
+
+    That makes this the one contract the rest of the suite structurally
+    cannot check: conformance tests drive the server with an HTTP client
+    that sees all headers regardless of CORS, so a port can implement every
+    capability header correctly, pass every other group, and still ship a
+    server no browser client can read a single capability from.
+
+    Requested through an optional ``conformance_http_cors_port`` fixture —
+    a worker configured to allow :data:`_CORS_ORIGIN`. A port that does not
+    implement CORS omits the fixture and this group skips; the companion
+    :class:`TestCorsOffMode` still runs everywhere.
+    """
+
+    @staticmethod
+    def _port(request: pytest.FixtureRequest) -> int:
+        """Resolve the CORS-enabled worker's port, or skip."""
+        try:
+            port: int = request.getfixturevalue("conformance_http_cors_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_cors_port")
+        return port
+
+    @staticmethod
+    def _preflight(port: int, path: str = "/echo_int") -> Any:
+        """Send a CORS preflight for an RPC call, as a browser would."""
+        import httpx
+
+        return httpx.options(
+            f"http://127.0.0.1:{port}{path}",
+            headers={
+                "Origin": _CORS_ORIGIN,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+            timeout=5.0,
+        )
+
+    @staticmethod
+    def _exposed(resp: Any) -> set[str]:
+        """Parse ``Access-Control-Expose-Headers`` into a lowercase name set."""
+        raw = resp.headers.get("access-control-expose-headers", "")
+        if raw.strip() == "*":
+            return {"*"}
+        return {name.strip().lower() for name in raw.split(",") if name.strip()}
+
+    def test_preflight_allows_the_origin(self, request: pytest.FixtureRequest) -> None:
+        """A preflight from the configured origin is answered, not refused."""
+        resp = self._preflight(self._port(request))
+        allow = resp.headers.get("access-control-allow-origin")
+        if allow is None:
+            pytest.skip("server does not answer CORS preflights")
+        assert allow in (_CORS_ORIGIN, "*"), f"origin not allowed: {allow!r}"
+
+    def test_preflight_allows_post(self, request: pytest.FixtureRequest) -> None:
+        """RPC calls are POSTs, so the preflight must permit POST.
+
+        A server that answers the preflight but omits POST has told the
+        browser to block every RPC call it was about to make.
+        """
+        resp = self._preflight(self._port(request))
+        if "access-control-allow-origin" not in resp.headers:
+            pytest.skip("server does not answer CORS preflights")
+        allowed = {m.strip().upper() for m in resp.headers.get("access-control-allow-methods", "").split(",")}
+        assert "POST" in allowed or "*" in allowed, f"POST not permitted: {sorted(allowed)}"
+
+    def test_preflight_allows_the_content_type(self, request: pytest.FixtureRequest) -> None:
+        """The Arrow content type is not a CORS-safelisted value.
+
+        ``application/vnd.apache.arrow.stream`` makes every RPC call a
+        non-simple request, so a browser will not send it unless the
+        preflight allows the ``Content-Type`` header explicitly.
+        """
+        resp = self._preflight(self._port(request))
+        if "access-control-allow-origin" not in resp.headers:
+            pytest.skip("server does not answer CORS preflights")
+        allowed = {h.strip().lower() for h in resp.headers.get("access-control-allow-headers", "").split(",")}
+        assert "content-type" in allowed or "*" in allowed, f"Content-Type not allowed: {sorted(allowed)}"
+
+    @pytest.mark.parametrize(
+        "header",
+        ["content-type", "x-vgi-accept-encoding", "vgi-session", "vgi-session-accept", "vgi-proxy-proof"],
+    )
+    def test_preflight_allows_the_request_headers(self, request: pytest.FixtureRequest, header: str) -> None:
+        """A browser may only *send* the headers the preflight permits.
+
+        The expose list is the response half of CORS; this is the request
+        half, and it fails differently. A server that permits only
+        ``Content-Type`` still serves plain calls perfectly, so nothing
+        looks wrong — but a browser silently refuses to send
+        ``VGI-Session``, which takes out sticky sessions, or
+        ``VGI-Proxy-Proof``, which takes out every call behind a proof gate.
+
+        Asked for individually rather than as one batch so a failure names
+        the header that was refused. A server may answer with the literal
+        echo of the request, an explicit list, or ``*`` — all three are
+        conformant; silently dropping one from the list is not.
+        """
+        import httpx
+
+        port = self._port(request)
+        resp = httpx.options(
+            f"http://127.0.0.1:{port}/echo_int",
+            headers={
+                "Origin": _CORS_ORIGIN,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": header,
+            },
+            timeout=5.0,
+        )
+        if "access-control-allow-origin" not in resp.headers:
+            pytest.skip("server does not answer CORS preflights")
+        allowed = {h.strip().lower() for h in resp.headers.get("access-control-allow-headers", "").split(",")}
+        assert header in allowed or "*" in allowed, f"a browser may not send {header!r}; allowed: {sorted(allowed)}"
+
+    def test_actual_response_carries_the_origin(self, request: pytest.FixtureRequest) -> None:
+        """The preflight is not enough — the real response needs the header too.
+
+        A browser re-checks ``Access-Control-Allow-Origin`` on the actual
+        response and discards the body without it, so a server that sets it
+        only on ``OPTIONS`` fails every real call while passing a naive
+        preflight-only test.
+        """
+        import httpx
+
+        port = self._port(request)
+        resp = httpx.post(
+            f"http://127.0.0.1:{port}/echo_int",
+            content=_unary_request_body("echo_int", value=1),
+            headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
+            timeout=5.0,
+        )
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
+        allow = resp.headers.get("access-control-allow-origin")
+        if allow is None and "access-control-allow-origin" not in self._preflight(port).headers:
+            pytest.skip("server does not implement CORS")
+        assert allow in (_CORS_ORIGIN, "*"), f"actual response not readable cross-origin: {allow!r}"
+
+    def test_advertised_capabilities_are_all_exposed(self, request: pytest.FixtureRequest) -> None:
+        """Every capability header the server advertises must be readable.
+
+        The expected set is derived from what this server actually
+        advertises on ``OPTIONS /health`` rather than hardcoded, so the
+        assertion adapts to a port's feature set instead of demanding
+        features it never claimed. Whatever you advertise, expose.
+
+        This is the assertion the rest of the suite cannot make: an
+        unexposed capability header is invisible only to a browser, and
+        every other test here drives the server with a client that ignores
+        CORS entirely.
+        """
+        import httpx
+
+        port = self._port(request)
+        preflight = self._preflight(port)
+        if "access-control-allow-origin" not in preflight.headers:
+            pytest.skip("server does not implement CORS")
+        exposed = self._exposed(preflight)
+        if "*" in exposed:
+            return  # a wildcard exposes everything; nothing to enumerate
+
+        health = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+        advertised = {name.lower() for name in health.headers if name.lower().startswith(("vgi-", "x-vgi-"))}
+        assert advertised, "server advertises no capability headers on OPTIONS /health"
+        missing = advertised - exposed
+        assert not missing, (
+            f"advertised but not readable by a browser: {sorted(missing)} — "
+            f"add them to Access-Control-Expose-Headers (exposed: {sorted(exposed)})"
+        )
+
+    def test_error_flag_is_exposed(self, request: pytest.FixtureRequest) -> None:
+        """``X-VGI-RPC-Error`` marks a 200 that is really a failure.
+
+        It is how a client tells an error response from a result, so a
+        browser client that cannot read it cannot tell the two apart at
+        all. It rides every error response rather than being advertised on
+        ``/health``, so the derived check above would not catch it.
+        """
+        preflight = self._preflight(self._port(request))
+        if "access-control-allow-origin" not in preflight.headers:
+            pytest.skip("server does not implement CORS")
+        exposed = self._exposed(preflight)
+        assert "x-vgi-rpc-error" in exposed or "*" in exposed, (
+            f"X-VGI-RPC-Error not exposed; a browser client cannot distinguish "
+            f"an error from a result (exposed: {sorted(exposed)})"
+        )
+
+
+class TestCorsOffMode:
+    """A server with no CORS configured must emit no CORS headers.
+
+    Not gated on any fixture: it runs against the plain conformance worker
+    everywhere, because "off by default" is a property every port has to
+    hold whether or not it implements the feature. A server that answers
+    every origin regardless of configuration is a different bug from one
+    that answers none.
+    """
+
+    def test_no_cors_headers_by_default(self, conformance_http_port: int) -> None:
+        """The default worker answers a preflight without allowing an origin."""
+        import httpx
+
+        resp = httpx.options(
+            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            headers={"Origin": _CORS_ORIGIN, "Access-Control-Request-Method": "POST"},
+            timeout=5.0,
+        )
+        assert "access-control-allow-origin" not in resp.headers, (
+            "an unconfigured server must not grant cross-origin access"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Sticky session conformance (HTTP-only, capability-gated)
 # ---------------------------------------------------------------------------
 

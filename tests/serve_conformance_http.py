@@ -208,6 +208,17 @@ def main() -> None:
             "which a warm cache would otherwise hide until production."
         ),
     )
+    parser.add_argument(
+        "--cors-origin",
+        default=None,
+        help=(
+            "Serve with CORS enabled for this origin. Backs the shared "
+            "conformance case that every capability header a server "
+            "advertises is also named in Access-Control-Expose-Headers — "
+            "without which a browser client can see none of them, a failure "
+            "the suite's own HTTP client cannot otherwise detect."
+        ),
+    )
     args = parser.parse_args()
 
     call_state_cache_entries = 0 if args.no_call_state_cache else 4096
@@ -245,6 +256,7 @@ def main() -> None:
                 port=args.port,
                 compression_level=compression_level,
                 call_state_cache_entries=call_state_cache_entries,
+                cors_origins=args.cors_origin,
             )
             return
         # Sticky-enabled default path. Mirrors the externalisation branch
@@ -261,6 +273,7 @@ def main() -> None:
             authenticate=authenticate,
             sticky_default_ttl=sticky_default_ttl,
             call_state_cache_entries=call_state_cache_entries,
+            cors_origins=args.cors_origin,
         )
         # Test-only admin endpoint so canonical conformance tests can
         # trigger drain over the wire without sending SIGTERM.
@@ -306,6 +319,7 @@ def main() -> None:
         max_upload_bytes=64 * 1024 * 1024,
         enable_sticky=enable_sticky,
         sticky_echo_headers=sticky_echo_headers,
+        cors_origins=args.cors_origin,
     )
     # Test-only admin endpoint (see _TestDrainResource for rationale).
     app.add_route("/__test_drain__", _TestDrainResource(drain_handle(app)))

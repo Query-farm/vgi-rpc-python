@@ -211,6 +211,22 @@ The pieces worth calling out:
 5. **Carry declarations through composition.** If your chain / require-all helpers do not propagate an authenticator's proxy-header dependency, wrapping one silently drops the note — which is exactly the deployment where you needed it.
 6. **Prove your codes are actually discriminated.** A server that answers every 401 with `unauthorized` passes the closed-set check, which is the one assertion most ports will write first. Supply the optional `conformance_http_auth_reason_port` fixture — a worker whose `authenticate` maps the `X-Conformance-Auth-Reason` request header onto the matching reason — and four more tests turn on that fail exactly that server. The header is a fixture affordance, never a production behaviour; see §7.1 of the spec and `tests/serve_conformance_http_auth.py` for the ~10-line reference.
 
+## HTTP CORS
+
+CORS is opt-in (`make_wsgi_app(cors_origins=...)` / `serve_http(cors_origins=...)`), and a server without it configured MUST emit no CORS headers at all — `TestCorsOffMode` asserts that everywhere, ungated. Ports that implement the feature supply an optional `conformance_http_cors_port` fixture: a worker allowing the origin `https://conformance.example`. The canonical `TestCors` group then runs; ports without the fixture skip it.
+
+This is the one contract the rest of the suite structurally cannot check. Every conformance test drives the server with an ordinary HTTP client that sees all response headers and may send any request header. A browser does neither. So a port can implement every capability header correctly, pass every other group, and still ship a server that is unusable from a browser — and nothing anywhere else in the suite will say so.
+
+Both halves matter, and they fail differently:
+
+1. **Response half — `Access-Control-Expose-Headers`.** A browser hides every response header not on this list from JavaScript. That covers the whole capability system (`VGI-Max-Response-Bytes`, `VGI-Supported-Encodings`, `VGI-Sticky-Enabled`, `VGI-Externalization-Enabled`, …), plus `VGI-Auth-Reason` on a 401, the session headers, and `X-VGI-RPC-Error` — which is how a client tells an error response from a result, so without it a browser client cannot distinguish the two at all. The rule is simply: **whatever you advertise, expose.** `test_advertised_capabilities_are_all_exposed` derives its expectation from what your server actually advertises on `OPTIONS /health`, so it adapts to your feature set rather than demanding features you never claimed.
+2. **Request half — `Access-Control-Allow-Headers`.** A browser refuses to *send* a header the preflight did not permit. Falcon echoes `Access-Control-Request-Headers` back, so the Python reference is permissive by construction; a port that hardcodes `Content-Type` instead will look completely healthy on ordinary calls and then silently break sticky sessions (`VGI-Session`, `VGI-Session-Accept`), proxy proof (`VGI-Proxy-Proof`), and encoding negotiation (`X-VGI-Accept-Encoding`). Echoing the request, returning an explicit list, or `*` are all conformant.
+
+Two further points the tests pin:
+
+- `application/vnd.apache.arrow.stream` is not a CORS-safelisted `Content-Type`, so **every** RPC call is a preflighted request. There is no simple-request fast path to fall back on.
+- `Access-Control-Allow-Origin` must be on the *actual* response, not only the preflight. A browser re-checks it and discards the body without it, so a server that sets it on `OPTIONS` alone fails every real call while passing a naive preflight-only test.
+
 ## HTTP proxy proof
 
 Proxy proof is an **opt-in additive feature**: a worker can refuse any request that did not arrive through a trusted proxy, which is verified by recomputing an HMAC over a timestamp, a nonce and the worker's own identifier. The full spec lives at [`docs/proxy-proof-spec.md`](proxy-proof-spec.md). A port may:
