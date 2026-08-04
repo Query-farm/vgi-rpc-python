@@ -315,24 +315,46 @@ class TestCredentialNeverLeaks:
             c.close()
 
     @pytest.mark.parametrize("token", [_SUBJECT, "no-such-credential"])
-    def test_absent_from_log_records(self, token: str, caplog: pytest.LogCaptureFixture) -> None:
+    def test_absent_from_log_records(self, token: str) -> None:
         """Asserted on captured output, not on review.
 
         Log lines are where a credential most plausibly escapes: a diagnostic
         added in a hurry outlives the hurry. The digest is what correlates a
         credential's failures across records without being the credential.
+
+        Captured by attaching a handler to the endpoint's own logger rather
+        than through ``caplog``, which reads records off the root logger and
+        so depends on global logging state that another test file in the same
+        xdist worker may have changed. That dependency does not fail loudly:
+        it makes the capture *empty*, and "the credential is not in this empty
+        string" passes. The digest assertion below is the paired positive
+        control that turned that into a visible failure rather than a silent
+        pass — keep both.
         """
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger("vgi_rpc.http.introspect")
+        handler = _Capture()
+        previous_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
         c = _client()
         try:
-            with caplog.at_level(logging.DEBUG):
-                _post(c, _PROXY, {"token": token})
+            _post(c, _PROXY, {"token": token})
             rendered = "\n".join(
-                [r.getMessage() for r in caplog.records]
-                + [str(v) for r in caplog.records for v in vars(r).values() if isinstance(v, str)]
+                [r.getMessage() for r in records]
+                + [str(v) for r in records for v in vars(r).values() if isinstance(v, str)]
             )
+            assert records, "nothing was logged, so this test would assert nothing"
             assert token not in rendered, "the credential reached a log record"
             assert token_digest(token) in rendered, "no digest was logged to correlate on"
         finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
             c.close()
 
 
