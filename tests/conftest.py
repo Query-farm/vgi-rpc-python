@@ -174,6 +174,37 @@ def _short_unix_path(name: str) -> str:
 
 
 @pytest.fixture(scope="session")
+def fixture_tcp_addr() -> Iterator[tuple[str, int]]:
+    """Serve the RPC fixture service over TCP for the session.
+
+    In-process on a daemon thread rather than a subprocess: the benchmarks
+    that use it are measuring transport cost, and a spawn per parametrisation
+    would be pure noise against that. ``serve_tcp`` reports the bound port
+    through ``on_bound``, so nothing has to guess a free one.
+    """
+    from vgi_rpc.rpc import RpcServer, serve_tcp
+
+    from .test_rpc import RpcFixtureService, RpcFixtureServiceImpl
+
+    bound: dict[str, Any] = {}
+    ready = threading.Event()
+
+    def _on_bound(host: str, port: int) -> None:
+        bound["host"], bound["port"] = host, port
+        ready.set()
+
+    server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+    thread = threading.Thread(
+        target=lambda: serve_tcp(server, "127.0.0.1", 0, threaded=True, on_bound=_on_bound),
+        daemon=True,
+    )
+    thread.start()
+    assert ready.wait(10), "serve_tcp did not bind within 10s"
+    _wait_for_tcp(bound["host"], bound["port"])
+    yield bound["host"], bound["port"]
+
+
+@pytest.fixture(scope="session")
 def unix_socket_server() -> Iterator[str]:
     """Spawn a single Unix socket server subprocess for the entire test session."""
     path = _short_unix_path("fix")
@@ -320,31 +351,59 @@ def conformance_tcp_addr() -> Iterator[tuple[str, int]]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(
-    params=[
-        "pipe",
-        "shm_pipe",
-        "subprocess",
-        "pool",
-        "http",
-        pytest.param("unix", marks=_SKIP_UNIX),
-        pytest.param("unix_threaded", marks=_SKIP_UNIX),
-    ]
-)
-def make_conn(
+#: Transports every ``make_conn`` test runs against.
+#:
+#: TCP is deliberately absent. It is covered for *correctness* by the
+#: conformance fixtures, and adding an eighth parametrisation here multiplies
+#: across every test using this fixture — against a suite budget that is
+#: already most of the way spent. Benchmarks, which need the transport
+#: comparison and are deselected by default, use ``_BENCH_TRANSPORTS`` below.
+_CONN_TRANSPORTS = [
+    "pipe",
+    "shm_pipe",
+    "subprocess",
+    "pool",
+    "http",
+    pytest.param("unix", marks=_SKIP_UNIX),
+    pytest.param("unix_threaded", marks=_SKIP_UNIX),
+]
+
+#: Transports the benchmarks run against: everything above, plus TCP.
+#:
+#: A benchmark's whole job is comparing transports, so leaving one out is a
+#: hole in the result rather than a saving — and TCP is the one whose numbers
+#: are least predictable from the others, having neither a shared page cache
+#: nor a local socket's short path.
+_BENCH_TRANSPORTS = [*_CONN_TRANSPORTS, "tcp"]
+
+
+def _build_conn_factory(
+    param: str,
     request: pytest.FixtureRequest,
     http_server_port: int,
     subprocess_worker: SubprocessTransport,
     worker_pool: WorkerPool,
 ) -> ConnFactory:
-    """Return a factory that creates an RPC connection context manager.
+    """Build the connection factory for one transport *param*.
 
-    Parametrized over pipe, shm_pipe, subprocess, pool, http, unix, and
-    unix_threaded transports so tests automatically run against all seven.
+    Shared by :func:`make_conn` and :func:`make_bench_conn` so the two cannot
+    drift into testing and benchmarking different things.
+
+    Args:
+        param: Transport name.
+        request: The requesting fixture context, for lazy server fixtures.
+        http_server_port: Port of the session HTTP worker.
+        subprocess_worker: The session subprocess worker.
+        worker_pool: The session worker pool.
+
+    Returns:
+        A callable taking an optional ``on_log`` and returning a connection
+        context manager.
+
     """
     from vgi_rpc.http import http_connect
     from vgi_rpc.log import Message
-    from vgi_rpc.rpc import RpcServer, ShmPipeTransport, make_pipe_pair, serve_pipe, unix_connect
+    from vgi_rpc.rpc import RpcServer, ShmPipeTransport, make_pipe_pair, serve_pipe, tcp_connect, unix_connect
     from vgi_rpc.shm import ShmSegment
 
     from .test_rpc import RpcFixtureService, RpcFixtureServiceImpl
@@ -352,9 +411,9 @@ def make_conn(
     def factory(
         on_log: Callable[[Message], None] | None = None,
     ) -> contextlib.AbstractContextManager[Any]:
-        if request.param == "pipe":
+        if param == "pipe":
             return serve_pipe(RpcFixtureService, RpcFixtureServiceImpl(), on_log=on_log)
-        if request.param == "shm_pipe":
+        if param == "shm_pipe":
 
             @contextlib.contextmanager
             def _shm_conn() -> Iterator[_RpcProxy]:
@@ -377,24 +436,52 @@ def make_conn(
                         shm.close()
 
             return _shm_conn()
-        if request.param == "subprocess":
+        if param == "subprocess":
 
             @contextlib.contextmanager
             def _conn() -> Iterator[_RpcProxy]:
                 yield _RpcProxy(RpcFixtureService, subprocess_worker, on_log)
 
             return _conn()
-        if request.param == "pool":
+        if param == "pool":
             return worker_pool.connect(RpcFixtureService, _worker_cmd(), on_log=on_log)
-        if request.param == "unix":
+        if param == "unix":
             path: str = request.getfixturevalue("unix_socket_server")
             return unix_connect(RpcFixtureService, path, on_log=on_log)
-        if request.param == "unix_threaded":
+        if param == "unix_threaded":
             path = request.getfixturevalue("unix_threaded_socket_server")
             return unix_connect(RpcFixtureService, path, on_log=on_log)
+        if param == "tcp":
+            tcp_host, tcp_port = request.getfixturevalue("fixture_tcp_addr")
+            return tcp_connect(RpcFixtureService, tcp_host, tcp_port, on_log=on_log)
         return http_connect(RpcFixtureService, f"http://127.0.0.1:{http_server_port}", on_log=on_log)
 
     return factory
+
+
+@pytest.fixture(params=_CONN_TRANSPORTS)
+def make_conn(
+    request: pytest.FixtureRequest,
+    http_server_port: int,
+    subprocess_worker: SubprocessTransport,
+    worker_pool: WorkerPool,
+) -> ConnFactory:
+    """Return a connection factory, parametrized over the seven core transports."""
+    return _build_conn_factory(request.param, request, http_server_port, subprocess_worker, worker_pool)
+
+
+@pytest.fixture(params=_BENCH_TRANSPORTS)
+def make_bench_conn(
+    request: pytest.FixtureRequest,
+    http_server_port: int,
+    subprocess_worker: SubprocessTransport,
+    worker_pool: WorkerPool,
+) -> ConnFactory:
+    """Return a connection factory over every transport, TCP included.
+
+    Benchmarks only; see :data:`_BENCH_TRANSPORTS`.
+    """
+    return _build_conn_factory(request.param, request, http_server_port, subprocess_worker, worker_pool)
 
 
 # ---------------------------------------------------------------------------

@@ -12,17 +12,19 @@ Run them explicitly with::
 from __future__ import annotations
 
 import tracemalloc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pyarrow as pa
 import pytest
 from pytest_benchmark.fixture import BenchmarkFixture
 
-from vgi_rpc.rpc import AnnotatedBatch
+from vgi_rpc.rpc import AnnotatedBatch, OutputCollector, StreamState
 from vgi_rpc.utils import (
     ArrowSerializableDataclass,
+    deserialize_compact,
     deserialize_record_batch,
+    serialize_compact,
     serialize_record_batch_bytes,
 )
 
@@ -56,9 +58,80 @@ class ComplexBenchData(ArrowSerializableDataclass):
     items: list[float]
 
 
+@dataclass
+class FlatCursorState(StreamState):
+    """A realistic stream cursor: scalars only, so it takes the compact codec.
+
+    This is what the overwhelming majority of stream state looks like — a
+    counter, an offset, a flag. Benchmarking state serialization against an
+    Arrow-shaped dataclass measured a path such a state no longer takes.
+    """
+
+    count: int
+    current: int = 0
+    label: str = "cursor"
+
+    def process(self, input: Any, out: OutputCollector, ctx: Any) -> None:
+        """Unused; these benchmarks exercise the codec, not the stream."""
+
+
+@dataclass
+class BatchHoldingState(StreamState):
+    """Not flat — an Arrow value forces the Arrow codec.
+
+    Kept so the contrast stays measurable: the compact codec's win is only
+    meaningful next to what a state pays when it cannot take that path.
+    """
+
+    count: int
+    payload: pa.RecordBatch = field(default_factory=lambda: pa.record_batch({"v": [1]}))
+
+    def process(self, input: Any, out: OutputCollector, ctx: Any) -> None:
+        """Unused; these benchmarks exercise the codec, not the stream."""
+
+
 # ---------------------------------------------------------------------------
 # Group 1: Serialization / Deserialization
 # ---------------------------------------------------------------------------
+
+
+class TestStateSerializationBenchmarks:
+    """How stream state actually gets encoded between HTTP turns.
+
+    A stream cursor is a record — a counter, an offset — and Arrow IPC is a
+    columnar container, so a flat state now takes a compact codec instead of
+    paying for a schema message, a batch message, an EOS marker and
+    alignment padding. These benchmarks measure both paths, and the ratio
+    between them is the point.
+    """
+
+    def test_serialize_flat_state_compact(self, benchmark: BenchmarkFixture) -> None:
+        """The path a real stream cursor takes."""
+        state = FlatCursorState(count=50, current=7)
+        encoded = serialize_compact(state)
+        assert encoded is not None, "a scalar-only state must take the compact codec"
+        benchmark.extra_info["bytes"] = len(encoded)
+        benchmark(serialize_compact, state)
+
+    def test_deserialize_flat_state_compact(self, benchmark: BenchmarkFixture) -> None:
+        """Decoding a cursor on the way back in."""
+        state = FlatCursorState(count=50, current=7)
+        data = serialize_compact(state)
+        assert data is not None
+        benchmark(deserialize_compact, FlatCursorState, data)
+
+    def test_serialize_flat_state_via_arrow(self, benchmark: BenchmarkFixture) -> None:
+        """The same state through Arrow — what it used to cost every turn."""
+        state = FlatCursorState(count=50, current=7)
+        benchmark.extra_info["bytes"] = len(state.serialize_to_bytes())
+        benchmark(state.serialize_to_bytes)
+
+    def test_serialize_non_flat_state(self, benchmark: BenchmarkFixture) -> None:
+        """A state holding an Arrow value cannot take the compact path."""
+        state = BatchHoldingState(count=1)
+        assert serialize_compact(state) is None, "a RecordBatch field must fall back to Arrow"
+        benchmark.extra_info["bytes"] = len(state.serialize_to_bytes())
+        benchmark(state.serialize_to_bytes)
 
 
 class TestSerializationBenchmarks:
@@ -134,40 +207,40 @@ class TestSerializationBenchmarks:
 class TestRpcBenchmarks:
     """Benchmarks for end-to-end RPC calls across all transports."""
 
-    def test_unary_noop(self, benchmark: BenchmarkFixture, make_conn: ConnFactory) -> None:
+    def test_unary_noop(self, benchmark: BenchmarkFixture, make_bench_conn: ConnFactory) -> None:
         """Benchmark minimum framework overhead — noop call."""
-        with make_conn() as proxy:
+        with make_bench_conn() as proxy:
             benchmark(proxy.noop)
 
-    def test_unary_add(self, benchmark: BenchmarkFixture, make_conn: ConnFactory) -> None:
+    def test_unary_add(self, benchmark: BenchmarkFixture, make_bench_conn: ConnFactory) -> None:
         """Benchmark primitive params + return — add(a, b)."""
-        with make_conn() as proxy:
+        with make_bench_conn() as proxy:
             benchmark(proxy.add, a=1.0, b=2.0)
 
-    def test_unary_greet(self, benchmark: BenchmarkFixture, make_conn: ConnFactory) -> None:
+    def test_unary_greet(self, benchmark: BenchmarkFixture, make_bench_conn: ConnFactory) -> None:
         """Benchmark string params — greet(name)."""
-        with make_conn() as proxy:
+        with make_bench_conn() as proxy:
             benchmark(proxy.greet, name="benchmark")
 
-    def test_unary_roundtrip_types(self, benchmark: BenchmarkFixture, make_conn: ConnFactory) -> None:
+    def test_unary_roundtrip_types(self, benchmark: BenchmarkFixture, make_bench_conn: ConnFactory) -> None:
         """Benchmark complex types — roundtrip_types(color, mapping, tags)."""
-        with make_conn() as proxy:
+        with make_bench_conn() as proxy:
             benchmark(proxy.roundtrip_types, color=Color.GREEN, mapping={"x": 1}, tags=frozenset({7}))
 
-    def test_stream_producer(self, benchmark: BenchmarkFixture, make_conn: ConnFactory) -> None:
+    def test_stream_producer(self, benchmark: BenchmarkFixture, make_bench_conn: ConnFactory) -> None:
         """Benchmark producer stream throughput — generate(count=50)."""
 
         def run() -> list[Any]:
-            with make_conn() as proxy:
+            with make_bench_conn() as proxy:
                 return list(proxy.generate(count=50))
 
         benchmark(run)
 
-    def test_stream_exchange(self, benchmark: BenchmarkFixture, make_conn: ConnFactory) -> None:
+    def test_stream_exchange(self, benchmark: BenchmarkFixture, make_bench_conn: ConnFactory) -> None:
         """Benchmark exchange throughput — 20 exchanges via transform."""
 
         def run() -> list[Any]:
-            with make_conn() as proxy:
+            with make_bench_conn() as proxy:
                 session = proxy.transform(factor=2.0)
                 results = []
                 for i in range(20):
