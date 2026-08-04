@@ -553,6 +553,84 @@ class TestAccessLogSampler:
             AccessLogSampler(bad)
 
 
+class TestReferenceWorkerValidatesItself:
+    """The reference worker must pass the reference validator, end to end.
+
+    It could not before: ``vgi-rpc-conformance`` had no ``--access-log``, so
+    the one implementation that defines correct behaviour was the one never
+    run through the rules. That is how a ``num_rows != 1`` check shipped that
+    rejects Python's own zero-parameter methods — ``void_noop`` sends a batch
+    with an empty schema and no row, which ``_wire.py`` explicitly allows and
+    the validator did not. Other ports were failed for matching the reference.
+    """
+
+    def test_zero_parameter_method_validates(self) -> None:
+        """A zero-parameter call's ``request_data`` is conformant.
+
+        The empty-schema exemption, asserted directly: a method with no
+        arguments has nothing to put in a row, so requiring one contradicts
+        the wire format.
+        """
+        import base64
+
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+        from vgi_rpc.http import http_connect
+        from vgi_rpc.http._testing import make_sync_client
+
+        logger = logging.getLogger("vgi_rpc.access")
+        handler = _Capture()
+        previous = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            client = make_sync_client(RpcServer(ConformanceService, ConformanceServiceImpl()), token_key=b"k" * 32)
+            try:
+                with http_connect(ConformanceService, "http://x", client=client) as proxy:
+                    proxy.void_noop()
+            finally:
+                client.close()
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous)
+
+        emitted = [r for r in records if getattr(r, "method", None) == "void_noop"]
+        assert emitted, "no access-log record for void_noop"
+        raw = getattr(emitted[0], "request_data", None)
+        assert isinstance(raw, str), "request_data missing at DEBUG"
+
+        decoded = base64.b64decode(raw)
+        batch = pa.ipc.open_stream(pa.BufferReader(decoded)).read_next_batch()
+        assert batch.num_columns == 0, "void_noop takes no parameters"
+        assert batch.num_rows == 0, "an empty schema carries no row"
+
+        record = _format_record(emitted[0])
+        violations = validate_access_logs([record])
+        assert violations == [], f"the reference worker fails its own validator: {violations}"
+
+    def test_conformance_cli_can_emit_an_access_log(self) -> None:
+        """The reference worker exposes the flag that makes the above testable.
+
+        Without it there is no way to capture the reference's records at all,
+        which is the gap that let the rule ship.
+        """
+        import subprocess
+
+        out = subprocess.run(
+            [sys.executable, "-m", "vgi_rpc.conformance._cli", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout
+        assert "--access-log" in out
+        assert "--access-log-debug" in out, "request_data only appears at DEBUG"
+
+
 class TestRequestDataRoundTrip:
     """``request_data`` must decode through ``pyarrow.ipc.open_stream``.
 

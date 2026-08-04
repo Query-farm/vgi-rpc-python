@@ -115,7 +115,12 @@ def _check_request_data(index: int, method: str, entry: dict[str, object]) -> li
         return [
             Violation(index, method, "request_data", f"record batch could not be read: {type(exc).__name__}: {exc}")
         ]
-    if batch.num_rows != 1:
+    # A no-argument method's request batch is legitimately empty in both
+    # dimensions -- `_write_request` builds it from an empty schema, so it
+    # carries no row. The wire reader states the same rule (`_wire.py`: a row
+    # is required only when the schema has fields), and demanding one here
+    # would reject the reference implementation's own `void_noop` records.
+    if len(batch.schema) > 0 and batch.num_rows != 1:
         return [
             Violation(
                 index,

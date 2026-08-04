@@ -12,6 +12,16 @@ Usage::
     vgi-rpc-conformance --unix /tmp/s.sock  # Unix domain socket
     vgi-rpc-conformance --tcp [HOST:]PORT   # TCP socket (loopback default)
     vgi-rpc-conformance --describe          # Enable __describe__ introspection
+    vgi-rpc-conformance --http --access-log /tmp/a.log --access-log-debug
+
+The access-log flags exist so the *reference* worker can be validated against
+the reference validator, end to end.  Without them it was the one
+implementation never checked against its own rules: other ports could be run
+through ``vgi-rpc-test --access-log`` and Python could not, which is how a
+validator rule that rejects Python's own ``void_noop`` records shipped.
+
+``--access-log-debug`` raises the logger to DEBUG, which is the only level
+that emits ``request_data`` — the field carrying the rule in question.
 
 """
 
@@ -36,6 +46,16 @@ def main() -> None:
     parser.add_argument("--describe", action="store_true", help="Enable __describe__ introspection")
     parser.add_argument("--threaded", action="store_true", help="Accept connections concurrently (unix/tcp only)")
     parser.add_argument(
+        "--access-log",
+        metavar="PATH",
+        help="Append JSONL access-log records to PATH (see docs/access-log-spec.md)",
+    )
+    parser.add_argument(
+        "--access-log-debug",
+        action="store_true",
+        help="Log the access channel at DEBUG, which is what emits request_data",
+    )
+    parser.add_argument(
         "--max-connections",
         type=int,
         default=None,
@@ -51,6 +71,22 @@ def main() -> None:
 
     impl = ConformanceServiceImpl()
     server = RpcServer(ConformanceService, impl, enable_describe=args.describe)
+
+    if args.access_log:
+        import logging
+
+        from vgi_rpc.rpc import _configure_access_log
+
+        _configure_access_log(
+            path=args.access_log,
+            max_bytes=0,
+            backup_count=0,
+            when=None,
+            max_record_bytes=1_048_576,
+            server_id=server.server_id,
+        )
+        if args.access_log_debug:
+            logging.getLogger("vgi_rpc.access").setLevel(logging.DEBUG)
 
     if args.unix is not None:
         _serve_unix(server, args.unix, threaded=args.threaded, max_connections=args.max_connections)
@@ -138,3 +174,7 @@ def _serve_http(server: RpcServer, port: int) -> None:
     app = make_wsgi_app(server)
     print(f"PORT:{port}", flush=True)
     waitress.serve(app, host="127.0.0.1", port=port, _quiet=True)
+
+
+if __name__ == "__main__":  # pragma: no cover - console-script entry point
+    main()
