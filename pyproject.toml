@@ -52,7 +52,11 @@ cli = ["typer>=0.9", "httpx>=0.24", "filelock>=3.13"]
 external = ["aiohttp>=3.14.1", "tenacity>=8.0", "zstandard>=0.20"]
 otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 oauth = ["joserfc>=1.0"]
-mtls = ["cryptography>=41.0"]
+# Floor is 50.0 for GHSA-g6cj-pr64-35w5 (Bleichenbacher oracle in PKCS#7
+# EnvelopedData decryption, 44.0.0–49.x). This package never decrypts PKCS#7 —
+# `_mtls.py` only parses x509 and hashes — so the floor is about not handing a
+# consumer a resolution into the vulnerable range, not about our own exposure.
+mtls = ["cryptography>=50.0"]
 sentry = ["sentry-sdk>=2.0"]
 conformance = ["jsonschema>=4.0"]
 
@@ -286,7 +290,7 @@ dev = [
     "opentelemetry-sdk>=1.20",
     "pytest-benchmark>=4.0",
     "sentry-sdk>=2.0",
-    "cryptography>=41.0",
+    "cryptography>=50.0",  # see the mtls extra for why this floor is not 41.0
     "pycryptodome>=3.20",
     "hypothesis>=6.155.3",
 ]
