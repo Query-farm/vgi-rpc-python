@@ -605,6 +605,20 @@ def conformance_http_cold_call_cache_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[int, Path]]:
+    """Spawn a conformance HTTP worker writing an access log, yielding (port, path).
+
+    Backs the shared ``TestRequestId`` correlation case.  Asserting that the
+    ``X-Request-ID`` on a response matches the ``request_id`` in the record
+    requires reading back what the server logged for a request the suite made,
+    which no amount of poking at the wire can substitute for.
+    """
+    log_path = tmp_path_factory.mktemp("accesslog") / "conformance.log"
+    with _spawn_conformance_http("--access-log", str(log_path)) as port:
+        yield port, log_path
+
+
+@pytest.fixture(scope="session")
 def conformance_http_introspect_port() -> Iterator[int]:
     """Spawn a conformance HTTP worker with token introspection enabled.
 

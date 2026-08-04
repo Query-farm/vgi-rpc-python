@@ -63,6 +63,27 @@ CONFORMANCE_SUBJECT_TTL = 300
 CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
 
 
+def _maybe_access_log(server: RpcServer, path: str | None) -> None:
+    """Wire the access log, if the runner asked for one.
+
+    Backs the shared ``TestRequestId`` correlation case: asserting that the
+    ``X-Request-ID`` on a response equals the ``request_id`` in the record
+    means reading back what the server logged for a request the suite made.
+    """
+    if not path:
+        return
+    from vgi_rpc.rpc import _configure_access_log
+
+    _configure_access_log(
+        path=path,
+        max_bytes=0,
+        backup_count=0,
+        when=None,
+        max_record_bytes=1_048_576,
+        server_id=server.server_id,
+    )
+
+
 def _conformance_resolver(token: str) -> TokenIdentity | None:
     """Resolve the one fixed subject credential the shared tests post."""
     if token in (CONFORMANCE_SUBJECT_TOKEN, CONFORMANCE_JWS_TRAP_TOKEN):
@@ -237,6 +258,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--access-log",
+        default=None,
+        help=(
+            "Append JSONL access-log records to this path. Backs the shared "
+            "TestRequestId correlation case, which needs to read back what the "
+            "server logged for a request it made."
+        ),
+    )
+    parser.add_argument(
         "--introspect",
         action="store_true",
         help=(
@@ -286,6 +316,7 @@ def main() -> None:
             ConformanceServiceImpl(),
             enable_describe=args.describe,
         )
+        _maybe_access_log(server, args.access_log)
         if not enable_sticky:
             # serve_http() doesn't expose enable_sticky directly; fall through
             # to the make_wsgi_app + waitress path below when sticky is on so
@@ -348,6 +379,7 @@ def main() -> None:
         enable_describe=args.describe,
         external_location=external_location,
     )
+    _maybe_access_log(server, args.access_log)
 
     listener = _bind_listener(args.host, args.port)
     port = int(listener.getsockname()[1])

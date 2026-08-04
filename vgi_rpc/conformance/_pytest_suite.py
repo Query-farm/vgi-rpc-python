@@ -2984,6 +2984,126 @@ class TestColdCallStateCache:
 
 
 # ---------------------------------------------------------------------------
+# Request-ID correlation (HTTP-only)
+# ---------------------------------------------------------------------------
+
+
+#: Header carrying the per-request correlation ID.
+_REQUEST_ID_HEADER = "X-Request-ID"
+
+
+class TestRequestId:
+    """``X-Request-ID`` must be emitted, and must match the access log.
+
+    The suite already required this header to be CORS-exposed, but never
+    checked that it is *sent* — the same shape as validating an expose list
+    without validating the header, where the rule holds everywhere except
+    where it applies.
+
+    The correlation half is the point. A request id that appears on the
+    response but not in the log, or differs between them, is worse than
+    having none: it looks like a working trail right up to the moment
+    somebody tries to follow it.
+
+    ``docs/access-log-spec.md`` §4.4 makes propagation a SHOULD, so the
+    header tests skip for a port that emits nothing rather than failing it.
+    What is *not* optional is agreement: a port that emits the header and a
+    ``request_id`` must make them the same value.
+    """
+
+    @staticmethod
+    def _call(port: int, request_id: str | None = None) -> Any:
+        """Make a unary call, optionally supplying a correlation ID."""
+        import httpx
+
+        headers = {"content-type": "application/vnd.apache.arrow.stream"}
+        if request_id is not None:
+            headers[_REQUEST_ID_HEADER] = request_id
+        for path in ("/echo_int", "/vgi/echo_int"):
+            resp = httpx.post(
+                f"http://127.0.0.1:{port}{path}",
+                content=_unary_request_body("echo_int", value=1),
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                return resp
+        return resp
+
+    def _emitted(self, port: int, request_id: str | None = None) -> str:
+        """Return the response's request id, skipping if the port emits none."""
+        resp = self._call(port, request_id)
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
+        got = resp.headers.get(_REQUEST_ID_HEADER.lower())
+        if got is None:
+            pytest.skip(f"server does not emit {_REQUEST_ID_HEADER}")
+        return str(got)
+
+    def test_response_carries_a_request_id(self, conformance_http_port: int) -> None:
+        """Every response carries a correlation ID, generated when none was sent."""
+        got = self._emitted(conformance_http_port)
+        assert got.strip(), "request id must not be empty"
+
+    def test_inbound_request_id_is_echoed(self, conformance_http_port: int) -> None:
+        """A caller-supplied ID is propagated, not replaced.
+
+        Propagation is what makes the ID useful across a hop: a proxy or
+        client that minted an ID needs the worker's records to carry the same
+        one, or the two logs cannot be joined.
+        """
+        mine = "conformance-request-id-0123456789"
+        got = self._emitted(conformance_http_port, mine)
+        assert got == mine, f"inbound {_REQUEST_ID_HEADER} was replaced with {got!r}"
+
+    def test_generated_ids_differ_between_requests(self, conformance_http_port: int) -> None:
+        """A minted ID identifies one request, so it cannot be a constant."""
+        first = self._emitted(conformance_http_port)
+        second = self._emitted(conformance_http_port)
+        assert first != second, "generated request ids must be unique per request"
+
+    def test_request_id_matches_the_access_log(self, request: pytest.FixtureRequest) -> None:
+        """The header and the record must name the same request.
+
+        This is the assertion the whole field exists for, and the one the
+        suite could not make until a runner exposed its worker's log. Gated
+        on the optional ``conformance_http_access_log`` fixture, which yields
+        ``(port, path)`` for a worker writing JSONL access records.
+        """
+        import json
+        import time
+
+        try:
+            port, log_path = request.getfixturevalue("conformance_http_access_log")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_access_log")
+
+        mine = "conformance-correlation-abcdef0123"
+        got = self._emitted(port, mine)
+        assert got == mine
+
+        # The record is written as the response completes; allow the writer a
+        # moment rather than racing it.
+        deadline = time.time() + 10.0
+        ids: list[str] = []
+        while time.time() < deadline:
+            if log_path.exists():
+                ids = [
+                    str(rec.get("request_id", ""))
+                    for line in log_path.read_text().splitlines()
+                    if line.strip()
+                    for rec in [json.loads(line)]
+                    if rec.get("logger") == "vgi_rpc.access"
+                ]
+                if mine in ids:
+                    break
+            time.sleep(0.2)
+        assert mine in ids, (
+            f"the response reported {_REQUEST_ID_HEADER}={mine!r} but no access-log record "
+            f"carries that request_id (saw {ids[-5:]}); header and log must name the same request"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Token introspection conformance (HTTP-only, optional)
 # ---------------------------------------------------------------------------
 

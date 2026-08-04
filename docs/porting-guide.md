@@ -266,6 +266,16 @@ Two further points the tests pin:
 - **Headers a plain worker never advertises.** The conditional capability headers — `VGI-Upload-URL-Support`, `VGI-Max-Upload-Bytes`, the size caps — are absent from a worker with no storage configured, so a missing exposure for them passes. **Point `conformance_http_cors_port` at a storage/upload-enabled worker**, not a bare one; `test_worker_advertises_the_optional_capabilities` fails the fixture if you don't.
 - **Headers that only ride failures.** `OPTIONS /health` is a success-path surface, so nothing advertises `X-VGI-RPC-Error`, `VGI-Auth-Reason`, or `X-Request-ID` — a derived check structurally cannot reach them. They are named explicitly in `_ALWAYS_EXPOSED` and asserted one at a time. `VGI-Auth-Reason` is the one to check first: without it a browser client cannot read the machine-readable half of a 401 and is back to parsing prose.
 
+## HTTP request-id correlation
+
+`X-Request-ID` on the response and `request_id` in the access log must name the same request. That agreement is the whole value of the field: an ID that appears on the response but not in the log, or differs between them, is worse than none — it looks like a working trail right up to the moment someone tries to follow it.
+
+`docs/access-log-spec.md` §4.4 makes propagation a SHOULD, so `TestRequestId`'s header cases skip cleanly for a port that emits nothing. What is **not** optional is agreement: a port that emits both must make them equal.
+
+The group asserts four things — the response carries an ID, a caller-supplied one is echoed rather than replaced, generated ones differ between requests, and the header matches the record. That last one needs the worker's log, so supply the optional `conformance_http_access_log` fixture: `(port, path)` for a worker started with `--access-log PATH`. Omit it and only the correlation case skips.
+
+This is the same gap the CORS work turned up twice — the suite asserted `X-Request-ID` was in the expose list and never that it was sent. A rule enforced everywhere except where it applies is not enforced.
+
 ## HTTP token introspection
 
 **Optional, and off unless explicitly enabled.** A port that does not implement it MUST still answer `POST {prefix}/__introspect_token__` with a status a caller treats as **definitive** — `401`, `403` or `404`. That requirement is not decoration: a caller classifying anything else as transient will retry forever against a worker that is never going to support the feature, so a `415` from a generic catch-all route turns a misconfiguration into an infinite loop instead of a preflight failure. The reference answers `404 {"error": "not_enabled"}`.
