@@ -92,6 +92,7 @@ class _HttpRpcApp:
         max_upload_bytes: int | None = None,
         token_ttl: int = 3600,
         max_externalized_response_bytes: int | None = None,
+        call_state_cache_entries: int = 4096,
     ) -> None:
         self._server = server
         self._token_key = token_key
@@ -105,7 +106,13 @@ class _HttpRpcApp:
         # Per-process accelerator for the call half of stream state.  Entries
         # expire with the token TTL so a cached call never outlives the token
         # that names it; a miss simply reopens the client's call token.
-        self._call_state_cache = _CallStateCache(ttl=float(token_ttl) if token_ttl > 0 else 3600.0)
+        # Sizing it to 0 disables it outright, forcing every continuation
+        # down the miss path — which is how a client's obligation to echo
+        # the call token is made testable rather than load-dependent.
+        self._call_state_cache = _CallStateCache(
+            max_entries=call_state_cache_entries,
+            ttl=float(token_ttl) if token_ttl > 0 else 3600.0,
+        )
 
     def _resolve_method(self, req: falcon.Request, method: str) -> RpcMethodInfo:
         """Validate content type and resolve method info.

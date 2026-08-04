@@ -10,9 +10,11 @@ This file tests only things unique to the HTTP transport layer.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from http import HTTPStatus
 from io import BytesIO
 from typing import Any, Protocol, cast
 
@@ -878,6 +880,126 @@ class TestStateTokenStateEncoding:
         too_short = base64.b64encode(b"\x05short")
         with pytest.raises(Exception, match="signature verification failed"):
             _open_cursor_token(too_short, b"\x09" * 32, _compute_aad(None))
+
+
+# ---------------------------------------------------------------------------
+# Tests: token payload compression
+# ---------------------------------------------------------------------------
+
+
+class TestTokenPayloadCompression:
+    """Token payloads are compressed *inside* the seal.
+
+    The ordering is the whole point: once a token is sealed it is ciphertext,
+    so the HTTP body codec can find no redundancy in it — over a sealed token
+    zstd recovers only the slack base64 added, never the state's own
+    structure.  Compressing before sealing reaches the real redundancy.
+
+    None of this is visible on the wire, so the cross-language conformance
+    suite cannot reach it; ``docs/WIRE_PROTOCOL.md`` makes it normative and
+    asks each port to pin it with a language-local test like this one.
+    """
+
+    @staticmethod
+    def _codec_tag(packed: bytes) -> bytes:
+        """Return the codec tag byte a packed payload leads with."""
+        return packed[:1]
+
+    def test_a_compressible_payload_is_compressed(self) -> None:
+        """A large, redundant payload comes back under the zstd tag and much smaller."""
+        from vgi_rpc.http.server._state_token import _CODEC_ZSTD, _pack_plaintext
+
+        plaintext = b"vgi-rpc-state-" * 1000
+        packed = _pack_plaintext(plaintext)
+
+        assert self._codec_tag(packed) == _CODEC_ZSTD
+        assert len(packed) < len(plaintext) // 4, (
+            f"expected real compression on a redundant payload, got {len(packed)} from {len(plaintext)}"
+        )
+
+    def test_an_incompressible_payload_stays_raw_and_never_grows(self) -> None:
+        """When compression would not pay, the payload ships raw under the raw tag.
+
+        Skipping is what keeps the guarantee one-directional: a token may get
+        smaller, never larger than its plaintext plus the one tag byte.
+        """
+        from vgi_rpc.http.server._state_token import _CODEC_RAW, _pack_plaintext
+
+        # Random bytes have no redundancy for the codec to find.
+        plaintext = os.urandom(64)
+        packed = _pack_plaintext(plaintext)
+
+        assert self._codec_tag(packed) == _CODEC_RAW
+        assert len(packed) == len(plaintext) + 1
+
+    @pytest.mark.parametrize(
+        "plaintext",
+        [b"", b"x", os.urandom(32), b"vgi-rpc-state-" * 500],
+        ids=["empty", "one-byte", "incompressible", "compressible"],
+    )
+    def test_pack_round_trips_under_either_codec(self, plaintext: bytes) -> None:
+        """Whichever branch a payload takes, unpacking returns it byte-for-byte."""
+        from vgi_rpc.http.server._state_token import _pack_plaintext, _unpack_plaintext
+
+        assert _unpack_plaintext(_pack_plaintext(plaintext)) == plaintext
+
+    def test_an_unknown_codec_tag_is_rejected_as_a_400(self) -> None:
+        """An unrecognised tag means a token this server did not mint."""
+        from vgi_rpc.http._common import _RpcHttpError
+        from vgi_rpc.http.server._state_token import _unpack_plaintext
+
+        with pytest.raises(_RpcHttpError) as excinfo:
+            _unpack_plaintext(b"\x7f" + b"payload")
+        assert excinfo.value.status_code == HTTPStatus.BAD_REQUEST
+
+    def test_an_empty_payload_is_rejected_as_a_400(self) -> None:
+        """A payload with no room for even the tag byte is malformed."""
+        from vgi_rpc.http._common import _RpcHttpError
+        from vgi_rpc.http.server._state_token import _unpack_plaintext
+
+        with pytest.raises(_RpcHttpError) as excinfo:
+            _unpack_plaintext(b"")
+        assert excinfo.value.status_code == HTTPStatus.BAD_REQUEST
+
+    def test_a_corrupt_compressed_body_is_rejected_as_a_400(self) -> None:
+        """A zstd-tagged body that will not decompress surfaces the uniform 400.
+
+        It cannot happen to an honest client — the payload is authenticated
+        before it is ever decompressed — so this pins that a framework bug
+        degrades into the same error as every other token failure rather
+        than an unhandled exception.
+        """
+        from vgi_rpc.http._common import _RpcHttpError
+        from vgi_rpc.http.server._state_token import _CODEC_ZSTD, _unpack_plaintext
+
+        with pytest.raises(_RpcHttpError) as excinfo:
+            _unpack_plaintext(_CODEC_ZSTD + b"not-a-zstd-frame")
+        assert excinfo.value.status_code == HTTPStatus.BAD_REQUEST
+
+    def test_a_sealed_call_token_shrinks_with_a_compressible_call_state(self) -> None:
+        """End to end: compression inside the seal shrinks the token itself.
+
+        Guards the ordering rather than the codec — a token sealed around an
+        uncompressed payload would come out roughly the size of its input,
+        which is the regression this catches.
+        """
+        from vgi_rpc.http.server._state_token import _compute_call_aad, _seal_call_token
+
+        call_state = b"vgi-rpc-call-state-" * 400
+        token = _seal_call_token(
+            call_state_bytes=call_state,
+            call_state_type="BigCallState",
+            schema_bytes=b"schema" * 100,
+            input_schema_bytes=b"input-schema" * 100,
+            call_id=b"\x0c" * 16,
+            stream_id="sid-compress",
+            token_key=b"\x0d" * 32,
+            aad=_compute_call_aad(None),
+            created_at=1000,
+        )
+        assert len(token) < len(call_state) // 4, (
+            f"sealed token ({len(token)}B) should be far smaller than its call state ({len(call_state)}B)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2755,6 +2877,86 @@ class TestDescribeHtmlPage:
 # ---------------------------------------------------------------------------
 # Health endpoint
 # ---------------------------------------------------------------------------
+
+
+def _html_page_templates() -> list[tuple[str, str]]:
+    """Discover every HTML page template the ``vgi_rpc.http`` package defines.
+
+    Discovered rather than listed so that a page added later is covered
+    without anyone remembering to extend this test — the case the branding
+    invariant actually fails in is a *new* page that inlines its own markup.
+
+    Returns:
+        ``(qualified_name, template)`` pairs for every module-level string
+        constant containing an HTML doctype.
+
+    """
+    import importlib
+    import pkgutil
+
+    import vgi_rpc.http as http_pkg
+
+    found: list[tuple[str, str]] = []
+    for info in pkgutil.walk_packages(http_pkg.__path__, f"{http_pkg.__name__}."):
+        module = importlib.import_module(info.name)
+        for attr, value in vars(module).items():
+            if isinstance(value, str) and "<!DOCTYPE html>" in value:
+                found.append((f"{info.name}.{attr}", value))
+    return found
+
+
+class TestPageBranding:
+    """Every served HTML page carries the same mark and footer link.
+
+    These pages are rendered by four unrelated modules, so "they all look
+    like the same service" is an invariant nothing enforces on its own. The
+    401 page is the one that matters most here: it is the only page a caller
+    reaches by accident, and until this test it was the only one with no
+    branding assertion at all.
+    """
+
+    def test_templates_are_discovered(self) -> None:
+        """Guard the discovery itself — an import rename must not empty the sweep."""
+        names = [name for name, _ in _html_page_templates()]
+        assert len(names) >= 5, f"expected every HTML page to be found, got {names}"
+        assert any("_UNAUTHORIZED_HTML_TEMPLATE" in name for name in names)
+
+    @pytest.mark.parametrize("name,template", _html_page_templates(), ids=lambda v: v if isinstance(v, str) else "")
+    def test_every_html_page_carries_the_mark(self, name: str, template: str) -> None:
+        """No page may inline its own copy of the logo markup."""
+        from vgi_rpc.http._common import _VGI_LOGO_HTML
+
+        assert _VGI_LOGO_HTML in template, f"{name} does not embed _VGI_LOGO_HTML"
+
+    @pytest.mark.parametrize("name,template", _html_page_templates(), ids=lambda v: v if isinstance(v, str) else "")
+    def test_every_html_page_links_home(self, name: str, template: str) -> None:
+        """A caller who lands on any of these pages can find out what served it."""
+        assert "vgi-rpc.query.farm" in template, f"{name} has no link home"
+
+    def test_rendered_401_page_carries_the_mark(self) -> None:
+        """Assert it on the response, not only on the template.
+
+        The 401 page is assembled through an error serializer rather than
+        returned by a resource, so a template that embeds the mark is not by
+        itself proof that a caller receives it.
+        """
+
+        def reject(_req: falcon.Request) -> AuthContext:
+            raise ValueError("nope")
+
+        c = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test-key",
+            authenticate=reject,
+        )
+        try:
+            resp = c.post(f"{_BASE_URL}/echo_int", content=b"", headers={"Accept": "text/html"})
+            assert resp.status_code == 401
+            body = resp.content.decode()
+            assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in body
+            assert "vgi-rpc.query.farm" in body
+        finally:
+            c.close()
 
 
 class TestHealthEndpoint:

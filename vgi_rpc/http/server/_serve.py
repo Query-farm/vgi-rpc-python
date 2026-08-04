@@ -70,6 +70,7 @@ def serve_http(
     drain_grace_seconds: float = 30.0,
     install_signal_handlers: bool = True,
     threads: int | None = None,
+    call_state_cache_entries: int = 4096,
 ) -> None:
     """Serve an ``RpcServer`` over HTTP using waitress.
 
@@ -140,6 +141,8 @@ def serve_http(
             resolves ``VGI_HTTP_THREADS``, then falls back to
             ``_DEFAULT_THREADS``.  See :func:`_resolve_threads` for why
             waitress's own default of 4 is too low here.
+        call_state_cache_entries: Size of the per-process call-state cache;
+            ``0`` disables it.  See :func:`make_wsgi_app`.
 
     """
     if max_stream_response_bytes is not None:
@@ -175,6 +178,7 @@ def serve_http(
         enable_sticky=enable_sticky,
         sticky_default_ttl=sticky_default_ttl,
         sticky_echo_headers=sticky_echo_headers,
+        call_state_cache_entries=call_state_cache_entries,
     )
 
     if install_signal_handlers and enable_sticky:

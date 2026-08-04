@@ -21,6 +21,7 @@ import falcon
 from .._common import (
     _ERROR_PAGE_STYLE,
     _FONT_IMPORTS,
+    _VGI_LOGO_HTML,
     AUTH_PROXY_REQUIRED_HEADER,
     AUTH_REASON_HEADER,
 )
@@ -40,9 +41,9 @@ _NOT_FOUND_HTML_TEMPLATE = (
     + """
 </head>
 <body>
-<div class="logo">
-  <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">
-</div>
+"""
+    + _VGI_LOGO_HTML
+    + """
 <h1>404 &mdash; Not Found</h1>
 <p>This is a <code>vgi-rpc</code> service endpoint{protocol_fragment}.</p>
 <p>RPC methods are available under <code>{prefix}/&lt;method&gt;</code>.</p>
@@ -67,9 +68,9 @@ _UNAUTHORIZED_HTML_TEMPLATE = (
     + """
 </head>
 <body>
-<div class="logo">
-  <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">
-</div>
+"""
+    + _VGI_LOGO_HTML
+    + """
 <h1>401 &mdash; Unauthorized</h1>
 <div class="reason">{reason}</div>
 <p>Authentication is required to access this <code>vgi-rpc</code> service.</p>

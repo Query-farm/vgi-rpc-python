@@ -148,6 +148,7 @@ def make_sync_client(
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
+    call_state_cache_entries: int = 4096,
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -182,6 +183,8 @@ def make_sync_client(
         enable_sticky: See ``make_wsgi_app``.
         sticky_default_ttl: See ``make_wsgi_app``.
         sticky_echo_headers: See ``make_wsgi_app``.
+        call_state_cache_entries: See ``make_wsgi_app``.  Pass ``0`` to force
+            every stream continuation down the call-token miss path.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -213,5 +216,6 @@ def make_sync_client(
         enable_sticky=enable_sticky,
         sticky_default_ttl=sticky_default_ttl,
         sticky_echo_headers=sticky_echo_headers,
+        call_state_cache_entries=call_state_cache_entries,
     )
     return _SyncTestClient(app, default_headers=default_headers, prefix=prefix)

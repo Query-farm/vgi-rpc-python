@@ -197,8 +197,20 @@ def main() -> None:
             "never compresses, whatever the client asks for."
         ),
     )
+    parser.add_argument(
+        "--no-call-state-cache",
+        action="store_true",
+        help=(
+            "Serve with the call-state cache disabled, so every stream "
+            "continuation takes the cache-miss path and must resolve the "
+            "client's echoed call token. Backs the shared conformance case "
+            "that a client echoes vgi_rpc.call_state#b64 on every request — "
+            "which a warm cache would otherwise hide until production."
+        ),
+    )
     args = parser.parse_args()
 
+    call_state_cache_entries = 0 if args.no_call_state_cache else 4096
     enable_sticky = not args.no_sticky
     # Fixed marker the canonical TestSticky::test_echo_header_round_trip
     # captures + replays. Operators wiring up real deployments use
@@ -227,7 +239,13 @@ def main() -> None:
             # serve_http() doesn't expose enable_sticky directly; fall through
             # to the make_wsgi_app + waitress path below when sticky is on so
             # the conformance default exercises the feature.
-            serve_http(server, host=args.host, port=args.port, compression_level=compression_level)
+            serve_http(
+                server,
+                host=args.host,
+                port=args.port,
+                compression_level=compression_level,
+                call_state_cache_entries=call_state_cache_entries,
+            )
             return
         # Sticky-enabled default path. Mirrors the externalisation branch
         # below but without storage, so the canonical TestSticky group has
@@ -242,6 +260,7 @@ def main() -> None:
             token_key=token_key,
             authenticate=authenticate,
             sticky_default_ttl=sticky_default_ttl,
+            call_state_cache_entries=call_state_cache_entries,
         )
         # Test-only admin endpoint so canonical conformance tests can
         # trigger drain over the wire without sending SIGTERM.

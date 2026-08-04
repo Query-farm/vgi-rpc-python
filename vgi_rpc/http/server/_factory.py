@@ -109,6 +109,7 @@ def make_wsgi_app(
     enable_sticky: bool = False,
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
+    call_state_cache_entries: int = 4096,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -278,6 +279,14 @@ def make_wsgi_app(
             header so clients/LBs can introspect the contract via
             ``OPTIONS /health``.  See ``vgi_rpc/http/fly.py`` for a Fly-
             specific helper.  Only meaningful when ``enable_sticky=True``.
+        call_state_cache_entries: Size of the per-process call-state cache
+            (default 4096).  The cache is a pure accelerator: a miss reopens
+            the call token the client echoed, so correctness never depends
+            on a hit.  Setting it to ``0`` disables the cache, which is the
+            supported way to prove that — every continuation then takes the
+            miss path, so a client that fails to echo
+            :data:`~vgi_rpc.metadata.CALL_STATE_KEY` fails immediately
+            instead of only once the cache goes cold in production.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -329,6 +338,7 @@ def make_wsgi_app(
         max_upload_bytes,
         token_ttl,
         max_externalized_response_bytes=max_externalized_response_bytes,
+        call_state_cache_entries=call_state_cache_entries,
     )
     # Resolve the proxy-header dependency now, from the `authenticate` the
     # caller passed. The PKCE branch below rebinds `authenticate` to a chained

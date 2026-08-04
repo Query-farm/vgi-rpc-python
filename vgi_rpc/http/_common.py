@@ -178,6 +178,13 @@ _ERROR_PAGE_STYLE = """\
   footer a:hover {{ color: #4a7c23; }}
 </style>"""
 
+# The single source of the mark for every HTML page this package serves — the
+# 404 and 401 pages, the landing and describe pages, and the OAuth error page.
+# It lives here rather than being inlined per template because a rebrand that
+# updates four of five copies leaves one page serving the old mark, and the
+# page most likely to be missed is the one nobody visits deliberately.
+# `test_every_html_page_carries_the_mark` asserts the templates keep using it.
+# Contains no braces, so it survives the `.format()` its consumers apply.
 _VGI_LOGO_HTML = """\
 <div class="logo">
   <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">

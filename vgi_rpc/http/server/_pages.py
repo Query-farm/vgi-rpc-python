@@ -12,7 +12,7 @@ import falcon
 from vgi_rpc.introspect import MethodDescription, parse_describe_batch
 from vgi_rpc.rpc import RpcServer
 
-from .._common import _FONT_IMPORTS
+from .._common import _FONT_IMPORTS, _VGI_LOGO_HTML
 from ._responses import _vgi_version
 
 _LANDING_HTML_TEMPLATE = (
@@ -55,9 +55,9 @@ _LANDING_HTML_TEMPLATE = (
 </style>
 </head>
 <body>
-<div class="logo">
-  <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">
-</div>
+"""
+    + _VGI_LOGO_HTML
+    + """
 <h1>{protocol_name}</h1>
 <p>This is a <code>vgi-rpc</code> service endpoint.</p>
 <div class="links">
@@ -182,9 +182,9 @@ _DESCRIBE_HTML_TEMPLATE = (
 </head>
 <body>
 <div class="header">
-  <div class="logo">
-    <img src="https://vgi-rpc-python.query.farm/assets/logo-hero.png" alt="vgi-rpc logo">
-  </div>
+"""
+    + _VGI_LOGO_HTML
+    + """
   <h1>{protocol_name}</h1>
   <p class="subtitle">API Reference</p>
   <p class="meta">Powered by <code>vgi-rpc</code> v{version} &middot; server <code>{server_id}</code>

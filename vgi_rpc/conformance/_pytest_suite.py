@@ -17,10 +17,12 @@ import threading
 import time
 from collections.abc import Callable
 from decimal import Decimal
+from io import BytesIO
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
+from pyarrow import ipc
 
 if TYPE_CHECKING:
     import httpx
@@ -45,7 +47,9 @@ from vgi_rpc.conformance import (
 from vgi_rpc.conformance.proof_harness import ProofUnsupported, ProofWorker, ProofWorkerFactory
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
+from vgi_rpc.metadata import CALL_STATE_KEY, STATE_KEY
 from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pipe_pair
+from vgi_rpc.utils import empty_batch, new_ipc_stream
 
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 
@@ -67,6 +71,19 @@ _AUTH_REASONS = frozenset(
         "proxy_required",
         "unauthorized",
     }
+)
+#: Header a request uses to name the reason it wants refused with, honoured by
+#: workers behind the ``conformance_http_auth_reason_port`` fixture.
+_CONFORMANCE_REASON_HEADER = "X-Conformance-Auth-Reason"
+#: The reasons a request can ask for. ``proxy_required`` is excluded because
+#: §5 derives it from server configuration, not from the request, and
+#: ``unauthorized`` because it is what the *absence* of a request reason must
+#: produce — both are asserted separately below.
+_REQUESTABLE_REASONS = (
+    "missing_credential",
+    "invalid_credential",
+    "expired_credential",
+    "insufficient_scope",
 )
 
 pytestmark = pytest.mark.timeout(5)
@@ -1656,7 +1673,7 @@ class TestUnauthorized:
     """
 
     @staticmethod
-    def _post(port: int, accept: str | None = None) -> Any:
+    def _post(port: int, accept: str | None = None, want_reason: str | None = None) -> Any:
         """POST a well-formed unary body to whichever RPC path the runner serves.
 
         Runners mount RPC at different prefixes and differ in whether auth
@@ -1666,6 +1683,8 @@ class TestUnauthorized:
         Args:
             port: Port of the auth-enforcing conformance worker.
             accept: Value for the ``Accept`` header, or ``None`` to send none.
+            want_reason: Reason code to request via
+                ``X-Conformance-Auth-Reason``, or ``None`` to send none.
 
         Returns:
             The ``httpx.Response`` for the gated endpoint.
@@ -1676,6 +1695,8 @@ class TestUnauthorized:
         headers = {"content-type": "application/vnd.apache.arrow.stream"}
         if accept is not None:
             headers["accept"] = accept
+        if want_reason is not None:
+            headers[_CONFORMANCE_REASON_HEADER] = want_reason
         body = _unary_request_body("echo_int", value=1)
         last: Any = None
         for path in ("/echo_int", "/vgi/echo_int"):
@@ -1701,6 +1722,74 @@ class TestUnauthorized:
         resp = self._gated(conformance_http_auth_port)
         reason = resp.headers[_AUTH_REASON_HEADER.lower()]
         assert reason in _AUTH_REASONS, f"{reason!r} is not one of {sorted(_AUTH_REASONS)}"
+
+    @staticmethod
+    def _reason_port(request: pytest.FixtureRequest) -> int:
+        """Port of a worker that honours the reason-request header, or skip."""
+        try:
+            port: int = request.getfixturevalue("conformance_http_auth_reason_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_auth_reason_port")
+        return port
+
+    @pytest.mark.parametrize("want", _REQUESTABLE_REASONS)
+    def test_requested_reason_is_honoured(self, request: pytest.FixtureRequest, want: str) -> None:
+        """The server reports the reason that actually applies, not a constant.
+
+        Membership in the closed set is not enough on its own: a server that
+        answers every 401 with ``unauthorized`` satisfies it. This is what
+        makes the code worth branching on — a client that refreshes a token
+        on ``expired_credential`` and gives up on ``insufficient_scope``
+        needs the two to be told apart.
+        """
+        resp = self._post(self._reason_port(request), accept="*/*", want_reason=want)
+        if _AUTH_REASON_HEADER.lower() not in resp.headers:
+            pytest.skip(f"server does not emit {_AUTH_REASON_HEADER}")
+        assert resp.headers[_AUTH_REASON_HEADER.lower()] == want
+        assert resp.json()["reason"] == want
+
+    def test_unclassified_failure_is_unauthorized(self, request: pytest.FixtureRequest) -> None:
+        """A rejection that names no reason lands on the fallback, not a guess.
+
+        Guessing a finer code from an unclassified failure means matching on
+        message text, which misclassifies the moment someone rewords a
+        string — so the fallback has to be reachable and stable.
+        """
+        resp = self._post(self._reason_port(request), accept="*/*")
+        if _AUTH_REASON_HEADER.lower() not in resp.headers:
+            pytest.skip(f"server does not emit {_AUTH_REASON_HEADER}")
+        assert resp.headers[_AUTH_REASON_HEADER.lower()] == "unauthorized"
+
+    def test_reason_codes_are_distinct(self, request: pytest.FixtureRequest) -> None:
+        """Asserted in one place so a server collapsing codes cannot pass piecemeal.
+
+        The per-reason tests above each fail on their own for a server that
+        hardcodes one code, but only if the runner wires every parametrisation
+        up. This states the property directly: N distinct requests, N distinct
+        answers.
+        """
+        port = self._reason_port(request)
+        first = self._post(port, accept="*/*", want_reason=_REQUESTABLE_REASONS[0])
+        if _AUTH_REASON_HEADER.lower() not in first.headers:
+            pytest.skip(f"server does not emit {_AUTH_REASON_HEADER}")
+        seen = {
+            self._post(port, accept="*/*", want_reason=want).headers[_AUTH_REASON_HEADER.lower()]
+            for want in _REQUESTABLE_REASONS
+        }
+        assert len(seen) == len(_REQUESTABLE_REASONS), f"reason codes are not discriminated: {sorted(seen)}"
+
+    def test_proxy_required_is_not_request_driven(self, request: pytest.FixtureRequest) -> None:
+        """A caller cannot summon the proxy reason on a service with no proxy.
+
+        §5 derives the proxy note from server configuration precisely so that
+        it says the same thing on every 401. A server that let the request
+        steer it would be advertising a proxy dependency that does not exist.
+        """
+        resp = self._post(self._reason_port(request), accept="*/*", want_reason="proxy_required")
+        if _AUTH_REASON_HEADER.lower() not in resp.headers:
+            pytest.skip(f"server does not emit {_AUTH_REASON_HEADER}")
+        assert resp.headers[_AUTH_REASON_HEADER.lower()] != "proxy_required"
+        assert _AUTH_PROXY_REQUIRED_HEADER.lower() not in resp.headers
 
     def test_json_envelope_for_machine_clients(self, conformance_http_auth_port: int) -> None:
         """A client that does not ask for HTML gets the JSON envelope."""
@@ -2667,6 +2756,231 @@ class TestHttpResponseCapSoftWire:
             # the data batch + a continuation token + trailing finish, but
             # the client-visible batches are: 1 data batch.
             assert sum(b.batch.num_rows for b in batches) == target_rows
+
+
+# ---------------------------------------------------------------------------
+# Call-token conformance (HTTP-only)
+# ---------------------------------------------------------------------------
+
+
+def _empty_schema() -> pa.Schema:
+    """Build the zero-column schema a producer continuation request is framed on."""
+    return pa.schema([])
+
+
+def _stream_batches(body: bytes) -> list[tuple[int, dict[bytes, bytes]]]:
+    """Walk a response body, returning ``(num_rows, custom_metadata)`` per batch.
+
+    A stream response may be several *concatenated* IPC streams — a header
+    stream followed by the data stream — so this reads streams until the
+    buffer is exhausted rather than stopping at the first EOS.
+
+    Args:
+        body: The raw, uncompressed response body.
+
+    Returns:
+        One entry per batch, in wire order.
+
+    """
+    from io import BytesIO
+
+    buf = BytesIO(body)
+    out: list[tuple[int, dict[bytes, bytes]]] = []
+    while buf.tell() < len(body):
+        before = buf.tell()
+        try:
+            reader = ipc.open_stream(buf)
+        except pa.ArrowInvalid:
+            break
+        while True:
+            try:
+                batch, md = reader.read_next_batch_with_custom_metadata()
+            except StopIteration:
+                break
+            out.append((batch.num_rows, dict(md) if md is not None else {}))
+        if buf.tell() == before:  # no forward progress — don't spin
+            break
+    return out
+
+
+class TestCallTokenSplit:
+    """A stream's state MUST travel as two tokens, split by lifetime.
+
+    Half of a stream's state is fixed for the life of the call — the init
+    request and the resolved input/output schemas — and half advances every
+    turn.  Carrying both in one token makes every continuation re-serialize,
+    re-seal, re-open and re-parse the fixed half, which for a typical stream
+    is most of the payload.  So the two travel separately:
+
+    * :data:`~vgi_rpc.metadata.CALL_STATE_KEY` — the **call token**, minted
+      once by ``/init`` and never re-issued.
+    * :data:`~vgi_rpc.metadata.STATE_KEY` — the **cursor token**, re-minted
+      every turn, and the only token a continuation response returns.
+
+    Splitting is required, not an optimisation a port may skip: it is what
+    lets a server cache the resolved call, compress the two halves on their
+    own lifetimes, and keep continuation payloads small.  A server that
+    packs everything into the cursor forces every peer and intermediary onto
+    the expensive path forever, so it fails here.
+
+    These tests read the wire directly rather than through a client, which
+    strips both keys before application code sees them.  They need nothing
+    from a runner beyond the plain ``conformance_http_port`` worker.
+
+    The companion :class:`TestColdCallStateCache` covers the other side of
+    the contract — that the *client* echoes the call token, and that the
+    server can resume from it with nothing cached.
+    """
+
+    def _init(self, port: int, method: str, **params: object) -> list[tuple[int, dict[bytes, bytes]]]:
+        """POST ``{method}/init`` and return the response's batches.
+
+        A stream ``/init`` request body is the same request stream shape as
+        a unary call — params batch plus dispatch metadata — so it is built
+        with the same helper.
+        """
+        import httpx
+
+        from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
+
+        resp = httpx.post(
+            f"http://127.0.0.1:{port}/{method}/init",
+            content=_unary_request_body(method, **params),
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                # Pin identity so the body is readable without a decompressor.
+                "Accept-Encoding": "identity",
+                "X-VGI-Accept-Encoding": "identity",
+            },
+            timeout=30.0,
+        )
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
+        return _stream_batches(resp.content)
+
+    @staticmethod
+    def _sentinel(batches: list[tuple[int, dict[bytes, bytes]]]) -> dict[bytes, bytes]:
+        """Return the metadata of the zero-row batch carrying the cursor token."""
+        for num_rows, md in batches:
+            if num_rows == 0 and STATE_KEY in md:
+                return md
+        raise AssertionError(f"no token sentinel in response; batches={[(n, sorted(m)) for n, m in batches]}")
+
+    def test_producer_init_mints_a_call_token(self, conformance_http_port: int) -> None:
+        """A producer ``/init`` hands over both tokens on the same sentinel."""
+        md = self._sentinel(self._init(conformance_http_port, "produce_n", count=3))
+        assert CALL_STATE_KEY in md, (
+            f"producer /init must mint a call token alongside the cursor; got only {sorted(k.decode() for k in md)}"
+        )
+        assert md[CALL_STATE_KEY], "call token must not be empty"
+
+    def test_exchange_init_mints_a_call_token(self, conformance_http_port: int) -> None:
+        """An exchange ``/init`` hands over both tokens on the same sentinel."""
+        md = self._sentinel(self._init(conformance_http_port, "exchange_accumulate"))
+        assert CALL_STATE_KEY in md, (
+            f"exchange /init must mint a call token alongside the cursor; got only {sorted(k.decode() for k in md)}"
+        )
+        assert md[CALL_STATE_KEY], "call token must not be empty"
+
+    def test_continuation_does_not_reissue_the_call_token(self, conformance_http_port: int) -> None:
+        """Only the cursor is re-minted per turn; the call token is issued once.
+
+        This is what makes the split pay: if a server re-sealed the call
+        half every turn it would be doing exactly the work the split exists
+        to avoid, while looking conformant to a client that merely stores
+        whatever it was last sent.
+        """
+        import httpx
+
+        from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
+
+        init = self._sentinel(self._init(conformance_http_port, "produce_n", count=3))
+        assert CALL_STATE_KEY in init, (
+            "cannot check re-issue: /init minted no call token (see test_producer_init_mints_a_call_token)"
+        )
+        req = BytesIO()
+        with new_ipc_stream(req, _empty_schema()) as writer:
+            writer.write_batch(
+                empty_batch(_empty_schema()),
+                custom_metadata=pa.KeyValueMetadata({STATE_KEY: init[STATE_KEY], CALL_STATE_KEY: init[CALL_STATE_KEY]}),
+            )
+        resp = httpx.post(
+            f"http://127.0.0.1:{conformance_http_port}/produce_n/exchange",
+            content=req.getvalue(),
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                "Accept-Encoding": "identity",
+                "X-VGI-Accept-Encoding": "identity",
+            },
+            timeout=30.0,
+        )
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
+        for _num_rows, md in _stream_batches(resp.content):
+            assert CALL_STATE_KEY not in md, "a continuation response must not re-issue the call token"
+
+
+class TestColdCallStateCache:
+    """A stream continuation must carry everything the server needs to resume it.
+
+    A server splits its stream state into a *call* token (fixed for the life
+    of the call — the init request and resolved schemas, minted once by
+    ``/init``) and a *cursor* token (re-minted every turn); see
+    :class:`TestCallTokenSplit`, which pins that requirement.  Having split,
+    it is free to keep a per-process cache of resolved calls so a
+    continuation need not re-open the call token — but that cache is an
+    accelerator, never a contract.  A client owes the server both tokens on
+    **every** request:
+    :data:`~vgi_rpc.metadata.STATE_KEY` and, when ``/init`` handed one over,
+    :data:`~vgi_rpc.metadata.CALL_STATE_KEY`.
+
+    A client that echoes only the cursor works perfectly while the cache is
+    warm and fails the moment it is not — a restarted worker, an evicted
+    entry, or a continuation load-balanced to a node that never saw this
+    stream's ``/init``.  That is precisely the stateless-relay case the split
+    exists to serve, so it must not be left to chance.
+
+    These tests run against a worker booted with the call-state cache
+    **disabled**, which turns that load-dependent bug into a deterministic
+    one: every continuation takes the miss path.
+
+    Requested through an optional ``conformance_http_cold_call_cache_port``
+    fixture — a runner whose server does not split call state (everything
+    rides the cursor, so there is nothing to echo) omits it and this group
+    skips.
+    """
+
+    def _port(self, request: pytest.FixtureRequest) -> int:
+        """Resolve the cold-cache worker's port, or skip."""
+        try:
+            port: int = request.getfixturevalue("conformance_http_cold_call_cache_port")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no cache-disabled server")
+        return port
+
+    def test_producer_continuations_survive_a_cold_cache(self, request: pytest.FixtureRequest) -> None:
+        """Draining a producer stream works with every turn on the miss path."""
+        from vgi_rpc.http import http_connect
+
+        port = self._port(request)
+        with http_connect(ConformanceService, f"http://127.0.0.1:{port}") as proxy:
+            batches = list(proxy.produce_n(count=5))
+        assert sum(b.batch.num_rows for b in batches) == 5
+
+    def test_exchange_turns_survive_a_cold_cache(self, request: pytest.FixtureRequest) -> None:
+        """Successive exchange turns each re-resolve the call from the echoed token."""
+        from vgi_rpc.http import http_connect
+
+        port = self._port(request)
+        with (
+            http_connect(ConformanceService, f"http://127.0.0.1:{port}") as conn,
+            conn.exchange_accumulate() as session,
+        ):
+            # Three turns: the first rides the /init round-trip, the rest are
+            # continuations. Each one must stand on its own.
+            sums = [
+                session.exchange(AnnotatedBatch.from_pydict({"value": [n]})).batch.column("running_sum")[0].as_py()
+                for n in (1.0, 2.0, 3.0)
+            ]
+        assert sums == [pytest.approx(1.0), pytest.approx(3.0), pytest.approx(6.0)]
 
 
 # ---------------------------------------------------------------------------

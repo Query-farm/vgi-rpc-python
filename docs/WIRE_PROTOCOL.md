@@ -85,7 +85,8 @@ where they appear, and their semantics:
 
 | Key (bytes) | Value | Description |
 |-------------|-------|-------------|
-| `vgi_rpc.stream_state#b64` | Base64-encoded binary (signed token) | Serialized stream state for stateless HTTP exchanges. The `#b64` suffix signals that the value is base64-encoded binary data. |
+| `vgi_rpc.stream_state#b64` | Base64-encoded binary (signed token) | Serialized stream state for stateless HTTP exchanges — the per-turn *cursor* when the server splits its state. The `#b64` suffix signals that the value is base64-encoded binary data. |
+| `vgi_rpc.call_state#b64` | Base64-encoded binary (signed token) | Optional. The stream's *call state* — the half fixed for the life of the call. Minted once by `/init`, never re-issued, and echoed by the client on every subsequent request. Absent from servers that keep everything in the cursor. |
 
 ### Shared memory pointer batch metadata
 
@@ -602,6 +603,27 @@ Response body:
 The zero-row batch carries the signed state token in
 `vgi_rpc.stream_state#b64` custom metadata.
 
+A server MUST split a stream's state in two, by lifetime. The half that is
+fixed for the life of the call — the init request and the resolved
+input/output schemas — is sealed into a separate **call token** under
+`vgi_rpc.call_state#b64`, carried on this same zero-row batch;
+`vgi_rpc.stream_state#b64` then holds only the per-turn **cursor**.
+
+The split is required, not an optimisation. Packing both halves into one
+token makes every continuation re-serialize, re-seal, re-open and re-parse a
+payload that cannot have changed — for a typical stream, the overwhelming
+majority of the token. Splitting also lets each half be compressed on its
+own lifetime, and lets a server cache the resolved call so a warm process
+skips opening the call token altogether. A server that keeps everything in
+the cursor forces every peer and intermediary onto the expensive path
+permanently, and is not conformant.
+
+The call token is minted once, by `/init`, and is **never re-issued** — a
+continuation response carries only a cursor. `/init` MUST emit both keys on
+the same zero-row sentinel, for producer and exchange streams alike, and MUST
+do so even when the method declares no call state of its own: the token still
+carries the frozen schemas and the call id that binds the pair.
+
 ### Stream exchange (HTTP)
 
 ```
@@ -614,6 +636,37 @@ Response body: IPC stream (output_schema, 0..N log batches, 1 data batch with up
 The request batch's custom metadata MUST contain `vgi_rpc.stream_state#b64`
 with the current state token (base64-encoded).
 
+The request MUST also echo `vgi_rpc.call_state#b64`, unchanged, on **every**
+subsequent request — continuations, exchanges, and cancels alike. A server
+may resolve the call from a per-process cache, so a client that omits the
+token still works while that cache is warm; it fails as soon as the cache is
+not — a restarted worker, an evicted entry, or a request balanced onto a node
+that never saw the `/init`. Since the cursor names a call the server minted
+but no longer carries its payload, the client's copy is the only one such a
+node has. A server MUST reject a continuation it cannot resolve with
+`400 Bad Request` rather than guessing.
+
+The same obligation extends to intermediaries: a proxy that forwards a
+continuation must carry both tokens, not just the cursor.
+
+#### Resolution order (normative)
+
+A server MUST resolve the two tokens in this order:
+
+1. Open and authenticate the **cursor** token first. Its AEAD tag covers the
+   `call_id`; its AAD covers the caller's `(domain, principal)`.
+2. Only then use that now-authenticated `call_id` to look up any cached
+   resolved call.
+3. On a cache miss, open the client-supplied **call token** and require its
+   embedded `call_id` to equal the one the cursor named.
+
+The ordering is a security property, not an implementation detail. A client
+cannot name a `call_id` the server did not mint for it, so a cache hit can
+never hand back another principal's call state. A server that opens the
+client-supplied call token first, or that keys a cache on any value the
+client controls directly, has a cross-principal disclosure bug even though
+every functional test still passes.
+
 For **producer continuation**, the input is a zero-row batch on empty schema
 with the state token. The response may contain multiple data batches and
 may end with another continuation token.
@@ -621,50 +674,137 @@ may end with another continuation token.
 For **exchange**, the input carries real data plus the state token. The
 response data batch carries an updated state token for the next exchange.
 
-The client MUST strip `vgi_rpc.stream_state#b64` from the batch metadata before
-exposing it to application code.
+The client MUST strip `vgi_rpc.stream_state#b64` and `vgi_rpc.call_state#b64`
+from the batch metadata before exposing it to application code.
 
 ### State token binary format
 
-The state token is an opaque AEAD-sealed blob, base64-encoded for UTF-8
-safe metadata storage. The envelope is XChaCha20-Poly1305 (libsodium
-IETF variant) — confidential (state is not visible to anything between
-client and server) and authenticated (any tampering, including
-cross-principal replay, fails decryption).
+Both tokens are opaque AEAD-sealed blobs, base64-encoded for UTF-8 safe
+metadata storage. The envelope is XChaCha20-Poly1305 (libsodium IETF
+variant) — confidential (state is not visible to anything between client
+and server) and authenticated (any tampering, including cross-principal
+replay, fails decryption).
 
-After base64-decoding, the wire layout (v4) is:
+The two carry **independent version lines**, because they change for
+independent reasons. After base64-decoding, both share this envelope:
 
 ```
 Offset      Size     Field
-0           1        version: uint8 (currently 4)
+0           1        version: uint8 (cursor token: 5; call token: 1)
 1           24       nonce: random per-token (XChaCha20-Poly1305 NPUB)
-25          ...      ciphertext: AEAD(plaintext, AAD) — includes the 16-byte
-                     Poly1305 tag at the end
+25          ...      ciphertext: AEAD(sealed_payload, AAD) — includes the
+                     16-byte Poly1305 tag at the end
 ```
 
-The plaintext (encrypted, never on the wire) is laid out as:
+#### Compression happens inside the seal (normative)
+
+`sealed_payload` is not the framed plaintext directly. It is:
+
+```
+Offset      Size     Field
+0           1        codec: uint8 — self-describing codec tag
+                     (reference: 0x00 raw, 0x01 zstd)
+1           ...      the framed plaintext below, compressed per `codec`
+```
+
+The order matters and is the point of the exercise: **compress, then
+encrypt**. Once a token is sealed it is ciphertext, so the HTTP body codec
+can no longer find any redundancy in it — measured, zstd over a sealed token
+recovers only the slack base64 added (to ~76–80%) and never the state's own
+structure. Compressing inside the seal reaches the real redundancy: a
+7,800-byte call state packs to 1,872, turning a 10,820-byte token into 2,552.
+
+This is the second half of what the lifetime split buys. Splitting lets each
+half be compressed and cached on its own lifetime; a server that packs
+everything into one token pays full freight on every turn even if it
+compresses.
+
+The requirements on a server are:
+
+- It MUST compress the payload inside the seal whenever the compressed form
+  is smaller than the raw one. Compressing outside the seal is not an
+  alternative — it accomplishes nothing.
+- It MUST prefix a self-describing codec tag, so the reader never guesses,
+  and MUST emit the raw tag and skip compression when compression does not
+  pay. A small token must never grow.
+- It MUST bound the decompressed size (the reference caps output at 64 MiB).
+  The payload is authenticated before it is decompressed, so this guards
+  against a framework bug rather than an attacker, but an unbounded
+  decompress on a request path is not worth having.
+- It MUST reject an unknown codec tag, or a payload that fails to
+  decompress, as the same uniform `400 Bad Request` as every other token
+  failure — both mean a token this server did not mint.
+
+The **codec is the port's choice**: zstd where the runtime has it, deflate or
+gzip where it does not. Tag values are per-port, since a token never
+round-trips across ports. The reference uses zstd level 3 for both token
+kinds — the same speed as level 1 at these payload sizes and slightly
+smaller, where the levels that compress materially better (9, 19) cost 8× and
+84× the CPU for a few hundred bytes.
+
+Because token internals are opaque by design, none of this is observable
+from outside and the shared conformance suite cannot check it. Each port
+should assert it in a language-local test over its own seal/open path — that
+compression engages on a large payload, that a tiny payload stays raw, and
+that a corrupt or unknown-codec payload surfaces as a 400.
+
+Cursor token plaintext (encrypted, never on the wire) — v5 carries only the
+advancing state plus the call id binding it to its call token. Everything
+the pre-split v4 token also carried (both schemas, the stream id) moved into
+the call token:
 
 ```
 Offset      Size     Field
 0           8        created_at: uint64 LE (seconds since Unix epoch)
-8           4        state_len: uint32 LE
-12          N        state_bytes: Arrow IPC stream of the StreamState dataclass
-12+N        4        schema_len: uint32 LE
-16+N        M        schema_bytes: serialized output pa.Schema
-16+N+M      4        input_schema_len: uint32 LE
-20+N+M      P        input_schema_bytes: serialized input pa.Schema
-20+N+M+P    4        stream_id_len: uint32 LE
-24+N+M+P    Q        stream_id_bytes: UTF-8 chain-correlation id
+8           16       call_id: the call token this cursor belongs to
+24          4        state_len: uint32 LE
+28          N        state_bytes: serialized StreamState
 ```
+
+Call token plaintext — v1, minted once at `/init`:
+
+```
+Offset      Size     Field
+0           8        created_at: uint64 LE (seconds since Unix epoch)
+8           16       call_id: random, minted at /init
+24          4        call_len: uint32 LE
+28          N        call_state_bytes: serialized call state (empty when the
+                     method declares none)
+...         4        type_len: uint32 LE
+...         M        call_state_type: UTF-8 class name, or empty
+...         4        schema_len: uint32 LE
+...         P        schema_bytes: serialized output pa.Schema
+...         4        input_schema_len: uint32 LE
+...         Q        input_schema_bytes: serialized input pa.Schema
+...         4        stream_id_len: uint32 LE
+...         R        stream_id_bytes: UTF-8 chain-correlation id
+```
+
+`call_state_type` is carried because a stream method may return a *union* of
+state classes whose members declare different call-state types. A reader MUST
+resolve that name against the set the method itself declares, and reject an
+unrecognised one — never look up a class by a client-supplied name.
 
 The AEAD AAD (authenticated, not encrypted) is:
 
 ```
-b"vgi_rpc.state.v4\x00" || identity_tail
+cursor token:  b"vgi_rpc.state.v4\x00" || identity_tail
+call token:    b"vgi_rpc.call.v1\x00"  || identity_tail
 ```
 
 where `identity_tail` is `b"\x01" || domain || b"\x00" || principal` for
-authenticated requests and the literal `b"\x00anonymous"` otherwise.
+authenticated requests and the literal `b"\x00anonymous"` otherwise. The
+prefixes differ deliberately, so a call token and a cursor token are not
+interchangeable even for the same principal: presenting one where the other
+is expected fails the tag check rather than decoding into a payload the
+reader would misinterpret.
+
+As elsewhere, the *plaintext* framing above is the reference implementation's;
+a port may choose its own encoding for what goes inside each token, and its
+own compression codec (see the porting guide). What is normative is that
+there are two tokens, split by lifetime, bound by an authenticated `call_id`,
+and that each is compressed inside its seal under a self-describing codec
+tag.
 This binds every token to its issuing identity: a token sealed for one
 principal cannot be opened with another principal's AAD even if both
 share the master `token_key`.

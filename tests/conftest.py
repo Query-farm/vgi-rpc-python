@@ -503,6 +503,21 @@ def conformance_http_sticky_auth_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_cold_call_cache_port() -> Iterator[int]:
+    """Spawn a conformance HTTP server with the call-state cache disabled.
+
+    Backs the shared ``TestColdCallStateCache`` group.  The cache is a pure
+    accelerator, so with it warm a client that never echoes the call token
+    still works — the bug only surfaces once a continuation lands on a
+    process that has no cached entry.  Booting a worker with the cache off
+    makes every continuation take that path, so the client's obligation is
+    checked deterministically instead of by luck.
+    """
+    with _spawn_conformance_http("--no-call-state-cache") as port:
+        yield port
+
+
+@pytest.fixture(scope="session")
 def conformance_http_no_compression_port() -> Iterator[int]:
     """Spawn a conformance HTTP server with response compression disabled.
 
@@ -758,6 +773,21 @@ def conformance_http_auth_port() -> Iterator[int]:
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_auth_reason_port(conformance_http_auth_port: int) -> int:
+    """Return a worker whose ``authenticate`` honours ``X-Conformance-Auth-Reason``.
+
+    Optional across ports: supplying this fixture is how a runner declares
+    that its worker maps the header onto the matching reason code, which is
+    what makes ``TestUnauthorized``'s discrimination tests meaningful. A port
+    that omits it skips those tests instead of passing them vacuously.
+
+    The reject-all worker already implements the header, so this is an alias
+    rather than a second process.
+    """
+    return conformance_http_auth_port
 
 
 @pytest.fixture(scope="session")

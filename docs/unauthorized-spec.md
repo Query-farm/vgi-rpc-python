@@ -130,8 +130,31 @@ A client MUST NOT attempt to parse an Arrow IPC stream from a 401 body. The reje
 | `test_json_envelope_for_machine_clients` | `Accept: */*` yields `application/json` matching §4.3, with `reason` agreeing with the header. |
 | `test_html_page_for_browsers` | `Accept: text/html` yields `text/html`, and the reason header is still present. |
 | `test_not_cached` | `Cache-Control` forbids shared caching. |
-| `test_no_proxy_header_without_proxy_auth` | A service with no proxy dependency omits `VGI-Auth-Proxy-Required` and `proxy_hint`. |
-| `test_proxy_hint_when_proxy_required` | A require-mode proxy-proof worker sets the header and includes a non-empty `proxy_hint`. Gated on the `proof_worker_factory` fixture. |
+| `test_no_proxy_note_without_proxy_auth` | A service with no proxy dependency omits `VGI-Auth-Proxy-Required` and `proxy_hint`. |
+| `test_proxy_note_when_proxy_required` | A require-mode proxy-proof worker sets the header and includes a non-empty `proxy_hint`. Gated on the `proof_worker_factory` fixture. |
 | `test_proxy_rejection_is_uniform` | Absent, malformed, and bad-MAC proofs produce the *same* reason code and the same detail — the uniform-rejection rule of `docs/proxy-proof-spec.md` §6, asserted from the outside. |
+| `test_requested_reason_is_honoured` | Each of the four request-classifiable reasons round-trips onto both the header and the body. Gated on `conformance_http_auth_reason_port`. |
+| `test_unclassified_failure_is_unauthorized` | A rejection naming no reason lands on `unauthorized` rather than a guess. |
+| `test_reason_codes_are_distinct` | N distinct requests produce N distinct codes. |
+| `test_proxy_required_is_not_request_driven` | A request cannot summon `proxy_required` on a service with no proxy dependency (§5). |
 
-Runners supply the existing `conformance_http_auth_port` fixture (a server whose RPC endpoints all 401) and, for the last two tests, `proof_worker_factory`.
+Runners supply the existing `conformance_http_auth_port` fixture (a server whose RPC endpoints all 401) and, for the proxy tests, `proof_worker_factory`.
+
+### 7.1 Proving the codes are discriminated
+
+Membership in the closed set is a weak assertion on its own: **a server that stamps `unauthorized` on every 401 satisfies every test above it.** That is the failure mode this section exists to catch, because it defeats the entire point of §3 — a client cannot branch on a constant.
+
+Runners that want the discrimination tests supply one more optional fixture:
+
+| Fixture | Shape |
+|---|---|
+| `conformance_http_auth_reason_port` | An `int` port for a worker whose `authenticate` reads the `X-Conformance-Auth-Reason` request header and fails with the matching reason from §3. |
+
+The header is a **conformance-fixture affordance, not part of the protocol** — a production server must never let a request steer its reason code. The reference worker is `tests/serve_conformance_http_auth.py`, about ten lines: a dict from header value to reason, raising `AuthFailure(reason)` on a hit and a bare `ValueError` on a miss.
+
+Two values are deliberately not requestable, and both are asserted:
+
+- **`proxy_required`** — derived from server configuration per §5, never from the request. A worker that let a caller summon it would advertise a proxy dependency that does not exist.
+- **`unauthorized`** — this is what the *absence* of a requested reason must produce, so making it requestable would hide whether the fallback path works at all.
+
+A port that omits the fixture skips these four tests. That is a real gap rather than a pass, so it is worth closing: the fixture is cheaper than the contract it protects.
