@@ -134,7 +134,7 @@ class _ClampedRaw(RawIOBase):
     outside instead measured 2-3x slower on small calls, for no extra safety.
     """
 
-    def __init__(self, raw: IOBase, owner: IOBase | None = None) -> None:
+    def __init__(self, raw: RawIOBase, owner: IOBase | None = None) -> None:
         super().__init__()
         self._raw = raw
         # The buffered wrapper we took ``raw`` out of, kept so closing this
@@ -145,7 +145,13 @@ class _ClampedRaw(RawIOBase):
         view = memoryview(b).cast("B")
         if len(view) > _MAX_READ_CHUNK:
             view = view[:_MAX_READ_CHUNK]
-        return self._raw.readinto(view)  # type: ignore[attr-defined,no-any-return]
+        got = self._raw.readinto(view)
+        if got is None:
+            # Non-blocking fd with nothing available. These transports are
+            # always blocking; treat it as a programming error rather than
+            # spinning, exactly as the writer does.
+            raise BlockingIOError("transport reader is non-blocking; refusing to spin")
+        return got
 
     def readable(self) -> bool:
         return True
