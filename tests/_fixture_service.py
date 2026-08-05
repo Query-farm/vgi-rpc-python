@@ -60,6 +60,28 @@ class GenerateState(ProducerState):
 
 
 @dataclass
+class EmitAndFinishState(ProducerState):
+    """Emit the whole stream and finish in the *same* tick.
+
+    The usual producer shape emits on one tick and finishes on the next,
+    which costs a round trip to learn there is no more data.  Finishing
+    alongside the data is well-formed on the wire — completion is signalled
+    by the *absence* of a continuation sentinel, so a response carrying a
+    data batch and no sentinel says "here it is, and we're done" in one
+    turn.  Used to pin both halves of that: the data still arrives, and it
+    is still subject to the response caps.
+    """
+
+    rows: int
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit every row at once, then finish without a further tick."""
+        indices = list(range(self.rows))
+        out.emit_pydict({"i": indices, "value": [v * 10 for v in indices]})
+        out.finish()
+
+
+@dataclass
 class GenerateMultiRowState(ProducerState):
     """State for a producer that emits multi-row batches."""
 
@@ -294,6 +316,10 @@ class RpcFixtureService(Protocol):
         """Generate count batches."""
         ...
 
+    def emit_and_finish(self, rows: int) -> Stream[ProducerState]:
+        """Emit every row and finish in the same tick (one round trip)."""
+        ...
+
     def generate_multi(self, count: int, rows_per_batch: int) -> Stream[ProducerState]:
         """Generate batches with multiple rows each."""
         ...
@@ -394,6 +420,11 @@ class RpcFixtureServiceImpl:
         """Generate count batches."""
         schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
         return Stream(output_schema=schema, state=GenerateState(count=count))
+
+    def emit_and_finish(self, rows: int) -> Stream[EmitAndFinishState]:
+        """Emit every row and finish in the same tick (one round trip)."""
+        schema = pa.schema([pa.field("i", pa.int64()), pa.field("value", pa.int64())])
+        return Stream(output_schema=schema, state=EmitAndFinishState(rows=rows))
 
     def generate_multi(self, count: int, rows_per_batch: int) -> Stream[GenerateMultiRowState]:
         """Generate batches with multiple rows each."""

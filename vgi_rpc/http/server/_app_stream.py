@@ -1010,7 +1010,18 @@ def _run_http_producer_turn(
                 # Pre-flight the external cap BEFORE flushing — predicting the
                 # upload size from the data batch's buffer size lets us refuse
                 # a violating upload without paying the storage round-trip.
-                if max_external_bytes is not None and externalization_enabled and not out.finished:
+                # Deliberately *not* gated on ``out.finished``.  A producer may
+                # emit its data and finish in the same tick — the wire signals
+                # completion by the absence of a continuation sentinel, so
+                # "here is the data, and we are done" is a well-formed single
+                # turn, and one round trip cheaper than emitting now and
+                # finishing on the next tick.  ``_flush_collector`` below
+                # uploads that batch either way, so skipping the pre-flight
+                # when ``finished`` is set let a finishing turn's payload past
+                # the cap entirely — and the producer path has no post-flush
+                # backstop to catch it (``_enforce_response_budgets`` runs on
+                # the exchange path only).
+                if max_external_bytes is not None and externalization_enabled:
                     ext_cfg = app._server.external_config
                     assert ext_cfg is not None  # narrowed by externalization_enabled
                     predicted = predict_externalize_bytes_for_collector(out, ext_cfg)

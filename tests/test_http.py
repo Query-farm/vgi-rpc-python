@@ -3523,3 +3523,105 @@ class TestDecodeContentEncoding:
         assert decode_content_encoding(b"plain", None) == b"plain"
         assert decode_content_encoding(b"plain", "identity") == b"plain"
         assert decode_content_encoding(b"plain", "") == b"plain"
+
+
+class TestEmitAndFinishSameTick:
+    """A producer may emit its data and finish in the same turn.
+
+    The usual shape emits on one tick and finishes on the next, which costs
+    a round trip purely to learn there is no more data.  Completion is
+    signalled on the wire by the *absence* of a continuation sentinel, so a
+    response carrying a data batch and no sentinel is a well-formed "here it
+    is, and we're done" — one turn instead of two.
+
+    That shape already worked, because ``_flush_collector`` writes the
+    collector's batches whether or not ``finish()`` was called.  What did
+    not work was the external-response cap: its pre-flight used to be gated
+    on ``not out.finished``, so a finishing turn's payload skipped the check
+    entirely, and the producer path has no post-flush backstop
+    (``_enforce_response_budgets`` runs on the exchange path only).  These
+    tests pin both halves.
+    """
+
+    @staticmethod
+    def _init_request(rows: int) -> bytes:
+        """Build the ``/emit_and_finish/init`` request body."""
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+
+        schema = pa.schema([pa.field("rows", pa.int64())])
+        buf = BytesIO()
+        md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"emit_and_finish", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        with ipc.new_stream(buf, schema) as writer:
+            writer.write_batch(pa.RecordBatch.from_pydict({"rows": [rows]}, schema=schema), custom_metadata=md)
+        return buf.getvalue()
+
+    def test_one_turn_delivers_data_and_ends_the_stream(self) -> None:
+        """The init response carries the rows and no continuation sentinel."""
+        from vgi_rpc.metadata import STATE_KEY
+
+        client = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), token_key=b"test-key")
+        resp = client.post(
+            f"{_BASE_URL}/emit_and_finish/init",
+            content=self._init_request(4),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 200, resp.content[:200]
+
+        reader = ipc.open_stream(BytesIO(resp.content))
+        data_rows = 0
+        sentinels = 0
+        while True:
+            try:
+                batch, cm = reader.read_next_batch_with_custom_metadata()
+            except StopIteration:
+                break
+            if batch.num_rows == 0 and cm is not None and cm.get(STATE_KEY) is not None:
+                sentinels += 1
+            else:
+                data_rows += batch.num_rows
+
+        assert data_rows == 4, "the finishing turn's data must still be delivered"
+        assert sentinels == 0, (
+            "a continuation sentinel means the client must make another request; "
+            "finishing in the same tick exists precisely to avoid that round trip"
+        )
+
+    def test_the_finishing_turn_is_still_subject_to_the_external_cap(self) -> None:
+        """A finishing turn's payload is capped, and refused before it uploads."""
+        uploads: list[int] = []
+
+        class _CountingStorage:
+            def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
+                uploads.append(len(data))
+                return f"http://storage.invalid/blob/{len(uploads)}"
+
+        cap = 4096
+        server = RpcServer(
+            RpcFixtureService,
+            RpcFixtureServiceImpl(),
+            external_location=ExternalLocationConfig(
+                storage=cast("Any", _CountingStorage()),
+                externalize_threshold_bytes=1024,
+                url_validator=None,
+            ),
+        )
+        client = make_sync_client(
+            server,
+            token_key=b"test-key",
+            max_externalized_response_bytes=cap,
+            # Generous on purpose: an externalised payload leaves only a
+            # pointer batch on the wire, so the body cap must not be what
+            # fails or this proves nothing about the external channel.
+            max_response_bytes=8 * 1024 * 1024,
+        )
+        resp = client.post(
+            f"{_BASE_URL}/emit_and_finish/init",
+            content=self._init_request(50_000),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+
+        assert b"max_externalized_response_bytes" in resp.content, (
+            "a finishing turn overshooting the external cap must be refused; "
+            "before this was fixed the pre-flight was skipped whenever finish() had been called"
+        )
+        assert uploads == [], "the cap must refuse before paying for the upload, not report afterwards"
