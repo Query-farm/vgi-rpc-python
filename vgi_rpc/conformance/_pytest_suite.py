@@ -3026,16 +3026,32 @@ class TestErrorHeader:
                 return resp
         return resp
 
-    def test_error_response_sets_the_flag(self, conformance_http_port: int) -> None:
-        """A method that raises answers 200 with the flag set."""
-        resp = self._post(conformance_http_port, "raise_value_error", message="boom")
+    @pytest.mark.parametrize(
+        "method",
+        ["raise_value_error", "raise_type_error", "raise_runtime_error"],
+    )
+    def test_error_response_sets_the_flag(self, conformance_http_port: int, method: str) -> None:
+        """A method that raises answers 200 with the flag set.
+
+        Parametrised over exception classes because the exception's *type*
+        must not change the answer. A server that special-cases some class
+        onto a 4xx sends a status this protocol gives no meaning to, and
+        sends it without the flag — the one signal separating a failure from
+        a result. ``raise_type_error`` is the case that catches it: the
+        reference itself answered 400 here until the narrow
+        ``(TypeError, pa.ArrowInvalid)`` branch was removed from the dispatch
+        paths, because that branch sat *after* the method was invoked and so
+        caught the method's own errors, not the caller's.
+        """
+        resp = self._post(conformance_http_port, method, message="boom")
         assert resp.status_code == 200, (
             f"a raising method must still answer 200 — the error rides the body, not the status "
-            f"(got {resp.status_code})"
+            f"(got {resp.status_code} for {method!r}); the exception class must not change the status"
         )
         flag = resp.headers.get(_RPC_ERROR_HEADER.lower())
         assert flag is not None, (
-            f"{_RPC_ERROR_HEADER} absent on an error response; a client sees 200 and reads a failure as a result"
+            f"{_RPC_ERROR_HEADER} absent on an error response from {method!r}; "
+            f"a client sees 200 and reads a failure as a result"
         )
         assert flag.lower() == "true", f"expected 'true', got {flag!r}"
 

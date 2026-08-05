@@ -695,6 +695,69 @@ def _validate_params(method_name: str, kwargs: dict[str, object], param_types: d
             raise TypeError(f"{method_name}() parameter '{name}' is not optional but got None")
 
 
+#: Scalar annotations whose Python values can be checked cheaply with
+#: ``isinstance`` before dispatch.  Deliberately not exhaustive — anything
+#: absent is left to the method, because a false rejection here answers 400
+#: to a request the method would have served.
+_CHECKABLE_SCALARS: dict[object, tuple[type, ...]] = {
+    bool: (bool,),
+    # bool is an int subclass, so accept it for int; and int for float, which
+    # is ordinary Python numeric widening.
+    int: (int,),
+    float: (int, float),
+    str: (str,),
+    bytes: (bytes,),
+}
+
+
+def _validate_call_signature(
+    method_name: str,
+    kwargs: dict[str, object],
+    param_types: dict[str, object],
+    param_defaults: dict[str, object],
+) -> None:
+    """Reject a request the method cannot accept, before invoking it.
+
+    The server builds kwargs from *the request batch's own columns*, so a
+    caller controls their names and types. Misnamed, extra, missing or
+    wrongly-typed columns are caller errors and must be refused with 400
+    while the request is still being validated.
+
+    Doing it here is what lets the dispatch paths treat everything the method
+    raises as the method's own. The alternative — catching ``TypeError``
+    after the call — cannot tell a caller's bad request from an exception the
+    method body raised, and so answered 400 to both.
+
+    Args:
+        method_name: Name of the method being dispatched.
+        kwargs: Parameters decoded from the request batch.
+        param_types: Declared parameter annotations.
+        param_defaults: Declared parameter defaults, by name.
+
+    Raises:
+        TypeError: If ``kwargs`` names a parameter the method does not
+            declare, omits one that has no default, or carries a value of an
+            obviously wrong scalar type.
+
+    """
+    # ``ctx`` is injected by the framework after this check, never sent by a
+    # caller, so it is not part of the declared surface.
+    unexpected = sorted(set(kwargs) - set(param_types) - {"ctx"})
+    if unexpected:
+        raise TypeError(f"{method_name}() got unexpected keyword argument(s): {', '.join(repr(n) for n in unexpected)}")
+    missing = sorted(set(param_types) - set(kwargs) - set(param_defaults))
+    if missing:
+        raise TypeError(f"{method_name}() missing required argument(s): {', '.join(repr(n) for n in missing)}")
+    for name, value in kwargs.items():
+        if value is None:
+            continue  # nullability is _validate_params' job
+        accepted = _CHECKABLE_SCALARS.get(param_types.get(name))
+        if accepted is not None and not isinstance(value, accepted):
+            raise TypeError(
+                f"{method_name}() parameter {name!r} expected {param_types[name]!r} but got {type(value).__name__}"
+            )
+
+
 def _validate_result(method_name: str, value: object, result_type: object) -> None:
     """Validate that a non-optional return value is not None.
 

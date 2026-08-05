@@ -28,6 +28,7 @@ from vgi_rpc.rpc import (
     _log_method_error,
     _read_request,
     _truncate_error_message,
+    _validate_call_signature,
     _validate_params,
     _validate_result,
     _write_error_batch,
@@ -95,6 +96,10 @@ def _run_unary_sync(
                 md = _current_request_metadata.get()
                 app._server._check_protocol_version(md.get(PROTOCOL_VERSION_KEY) if md is not None else None)
             _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
+            # Caller-controlled shape is refused *here*, while the request is
+            # still being validated, so that anything raised past this point
+            # is the method's own and gets the ordinary error path.
+            _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
@@ -188,12 +193,19 @@ def _run_unary_sync(
                         external_bytes_written = _write_result_batch(
                             writer, schema, result, app._server.external_config, prebuilt=result_batch
                         )
-                except (TypeError, pa.ArrowInvalid) as exc:
-                    _hook_exc = exc
-                    status = "error"
-                    error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                    _write_error_batch(writer, schema, exc, server_id=server_id)
-                    http_status = HTTPStatus.BAD_REQUEST
+                # No narrow (TypeError, pa.ArrowInvalid) -> 400 branch here.
+                # Every *request* error is already caught above, before the
+                # method is invoked: _read_request, the method-name check,
+                # _deserialize_params and _validate_params all raise into the
+                # 400 handler.  By this point the call has reached the method,
+                # so a TypeError is the method's own -- or worse, ours:
+                # _validate_result raises TypeError when the *implementation*
+                # returns None for a non-nullable return, and _build_result_batch
+                # raises ArrowInvalid when the *server's* result does not fit its
+                # own schema.  Answering 400 blamed the caller for a server bug,
+                # and did it without X-VGI-RPC-Error, so the one signal that
+                # distinguishes a failure from a result went missing on a real
+                # failure.
                 except Exception as exc:
                     _hook_exc = exc
                     status = "error"

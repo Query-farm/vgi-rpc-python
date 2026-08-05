@@ -43,6 +43,7 @@ from vgi_rpc.rpc import (
     _log_method_error,
     _read_request,
     _truncate_error_message,
+    _validate_call_signature,
     _validate_params,
     _write_error_batch,
     _write_stream_header,
@@ -232,6 +233,10 @@ def _run_stream_init_sync(
                 md = _current_request_metadata.get()
                 app._server._check_protocol_version(md.get(PROTOCOL_VERSION_KEY) if md is not None else None)
             _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
+            # See the note in _app_unary.py: caller-controlled shape is refused
+            # while the request is still being validated, so anything the init
+            # method raises past this point takes the ordinary error path.
+            _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
@@ -270,12 +275,11 @@ def _run_stream_init_sync(
         ) as outcome:
             try:
                 result: Stream[StreamState, Any] = getattr(app._server.implementation, method_name)(**kwargs)
-            except (TypeError, pa.ArrowInvalid) as exc:
-                outcome.status = "error"
-                outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                outcome.error_message = _truncate_error_message(exc)
-                outcome.http_status = HTTPStatus.BAD_REQUEST
-                raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
+            # No narrow (TypeError, pa.ArrowInvalid) -> 400 branch here; see the
+            # matching note in _app_unary.py.  Request errors are already caught
+            # above by the _read_request / _deserialize_params / _validate_params
+            # handler, so a TypeError raised from the init method is the method's
+            # own and takes the ordinary error path: 200 + X-VGI-RPC-Error.
             except Exception as exc:
                 outcome.status = "error"
                 outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
