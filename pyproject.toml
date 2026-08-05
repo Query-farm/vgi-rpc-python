@@ -283,7 +283,13 @@ dev = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.6",
     "ruff>=0.1",
-    "ty>=0.0.8",
+    # Capped below 0.0.64: at 0.0.66, `ty check` stopped terminating on the
+    # sibling vgi-python tree -- it ran past ten minutes locally and, in CI,
+    # hung until the step was cancelled, which `continue-on-error` does not
+    # rescue. ty is pre-1.0 and gates nothing here, so the cap costs nothing
+    # and stops a routine `uv lock --upgrade` from silently reintroducing it.
+    # Retest and lift once upstream terminates again.
+    "ty>=0.0.8,<0.0.64",
     "typer>=0.9",
     "waitress>=2.0",
     "opentelemetry-api>=1.20",
