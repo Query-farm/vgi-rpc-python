@@ -14,8 +14,8 @@ import sys
 import threading
 from collections.abc import Callable
 from enum import Enum
-from io import IOBase
-from typing import TYPE_CHECKING, BinaryIO, Protocol, cast, runtime_checkable
+from io import IOBase, RawIOBase
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast, runtime_checkable
 
 from vgi_rpc.rpc._common import _logger
 from vgi_rpc.rpc._debug import wire_transport_logger
@@ -31,6 +31,79 @@ def _stderr_open() -> bool:
         return sys.stderr is not None and not sys.stderr.closed
     except ValueError:
         return False
+
+
+# Largest byte count handed to a single underlying ``write()``.  Chosen to
+# sit well under ``INT_MAX`` on every platform; ``memoryview`` slicing is
+# free, so the only cost of chunking is one extra syscall per gigabyte.
+_MAX_WRITE_CHUNK = 1 << 30  # 1 GiB
+
+
+class _ExactWriter(RawIOBase):
+    """Wrap an unbuffered binary writer so a large payload is written in full.
+
+    Every writer here is deliberately unbuffered so IPC data reaches the
+    peer immediately, which means ``write()`` maps onto a single
+    ``write(2)`` / ``send(2)``.  That syscall is not obliged to accept the
+    whole buffer, and above 2 GiB on macOS it refuses to — in one of two
+    different ways depending on what is underneath:
+
+    * **pipes** return a short count of exactly ``INT_MAX`` with *no
+      error*, so the tail is silently dropped.  Nothing raises; the peer
+      simply blocks forever waiting for bytes the Arrow IPC header
+      promised, and the RPC deadlocks.
+    * **sockets** (Unix domain and TCP) fail outright with ``EINVAL``.
+
+    So looping on the return value alone is not enough — the per-call size
+    has to be clamped as well, which is what ``_MAX_WRITE_CHUNK`` does.
+    Arrow's ``PythonFile`` sink does not re-offer a remainder, so both
+    behaviours have to be absorbed here.  The readers are already hardened
+    against the mirror-image short-*read*; this is the write-side
+    counterpart.
+    """
+
+    def __init__(self, raw: IOBase) -> None:
+        super().__init__()
+        self._raw = raw
+
+    def write(self, b: Any, /) -> int:
+        view = memoryview(b).cast("B")
+        total = 0
+        size = len(view)
+        while total < size:
+            end = min(total + _MAX_WRITE_CHUNK, size)
+            written = self._raw.write(view[total:end])
+            if written is None:
+                # Non-blocking fd with nothing accepted. These transports are
+                # always blocking; treat it as a programming error rather than
+                # spinning.
+                raise BlockingIOError("transport writer is non-blocking; refusing to spin")
+            if written == 0:
+                raise OSError("transport write accepted 0 bytes; peer is not consuming")
+            total += written
+        return total
+
+    def writable(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def flush(self) -> None:
+        if not self._raw.closed:
+            self._raw.flush()
+
+    def close(self) -> None:
+        try:
+            self.flush()
+        finally:
+            self._raw.close()
+            super().close()
+
+
+def _exact(raw: IOBase) -> IOBase:
+    """Wrap ``raw`` so partial writes are retried. See :class:`_ExactWriter`."""
+    return cast("IOBase", _ExactWriter(raw))
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +178,11 @@ def make_pipe_pair() -> tuple[PipeTransport, PipeTransport]:
         )
     client = PipeTransport(
         os.fdopen(s2c_r, "rb"),
-        os.fdopen(c2s_w, "wb", buffering=0),
+        _exact(os.fdopen(c2s_w, "wb", buffering=0)),
     )
     server = PipeTransport(
         os.fdopen(c2s_r, "rb"),
-        os.fdopen(s2c_w, "wb", buffering=0),
+        _exact(os.fdopen(s2c_w, "wb", buffering=0)),
     )
     return client, server
 
@@ -233,7 +306,7 @@ class SubprocessTransport:
         assert self._proc.stdout is not None
         assert self._proc.stdin is not None
         self._reader: IOBase = os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False)
-        self._writer: IOBase = cast("IOBase", self._proc.stdin)
+        self._writer: IOBase = _exact(cast("IOBase", self._proc.stdin))
         self._closed = False
         self._stderr_thread: threading.Thread | None = None
         if wire_transport_logger.isEnabledFor(logging.DEBUG):
@@ -316,7 +389,7 @@ def serve_stdio(server: RpcServer) -> None:
             "(e.g. vgi_rpc.connect()).\n"
         )
     reader = os.fdopen(sys.stdin.fileno(), "rb", closefd=False)
-    writer = os.fdopen(sys.stdout.fileno(), "wb", buffering=0, closefd=False)
+    writer = _exact(os.fdopen(sys.stdout.fileno(), "wb", buffering=0, closefd=False))
     if wire_transport_logger.isEnabledFor(logging.DEBUG):
         wire_transport_logger.debug(
             "serve_stdio: server_id=%s, protocol=%s",
@@ -347,7 +420,7 @@ class UnixTransport:
         """Initialize from a connected AF_UNIX socket."""
         self._sock = sock
         self._reader: IOBase = cast("IOBase", sock.makefile("rb"))
-        self._writer: IOBase = cast("IOBase", sock.makefile("wb", buffering=0))
+        self._writer: IOBase = _exact(cast("IOBase", sock.makefile("wb", buffering=0)))
 
     @property
     def reader(self) -> IOBase:
@@ -676,7 +749,7 @@ class TcpTransport:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = sock
         self._reader: IOBase = cast("IOBase", sock.makefile("rb"))
-        self._writer: IOBase = cast("IOBase", sock.makefile("wb", buffering=0))
+        self._writer: IOBase = _exact(cast("IOBase", sock.makefile("wb", buffering=0)))
 
     @property
     def reader(self) -> IOBase:
@@ -838,7 +911,7 @@ class NamedPipeTransport:
         raw = handle.Detach()  # take ownership from pywin32 (PyHANDLE)
         fd = msvcrt.open_osfhandle(raw, os.O_BINARY)
         self._reader: IOBase = cast("IOBase", os.fdopen(fd, "rb"))
-        self._writer: IOBase = cast("IOBase", os.fdopen(os.dup(fd), "wb", buffering=0))
+        self._writer: IOBase = _exact(cast("IOBase", os.fdopen(os.dup(fd), "wb", buffering=0)))
 
     @property
     def reader(self) -> IOBase:

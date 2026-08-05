@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import fnmatch
 import math
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -179,6 +180,11 @@ class _ConformanceTest:
             excludes it.  Cross-
             language ports must honour this field — the strict-fail tests
             in particular require behaviour that is HTTP-specific.
+        timeout: Per-test timeout override in seconds.  ``None`` means use
+            the runner's default.  Set it only for tests whose cost is
+            inherent rather than accidental (moving gigabytes, say), so a
+            slower machine reports a real failure instead of a stopwatch
+            artefact.
 
     """
 
@@ -186,6 +192,7 @@ class _ConformanceTest:
     name: str
     fn: Callable[[ConformanceService, LogCollector], None]
     transports: tuple[_Transport, ...] = _ALL_TRANSPORTS
+    timeout: float | None = None
 
     @property
     def full_name(self) -> str:
@@ -205,13 +212,14 @@ def _conformance_test(
     category: str,
     name: str,
     transports: tuple[_Transport, ...] = _ALL_TRANSPORTS,
+    timeout: float | None = None,
 ) -> Callable[[Callable[[ConformanceService, LogCollector], None]], Callable[[ConformanceService, LogCollector], None]]:
     """Register a conformance test function."""
 
     def decorator(
         fn: Callable[[ConformanceService, LogCollector], None],
     ) -> Callable[[ConformanceService, LogCollector], None]:
-        _TESTS.append(_ConformanceTest(category=category, name=name, fn=fn, transports=transports))
+        _TESTS.append(_ConformanceTest(category=category, name=name, fn=fn, transports=transports, timeout=timeout))
         return fn
 
     return decorator
@@ -675,6 +683,74 @@ def _test_empty_dict(proxy: ConformanceService, logs: LogCollector) -> None:
 @_conformance_test(category="boundary_values", name="empty_nested_list")
 def _test_empty_nested_list(proxy: ConformanceService, logs: LogCollector) -> None:
     assert proxy.echo_nested_list(matrix=[[]]) == [[]]
+
+
+# ---------------------------------------------------------------------------
+# Large payload tests
+#
+# A payload big enough to span multiple transport writes is a distinct
+# hazard from a payload of an unusual *type*: ``echo_large_binary`` above
+# only pins the Arrow ``large_binary`` encoding, and every value it ever
+# carried was a few bytes long.
+#
+# The failure these guard against is silent.  An unbuffered writer maps
+# ``write()`` onto one ``write(2)`` / ``send(2)``, which is permitted to
+# accept fewer bytes than offered and report the short count with no
+# error.  An implementation that treats the return value as "all of it"
+# truncates the body, and the peer then blocks forever waiting for bytes
+# the Arrow IPC header promised -- a deadlock, not an exception.  macOS
+# makes this reachable at a specific size by capping a single pipe or
+# socket write at ``INT_MAX``.
+#
+# So there are two tests.  The first is cheap and always runs: it crosses
+# the ordinary pipe buffer (64 KiB) many times over, catching any writer
+# that never loops at all.  The second crosses ``INT_MAX`` and is opt-in,
+# because it costs multiple GiB of RAM on both sides and no CI should pay
+# that by default.
+# ---------------------------------------------------------------------------
+
+_HUGE_PAYLOAD_ENV = "VGI_RPC_CONFORMANCE_HUGE"
+
+
+@_conformance_test(category="large_payload", name="echo_binary_4mib")
+def _test_echo_binary_4mib(proxy: ConformanceService, logs: LogCollector) -> None:
+    # 4 MiB spans ~64 pipe buffers, so a writer that ignores short writes
+    # loses data here even though the tiny echo tests all pass.
+    payload = b"\xa5" * (4 * 1024 * 1024)
+    result = proxy.echo_large_binary(value=payload)
+    assert len(result) == len(payload), f"expected {len(payload)} bytes back, got {len(result)}"
+    assert result == payload
+
+
+@_conformance_test(
+    category="large_payload",
+    name="echo_binary_over_int32_max",
+    # The hazard lives in the raw pipe/socket writers. HTTP bodies take a
+    # different path with its own size limits, so exercising it there would
+    # test something else and fail for unrelated reasons.
+    transports=("pipe", "unix", "tcp"),
+    # Moving >2 GiB twice (there and back) takes seconds even when nothing is
+    # wrong, and the default 5s budget leaves no headroom on a slower machine.
+    # Generous on purpose: this test should fail because the bytes were wrong,
+    # never because the stopwatch ran out.
+    timeout=300.0,
+)
+def _test_echo_binary_over_int32_max(proxy: ConformanceService, logs: LogCollector) -> None:
+    if os.environ.get(_HUGE_PAYLOAD_ENV, "").lower() not in {"1", "true", "yes"}:
+        raise _ConformanceSkip(
+            f"set {_HUGE_PAYLOAD_ENV}=1 to run — allocates >2 GiB on both the client "
+            f"and the worker, so it is opt-in rather than part of a default run"
+        )
+    # One byte past INT_MAX is the interesting size: it is the exact point
+    # where a single macOS pipe write stops accepting the whole buffer.
+    size = 2**31 + 1
+    payload = b"\xa5" * size
+    result = proxy.echo_large_binary(value=payload)
+    assert len(result) == size, f"expected {size} bytes back, got {len(result)} — body was truncated"
+    # Spot-check the ends rather than comparing 2 GiB twice; a short write
+    # loses the tail, and a misaligned resume corrupts the head.
+    assert result[:1024] == payload[:1024]
+    assert result[-1024:] == payload[-1024:]
 
 
 # ---------------------------------------------------------------------------
@@ -1965,9 +2041,12 @@ def run_conformance(
         passed = True
         skipped_runtime = False
         skip_reason: str | None = None
+        # A test may declare its own budget when its cost is inherent; the
+        # caller disabling timeouts entirely (0) still wins.
+        effective_timeout = timeout if test.timeout is None else max(timeout, test.timeout)
         try:
             if timeout > 0:
-                _run_with_timeout(lambda t=test: t.fn(proxy, log_collector), timeout)  # type: ignore[misc]
+                _run_with_timeout(lambda t=test: t.fn(proxy, log_collector), effective_timeout)  # type: ignore[misc]
             else:
                 test.fn(proxy, log_collector)
         except _ConformanceSkip as e:

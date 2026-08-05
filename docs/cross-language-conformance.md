@@ -45,6 +45,37 @@ vgi-rpc-test --cmd "./my-worker" -k "producer_stream*"
 vgi-rpc-test --list --filter "exchange*"
 ```
 
+## Large payloads
+
+`large_payload.echo_binary_4mib` runs by default and crosses the pipe buffer
+many times over. It catches a writer that never loops at all.
+
+`large_payload.echo_binary_over_int32_max` is **skipped unless you opt in**,
+because it allocates over 2 GiB on both the client and the worker:
+
+```bash
+VGI_RPC_CONFORMANCE_HUGE=1 vgi-rpc-test --cmd "./my-worker"
+```
+
+Run it at least once per implementation. It is the only test that reaches the
+size where a single `write(2)` / `send(2)` stops accepting a whole buffer, and
+the two failure modes it catches are both nasty:
+
+- **Pipes on macOS** return a short count of exactly `INT_MAX` with *no error*.
+  An implementation that trusts the return value drops the tail, and the peer
+  then blocks forever waiting for bytes the Arrow IPC header promised. The
+  symptom is a deadlock, not an exception.
+- **Sockets on macOS** instead fail outright with `EINVAL`.
+
+Handling both means your writer must loop on the returned count *and* clamp
+each call to something below `INT_MAX`. Looping alone passes on pipes and
+fails on sockets. Linux hides the whole problem — it silently caps a single
+transfer at `0x7ffff000` and returns a short count that a correct loop
+absorbs — so a Linux-only CI will not tell you whether you got this right.
+
+The test is limited to the `pipe`, `unix`, and `tcp` transports; HTTP bodies
+take a different path with their own size limits.
+
 ## Output
 
 ```bash
