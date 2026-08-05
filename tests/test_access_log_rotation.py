@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 
@@ -15,7 +17,7 @@ import jsonschema
 import pytest
 
 from vgi_rpc.access_log_conformance import _load_schema
-from vgi_rpc.logging_utils import VgiAccessLogFormatter
+from vgi_rpc.logging_utils import DroppingQueueHandler, VgiAccessLogFormatter
 from vgi_rpc.rpc import _configure_access_log
 
 
@@ -261,4 +263,89 @@ def test_size_rotation_actually_rotates(tmp_path: Path) -> None:
         access.info("ConformanceService.greet ok", extra=payload)
     rotated = sorted(p.name for p in tmp_path.iterdir())
     assert any(name.endswith(".jsonl.1") for name in rotated)
+    _drain_handlers()
+
+
+def test_configure_access_log_async_starts(tmp_path: Path) -> None:
+    """``use_async=True`` must not raise.
+
+    Regression: the branch called ``listener.start()`` and *then* set
+    ``listener._thread.daemon = True``. ``QueueListener.start()`` already
+    constructs its thread with ``daemon=True``, and ``Thread.daemon`` raises
+    ``RuntimeError("cannot set daemon status of active thread")`` once the
+    thread is running -- so every caller of this branch died on the assignment
+    that was only re-asserting what was already true. Nothing caught it
+    because no test configured the async path.
+    """
+    _drain_handlers()
+    target = tmp_path / "access.jsonl"
+    _configure_access_log(
+        path=str(target),
+        max_bytes=0,
+        backup_count=5,
+        when=None,
+        max_record_bytes=65536,
+        server_id="serverA",
+        use_async=True,
+        queue_size=64,
+    )
+    handlers = logging.getLogger("vgi_rpc.access").handlers
+    assert len(handlers) == 1
+    assert isinstance(handlers[0], DroppingQueueHandler)
+    _drain_handlers()
+
+
+def test_configure_access_log_async_thread_is_daemon(tmp_path: Path) -> None:
+    """The listener thread is a daemon, so a stuck writer cannot hold up exit.
+
+    The property the removed assignment was reaching for. Asserted rather than
+    assigned, because the stdlib already guarantees it and re-asserting it is
+    what broke the feature.
+    """
+    _drain_handlers()
+    target = tmp_path / "access.jsonl"
+    _configure_access_log(
+        path=str(target),
+        max_bytes=0,
+        backup_count=5,
+        when=None,
+        max_record_bytes=65536,
+        server_id="serverA",
+        use_async=True,
+    )
+    listener_threads = [t for t in threading.enumerate() if t.name.startswith("Thread-") and t.is_alive()]
+    assert any(t.daemon for t in listener_threads)
+    _drain_handlers()
+
+
+def test_async_records_reach_the_file(tmp_path: Path) -> None:
+    """End-to-end: a record handed to the queue is written by the listener.
+
+    The crash left no listener at all, so attaching the queue handler alone
+    proves nothing -- records would vanish into a queue nobody drains. This
+    asserts the record comes out the other side.
+    """
+    _drain_handlers()
+    target = tmp_path / "access.jsonl"
+    _configure_access_log(
+        path=str(target),
+        max_bytes=0,
+        backup_count=5,
+        when=None,
+        max_record_bytes=65536,
+        server_id="serverA",
+        use_async=True,
+    )
+    access = logging.getLogger("vgi_rpc.access")
+    access.info("ConformanceService.greet ok", extra=_required_envelope())
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if target.exists() and target.read_text().strip():
+            break
+        time.sleep(0.01)
+
+    lines = [line for line in target.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["method"] == "greet"
     _drain_handlers()

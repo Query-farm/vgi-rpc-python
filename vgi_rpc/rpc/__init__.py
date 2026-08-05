@@ -389,9 +389,14 @@ def _configure_access_log(
 
         record_queue: _queue.Queue[logging.LogRecord] = _queue.Queue(maxsize=queue_size)
         listener = QueueListener(record_queue, handler)
+        # QueueListener.start() constructs its thread with daemon=True already,
+        # so a hung writer cannot hold up exit. Re-asserting it afterwards is
+        # not merely redundant: Thread.daemon raises "cannot set daemon status
+        # of active thread" once the thread is running, which took down every
+        # caller of this branch.
         listener.start()
-        if listener._thread is not None:  # daemon so a stuck writer cannot hold up exit
-            listener._thread.daemon = True
+        # Drains what is still queued at exit; without it a clean shutdown
+        # loses the tail of the access log.
         atexit.register(listener.stop)
         access_logger.addHandler(DroppingQueueHandler(record_queue))
     else:
