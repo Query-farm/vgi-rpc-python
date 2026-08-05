@@ -43,23 +43,21 @@ vgi-rpc-test --cmd "./my-worker" -k "producer_stream*"
 
 # List tests matching a filter
 vgi-rpc-test --list --filter "exchange*"
+
+# Prefix a pattern with ! to exclude it; an exclusion always wins, and a
+# filter made only of exclusions means "everything except these"
+vgi-rpc-test --cmd "./my-worker" --filter '!large_payload.echo_binary_over_int32_max'
 ```
 
 ## Large payloads
 
-`large_payload.echo_binary_4mib` runs by default and crosses the pipe buffer
-many times over. It catches a writer that never loops at all.
+`large_payload.echo_binary_4mib` crosses the pipe buffer many times over. It
+catches a writer that never loops at all.
 
-`large_payload.echo_binary_over_int32_max` is **skipped unless you opt in**,
-because it allocates over 2 GiB on both the client and the worker:
-
-```bash
-VGI_RPC_CONFORMANCE_HUGE=1 vgi-rpc-test --cmd "./my-worker"
-```
-
-Run it at least once per implementation. It is the only test that reaches the
-size where a single `write(2)` / `send(2)` stops accepting a whole buffer, and
-the two failure modes it catches are both nasty:
+`large_payload.echo_binary_over_int32_max` allocates over 2 GiB on both the
+client and the worker, takes seconds to run, and is **required** — it is the
+only test that reaches the size where a single `write(2)` / `send(2)` stops
+accepting a whole buffer, and the two failure modes it catches are both nasty:
 
 - **Pipes on macOS** return a short count of exactly `INT_MAX` with *no error*.
   An implementation that trusts the return value drops the tail, and the peer
@@ -73,8 +71,62 @@ fails on sockets. Linux hides the whole problem — it silently caps a single
 transfer at `0x7ffff000` and returns a short count that a correct loop
 absorbs — so a Linux-only CI will not tell you whether you got this right.
 
+**The read side needs the same treatment.** `recv` refuses an over-`INT_MAX`
+buffer with `EINVAL` exactly as `send` does, so a reader must clamp its
+requests too — and it must then *loop* to refill, because Arrow asks for a
+whole message body in one call and reports a short read as a corrupt stream
+rather than retrying. The reference had this bug on Unix and TCP sockets and
+did not know it: buffering meant only some requests crossed `INT_MAX`, so
+roughly one connection in two died mid-request while the rest passed. If your
+port's huge-payload test is flaky rather than failing, look here first.
+
 The test is limited to the `pipe`, `unix`, and `tcp` transports; HTTP bodies
-take a different path with their own size limits.
+take a different path with their own size limits. It carries a 300-second
+timeout instead of the default 5, so it fails because the bytes were wrong
+rather than because a slow machine ran out of stopwatch.
+
+It was briefly opt-in, behind an environment variable, on the theory that no
+CI should pay multiple GiB by default. That was a mistake: a conformance test
+nobody runs enforces nothing, and this one guards a failure that presents as a
+hung process rather than an error.
+
+### Two acceptable answers
+
+Required does not mean every port must round-trip 2 GiB. It means every port
+must be *asked*, and must answer in one of two ways:
+
+1. **Echo the payload back intact.** Head and tail are both checked, so a
+   short write loses the tail and a misaligned resume corrupts the head.
+2. **Refuse it with a typed error, and stay usable.** The test then issues an
+   ordinary `echo_string` on the same connection; if that succeeds, the refusal
+   passes and the report carries a `note:` naming it. If the connection is
+   wedged, the test fails — a hung transport is the deadlock wearing a
+   different hat.
+
+The second answer exists because the ceiling is sometimes the *language's*.
+The JVM caps a `byte[]` at `Integer.MAX_VALUE` **elements**, so a Java worker
+cannot materialise 2³¹+1 bytes at any heap size — `-Xmx` is irrelevant. Holding
+that port to a test it could only ever fail would get the test excluded from
+its CI, and an excluded test enforces nothing either. So vgi-rpc-java refuses
+with a message naming the field, the real size, and whose limit it is, and that
+is conformant.
+
+What is never acceptable is a **silent** answer: a short body, or a peer that
+blocks forever waiting for bytes the header promised. No port is exempt from
+those, and no runtime limit excuses them.
+
+### If a runner genuinely cannot afford the memory
+
+Exclude the test by name — an exclusion is a visible decision in the CI
+configuration, which a silent skip is not:
+
+```bash
+vgi-rpc-test --cmd "./my-worker" --filter '!large_payload.echo_binary_over_int32_max'
+```
+
+Reach for this only for real resource limits on the runner. A *language*
+ceiling does not need it: answer (2) above already covers that case, and it
+keeps the test running.
 
 ## Output
 

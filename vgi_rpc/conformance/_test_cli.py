@@ -178,6 +178,10 @@ def _format_table(suite: ConformanceSuite) -> str:
             lines.append(f"    {r.skip_reason}")
         elif r.error:
             lines.append(f"    {r.error}")
+        elif r.note:
+            # A pass that came by a weaker path than the test's headline
+            # claim. Printed so it cannot read as an unqualified success.
+            lines.append(f"    note: {r.note}")
 
     return "\n".join(lines)
 
@@ -199,6 +203,7 @@ def _format_json(suite: ConformanceSuite) -> str:
                 "skip_reason": r.skip_reason,
                 "duration_ms": round(r.duration_ms, 1),
                 "error": r.error,
+                "note": r.note,
             }
             for r in suite.results
         ],
@@ -360,7 +365,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # Test selection
     selection_group = parser.add_argument_group("test selection")
     selection_group.add_argument(
-        "--filter", "-k", metavar="PATTERN", help="Comma-separated glob patterns (e.g. 'scalar*,void*')"
+        "--filter",
+        "-k",
+        metavar="PATTERN",
+        help="Comma-separated glob patterns (e.g. 'scalar*,void*'); prefix one with ! to exclude",
     )
     selection_group.add_argument("--list", "-l", action="store_true", help="List available tests and exit")
 

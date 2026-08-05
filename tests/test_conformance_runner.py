@@ -9,16 +9,20 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
+
+import pytest
 
 from vgi_rpc.conformance import (
     ConformanceResult,
     ConformanceService,
     ConformanceServiceImpl,
     LogCollector,
+    _runner,
     list_conformance_tests,
     run_conformance,
 )
-from vgi_rpc.rpc import serve_pipe
+from vgi_rpc.rpc import RpcError, serve_pipe
 
 _CONFORMANCE_PIPE = str(Path(__file__).parent / "serve_conformance_pipe.py")
 
@@ -90,6 +94,88 @@ class TestListConformanceTests:
         """Should return empty for non-matching pattern."""
         tests = list_conformance_tests(["nonexistent*"])
         assert tests == []
+
+    def test_exclusion_only_keeps_everything_else(self) -> None:
+        """A filter of only exclusions should mean 'all but these'."""
+        everything = list_conformance_tests()
+        kept = list_conformance_tests(["!large_payload.echo_binary_over_int32_max"])
+        assert "large_payload.echo_binary_over_int32_max" in everything
+        assert "large_payload.echo_binary_over_int32_max" not in kept
+        assert kept == [t for t in everything if t != "large_payload.echo_binary_over_int32_max"]
+
+    def test_exclusion_beats_inclusion(self) -> None:
+        """An exclusion should win over an include that also matches."""
+        tests = list_conformance_tests(["large_payload*", "!*over_int32_max"])
+        assert tests == ["large_payload.echo_binary_4mib"]
+
+    def test_exclusion_matches_a_whole_category(self) -> None:
+        """Category-level globs should exclude as well as include."""
+        tests = list_conformance_tests(["!large_payload"])
+        assert not any(t.startswith("large_payload.") for t in tests)
+
+
+class TestHugePayloadIsRequired:
+    """The >2 GiB test must not be skippable by ambient configuration."""
+
+    def test_registered_and_not_env_gated(self) -> None:
+        """It should be in the default list, with no environment opt-in."""
+        # It was briefly gated behind VGI_RPC_CONFORMANCE_HUGE. A test the
+        # ports can silently not run enforces nothing, so the gate is gone;
+        # opting out has to be an explicit --filter in the CI configuration.
+        assert "large_payload.echo_binary_over_int32_max" in list_conformance_tests()
+        source = Path(_runner.__file__).read_text()
+        assert "VGI_RPC_CONFORMANCE_HUGE" not in source
+
+
+class TestTypedRefusalIsConformant:
+    """A port that cannot represent 2 GiB may refuse, but not silently.
+
+    Exercised through the helper rather than the test itself so these stay
+    cheap: the test body allocates 2**31+1 bytes before it can reach this
+    path, and that is not a cost a unit test should pay.
+    """
+
+    @staticmethod
+    def _refusal() -> RpcError:
+        return RpcError(
+            error_type="NotImplementedError",
+            error_message="value is 2147483649 bytes; the JVM caps an array at 2147483647 elements",
+            remote_traceback="",
+        )
+
+    def test_refusal_passes_when_connection_survives(self) -> None:
+        """A typed error plus a working connection should be accepted."""
+
+        class _Survives:
+            def echo_string(self, value: str) -> str:
+                return value
+
+        _runner._CURRENT_NOTE = None
+        _runner._accept_typed_refusal(cast("ConformanceService", _Survives()), self._refusal())
+        # The pass must be qualified in the report, or it reads as a round-trip.
+        assert _runner._CURRENT_NOTE is not None
+        assert "refused" in _runner._CURRENT_NOTE
+        assert "NotImplementedError" in _runner._CURRENT_NOTE
+
+    def test_refusal_fails_when_connection_is_wedged(self) -> None:
+        """A refusal that breaks the transport is the deadlock in disguise."""
+
+        class _Wedged:
+            def echo_string(self, value: str) -> str:
+                raise TimeoutError("no response")
+
+        with pytest.raises(AssertionError, match="wedged the transport"):
+            _runner._accept_typed_refusal(cast("ConformanceService", _Wedged()), self._refusal())
+
+    def test_refusal_fails_when_next_call_is_wrong(self) -> None:
+        """A live-but-desynced connection should not count as survival."""
+
+        class _Desynced:
+            def echo_string(self, value: str) -> str:
+                return "some other response"
+
+        with pytest.raises(AssertionError, match="out of sync"):
+            _runner._accept_typed_refusal(cast("ConformanceService", _Desynced()), self._refusal())
 
 
 class TestCliEntryPoint:

@@ -22,7 +22,6 @@ from __future__ import annotations
 import contextlib
 import fnmatch
 import math
-import os
 import threading
 import time
 from collections.abc import Callable
@@ -84,7 +83,22 @@ def _run_with_timeout(fn: Callable[[], None], timeout: float) -> None:
 
 @dataclass(frozen=True)
 class ConformanceResult:
-    """Result of a single conformance test."""
+    """Result of a single conformance test.
+
+    Attributes:
+        name: Full test name, ``category.test``.
+        category: The test's category.
+        passed: Whether the test succeeded (a runtime skip counts as passed).
+        duration_ms: Wall-clock time for the test body.
+        error: Failure detail, when it failed.
+        skipped: Whether the test skipped itself at runtime.
+        skip_reason: Why it skipped.
+        note: A qualification on a *pass* -- the implementation satisfied the
+            contract, but by a path the report should not hide.  Reported
+            alongside the pass so "passed" never quietly means something
+            weaker than the test's headline claim.
+
+    """
 
     name: str
     category: str
@@ -93,6 +107,7 @@ class ConformanceResult:
     error: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +178,23 @@ class _ConformanceSkip(Exception):
     verify the strict-fail behaviour and skips cleanly instead of
     failing).  The message becomes the ``skip_reason`` on the result.
     """
+
+
+# Set by a test that passed, but by a path worth naming in the report.  The
+# runner clears it before each test and drains it after; only one test runs
+# at a time, so a plain module global is enough.
+_CURRENT_NOTE: str | None = None
+
+
+def _note(message: str) -> None:
+    """Qualify the current test's pass with a note carried into the report.
+
+    Args:
+        message: What the reader needs to know about how this test passed.
+
+    """
+    global _CURRENT_NOTE
+    _CURRENT_NOTE = message
 
 
 @dataclass(frozen=True)
@@ -702,14 +734,69 @@ def _test_empty_nested_list(proxy: ConformanceService, logs: LogCollector) -> No
 # makes this reachable at a specific size by capping a single pipe or
 # socket write at ``INT_MAX``.
 #
-# So there are two tests.  The first is cheap and always runs: it crosses
-# the ordinary pipe buffer (64 KiB) many times over, catching any writer
-# that never loops at all.  The second crosses ``INT_MAX`` and is opt-in,
-# because it costs multiple GiB of RAM on both sides and no CI should pay
-# that by default.
+# So there are two tests.  The first is cheap: it crosses the ordinary pipe
+# buffer (64 KiB) many times over, catching any writer that never loops at
+# all.  The second crosses ``INT_MAX``, which is the only size where the
+# syscall actually refuses a whole buffer -- 4 MiB cannot distinguish a
+# writer that loops correctly from one that merely never had to.
+#
+# Both are required.  The big one costs multiple GiB of RAM on both sides,
+# and an earlier revision made it opt-in for that reason; that was wrong.
+# A conformance test nobody runs enforces nothing, and this is the one
+# guarding a failure mode that presents as a hung process rather than an
+# error -- exactly the kind that survives to production.
+#
+# Required does not mean every port must round-trip 2 GiB.  It means every
+# port must be *asked*, and must answer in one of two acceptable ways: echo
+# the payload back intact, or refuse it with a typed error that leaves the
+# connection usable.  The second exists because the ceiling is sometimes the
+# language's -- the JVM caps a byte[] at INT_MAX elements, so a Java worker
+# cannot materialise 2**31+1 bytes at any heap size.  Holding it to a test it
+# could only ever fail would get the test excluded from its CI, and an
+# excluded test enforces nothing either.
+#
+# What is never acceptable is a silent answer: a short body, or a peer that
+# blocks forever waiting for bytes the header promised.  Those are what the
+# test is for, and no port is exempt from them.
 # ---------------------------------------------------------------------------
 
-_HUGE_PAYLOAD_ENV = "VGI_RPC_CONFORMANCE_HUGE"
+
+def _accept_typed_refusal(proxy: ConformanceService, exc: RpcError) -> None:
+    """Accept an explicit refusal of a payload the runtime cannot represent.
+
+    A runtime whose arrays are int-indexed cannot hold ``2**31 + 1`` bytes at
+    any heap size -- the JVM caps a ``byte[]`` at ``INT_MAX`` *elements*, so no
+    ``-Xmx`` rescues it.  That is a property of the language, not a defect in
+    the port, and a required test such a port could only ever fail would just
+    be excluded from its CI, which enforces nothing.
+
+    So a typed error is an acceptable answer -- provided it left the connection
+    usable.  A refusal that wedges the transport is the deadlock this whole
+    category exists to catch, wearing a different hat, so that is checked here
+    rather than taken on trust.
+
+    Args:
+        proxy: The service under test, used to prove the connection survived.
+        exc: The refusal the implementation answered with.
+
+    Raises:
+        AssertionError: If the connection cannot serve an ordinary call
+            afterwards.
+
+    """
+    try:
+        alive = proxy.echo_string(value="alive") == "alive"
+    except Exception as followup:
+        raise AssertionError(
+            f"refused the payload with {exc.error_type} and then could not serve the "
+            f"next call ({type(followup).__name__}: {followup}) -- the refusal wedged "
+            f"the transport"
+        ) from followup
+    assert alive, (
+        f"refused the payload with {exc.error_type} and then answered the next call "
+        f"incorrectly -- the refusal left the transport out of sync"
+    )
+    _note(f"payload refused, transport survived: {exc.error_type}: {exc.error_message}")
 
 
 @_conformance_test(category="large_payload", name="echo_binary_4mib")
@@ -736,16 +823,15 @@ def _test_echo_binary_4mib(proxy: ConformanceService, logs: LogCollector) -> Non
     timeout=300.0,
 )
 def _test_echo_binary_over_int32_max(proxy: ConformanceService, logs: LogCollector) -> None:
-    if os.environ.get(_HUGE_PAYLOAD_ENV, "").lower() not in {"1", "true", "yes"}:
-        raise _ConformanceSkip(
-            f"set {_HUGE_PAYLOAD_ENV}=1 to run — allocates >2 GiB on both the client "
-            f"and the worker, so it is opt-in rather than part of a default run"
-        )
     # One byte past INT_MAX is the interesting size: it is the exact point
     # where a single macOS pipe write stops accepting the whole buffer.
     size = 2**31 + 1
     payload = b"\xa5" * size
-    result = proxy.echo_large_binary(value=payload)
+    try:
+        result = proxy.echo_large_binary(value=payload)
+    except RpcError as exc:
+        _accept_typed_refusal(proxy, exc)
+        return
     assert len(result) == size, f"expected {size} bytes back, got {len(result)} — body was truncated"
     # Spot-check the ends rather than comparing 2 GiB twice; a short write
     # loses the tail, and a misaligned resume corrupts the head.
@@ -1962,9 +2048,44 @@ def _test_proto_version_matched_dispatch(proxy: ConformanceService, logs: LogCol
 # ---------------------------------------------------------------------------
 
 
+def _matches_one(name: str, pattern: str) -> bool:
+    """Check one glob against a test's full name or its category.
+
+    Args:
+        name: Full test name, ``category.test``.
+        pattern: A single glob pattern.
+
+    Returns:
+        True when the pattern matches the full name or the category alone.
+
+    """
+    return fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(name.split(".")[0], pattern)
+
+
 def _matches_filter(name: str, patterns: list[str]) -> bool:
-    """Check if a test name matches any of the given glob patterns."""
-    return any(fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(name.split(".")[0], pattern) for pattern in patterns)
+    """Check if a test name is selected by the given glob patterns.
+
+    A pattern prefixed with ``!`` excludes rather than includes, and an
+    exclusion always wins.  Patterns that are all exclusions therefore mean
+    "everything except these" rather than "nothing", which is what lets a
+    runner drop one costly test by name without having to enumerate the
+    ones it keeps.
+
+    Args:
+        name: Full test name, ``category.test``.
+        patterns: Glob patterns, each optionally prefixed with ``!``.
+
+    Returns:
+        True when the test should run.
+
+    """
+    excludes = [p[1:] for p in patterns if p.startswith("!")]
+    if any(_matches_one(name, pattern) for pattern in excludes):
+        return False
+    includes = [p for p in patterns if not p.startswith("!")]
+    if not includes:
+        return True
+    return any(_matches_one(name, pattern) for pattern in includes)
 
 
 def list_conformance_tests(filter_patterns: list[str] | None = None) -> list[str]:
@@ -2041,6 +2162,8 @@ def run_conformance(
         passed = True
         skipped_runtime = False
         skip_reason: str | None = None
+        global _CURRENT_NOTE
+        _CURRENT_NOTE = None
         # A test may declare its own budget when its cost is inherent; the
         # caller disabling timeouts entirely (0) still wins.
         effective_timeout = timeout if test.timeout is None else max(timeout, test.timeout)
@@ -2074,6 +2197,7 @@ def run_conformance(
             error=error,
             skipped=skipped_runtime,
             skip_reason=skip_reason,
+            note=_CURRENT_NOTE if passed and not skipped_runtime else None,
         )
         results.append(result)
         if on_progress:
