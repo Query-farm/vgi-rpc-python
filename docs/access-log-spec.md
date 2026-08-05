@@ -77,8 +77,28 @@ These fields appear on HTTP transports only.
 | `request_id` | string | Per-request correlation ID. Implementations SHOULD propagate inbound `X-Request-ID` if present, otherwise mint a UUID. |
 | `trace_id` | string | W3C trace ID, 32 lowercase hex characters, of the span this call ran under. Present when the server participates in a trace. This is the join key to the surrounding distributed trace — `request_id` only correlates records within one service, so without this a log line and the span describing the same call cannot be matched. Read it from whatever span is current rather than from anything the framework threads through, so a record correlates with an application-opened span as readily as a framework-opened one. |
 | `span_id` | string | W3C span ID, 16 lowercase hex characters. Emitted together with `trace_id` — both or neither. |
-| `request_state` | string | Base64 of the **decrypted** stream state's Arrow IPC payload on stream continuations. Absent on `init`. The on-wire token is an opaque AEAD ciphertext; servers MUST log the plaintext state bytes (or an envelope thereof for union-tagged states), not the ciphertext, so log readers can decode the state without holding the server's `token_key`. |
-| `response_state` | string | Base64 of the **decrypted** outbound state's Arrow IPC payload on stream `init` and continuations that produce a continuation token. Absent on the terminal continuation that closes the stream and on unary calls. Symmetric with `request_state`: log readers see plaintext, not the AEAD ciphertext that travels on the wire. |
+| `request_state` | string | Base64 of the **decrypted** state bytes, in the server's own state encoding, on stream continuations. Absent on `init`. The on-wire token is an opaque AEAD ciphertext; servers MUST log the plaintext state bytes (or an envelope thereof for union-tagged states), not the ciphertext, so log readers can decode the state without holding the server's `token_key`. **The encoding itself is not specified** — see the note below. |
+| `response_state` | string | Base64 of the **decrypted** outbound state bytes, in the server's own state encoding, on stream `init` and continuations that produce a continuation token. Absent on the terminal continuation that closes the stream and on unary calls. Symmetric with `request_state`: log readers see plaintext, not the AEAD ciphertext that travels on the wire. |
+
+> **The state encoding is server-defined and deliberately outside this spec.**
+> A stream state's plaintext encoding is a per-port choice — Go uses gob, Rust
+> bincode, Java CBOR, TypeScript JSON, and the Python reference uses a compact
+> msgpack codec for flat states, falling back to Arrow IPC only for states
+> holding Arrow values. Tokens are not expected to round-trip across ports, so
+> nothing requires them to agree.
+>
+> Earlier revisions of this document described these two fields as "the Arrow
+> IPC payload". That was never satisfiable outside one implementation, and
+> since the compact codec landed it is not satisfiable inside it either: a
+> reader reaching for `pyarrow.ipc.open_stream` gets `ArrowInvalid` on the
+> common case. The schema only ever constrained the fields to base64, so no
+> implementation failed — the wording was simply wrong, and would have sent a
+> log reader down a dead end.
+>
+> What **is** normative is the property the fields exist for: the value is the
+> decrypted plaintext, never the AEAD ciphertext that travels on the wire, so
+> a reader can decode state without holding the server's `token_key`. Decoding
+> it requires knowing which server wrote the record. Do not assume Arrow.
 
 ### 4.5 Server identity & auth
 
