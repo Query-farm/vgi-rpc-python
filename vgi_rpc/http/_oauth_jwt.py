@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import falcon
-import httpx
+import httpx2
 
 try:
     from joserfc import jwt
@@ -87,12 +87,12 @@ def jwt_authenticate(
     def _fetch_jwks() -> KeySet:
         nonlocal resolved_jwks_uri, key_set
         if resolved_jwks_uri is None:
-            with httpx.Client() as client:
+            with httpx2.Client() as client:
                 oidc_resp = client.get(f"{discovery_issuer.rstrip('/')}/.well-known/openid-configuration")
                 oidc_resp.raise_for_status()
                 resolved_jwks_uri = oidc_resp.json()["jwks_uri"]
 
-        with httpx.Client() as client:
+        with httpx2.Client() as client:
             resp = client.get(resolved_jwks_uri)
             resp.raise_for_status()
             new_key_set = KeySet.import_key_set(resp.json())

@@ -25,7 +25,7 @@ import pytest
 from pyarrow import ipc
 
 if TYPE_CHECKING:
-    import httpx
+    import httpx2
 
 from vgi_rpc.conformance import (
     AllTypes,
@@ -1507,11 +1507,11 @@ class TestExternalLocation:
         bytes.  Also confirms that the upload registered against the
         backing fake-storage service via its ``/_stats`` counter.
         """
-        import httpx
+        import httpx2
 
         from vgi_rpc.http import request_upload_urls
 
-        before = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        before = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         urls = request_upload_urls(f"http://127.0.0.1:{conformance_http_with_storage_port}", count=2)
         assert len(urls) == 2
         for u in urls:
@@ -1519,13 +1519,13 @@ class TestExternalLocation:
             assert u.download_url and isinstance(u.download_url, str)
 
         payload = b"client-vended upload contents"
-        put_resp = httpx.put(urls[0].upload_url, content=payload, timeout=5.0)
+        put_resp = httpx2.put(urls[0].upload_url, content=payload, timeout=5.0)
         assert put_resp.status_code == 204, f"PUT failed: {put_resp.status_code}"
-        get_resp = httpx.get(urls[0].download_url, timeout=5.0)
+        get_resp = httpx2.get(urls[0].download_url, timeout=5.0)
         assert get_resp.status_code == 200
         assert get_resp.content == payload
 
-        after = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        after = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         # Each request_upload_urls(count=2) call performs >=1 alloc per URL.
         assert after >= before + 1
 
@@ -1541,11 +1541,11 @@ class TestExternalLocation:
         stored object (proving the server invoked the storage backend
         rather than inlining the response).
         """
-        import httpx
+        import httpx2
 
         from vgi_rpc.http import http_connect
 
-        before = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        before = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         big = "z" * 32_000
         with http_connect(
             ConformanceService,
@@ -1553,7 +1553,7 @@ class TestExternalLocation:
             external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         ) as proxy:
             assert proxy.echo_large_string(value=big) == big
-        after = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        after = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         assert after > before, f"expected new objects in fake storage, before={before} after={after}"
 
     def test_client_to_server_auto_externalization(
@@ -1579,11 +1579,11 @@ class TestExternalLocation:
         """
         import os
 
-        import httpx
+        import httpx2
 
         from vgi_rpc.http import http_connect
 
-        before = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        before = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         # Use a high-entropy payload (hex-encoded random bytes) so wire
         # compression can't shrink it under max_request_bytes.  Disable
         # request compression on this connection so the *wire* body
@@ -1596,7 +1596,7 @@ class TestExternalLocation:
             compression_level=None,
         ) as proxy:
             assert proxy.echo_large_string(value=big) == big
-        after = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
+        after = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         # At least 2 new objects: client's request upload + server's response upload.
         assert after >= before + 2, f"expected ≥2 new objects (1 request + 1 response), before={before} after={after}"
 
@@ -1621,9 +1621,9 @@ class TestHealth:
 
     def test_health_endpoint_returns_ok(self, conformance_http_port: int) -> None:
         """``GET /health`` returns 200 with JSON ``{status, server_id, protocol}``."""
-        import httpx
+        import httpx2
 
-        resp = httpx.get(f"http://127.0.0.1:{conformance_http_port}/health", timeout=5.0)
+        resp = httpx2.get(f"http://127.0.0.1:{conformance_http_port}/health", timeout=5.0)
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
@@ -1637,10 +1637,10 @@ class TestHealth:
         unauthenticated unary RPC POST is rejected — otherwise the health
         assertion would be a false positive.
         """
-        import httpx
+        import httpx2
 
         url = f"http://127.0.0.1:{conformance_http_auth_port}"
-        health = httpx.get(f"{url}/health", timeout=5.0)
+        health = httpx2.get(f"{url}/health", timeout=5.0)
         assert health.status_code == 200, f"health must bypass auth, got {health.status_code}"
         assert health.json()["status"] == "ok"
 
@@ -1651,7 +1651,7 @@ class TestHealth:
         # does not serve. Probe both candidate layouts and require that the real
         # endpoint — wherever it lives — is refused, and that neither is served.
         candidates = {
-            path: httpx.post(f"{url}{path}", content=b"", timeout=5.0).status_code
+            path: httpx2.post(f"{url}{path}", content=b"", timeout=5.0).status_code
             for path in ("/echo_int", "/vgi/echo_int")
         }
         assert 200 not in candidates.values(), f"RPC must not be served unauthenticated: {candidates}"
@@ -1687,10 +1687,10 @@ class TestUnauthorized:
                 ``X-Conformance-Auth-Reason``, or ``None`` to send none.
 
         Returns:
-            The ``httpx.Response`` for the gated endpoint.
+            The ``httpx2.Response`` for the gated endpoint.
 
         """
-        import httpx
+        import httpx2
 
         headers = {"content-type": "application/vnd.apache.arrow.stream"}
         if accept is not None:
@@ -1700,7 +1700,7 @@ class TestUnauthorized:
         body = _unary_request_body("echo_int", value=1)
         last: Any = None
         for path in ("/echo_int", "/vgi/echo_int"):
-            last = httpx.post(f"http://127.0.0.1:{port}{path}", content=body, headers=headers, timeout=5.0)
+            last = httpx2.post(f"http://127.0.0.1:{port}{path}", content=body, headers=headers, timeout=5.0)
             if last.status_code == 401:
                 return last
         pytest.fail(f"no RPC endpoint returned 401 on port {port}; last status {last.status_code}")
@@ -1878,12 +1878,12 @@ class TestUnauthorized:
     @staticmethod
     def _proof_post(worker: ProofWorker, *, token: str | None) -> Any:
         """POST a well-formed unary body to a proof worker, optionally with a proof."""
-        import httpx
+        import httpx2
 
         headers = {"content-type": "application/vnd.apache.arrow.stream", "accept": "*/*"}
         if token is not None:
             headers[_PROOF_HEADER] = token
-        return httpx.post(
+        return httpx2.post(
             worker.rpc_url("echo_int"),
             content=_unary_request_body("echo_int", value=1),
             headers=headers,
@@ -1923,12 +1923,12 @@ class TestProxyProof:
         not exist also yields a rejection, which would make these assertions
         vacuous.
         """
-        import httpx
+        import httpx2
 
         headers = {"content-type": "application/vnd.apache.arrow.stream"}
         if token is not None:
             headers[_PROOF_HEADER] = token
-        resp = httpx.post(
+        resp = httpx2.post(
             worker.rpc_url(method),
             content=_unary_request_body(method, value=1),
             headers=headers,
@@ -2074,7 +2074,7 @@ class TestProxyProof:
         Load-balancer probes reach the worker directly rather than through
         the proxy, so gating them would mark a healthy worker down.
         """
-        import httpx
+        import httpx2
 
         from vgi_rpc.conformance.proof_harness import ProofWorkerConfig
 
@@ -2084,7 +2084,7 @@ class TestProxyProof:
             # or at the root, so probe both. What matters is that it is
             # reachable somewhere and never gated, not where it lives.
             codes = {
-                path: httpx.get(f"{worker.base_url}{path}", timeout=5.0).status_code
+                path: httpx2.get(f"{worker.base_url}{path}", timeout=5.0).status_code
                 for path in ("/health", f"{worker.prefix}/health")
             }
             # A 401 on the *other* candidate is not a gate failure: a port that
@@ -2107,10 +2107,10 @@ class TestProxyProof:
             Lower-cased header names to values, from the first path answering 200.
 
         """
-        import httpx
+        import httpx2
 
         for path in ("/health", f"{worker.prefix}/health"):
-            resp = httpx.get(f"{worker.base_url}{path}", timeout=5.0)
+            resp = httpx2.get(f"{worker.base_url}{path}", timeout=5.0)
             if resp.status_code == 200:
                 return {k.lower(): v for k, v in resp.headers.items()}
         raise AssertionError("no health endpoint answered 200")
@@ -2177,9 +2177,9 @@ class TestProxyProofOffMode:
 
     def test_unconfigured_worker_accepts_without_a_proof(self, conformance_http_port: int) -> None:
         """No header, no gate, no change."""
-        import httpx
+        import httpx2
 
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{conformance_http_port}/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"content-type": "application/vnd.apache.arrow.stream"},
@@ -2193,9 +2193,9 @@ class TestProxyProofOffMode:
         Catches a port that installs the verifier whenever the header is
         present rather than whenever the feature is configured.
         """
-        import httpx
+        import httpx2
 
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{conformance_http_port}/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={
@@ -2242,16 +2242,16 @@ def _advertised_encodings(port: int) -> list[str] | None:
     the advertisement), and a possibly-empty list when it is present.
     Absent and present-but-empty are deliberately different answers.
     """
-    import httpx
+    import httpx2
 
-    resp = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+    resp = httpx2.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
     raw = resp.headers.get("VGI-Supported-Encodings")
     if raw is None:
         return None
     return [t.strip().lower() for t in raw.split(",") if t.strip()]
 
 
-def _response_codec(resp: httpx.Response) -> str | None:
+def _response_codec(resp: httpx2.Response) -> str | None:
     """Return the codec a response claims, from either stamping header."""
     ce = resp.headers.get("Content-Encoding") or resp.headers.get("X-VGI-Content-Encoding")
     return ce.strip().lower() if ce else None
@@ -2285,13 +2285,13 @@ class TestHttpCompressionNegotiationConformance:
     # minimum-size floor (Rust, for one, won't compress below 1 KiB).
     PAYLOAD = "conformance-compression-probe " * 4096
 
-    def _echo(self, port: int, headers: dict[str, str]) -> httpx.Response:
-        import httpx
+    def _echo(self, port: int, headers: dict[str, str]) -> httpx2.Response:
+        import httpx2
 
         from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
         body = _unary_request_body("echo_string", value=self.PAYLOAD)
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{port}/echo_string",
             content=body,
             headers={"Content-Type": _ARROW_CONTENT_TYPE, **headers},
@@ -2300,7 +2300,7 @@ class TestHttpCompressionNegotiationConformance:
         assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
         return resp
 
-    def _echo_compressed(self, port: int, codec: str) -> httpx.Response:
+    def _echo_compressed(self, port: int, codec: str) -> httpx2.Response:
         """POST a *compressed* ``echo_string`` request, asking for a plain response.
 
         The accept headers pin ``identity`` so the reply is readable
@@ -2308,12 +2308,12 @@ class TestHttpCompressionNegotiationConformance:
         test (request decoding) from response negotiation.  The status is
         deliberately not asserted — callers decide what is acceptable.
         """
-        import httpx
+        import httpx2
 
         from vgi_rpc.http._common import _ARROW_CONTENT_TYPE, Encoding, compress
 
         body = compress(Encoding(codec), _unary_request_body("echo_string", value=self.PAYLOAD))
-        return httpx.post(
+        return httpx2.post(
             f"http://127.0.0.1:{port}/echo_string",
             content=body,
             headers={
@@ -2326,7 +2326,7 @@ class TestHttpCompressionNegotiationConformance:
         )
 
     @staticmethod
-    def _echoed_value(resp: httpx.Response) -> object:
+    def _echoed_value(resp: httpx2.Response) -> object:
         """Read the ``result`` column out of an uncompressed unary response."""
         from io import BytesIO
 
@@ -2412,7 +2412,7 @@ class TestHttpCompressionNegotiationConformance:
         if not advertised:
             pytest.skip("server advertises no response codecs")
         codec = advertised[0]
-        # httpx injects its own ``Accept-Encoding`` unless told otherwise —
+        # httpx2 injects its own ``Accept-Encoding`` unless told otherwise —
         # the same trap cpp-httplib sets.  Blanking it is what actually
         # reproduces a browser, where the header cannot be set at all; leave
         # it in and the codec is found in *both* lists and stamped on the
@@ -2938,11 +2938,11 @@ class TestCallTokenSplit:
         a unary call — params batch plus dispatch metadata — so it is built
         with the same helper.
         """
-        import httpx
+        import httpx2
 
         from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{port}/{method}/init",
             content=_unary_request_body(method, **params),
             headers={
@@ -2988,7 +2988,7 @@ class TestCallTokenSplit:
         to avoid, while looking conformant to a client that merely stores
         whatever it was last sent.
         """
-        import httpx
+        import httpx2
 
         from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
@@ -3002,7 +3002,7 @@ class TestCallTokenSplit:
                 empty_batch(_empty_schema()),
                 custom_metadata=pa.KeyValueMetadata({STATE_KEY: init[STATE_KEY], CALL_STATE_KEY: init[CALL_STATE_KEY]}),
             )
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{conformance_http_port}/produce_n/exchange",
             content=req.getvalue(),
             headers={
@@ -3112,10 +3112,10 @@ class TestErrorHeader:
     @staticmethod
     def _post(port: int, method: str, **kwargs: object) -> Any:
         """POST a unary call, returning the raw response."""
-        import httpx
+        import httpx2
 
         for path in (f"/{method}", f"/vgi/{method}"):
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"http://127.0.0.1:{port}{path}",
                 content=_unary_request_body(method, **kwargs),
                 headers={"content-type": "application/vnd.apache.arrow.stream"},
@@ -3200,13 +3200,13 @@ class TestRequestId:
     @staticmethod
     def _call(port: int, request_id: str | None = None) -> Any:
         """Make a unary call, optionally supplying a correlation ID."""
-        import httpx
+        import httpx2
 
         headers = {"content-type": "application/vnd.apache.arrow.stream"}
         if request_id is not None:
             headers[_REQUEST_ID_HEADER] = request_id
         for path in ("/echo_int", "/vgi/echo_int"):
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"http://127.0.0.1:{port}{path}",
                 content=_unary_request_body("echo_int", value=1),
                 headers=headers,
@@ -3346,13 +3346,13 @@ class TestTokenIntrospection:
     @staticmethod
     def _post(port: int, caller: str | None, body: object) -> Any:
         """POST *body* to the introspection endpoint as *caller*."""
-        import httpx
+        import httpx2
 
         headers = {"content-type": "application/json"}
         if caller is not None:
             headers[_PRINCIPAL_HEADER_NAME] = caller
         for path in (_INTROSPECT_PATH, f"/vgi{_INTROSPECT_PATH}"):
-            resp = httpx.post(f"http://127.0.0.1:{port}{path}", json=body, headers=headers, timeout=5.0)
+            resp = httpx2.post(f"http://127.0.0.1:{port}{path}", json=body, headers=headers, timeout=5.0)
             if resp.status_code != 404 or "not_enabled" not in resp.text:
                 return resp
         return resp
@@ -3455,10 +3455,10 @@ class TestTokenIntrospection:
 
     def test_capability_is_advertised(self, request: pytest.FixtureRequest) -> None:
         """A proxy preflights at boot rather than discovering at first login."""
-        import httpx
+        import httpx2
 
         port = self._port(request)
-        resp = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+        resp = httpx2.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
         assert resp.headers.get(_INTROSPECT_ENABLED_HEADER.lower()) == "true"
 
 
@@ -3472,9 +3472,9 @@ class TestTokenIntrospectionOffMode:
 
     def test_not_advertised_by_default(self, conformance_http_port: int) -> None:
         """The absent capability header is how a proxy knows not to configure this."""
-        import httpx
+        import httpx2
 
-        resp = httpx.options(f"http://127.0.0.1:{conformance_http_port}/health", timeout=5.0)
+        resp = httpx2.options(f"http://127.0.0.1:{conformance_http_port}/health", timeout=5.0)
         assert _INTROSPECT_ENABLED_HEADER.lower() not in resp.headers
 
     def test_disabled_worker_refuses_definitively(self, conformance_http_port: int) -> None:
@@ -3485,10 +3485,10 @@ class TestTokenIntrospectionOffMode:
         as "retry later", so pointing a proxy at a worker without the feature
         retries forever instead of failing at preflight.
         """
-        import httpx
+        import httpx2
 
         for path in (_INTROSPECT_PATH, f"/vgi{_INTROSPECT_PATH}"):
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"http://127.0.0.1:{conformance_http_port}{path}",
                 json={"token": "anything"},
                 headers={"content-type": "application/json"},
@@ -3554,9 +3554,9 @@ class TestCors:
     @staticmethod
     def _preflight(port: int, path: str = "/echo_int") -> Any:
         """Send a CORS preflight for an RPC call, as a browser would."""
-        import httpx
+        import httpx2
 
-        return httpx.options(
+        return httpx2.options(
             f"http://127.0.0.1:{port}{path}",
             headers={
                 "Origin": _CORS_ORIGIN,
@@ -3626,10 +3626,10 @@ class TestCors:
         echo of the request, an explicit list, or ``*`` — all three are
         conformant; silently dropping one from the list is not.
         """
-        import httpx
+        import httpx2
 
         port = self._port(request)
-        resp = httpx.options(
+        resp = httpx2.options(
             f"http://127.0.0.1:{port}/echo_int",
             headers={
                 "Origin": _CORS_ORIGIN,
@@ -3651,10 +3651,10 @@ class TestCors:
         only on ``OPTIONS`` fails every real call while passing a naive
         preflight-only test.
         """
-        import httpx
+        import httpx2
 
         port = self._port(request)
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{port}/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
@@ -3679,7 +3679,7 @@ class TestCors:
         every other test here drives the server with a client that ignores
         CORS entirely.
         """
-        import httpx
+        import httpx2
 
         port = self._port(request)
         preflight = self._preflight(port)
@@ -3689,7 +3689,7 @@ class TestCors:
         if "*" in exposed:
             return  # a wildcard exposes everything; nothing to enumerate
 
-        health = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+        health = httpx2.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
         advertised = {name.lower() for name in health.headers if name.lower().startswith(("vgi-", "x-vgi-"))}
         assert advertised, "server advertises no capability headers on OPTIONS /health"
         missing = advertised - exposed
@@ -3713,10 +3713,10 @@ class TestCors:
         on. It is a test about test coverage, which is unusual, but the
         alternative is a green suite that proves less than it appears to.
         """
-        import httpx
+        import httpx2
 
         port = self._port(request)
-        health = httpx.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
+        health = httpx2.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
         advertised = {name.lower() for name in health.headers if name.lower().startswith(("vgi-", "x-vgi-"))}
         assert "vgi-upload-url-support" in advertised, (
             "the CORS worker advertises no upload-URL support, so the derived "
@@ -3734,10 +3734,10 @@ class TestCors:
         and the server sees a perfectly ordinary successful response, so
         this fails invisibly from the operator's side.
         """
-        import httpx
+        import httpx2
 
         port = self._port(request)
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{port}/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
@@ -3795,9 +3795,9 @@ class TestCorsOffMode:
 
     def test_no_cors_headers_by_default(self, conformance_http_port: int) -> None:
         """The default worker answers a preflight without allowing an origin."""
-        import httpx
+        import httpx2
 
-        resp = httpx.options(
+        resp = httpx2.options(
             f"http://127.0.0.1:{conformance_http_port}/echo_int",
             headers={"Origin": _CORS_ORIGIN, "Access-Control-Request-Method": "POST"},
             timeout=5.0,
@@ -3814,9 +3814,9 @@ class TestCorsOffMode:
         about resource policy either. Emitting it unconditionally would
         also make the header useless as a signal that CORS is configured.
         """
-        import httpx
+        import httpx2
 
-        resp = httpx.post(
+        resp = httpx2.post(
             f"http://127.0.0.1:{conformance_http_port}/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
@@ -3976,17 +3976,17 @@ class TestSticky:
     def test_delete_session_endpoint_idempotent_no_token(self, conformance_http_port: int) -> None:
         """``DELETE /vgi/__session__`` with no token returns 200 (idempotent no-op)."""
         self._skip_unless_sticky(conformance_http_port)
-        import httpx
+        import httpx2
 
-        resp = httpx.delete(f"http://127.0.0.1:{conformance_http_port}/__session__", timeout=5.0)
+        resp = httpx2.delete(f"http://127.0.0.1:{conformance_http_port}/__session__", timeout=5.0)
         assert resp.status_code == 200
 
     def test_delete_session_endpoint_idempotent_on_garbage_token(self, conformance_http_port: int) -> None:
         """``DELETE /vgi/__session__`` with a garbage token returns 200 (no info leak)."""
         self._skip_unless_sticky(conformance_http_port)
-        import httpx
+        import httpx2
 
-        resp = httpx.delete(
+        resp = httpx2.delete(
             f"http://127.0.0.1:{conformance_http_port}/__session__",
             headers={"VGI-Session": "garbage"},
             timeout=5.0,
@@ -4048,14 +4048,14 @@ class TestSticky:
         tests in the same fixture session aren't poisoned.
         """
         self._skip_unless_sticky(conformance_http_port)
-        import httpx
+        import httpx2
 
         url_base = f"http://127.0.0.1:{conformance_http_port}"
 
         # Probe the admin endpoint up front so we skip cleanly if the
         # conformance server doesn't expose it (other-language ports
         # without drain admin support).
-        probe = httpx.delete(f"{url_base}/__test_drain__", timeout=5.0)
+        probe = httpx2.delete(f"{url_base}/__test_drain__", timeout=5.0)
         if probe.status_code == 404:
             pytest.skip(
                 "conformance server doesn't expose /__test_drain__ admin endpoint — "
@@ -4070,7 +4070,7 @@ class TestSticky:
                 existing.open_counter(initial=10)
 
                 # Step 2: flip the drain flag via the admin endpoint.
-                drain_resp = httpx.post(f"{url_base}/__test_drain__", timeout=5.0)
+                drain_resp = httpx2.post(f"{url_base}/__test_drain__", timeout=5.0)
                 assert drain_resp.status_code in (200, 204), (
                     f"unexpected status {drain_resp.status_code} from POST /__test_drain__"
                 )
@@ -4091,7 +4091,7 @@ class TestSticky:
         finally:
             # Always clear the drain flag so subsequent tests in this
             # session-scoped fixture aren't poisoned.
-            httpx.delete(f"{url_base}/__test_drain__", timeout=5.0)
+            httpx2.delete(f"{url_base}/__test_drain__", timeout=5.0)
 
     def test_echo_header_round_trip(self, conformance_http_port: int) -> None:
         """Echo headers advertised by the server are captured + replayed by a conformant client.
@@ -4310,9 +4310,9 @@ class TestSticky:
         port_a, port_b = ports
         self._skip_unless_sticky(port_a)
 
-        import httpx
+        import httpx2
 
-        server_ids = {httpx.get(f"http://127.0.0.1:{p}/health", timeout=5.0).json()["server_id"] for p in ports}
+        server_ids = {httpx2.get(f"http://127.0.0.1:{p}/health", timeout=5.0).json()["server_id"] for p in ports}
         assert len(server_ids) == 2, f"peer fixture must supply two distinct workers; got {server_ids}"
 
         with self._connect(port_a) as proxy_a, proxy_a.with_session_token() as sess_a:
@@ -4347,13 +4347,13 @@ class TestSticky:
         port: int = self._require_failure_path_fixture(request, "conformance_http_sticky_auth_port")
         self._skip_unless_sticky(port)
 
-        import httpx
+        import httpx2
 
         base_url = f"http://127.0.0.1:{port}"
         principal_header = "X-Conformance-Principal"
 
         with (
-            httpx.Client(base_url=base_url, headers={principal_header: "alice"}) as alice_client,
+            httpx2.Client(base_url=base_url, headers={principal_header: "alice"}) as alice_client,
             self._connect_with_client(alice_client) as alice,
             alice.with_session_token() as alice_sess,
         ):
@@ -4363,7 +4363,7 @@ class TestSticky:
         assert token is not None
 
         with (
-            httpx.Client(base_url=base_url, headers={principal_header: "bob"}) as bob_client,
+            httpx2.Client(base_url=base_url, headers={principal_header: "bob"}) as bob_client,
             self._connect_with_client(bob_client) as bob,
             bob.with_session_token(token=token) as bob_sess,
             pytest.raises(RpcError) as excinfo,
@@ -4375,7 +4375,7 @@ class TestSticky:
 
         # Positive control: the rejection was about identity, not the token.
         with (
-            httpx.Client(base_url=base_url, headers={principal_header: "alice"}) as alice_client2,
+            httpx2.Client(base_url=base_url, headers={principal_header: "alice"}) as alice_client2,
             self._connect_with_client(alice_client2) as alice2,
             alice2.with_session_token(token=token) as alice_sess2,
         ):

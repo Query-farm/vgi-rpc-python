@@ -1,6 +1,6 @@
 # HTTP Transport
 
-HTTP transport using Falcon (server) and httpx (client). Requires `pip install vgi-rpc[http]`.
+HTTP transport using Falcon (server) and httpx2 (client). Requires `pip install vgi-rpc[http]`.
 
 ## Quick Start
 

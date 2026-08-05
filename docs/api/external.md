@@ -103,9 +103,9 @@ urls: list[UploadUrl] = request_upload_urls(
 )
 
 # Upload large data directly to storage (bypasses RPC server)
-import httpx
+import httpx2
 ipc_data = serialize_large_batch(my_batch)
-httpx.put(urls[0].upload_url, content=ipc_data)
+httpx2.put(urls[0].upload_url, content=ipc_data)
 
 # Send RPC request with pointer to uploaded data
 # The server resolves the pointer transparently

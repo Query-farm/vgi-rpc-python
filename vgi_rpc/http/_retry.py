@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2
 
 from vgi_rpc.rpc import RpcError
 
@@ -46,8 +46,8 @@ class HttpRetryConfig:
             (delay = base * 2^attempt).
         backoff_max: Maximum backoff delay in seconds.
         retryable_status_codes: HTTP status codes eligible for retry.
-        retry_on_connection_error: Whether to retry on ``httpx.ConnectError``
-            and ``httpx.TimeoutException``.
+        retry_on_connection_error: Whether to retry on ``httpx2.ConnectError``
+            and ``httpx2.TimeoutException``.
         respect_retry_after: Whether to honor the ``Retry-After`` header
             on 429/503 responses.
 
@@ -165,11 +165,11 @@ def _compute_delay(
 def _get_retry_after(headers: object) -> float | None:
     """Extract and parse ``Retry-After`` from response headers.
 
-    Handles both ``httpx.Headers`` (case-insensitive) and plain ``dict``
+    Handles both ``httpx2.Headers`` (case-insensitive) and plain ``dict``
     (case-sensitive, checked with canonical and lowercase keys).
 
     Args:
-        headers: Response headers (``httpx.Headers`` or ``dict``).
+        headers: Response headers (``httpx2.Headers`` or ``dict``).
 
     Returns:
         Parsed delay in seconds, or ``None`` if absent or unparseable.
@@ -194,13 +194,13 @@ def _body_preview(content: bytes) -> str:
 
 
 def _request_with_retry(
-    make_request: Callable[[], httpx.Response | _SyncTestResponse],
+    make_request: Callable[[], httpx2.Response | _SyncTestResponse],
     *,
     config: HttpRetryConfig,
     method_label: str,
     url: str,
     _sleep: Callable[[float], object] = time.sleep,
-) -> httpx.Response | _SyncTestResponse:
+) -> httpx2.Response | _SyncTestResponse:
     """Execute an HTTP request with retry on transient failures.
 
     This is the core retry loop shared by ``_post_with_retry`` and
@@ -218,20 +218,20 @@ def _request_with_retry(
 
     Raises:
         HttpTransientError: If retries are exhausted on a retryable status.
-        httpx.ConnectError: If connection errors exhaust retries (when
+        httpx2.ConnectError: If connection errors exhaust retries (when
             ``retry_on_connection_error`` is enabled).
-        httpx.TimeoutException: If timeouts exhaust retries.
+        httpx2.TimeoutException: If timeouts exhaust retries.
 
     """
-    last_resp: httpx.Response | _SyncTestResponse | None = None
+    last_resp: httpx2.Response | _SyncTestResponse | None = None
     last_retry_after: float | None = None
 
     for attempt in range(config.max_retries + 1):
         try:
             resp = make_request()
-        except httpx.RemoteProtocolError as exc:
+        except httpx2.RemoteProtocolError as exc:
             # A pooled keep-alive connection the peer had already closed.
-            # httpx raises this with "Server disconnected without sending a
+            # httpx2 raises this with "Server disconnected without sending a
             # response" when the socket dies before ANY response byte arrives,
             # which is the one disconnect we can retry safely: the request
             # provably was not answered, so replaying it cannot duplicate an
@@ -258,7 +258,7 @@ def _request_with_retry(
             )
             _sleep(delay)
             continue
-        except (httpx.ConnectError, httpx.TimeoutException):
+        except (httpx2.ConnectError, httpx2.TimeoutException):
             if not config.retry_on_connection_error or attempt >= config.max_retries:
                 raise
             delay = _compute_delay(attempt, config, None)
@@ -303,18 +303,18 @@ def _request_with_retry(
 
 
 def _post_with_retry(
-    client: httpx.Client | _SyncTestClient,
+    client: httpx2.Client | _SyncTestClient,
     url: str,
     *,
     content: bytes,
     headers: dict[str, str],
     config: HttpRetryConfig | None,
     _sleep: Callable[[float], object] = time.sleep,
-) -> httpx.Response | _SyncTestResponse:
+) -> httpx2.Response | _SyncTestResponse:
     """Execute ``client.post()`` with optional retry on transient failures.
 
     Args:
-        client: HTTP client (httpx or test client).
+        client: HTTP client (httpx2 or test client).
         url: Request URL.
         content: Request body bytes.
         headers: Request headers.
@@ -326,9 +326,9 @@ def _post_with_retry(
 
     Raises:
         HttpTransientError: If retries are exhausted on a retryable status.
-        httpx.ConnectError: If connection errors exhaust retries (when
+        httpx2.ConnectError: If connection errors exhaust retries (when
             ``retry_on_connection_error`` is enabled).
-        httpx.TimeoutException: If timeouts exhaust retries.
+        httpx2.TimeoutException: If timeouts exhaust retries.
 
     """
     if config is None:
@@ -344,16 +344,16 @@ def _post_with_retry(
 
 
 def _options_with_retry(
-    client: httpx.Client | _SyncTestClient,
+    client: httpx2.Client | _SyncTestClient,
     url: str,
     *,
     config: HttpRetryConfig | None,
     _sleep: Callable[[float], object] = time.sleep,
-) -> httpx.Response | _SyncTestResponse:
+) -> httpx2.Response | _SyncTestResponse:
     """Execute ``client.options()`` with optional retry on transient failures.
 
     Args:
-        client: HTTP client (httpx or test client).
+        client: HTTP client (httpx2 or test client).
         url: Request URL.
         config: Retry config, or ``None`` to disable retry.
         _sleep: Sleep function (injectable for tests).
@@ -363,9 +363,9 @@ def _options_with_retry(
 
     Raises:
         HttpTransientError: If retries are exhausted on a retryable status.
-        httpx.ConnectError: If connection errors exhaust retries (when
+        httpx2.ConnectError: If connection errors exhaust retries (when
             ``retry_on_connection_error`` is enabled).
-        httpx.TimeoutException: If timeouts exhaust retries.
+        httpx2.TimeoutException: If timeouts exhaust retries.
 
     """
     if config is None:

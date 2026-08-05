@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs
 
-import httpx
+import httpx2
 import pytest
 from werkzeug.serving import make_server
 
@@ -175,7 +175,7 @@ def _wait_for_http(base_url: str, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            httpx.get(base_url + "/health", timeout=0.5)
+            httpx2.get(base_url + "/health", timeout=0.5)
             return
         except Exception:
             time.sleep(0.05)
@@ -324,7 +324,7 @@ class TestOAuthTokenProxyConformance:
     ) -> None:
         """Resource metadata advertises {prefix}/_oauth/token as the token_endpoint."""
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.get(_well_known_url(base))
+            resp = httpx2.get(_well_known_url(base))
             assert resp.status_code == 200
             body = resp.json()
             assert body["token_endpoint"] == f"{base}/_oauth/token", (impl_name, body)
@@ -337,7 +337,7 @@ class TestOAuthTokenProxyConformance:
     ) -> None:
         """OPTIONS returns 204 with CORS headers when Origin is in the allowlist."""
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.request(
+            resp = httpx2.request(
                 "OPTIONS",
                 f"{base}/_oauth/token",
                 headers={"Origin": "https://cupola.query-farm.services"},
@@ -354,7 +354,7 @@ class TestOAuthTokenProxyConformance:
     ) -> None:
         """authorization_code grant is forwarded with the proxy-injected client_secret."""
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"{base}/_oauth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 content="grant_type=authorization_code&code=abc&code_verifier=v&redirect_uri=https://x/cb&client_id=my-client-id",
@@ -374,7 +374,7 @@ class TestOAuthTokenProxyConformance:
     ) -> None:
         """refresh_token grant is forwarded with the proxy-injected client_secret."""
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"{base}/_oauth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 content="grant_type=refresh_token&refresh_token=rtok&client_id=my-client-id&scope=openid",
@@ -393,7 +393,7 @@ class TestOAuthTokenProxyConformance:
     ) -> None:
         """Submitting a client_id different from the configured one returns 400 invalid_client."""
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"{base}/_oauth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 content="grant_type=authorization_code&client_id=evil&code=x&code_verifier=v&redirect_uri=https://x",
@@ -409,7 +409,7 @@ class TestOAuthTokenProxyConformance:
     ) -> None:
         """Grant types other than authorization_code/refresh_token are rejected."""
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"{base}/_oauth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 content="grant_type=client_credentials",
@@ -427,7 +427,7 @@ class TestOAuthTokenProxyConformance:
         mock_idp.resp_status = 400
         mock_idp.resp_body = b'{"error":"invalid_grant","error_description":"bad code"}'
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"{base}/_oauth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 content="grant_type=authorization_code&code=bad&code_verifier=v&redirect_uri=https://x",
@@ -444,7 +444,7 @@ class TestOAuthTokenProxyConformance:
     ) -> None:
         """Non-form Content-Type is rejected with 415."""
         with server_factory(mock_idp.url) as base:  # type: ignore[operator]
-            resp = httpx.post(
+            resp = httpx2.post(
                 f"{base}/_oauth/token",
                 headers={"Content-Type": "application/json"},
                 content='{"grant_type":"authorization_code"}',

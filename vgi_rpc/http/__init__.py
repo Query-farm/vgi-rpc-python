@@ -1,10 +1,10 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""HTTP transport for vgi-rpc using Falcon (server) and httpx (client).
+"""HTTP transport for vgi-rpc using Falcon (server) and httpx2 (client).
 
 Provides ``make_wsgi_app`` to expose an ``RpcServer`` as a Falcon WSGI
-application, and ``http_connect`` to call it from Python with ``httpx``.
+application, and ``http_connect`` to call it from Python with ``httpx2``.
 
 HTTP Wire Protocol
 ------------------

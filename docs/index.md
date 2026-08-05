@@ -99,10 +99,10 @@ pip install vgi-rpc
 Optional extras:
 
 ```bash
-pip install vgi-rpc[http]       # HTTP transport (Falcon + httpx)
+pip install vgi-rpc[http]       # HTTP transport (Falcon + httpx2)
 pip install vgi-rpc[s3]         # S3 storage backend
 pip install vgi-rpc[gcs]        # Google Cloud Storage backend
-pip install vgi-rpc[cli]        # CLI tool (typer + httpx)
+pip install vgi-rpc[cli]        # CLI tool (typer + httpx2)
 pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
 pip install vgi-rpc[sentry]     # Sentry error reporting

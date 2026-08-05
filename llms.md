@@ -8,7 +8,7 @@ Requires Python 3.12+.
 
 ```bash
 pip install vgi-rpc              # core (pipe + subprocess transports)
-pip install vgi-rpc[http]        # + HTTP transport (Falcon server, httpx client)
+pip install vgi-rpc[http]        # + HTTP transport (Falcon server, httpx2 client)
 pip install vgi-rpc[s3]          # + S3 external storage backend
 pip install vgi-rpc[gcs]         # + GCS external storage backend
 pip install vgi-rpc[cli]         # + CLI tool

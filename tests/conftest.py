@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from vgi_rpc.introspect import ServiceDescription
@@ -24,8 +24,8 @@ from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
 _SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
 
-# Windows + waitress + httpx race: under load, waitress closes the response
-# socket faster than httpx can drain the body, surfacing as WinError 10053
+# Windows + waitress + httpx2 race: under load, waitress closes the response
+# socket faster than httpx2 can drain the body, surfacing as WinError 10053
 # (connection aborted by software) instead of the actual error/response. The
 # ``http_externalize_always`` fixture multiplies request/response cycles via
 # upload-URL bootstrap, making the race deterministic on Windows. Pre-existing
@@ -33,7 +33,7 @@ _SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets no
 # we can drain-before-close at the WSGI handler layer.
 _SKIP_WIN_EXTERNALIZE = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="Windows + waitress + httpx + externalize: pre-existing TCP race (WinError 10053)",
+    reason="Windows + waitress + httpx2 + externalize: pre-existing TCP race (WinError 10053)",
 )
 
 _SERVE_FIXTURE = str(Path(__file__).parent / "serve_fixture_pipe.py")
@@ -67,7 +67,7 @@ def _http_worker_cmd() -> list[str]:
 def _wait_for_http(port: int, timeout: float = 30.0) -> None:
     """Poll until the HTTP server is accepting connections.
 
-    Retries on :class:`httpx.TransportError` rather than on connect errors
+    Retries on :class:`httpx2.TransportError` rather than on connect errors
     alone. "Not ready yet" has more than one shape: a server that has bound
     its socket but has not begun serving *accepts* the connection and then
     closes it, which arrives as ``RemoteProtocolError("Server disconnected
@@ -84,9 +84,9 @@ def _wait_for_http(port: int, timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            _ = httpx.get(f"http://127.0.0.1:{port}/", timeout=2.0)
+            _ = httpx2.get(f"http://127.0.0.1:{port}/", timeout=2.0)
             return
-        except httpx.TransportError:
+        except httpx2.TransportError:
             time.sleep(0.1)
     raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
 
@@ -1202,18 +1202,18 @@ def conformance_http_two_servers() -> Iterator[tuple[int, int]]:
             os.unlink(probe_path)
 
 
-def _make_roundrobin_client(ports: tuple[int, int]) -> httpx.Client:
-    """Build an ``httpx.Client`` that alternates between two ports per request."""
+def _make_roundrobin_client(ports: tuple[int, int]) -> httpx2.Client:
+    """Build an ``httpx2.Client`` that alternates between two ports per request."""
     import itertools
 
     counter = itertools.count()
     lock = threading.Lock()
 
-    class _RoundRobinTransport(httpx.BaseTransport):
+    class _RoundRobinTransport(httpx2.BaseTransport):
         def __init__(self) -> None:
-            self._inner = httpx.HTTPTransport()
+            self._inner = httpx2.HTTPTransport()
 
-        def handle_request(self, request: httpx.Request) -> httpx.Response:
+        def handle_request(self, request: httpx2.Request) -> httpx2.Response:
             with lock:
                 idx = next(counter) % 2
             port = ports[idx]
@@ -1223,7 +1223,7 @@ def _make_roundrobin_client(ports: tuple[int, int]) -> httpx.Client:
         def close(self) -> None:
             self._inner.close()
 
-    # base_url is required by httpx but the transport rewrites host:port on every request
-    return httpx.Client(
+    # base_url is required by httpx2 but the transport rewrites host:port on every request
+    return httpx2.Client(
         base_url=f"http://127.0.0.1:{ports[0]}", transport=_RoundRobinTransport(), follow_redirects=True
     )

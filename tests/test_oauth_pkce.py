@@ -408,7 +408,7 @@ class TestPkceRedirect:
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_browser_get_redirects(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Unauthenticated browser GET -> 302 to authorization endpoint."""
         mock_resp = type(
@@ -435,7 +435,7 @@ class TestPkceRedirect:
         # Session cookie should be set
         assert _SESSION_COOKIE_NAME in result.cookies
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_non_browser_get_gets_401(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Non-browser GET (no text/html Accept) -> 401, no redirect."""
         mock_resp = type(
@@ -450,7 +450,7 @@ class TestPkceRedirect:
         result = client.simulate_get("/vgi", headers={"Accept": "application/json"})
         assert result.status_code == 401
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_post_gets_401(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """POST requests -> 401, no redirect even with text/html Accept."""
         mock_resp = type(
@@ -471,7 +471,7 @@ class TestPkceRedirect:
         token = _mint_jwt(self.priv)
 
         # Need to mock OIDC discovery since make_wsgi_app with PKCE creates the discovery callable
-        with patch("vgi_rpc.http._oauth_pkce.httpx.Client") as mock_client_cls:
+        with patch("vgi_rpc.http._oauth_pkce.httpx2.Client") as mock_client_cls:
             mock_resp = type(
                 "R", (), {"status_code": 200, "raise_for_status": lambda s: None, "json": lambda s: _MOCK_OIDC_CONFIG}
             )()
@@ -509,7 +509,7 @@ class TestOAuthCallback:
         """Create a signed session cookie for testing."""
         return _pack_oauth_cookie("test-verifier", state, url, self.session_key)
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_missing_code_returns_400(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Missing authorization code in callback returns 400."""
         mock_resp = type(
@@ -524,7 +524,7 @@ class TestOAuthCallback:
         result = client.simulate_get("/vgi/_oauth/callback", params={"state": "test"})
         assert result.status_code == 400
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_google_error_returns_400(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Authorization server error in callback returns 400 with message."""
         mock_resp = type(
@@ -543,7 +543,7 @@ class TestOAuthCallback:
         assert result.status_code == 400
         assert b"authorization server returned an error" in result.content
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_state_mismatch_returns_400(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """State parameter mismatch (CSRF) returns 400."""
         mock_resp = type(
@@ -565,7 +565,7 @@ class TestOAuthCallback:
         assert b"State mismatch" in result.content
 
     @patch("vgi_rpc.http._oauth_pkce._exchange_code_for_token")
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_successful_callback_redirects_with_cookie(self, mock_client_cls, mock_exchange) -> None:  # type: ignore[no-untyped-def]
         """Successful code exchange redirects with auth cookie set."""
         mock_resp = type(
@@ -608,7 +608,7 @@ class TestOAuthLogout:
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_logout_clears_cookie_and_redirects(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Logout clears auth cookie and redirects to prefix root."""
         mock_resp = type(
@@ -672,7 +672,7 @@ class TestUserInfoInjection:
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_landing_page_has_user_info_script(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """When PKCE is active, landing page includes user-info JS."""
         mock_resp = type(
@@ -706,13 +706,13 @@ class TestUserInfoInjection:
 # ---------------------------------------------------------------------------
 
 
-def _mock_httpx_for_proxy(
+def _mock_httpx2_for_proxy(
     mock_client_cls: object,
     upstream_status: int = 200,
     upstream_body: bytes | None = None,
     capture: dict[str, Any] | None = None,
 ) -> None:
-    """Wire up the httpx.Client mock for OIDC discovery and the proxy's upstream call.
+    """Wire up the httpx2.Client mock for OIDC discovery and the proxy's upstream call.
 
     Stubs both ``.get()`` (discovery) and ``.post()`` (token forward).  Captures
     the POST data into *capture* if provided so tests can assert what was
@@ -763,20 +763,20 @@ class TestOAuthTokenProxy:
         self.priv, self.pub = _make_rsa_key()
         self.auth = _make_local_auth(self.pub)
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_well_known_advertises_token_endpoint(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """When client_secret is configured, /.well-known/... advertises the proxy URL."""
-        _mock_httpx_for_proxy(mock_client_cls)
+        _mock_httpx2_for_proxy(mock_client_cls)
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_get("/.well-known/oauth-protected-resource/vgi")
         assert result.status_code == 200
         body = result.json
         assert body["token_endpoint"] == "http://localhost:8000/vgi/_oauth/token"
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_options_preflight(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """OPTIONS preflight returns 204 with CORS headers when Origin is allowed."""
-        _mock_httpx_for_proxy(mock_client_cls)
+        _mock_httpx2_for_proxy(mock_client_cls)
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_options(
             "/vgi/_oauth/token",
@@ -786,11 +786,11 @@ class TestOAuthTokenProxy:
         assert result.headers.get("access-control-allow-origin") == "https://cupola.query-farm.services"
         assert "POST" in result.headers.get("access-control-allow-methods", "")
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_authorization_code_forwards_with_injected_secret(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """SPA POSTs without client_secret; proxy injects it before forwarding."""
         captured: dict[str, Any] = {}
-        _mock_httpx_for_proxy(mock_client_cls, capture=captured)
+        _mock_httpx2_for_proxy(mock_client_cls, capture=captured)
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_post(
             "/vgi/_oauth/token",
@@ -806,11 +806,11 @@ class TestOAuthTokenProxy:
         assert captured["data"]["code_verifier"] == "v"
         assert captured["data"]["redirect_uri"] == "https://x/cb"
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_refresh_token_forwards_with_injected_secret(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """refresh_token grant is forwarded with the proxy-injected client_secret."""
         captured: dict[str, Any] = {}
-        _mock_httpx_for_proxy(mock_client_cls, capture=captured)
+        _mock_httpx2_for_proxy(mock_client_cls, capture=captured)
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_post(
             "/vgi/_oauth/token",
@@ -823,10 +823,10 @@ class TestOAuthTokenProxy:
         assert captured["data"]["scope"] == "openid"
         assert captured["data"]["client_secret"] == "my-client-secret"
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_mismatched_client_id_rejected(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Submitting a client_id that differs from the configured one returns 400."""
-        _mock_httpx_for_proxy(mock_client_cls)
+        _mock_httpx2_for_proxy(mock_client_cls)
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_post(
             "/vgi/_oauth/token",
@@ -836,10 +836,10 @@ class TestOAuthTokenProxy:
         assert result.status_code == 400
         assert result.json["error"] == "invalid_client"
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_unsupported_grant_type_rejected(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Grant types other than authorization_code/refresh_token are rejected."""
-        _mock_httpx_for_proxy(mock_client_cls)
+        _mock_httpx2_for_proxy(mock_client_cls)
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_post(
             "/vgi/_oauth/token",
@@ -849,10 +849,10 @@ class TestOAuthTokenProxy:
         assert result.status_code == 400
         assert result.json["error"] == "unsupported_grant_type"
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_idp_error_passthrough(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """IdP error response is forwarded verbatim with its status code."""
-        _mock_httpx_for_proxy(
+        _mock_httpx2_for_proxy(
             mock_client_cls,
             upstream_status=400,
             upstream_body=b'{"error":"invalid_grant","error_description":"bad code"}',
@@ -867,10 +867,10 @@ class TestOAuthTokenProxy:
         assert result.json["error"] == "invalid_grant"
         assert result.json["error_description"] == "bad code"
 
-    @patch("vgi_rpc.http._oauth_pkce.httpx.Client")
+    @patch("vgi_rpc.http._oauth_pkce.httpx2.Client")
     def test_wrong_content_type_rejected(self, mock_client_cls) -> None:  # type: ignore[no-untyped-def]
         """Non-form Content-Type is rejected with 415."""
-        _mock_httpx_for_proxy(mock_client_cls)
+        _mock_httpx2_for_proxy(mock_client_cls)
         client = _make_test_app(authenticate=self.auth, oauth_metadata=_METADATA_PKCE)
         result = client.simulate_post(
             "/vgi/_oauth/token",

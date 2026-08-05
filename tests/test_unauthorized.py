@@ -257,7 +257,7 @@ class TestResponseShape:
         assert _body(resp) == {"error": "unauthorized", "reason": "unauthorized", "detail": "nope"}
 
     def test_wildcard_accept_is_not_html(self) -> None:
-        """``*/*`` is what httpx sends by default and must not select the page."""
+        """``*/*`` is what httpx2 sends by default and must not select the page."""
         client = _client(authenticate=_reject)
         resp = client.post("/echo_int", content=b"", headers={"Accept": "*/*"})
         assert resp.headers["content-type"].startswith("application/json")

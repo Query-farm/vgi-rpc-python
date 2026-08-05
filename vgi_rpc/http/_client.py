@@ -1,7 +1,7 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""HTTP client implementation using httpx.
+"""HTTP client implementation using httpx2.
 
 Provides ``http_connect`` context manager, ``HttpStreamSession``,
 ``http_introspect``, ``http_capabilities``, and ``request_upload_urls``.
@@ -21,7 +21,7 @@ from io import BytesIO
 from types import MappingProxyType, TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
-import httpx
+import httpx2
 import pyarrow as pa
 from pyarrow import ipc
 
@@ -103,7 +103,7 @@ if TYPE_CHECKING:
 def _client_offered_encodings() -> tuple[Encoding, ...]:
     """Return encodings the client can both produce *and* decode.
 
-    httpx auto-decompresses gzip and deflate; for zstd it transparently
+    httpx2 auto-decompresses gzip and deflate; for zstd it transparently
     decompresses if ``zstandard`` is importable.  We therefore advertise
     whatever ``available_encodings()`` reports — runtime presence of the
     libraries is the same gate on both ends.
@@ -151,7 +151,7 @@ def _prepare_request_body(
 def _externalize_via_upload_url(
     body: bytes,
     *,
-    client: httpx.Client | _SyncTestClient,
+    client: httpx2.Client | _SyncTestClient,
     url_prefix: str,
     url_validator: Callable[[str], None] | None,
     retry_config: HttpRetryConfig | None,
@@ -169,10 +169,10 @@ def _externalize_via_upload_url(
             "Request exceeds max_request_bytes and the server does not advertise upload_url_support",
             "",
         )
-    if not isinstance(client, httpx.Client):
+    if not isinstance(client, httpx2.Client):
         raise RpcError(
             "ExternalUploadFailed",
-            "Auto-externalization requires an httpx.Client (the in-process test shim doesn't support PUT)",
+            "Auto-externalization requires an httpx2.Client (the in-process test shim doesn't support PUT)",
             "",
         )
     urls = request_upload_urls(client=client, prefix=url_prefix, count=1, retry=retry_config)
@@ -380,7 +380,7 @@ class HttpStreamSession:
 
     def __init__(
         self,
-        client: httpx.Client | _SyncTestClient,
+        client: httpx2.Client | _SyncTestClient,
         url_prefix: str,
         method: str,
         state_bytes: bytes | None,
@@ -819,7 +819,7 @@ def http_connect[P](
     *,
     prefix: str | None = None,
     on_log: Callable[[Message], None] | None = None,
-    client: httpx.Client | _SyncTestClient | None = None,
+    client: httpx2.Client | _SyncTestClient | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
@@ -837,7 +837,7 @@ def http_connect[P](
             (the default), auto-detected from a ``_SyncTestClient``'s
             ``.prefix`` attribute, or ``""`` for other clients.
         on_log: Optional callback for log messages from the server.
-        client: Optional HTTP client — ``httpx.Client`` for production,
+        client: Optional HTTP client — ``httpx2.Client`` for production,
             or a ``_SyncTestClient`` from ``make_sync_client()`` for testing.
         external_location: Optional ExternalLocationConfig for
             resolving and producing externalized batches.
@@ -847,7 +847,7 @@ def http_connect[P](
         compression_level: Zstandard compression level for request bodies.
             ``1`` (the default) compresses requests and adds
             ``Content-Encoding: zstd``.  ``None`` disables request
-            compression (httpx still auto-decompresses server responses).
+            compression (httpx2 still auto-decompresses server responses).
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -860,7 +860,7 @@ def http_connect[P](
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True)
 
     # Auto-detect prefix from _SyncTestClient when not explicitly provided
     url_prefix = getattr(client, "prefix", "") if prefix is None else prefix
@@ -887,7 +887,7 @@ def http_introspect(
     base_url: str | None = None,
     *,
     prefix: str | None = None,
-    client: httpx.Client | _SyncTestClient | None = None,
+    client: httpx2.Client | _SyncTestClient | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
 ) -> ServiceDescription:
@@ -898,7 +898,7 @@ def http_introspect(
             Required when *client* is ``None``.
         prefix: URL prefix matching the server's prefix.  ``None``
             auto-detects from ``_SyncTestClient``.
-        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
         ipc_validation: Validation level for incoming IPC batches.
         retry: Optional retry configuration for transient HTTP failures.
 
@@ -917,7 +917,7 @@ def http_introspect(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
@@ -959,7 +959,7 @@ def http_introspect(
 
 
 def _init_http_stream_session(
-    client: httpx.Client | _SyncTestClient,
+    client: httpx2.Client | _SyncTestClient,
     url_prefix: str,
     method_name: str,
     reader: ValidatedReader,
@@ -1062,7 +1062,7 @@ class _HttpProxy:
     def __init__(
         self,
         protocol: type,
-        client: httpx.Client | _SyncTestClient,
+        client: httpx2.Client | _SyncTestClient,
         url_prefix: str,
         on_log: Callable[[Message], None] | None = None,
         *,
@@ -1184,7 +1184,7 @@ class _HttpProxy:
         )
 
     def _refresh_supported_encodings_from_response(
-        self, resp: httpx.Response | _SyncTestResponse
+        self, resp: httpx2.Response | _SyncTestResponse
     ) -> tuple[Encoding, ...] | None:
         """Harvest ``VGI-Supported-Encodings`` from a response and cache it.
 
@@ -1307,7 +1307,7 @@ class _HttpProxy:
         Multiple ``with_session_token()`` blocks may be open on the same
         connection concurrently; each block has its own token state because
         the per-call headers are emitted by the per-block tracking client,
-        not by the shared underlying httpx.Client.
+        not by the shared underlying httpx2.Client.
 
         Args:
             token: Optional initial session token to resume an existing
@@ -1498,7 +1498,7 @@ class _HttpProxy:
 
 
 class _SessionTrackingClient:
-    """Thin wrapper around an httpx.Client / _SyncTestClient that injects + captures session headers.
+    """Thin wrapper around an httpx2.Client / _SyncTestClient that injects + captures session headers.
 
     Every outgoing request carries ``VGI-Session-Accept: true`` (the
     server-side opt-in flag) and, if the view has captured a token,
@@ -1513,7 +1513,7 @@ class _SessionTrackingClient:
 
     __slots__ = ("_inner", "_view")
 
-    def __init__(self, inner: httpx.Client | _SyncTestClient, view: _SessionView) -> None:
+    def __init__(self, inner: httpx2.Client | _SyncTestClient, view: _SessionView) -> None:
         self._inner = inner
         self._view = view
 
@@ -1547,7 +1547,7 @@ class _SessionTrackingClient:
         if token:
             self._view._token = token
         # Capture VGI-Echo-* on every response (cheap; only emitted on session
-        # open, so subsequent responses are no-ops). httpx headers are
+        # open, so subsequent responses are no-ops). httpx2 headers are
         # case-insensitive but _SyncTestResponse stores lowercase — iterate
         # over items() so we hit both shapes uniformly.
         prefix_lower = ECHO_HEADER_PREFIX.lower()
@@ -1631,7 +1631,7 @@ class _SessionView:
         # is honest because the wrapper preserves the contract exactly.
         self._proxy = _HttpProxy(
             outer._protocol,
-            cast("httpx.Client | _SyncTestClient", self._tracking_client),
+            cast("httpx2.Client | _SyncTestClient", self._tracking_client),
             outer._url_prefix,
             outer._on_log,
             external_config=outer._external_config,
@@ -1782,7 +1782,7 @@ def http_capabilities(
     base_url: str | None = None,
     *,
     prefix: str | None = None,
-    client: httpx.Client | _SyncTestClient | None = None,
+    client: httpx2.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
 ) -> HttpServerCapabilities:
     """Discover server capabilities via ``OPTIONS {prefix}/health``.
@@ -1800,7 +1800,7 @@ def http_capabilities(
             Required when *client* is ``None``.
         prefix: URL prefix matching the server's prefix.  ``None``
             auto-detects from ``_SyncTestClient``.
-        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
         retry: Optional retry configuration for transient HTTP failures.
 
     Returns:
@@ -1816,7 +1816,7 @@ def http_capabilities(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
@@ -1927,7 +1927,7 @@ def request_upload_urls(
     *,
     count: int = 1,
     prefix: str | None = None,
-    client: httpx.Client | _SyncTestClient | None = None,
+    client: httpx2.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
 ) -> list[UploadUrl]:
     """Request pre-signed upload URLs from the server's ``__upload_url__`` endpoint.
@@ -1941,7 +1941,7 @@ def request_upload_urls(
         count: Number of upload URLs to request (default 1, max 100).
         prefix: URL prefix matching the server's prefix.  ``None``
             auto-detects from ``_SyncTestClient``.
-        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
         retry: Optional retry configuration for transient HTTP failures.
 
     Returns:
@@ -1957,7 +1957,7 @@ def request_upload_urls(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
@@ -2065,7 +2065,7 @@ def http_oauth_metadata(
     base_url: str | None = None,
     *,
     prefix: str | None = None,
-    client: httpx.Client | _SyncTestClient | None = None,
+    client: httpx2.Client | _SyncTestClient | None = None,
 ) -> OAuthResourceMetadataResponse | None:
     """Discover OAuth Protected Resource Metadata (RFC 9728).
 
@@ -2079,7 +2079,7 @@ def http_oauth_metadata(
             auto-detects from ``_SyncTestClient``.
             Must match the ``prefix`` passed to ``make_wsgi_app()`` on the
             server side — a mismatch will result in a 404 (``None`` return).
-        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
 
     Returns:
         An ``OAuthResourceMetadataResponse`` with discovered metadata, or
@@ -2094,13 +2094,13 @@ def http_oauth_metadata(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
     try:
         url = f"/.well-known/oauth-protected-resource{prefix}"
-        resp: httpx.Response | _SyncTestResponse = client.get(url)
+        resp: httpx2.Response | _SyncTestResponse = client.get(url)
         if resp.status_code == HTTPStatus.NOT_FOUND:
             return None
         if resp.status_code != HTTPStatus.OK:
@@ -2270,7 +2270,7 @@ def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
 def fetch_oauth_metadata(
     metadata_url: str,
     *,
-    client: httpx.Client | _SyncTestClient | None = None,
+    client: httpx2.Client | _SyncTestClient | None = None,
 ) -> OAuthResourceMetadataResponse:
     """Fetch OAuth metadata from a URL extracted from a 401 ``WWW-Authenticate`` header.
 
@@ -2282,7 +2282,7 @@ def fetch_oauth_metadata(
     Args:
         metadata_url: Full URL to the metadata document (e.g.
             ``https://api.example.com/.well-known/oauth-protected-resource/vgi``).
-        client: Optional HTTP client (``httpx.Client`` or ``_SyncTestClient``).
+        client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
 
     Returns:
         An ``OAuthResourceMetadataResponse`` with the server's OAuth metadata.
@@ -2294,10 +2294,10 @@ def fetch_oauth_metadata(
     """
     own_client = client is None
     if client is None:
-        client = httpx.Client(follow_redirects=True)
+        client = httpx2.Client(follow_redirects=True)
 
     try:
-        resp: httpx.Response | _SyncTestResponse = client.get(metadata_url)
+        resp: httpx2.Response | _SyncTestResponse = client.get(metadata_url)
         if resp.status_code != HTTPStatus.OK:
             raise ValueError(f"Failed to fetch OAuth metadata from {metadata_url}: HTTP {resp.status_code}")
         body: dict[str, Any] = json.loads(resp.content)

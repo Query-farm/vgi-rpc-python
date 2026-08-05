@@ -317,10 +317,10 @@ class FakeStorageBackend:
 
     def __init__(self, base_url: str) -> None:
         """Bind to a running fake-storage service at ``base_url``."""
-        import httpx
+        import httpx2
 
         self._base_url = base_url.rstrip("/")
-        self._client = httpx.Client(timeout=10.0)
+        self._client = httpx2.Client(timeout=10.0)
 
     def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Allocate a URL, PUT bytes, return the GET URL (``ExternalStorage``)."""

@@ -39,7 +39,7 @@ Full round-trip latency for unary and streaming calls across all transports. Inc
 - **Subprocess**, **Unix**, and **pool** transports have the lowest latency (~0.07-0.16 ms)
 - **Pipe** is slightly higher due to thread coordination overhead
 - **Shared memory** carries more setup overhead for simple calls but shines with large batches
-- **HTTP** adds ~0.5 ms baseline from the Falcon/httpx stack (in-process WSGI, no network)
+- **HTTP** adds ~0.5 ms baseline from the Falcon/httpx2 stack (in-process WSGI, no network)
 
 ### Streaming
 

@@ -27,7 +27,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pyarrow as pa
 import pytest
 from pytest_benchmark.fixture import BenchmarkFixture
@@ -49,9 +49,9 @@ def _wait_for_http(port: int, timeout: float = 10.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            _ = httpx.get(f"http://127.0.0.1:{port}/health", timeout=5.0)
+            _ = httpx2.get(f"http://127.0.0.1:{port}/health", timeout=5.0)
             return
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+        except (httpx2.ConnectError, httpx2.ConnectTimeout):
             time.sleep(0.1)
     raise TimeoutError(f"Java HTTP worker on port {port} did not start within {timeout}s")
 

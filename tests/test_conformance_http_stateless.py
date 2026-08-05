@@ -7,7 +7,7 @@ The generic conformance suite is run against a round-robin client (see
 ``conformance_conn`` in conftest), which already forces exchanges to
 land on different backends.  These tests add targeted assertions that
 *both* backends actually handled exchanges — guarding against a
-regression where an httpx-level sticky pool or protocol quirk silently
+regression where an httpx2-level sticky pool or protocol quirk silently
 pins a stream to one server, which would make round-robin coverage a
 false positive.
 """
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import cast
 
-import httpx
+import httpx2
 
 from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
@@ -28,7 +28,7 @@ def test_health_reports_distinct_server_ids(conformance_http_two_servers: tuple[
     port_a, port_b = conformance_http_two_servers
     ids = set()
     for port in (port_a, port_b):
-        resp = httpx.get(f"http://127.0.0.1:{port}/health", timeout=5.0)
+        resp = httpx2.get(f"http://127.0.0.1:{port}/health", timeout=5.0)
         resp.raise_for_status()
         ids.add(resp.json()["server_id"])
     assert len(ids) == 2, f"expected distinct server_ids across the two backends, got {ids}"
@@ -92,7 +92,7 @@ def test_cancel_notification_survives_backend_swap(conformance_http_two_servers:
 
     for port in (port_a, port_b):
         with (
-            httpx.Client(base_url=f"http://127.0.0.1:{port}") as direct,
+            httpx2.Client(base_url=f"http://127.0.0.1:{port}") as direct,
             http_connect(ConformanceService, client=direct) as proxy,
         ):
             proxy.reset_cancel_probe()
@@ -108,7 +108,7 @@ def test_cancel_notification_survives_backend_swap(conformance_http_two_servers:
         rr_client.close()
 
     with (
-        httpx.Client(base_url=f"http://127.0.0.1:{port_a}") as direct,
+        httpx2.Client(base_url=f"http://127.0.0.1:{port_a}") as direct,
         http_connect(ConformanceService, client=direct) as proxy,
     ):
         _produce, exchange_calls, on_cancel_calls = proxy.cancel_probe_counters()

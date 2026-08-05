@@ -939,7 +939,7 @@ class TestJwtAuthenticate:
                 time.sleep(0.05)
                 return _FakeResp()
 
-        with patch("vgi_rpc.http._oauth_jwt.httpx.Client", _FakeClient):
+        with patch("vgi_rpc.http._oauth_jwt.httpx2.Client", _FakeClient):
             auth_fn = jwt_authenticate(
                 issuer="https://auth.example.com",
                 audience="https://api.example.com/vgi",

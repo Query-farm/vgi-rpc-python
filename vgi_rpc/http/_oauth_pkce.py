@@ -13,7 +13,7 @@ are configured, this module enables browser-based authentication:
 3. The callback exchanges the code for a token, stores it in a JS-readable
    cookie, and redirects back to the original page.
 
-Requires ``pip install vgi-rpc[oauth]`` (httpx).
+Requires ``pip install vgi-rpc[oauth]`` (httpx2).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from urllib.parse import quote as _urlquote
 from urllib.parse import urlencode, urlparse
 
 import falcon
-import httpx
+import httpx2
 
 from vgi_rpc.rpc import AuthContext
 
@@ -283,7 +283,7 @@ def _create_oidc_discovery(issuer: str) -> Callable[[], tuple[str, str] | None]:
                 return cached  # type: ignore[unreachable]  # double-checked locking; mypy can't model concurrent set
             try:
                 url = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
-                with httpx.Client() as client:
+                with httpx2.Client() as client:
                     resp = client.get(url, timeout=10.0)
                     resp.raise_for_status()
                     data = resp.json()
@@ -343,7 +343,7 @@ def _exchange_code_for_token(
         form_data["client_secret"] = client_secret
 
     try:
-        with httpx.Client() as client:
+        with httpx2.Client() as client:
             resp = client.post(token_endpoint, data=form_data, timeout=15.0)
             resp.raise_for_status()
             body = resp.json()
@@ -1084,7 +1084,7 @@ class _OAuthTokenProxyResource:
                 upstream[key] = value
 
         try:
-            with httpx.Client() as client:
+            with httpx2.Client() as client:
                 upstream_resp = client.post(token_endpoint, data=upstream, timeout=15.0)
             body_bytes = upstream_resp.content
             status_code = upstream_resp.status_code

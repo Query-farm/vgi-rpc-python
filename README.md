@@ -45,10 +45,10 @@ pip install vgi-rpc
 Optional extras:
 
 ```bash
-pip install vgi-rpc[http]       # HTTP transport (Falcon + httpx)
+pip install vgi-rpc[http]       # HTTP transport (Falcon + httpx2)
 pip install vgi-rpc[s3]         # S3 storage backend
 pip install vgi-rpc[gcs]        # Google Cloud Storage backend
-pip install vgi-rpc[cli]        # CLI tool (typer + httpx)
+pip install vgi-rpc[cli]        # CLI tool (typer + httpx2)
 pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
 pip install vgi-rpc[sentry]     # Sentry error reporting
@@ -466,7 +466,7 @@ The lockstep RPC protocol guarantees only one side is active at a time, so no lo
 
 ### HTTP
 
-Requires `pip install vgi-rpc[http]`. The server exposes a Falcon WSGI app; the client uses httpx. Like pipe and subprocess transports, `http_connect` returns a proxy typed as the Protocol class:
+Requires `pip install vgi-rpc[http]`. The server exposes a Falcon WSGI app; the client uses httpx2. Like pipe and subprocess transports, `http_connect` returns a proxy typed as the Protocol class:
 
 ```python
 from vgi_rpc import RpcServer, http_connect, make_wsgi_app
@@ -564,7 +564,7 @@ if caps.upload_url_support:
     urls = request_upload_urls("http://localhost:8080", count=3)
     for url in urls:
         # Upload data directly to storage via pre-signed PUT URL
-        httpx.put(url.upload_url, content=data)
+        httpx2.put(url.upload_url, content=data)
         # url.download_url goes into vgi_rpc.location pointer batches
 ```
 

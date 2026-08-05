@@ -1032,7 +1032,7 @@ def _call_unary_http(
     protocol_version: str | None = None,
 ) -> None:
     """Call a unary method over HTTP transport."""
-    import httpx
+    import httpx2
 
     from vgi_rpc.http._client import _open_response_stream
     from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
@@ -1040,7 +1040,7 @@ def _call_unary_http(
     req_buf = BytesIO()
     _write_request(req_buf, method.name, method.params_schema, kwargs, protocol_version=protocol_version)
 
-    client = httpx.Client(base_url=url, follow_redirects=True)
+    client = httpx2.Client(base_url=url, follow_redirects=True)
     try:
         resp = client.post(
             f"{prefix}/{method.name}",
@@ -1069,7 +1069,7 @@ def _call_stream_http(
     protocol_version: str | None = None,
 ) -> None:
     """Call a stream method over HTTP transport."""
-    import httpx
+    import httpx2
 
     from vgi_rpc.http._client import _init_http_stream_session, _open_response_stream
     from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
@@ -1077,7 +1077,7 @@ def _call_stream_http(
     req_buf = BytesIO()
     _write_request(req_buf, method.name, method.params_schema, kwargs, protocol_version=protocol_version)
 
-    client = httpx.Client(base_url=url, follow_redirects=True)
+    client = httpx2.Client(base_url=url, follow_redirects=True)
     try:
         resp = client.post(
             f"{prefix}/{method.name}/init",

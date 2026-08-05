@@ -2092,7 +2092,7 @@ class TestZstdCompression:
     def test_server_compressed_client_uncompressed(self) -> None:
         """Server compresses responses; client sends uncompressed requests.
 
-        httpx (and _SyncTestResponse) auto-decompress zstd responses, so
+        httpx2 (and _SyncTestResponse) auto-decompress zstd responses, so
         this works transparently.
         """
         client = make_sync_client(
@@ -3120,7 +3120,7 @@ class _CookieServiceImpl:
         return ctx.cookies.get("sid", "")
 
     def set_sid(self, value: str, max_age: int, ctx: CallContext) -> str:
-        """Queue a Set-Cookie for ``sid`` — non-secure so httpx stores it on http:// URLs."""
+        """Queue a Set-Cookie for ``sid`` — non-secure so httpx2 stores it on http:// URLs."""
         ctx.set_cookie(
             "sid",
             value,
@@ -3296,26 +3296,26 @@ class TestCookiesServerSide:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Cookie conformance via real httpx.Client (end-to-end)
+# Tests: Cookie conformance via real httpx2.Client (end-to-end)
 # ---------------------------------------------------------------------------
 
 
 def _make_httpx_wsgi_client(app: falcon.App[falcon.Request, falcon.Response]) -> Any:
-    """Build an httpx.Client that dispatches to a WSGI app in-process.
+    """Build an httpx2.Client that dispatches to a WSGI app in-process.
 
-    Gives tests the full httpx pipeline (including the cookie jar) without
+    Gives tests the full httpx2 pipeline (including the cookie jar) without
     spawning a real HTTP server.
     """
-    import httpx
+    import httpx2
 
-    return httpx.Client(transport=httpx.WSGITransport(app=cast("Any", app)), base_url=_BASE_URL)
+    return httpx2.Client(transport=httpx2.WSGITransport(app=cast("Any", app)), base_url=_BASE_URL)
 
 
 class TestCookieClientConformance:
-    """End-to-end cookie behavior via httpx.Client + WSGITransport.
+    """End-to-end cookie behavior via httpx2.Client + WSGITransport.
 
     ``_SyncTestClient`` does not maintain a cookie jar, so these tests use
-    a real ``httpx.Client`` wired to the WSGI app in-process to validate
+    a real ``httpx2.Client`` wired to the WSGI app in-process to validate
     that ``Set-Cookie`` from the server is persisted by the client and
     echoed back on the next request.
     """
@@ -3448,7 +3448,7 @@ class TestCookiesRealServer:
         import threading
         import time
 
-        import httpx
+        import httpx2
 
         try:
             import waitress
@@ -3480,15 +3480,15 @@ class TestCookiesRealServer:
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 try:
-                    httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+                    httpx2.get(f"http://127.0.0.1:{port}/", timeout=0.5)
                     break
-                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout):
+                except (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.ReadTimeout):
                     time.sleep(0.05)
             else:
                 pytest.fail("Real server did not accept connections within 5s")
 
             base_url = f"http://127.0.0.1:{port}"
-            client = httpx.Client(base_url=base_url)
+            client = httpx2.Client(base_url=base_url)
             try:
                 with http_connect(_CookieService, client=client, prefix="") as proxy:
                     proxy.set_sid(value="waitressed", max_age=60)

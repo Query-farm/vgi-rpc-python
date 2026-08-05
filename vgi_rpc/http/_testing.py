@@ -27,11 +27,11 @@ if TYPE_CHECKING:
 
 
 class _SyncTestResponse:
-    """Minimal response object matching what _HttpProxy expects from httpx.Response.
+    """Minimal response object matching what _HttpProxy expects from httpx2.Response.
 
     Transparently decompresses ``Content-Encoding`` response bodies for
-    any codec the runtime can handle (zstd, gzip), mirroring httpx's
-    built-in decoders so the test client and a real httpx client behave
+    any codec the runtime can handle (zstd, gzip), mirroring httpx2's
+    built-in decoders so the test client and a real httpx2 client behave
     identically.
     """
 
@@ -107,13 +107,13 @@ class _SyncTestClient:
 
         Returns a 404 by default because the test client doesn't proxy
         out to external storage; callers needing real PUT semantics
-        should use ``httpx.Client`` directly. This stub exists so the
+        should use ``httpx2.Client`` directly. This stub exists so the
         sticky session-tracking client (which delegates PUT through
-        unchanged) keeps a uniform interface with httpx.
+        unchanged) keeps a uniform interface with httpx2.
         """
         # No-op delegation — tests don't go through the test client for
         # external uploads; they hit the FakeStorageBackend HTTP endpoint
-        # via real httpx. Returning a 404 surfaces clearly if anything
+        # via real httpx2. Returning a 404 surfaces clearly if anything
         # accidentally routes here.
         return _SyncTestResponse(404, b"", headers={})
 

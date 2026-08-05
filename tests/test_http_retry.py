@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
 
-import httpx
+import httpx2
 import pyarrow as pa
 import pytest
 
@@ -104,7 +104,7 @@ class _TransientFailureClient:
 
 
 class _ConnectionErrorClient:
-    """Raises ``httpx.ConnectError`` for the first N calls, then delegates."""
+    """Raises ``httpx2.ConnectError`` for the first N calls, then delegates."""
 
     def __init__(self, real: _SyncTestClient, *, failures: int = 1) -> None:
         self._real = real
@@ -115,7 +115,7 @@ class _ConnectionErrorClient:
         self.call_count += 1
         if self._failures_remaining > 0:
             self._failures_remaining -= 1
-            raise httpx.ConnectError("Connection refused")
+            raise httpx2.ConnectError("Connection refused")
 
     def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
         """Intercept POST requests, optionally raising ConnectError."""
@@ -133,7 +133,7 @@ class _ConnectionErrorClient:
 
 
 class _TimeoutErrorClient:
-    """Raises ``httpx.ReadTimeout`` for the first N calls, then delegates."""
+    """Raises ``httpx2.ReadTimeout`` for the first N calls, then delegates."""
 
     def __init__(self, real: _SyncTestClient, *, failures: int = 1) -> None:
         self._real = real
@@ -144,7 +144,7 @@ class _TimeoutErrorClient:
         self.call_count += 1
         if self._failures_remaining > 0:
             self._failures_remaining -= 1
-            raise httpx.ReadTimeout("Read timed out")
+            raise httpx2.ReadTimeout("Read timed out")
 
     def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> _SyncTestResponse:
         """Intercept POST requests, optionally raising ReadTimeout."""
@@ -549,7 +549,7 @@ class TestConnectionErrorRetry:
     def test_connect_error_exhausted_raises(self, real_client: _SyncTestClient) -> None:
         """ConnectError is re-raised when retries are exhausted."""
         wrapper = _ConnectionErrorClient(real_client, failures=10)
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(httpx2.ConnectError):
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
                 "/add",
@@ -563,7 +563,7 @@ class TestConnectionErrorRetry:
     def test_connect_error_no_retry_when_disabled(self, real_client: _SyncTestClient) -> None:
         """ConnectError is re-raised immediately when retry_on_connection_error=False."""
         wrapper = _ConnectionErrorClient(real_client, failures=1)
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(httpx2.ConnectError):
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
                 "/add",
@@ -591,7 +591,7 @@ class TestConnectionErrorRetry:
     def test_timeout_no_retry_when_disabled(self, real_client: _SyncTestClient) -> None:
         """TimeoutException is re-raised immediately when retry_on_connection_error=False."""
         wrapper = _TimeoutErrorClient(real_client, failures=1)
-        with pytest.raises(httpx.ReadTimeout):
+        with pytest.raises(httpx2.ReadTimeout):
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
                 "/add",
@@ -786,15 +786,15 @@ class TestStaleConnectionRetry:
     A server or load balancer may reap an idle persistent connection at any
     moment, and that reap races the next request no matter how the client is
     written — so the client has to recover rather than surface it. What makes
-    it recoverable is *when* it happens: httpx says "Server disconnected
+    it recoverable is *when* it happens: httpx2 says "Server disconnected
     without sending a response" only when the socket died before any response
     byte arrived, which proves the request went unanswered and cannot have
     been applied twice by a replay.
     """
 
     @staticmethod
-    def _stale() -> httpx.RemoteProtocolError:
-        return httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    def _stale() -> httpx2.RemoteProtocolError:
+        return httpx2.RemoteProtocolError("Server disconnected without sending a response.")
 
     def test_stale_pooled_connection_is_retried(self) -> None:
         """A disconnect before any response byte is replayed on a fresh connection."""
@@ -804,7 +804,7 @@ class TestStaleConnectionRetry:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise self._stale()
-            return httpx.Response(200, text="ok")
+            return httpx2.Response(200, text="ok")
 
         resp = _request_with_retry(
             make_request,
@@ -826,9 +826,9 @@ class TestStaleConnectionRetry:
 
         def make_request() -> Any:
             calls["n"] += 1
-            raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+            raise httpx2.RemoteProtocolError("peer closed connection without sending complete message body")
 
-        with pytest.raises(httpx.RemoteProtocolError):
+        with pytest.raises(httpx2.RemoteProtocolError):
             _request_with_retry(
                 make_request,
                 config=HttpRetryConfig(max_retries=2, backoff_base=0.001),
@@ -846,7 +846,7 @@ class TestStaleConnectionRetry:
             calls["n"] += 1
             raise self._stale()
 
-        with pytest.raises(httpx.RemoteProtocolError):
+        with pytest.raises(httpx2.RemoteProtocolError):
             _request_with_retry(
                 make_request,
                 config=HttpRetryConfig(max_retries=2, backoff_base=0.001),
@@ -864,7 +864,7 @@ class TestStaleConnectionRetry:
             calls["n"] += 1
             raise self._stale()
 
-        with pytest.raises(httpx.RemoteProtocolError):
+        with pytest.raises(httpx2.RemoteProtocolError):
             _request_with_retry(
                 make_request,
                 config=HttpRetryConfig(max_retries=3, retry_on_connection_error=False, backoff_base=0.001),

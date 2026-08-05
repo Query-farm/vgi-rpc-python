@@ -1,6 +1,6 @@
 [project]
 name = "vgi-rpc"
-version = "0.39.1"
+version = "0.40.0"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,7 +27,7 @@ Documentation = "https://vgi-rpc-python.query.farm/"
 [project.optional-dependencies]
 http = [
     "falcon>=3.0",
-    "httpx>=0.24",
+    "httpx2>=2.9.1",
     "waitress>=2.0",
     "zstandard>=0.20",
     "pycryptodome>=3.20",
@@ -44,7 +44,7 @@ http = [
 ]
 s3 = ["boto3>=1.28"]
 gcs = ["google-cloud-storage>=2.10"]
-cli = ["typer>=0.9", "httpx>=0.24", "filelock>=3.13"]
+cli = ["typer>=0.9", "httpx2>=2.9.1", "filelock>=3.13"]
 # aiohttp >=3.14.1 picks up a batch of client-side security fixes (CVE-2026-
 # 34993, -47265, -502xx, -542xx). The old <3.14 cap existed only because
 # aioresponses broke on 3.14's ClientResponse.stream_writer kwarg; the test
@@ -267,7 +267,7 @@ dev = [
     "falcon>=3.0",
     "filelock>=3.13",
     "google-cloud-storage>=2.10",
-    "httpx>=0.24",
+    "httpx2>=2.9.1",
     "jsonschema>=4.0",
     "types-jsonschema>=4.0",
     "lxml>=6.0.2",

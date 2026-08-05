@@ -74,11 +74,11 @@ from vgi_rpc.utils import (
 )
 
 # Optional integrations are loaded on first attribute access via __getattr__.
-# Submodules listed here pull in heavy deps (Falcon, httpx, sentry-sdk, boto3,
+# Submodules listed here pull in heavy deps (Falcon, httpx2, sentry-sdk, boto3,
 # google-cloud-storage) that subprocess workers and CLI users don't need at
 # import time.
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
-    # vgi_rpc.http (Falcon + httpx)
+    # vgi_rpc.http (Falcon + httpx2)
     "MAX_REQUEST_BYTES_HEADER": ("vgi_rpc.http", "MAX_REQUEST_BYTES_HEADER"),
     "MAX_UPLOAD_BYTES_HEADER": ("vgi_rpc.http", "MAX_UPLOAD_BYTES_HEADER"),
     "UPLOAD_URL_HEADER": ("vgi_rpc.http", "UPLOAD_URL_HEADER"),
