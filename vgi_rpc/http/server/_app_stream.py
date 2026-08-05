@@ -236,7 +236,7 @@ def _run_stream_init_sync(
             # See the note in _app_unary.py: caller-controlled shape is refused
             # while the request is still being validated, so anything the init
             # method raises past this point takes the ordinary error path.
-            _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults)
+            _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults, info.params_schema)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc

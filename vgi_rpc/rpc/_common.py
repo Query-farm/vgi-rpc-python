@@ -629,6 +629,15 @@ _current_access_sink: ContextVar[list[tuple[str, dict[str, object]]] | None] = C
 #: bytes copy was not.
 _current_request_batch: ContextVar[Any | None] = ContextVar("vgi_rpc_request_batch", default=None)
 
+#: Arrow schema of the request batch the current call's kwargs were decoded
+#: from, set by ``_read_request``.  The dispatch paths compare it against the
+#: method's declared ``params_schema`` to reject a caller's wrong types while
+#: the request is still being validated.  The check has to see *Arrow* types:
+#: kwargs have already been through ``as_py()`` by the time a dispatch path
+#: sees them, so the type that actually arrived on the wire is only
+#: recoverable from here.
+_current_request_param_schema: ContextVar[Any | None] = ContextVar("vgi_rpc_request_param_schema", default=None)
+
 # Stream correlation ID — set by _serve_stream() / HTTP init path,
 # carried in the HTTP state token for exchange/produce correlation.
 _current_stream_id: ContextVar[str] = ContextVar("vgi_rpc_stream_id", default="")

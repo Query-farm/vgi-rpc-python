@@ -99,7 +99,7 @@ def _run_unary_sync(
             # Caller-controlled shape is refused *here*, while the request is
             # still being validated, so that anything raised past this point
             # is the method's own and gets the ordinary error path.
-            _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults)
+            _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults, info.params_schema)
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
