@@ -266,6 +266,16 @@ Two further points the tests pin:
 - **Headers a plain worker never advertises.** The conditional capability headers — `VGI-Upload-URL-Support`, `VGI-Max-Upload-Bytes`, the size caps — are absent from a worker with no storage configured, so a missing exposure for them passes. **Point `conformance_http_cors_port` at a storage/upload-enabled worker**, not a bare one; `test_worker_advertises_the_optional_capabilities` fails the fixture if you don't.
 - **Headers that only ride failures.** `OPTIONS /health` is a success-path surface, so nothing advertises `X-VGI-RPC-Error`, `VGI-Auth-Reason`, or `X-Request-ID` — a derived check structurally cannot reach them. They are named explicitly in `_ALWAYS_EXPOSED` and asserted one at a time. `VGI-Auth-Reason` is the one to check first: without it a browser client cannot read the machine-readable half of a 401 and is back to parsing prose.
 
+## The externalized-response cap must be enforced, not just advertised
+
+`max_externalized_response_bytes` is the cap with **no escape valve**. `max_response_bytes` governs what lands on the wire and is *soft* for producer streams, because a continuation token carries the overshoot to the next turn. Bytes already uploaded to external storage cannot be un-uploaded, so this cap is hard on every method type — and it is the one whose absence costs real egress before anyone notices.
+
+One port shipped it advertised and unenforced: the configured value was read only to emit `VGI-Max-Externalized-Response-Bytes` and add it to the CORS expose list, and was never compared against anything. A worker capped at 512 bytes uploaded 200,336 bytes and answered success. A client sizing its requests against that header was reading a promise the server did not keep.
+
+`TestExternalizedResponseCap` pins three things: an overshooting unary response fails, a payload *under* the cap still round-trips through the external channel (so the cap is a cap and not a wall), and a producer gets no continuation escape from it — the direct opposite of `TestHttpResponseCapSoftWire`, which pins that a producer *does* get one for the wire cap.
+
+Supply `conformance_http_externalized_cap_port`: a worker with storage wired, a tight `max_externalized_response_bytes`, and a **generous** `max_response_bytes`. Getting that second part wrong is the trap — with both caps tight, the body cap fails first and the group passes while proving nothing about the external channel. The group is capability-gated on the advertisement, so a port with no external channel skips; a port that advertises has no way out, because the header is the promise.
+
 ## The error flag must be sent, not just exposed
 
 A failed RPC answers **HTTP 200** — the error rides the body as an EXCEPTION batch, because the call reached the method and the method raised. The status line therefore says nothing, and `X-VGI-RPC-Error: true` is how a client tells a failure from a result without parsing the body.

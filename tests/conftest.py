@@ -721,6 +721,50 @@ def conformance_http_strict_cap_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_externalized_cap_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Spawn a worker whose *external-channel* cap is the one that bites.
+
+    Backs the shared ``TestExternalizedResponseCap`` group.  Two settings
+    make this fixture mean what it says:
+
+    * ``--max-externalized-response-bytes`` is tight (64 KiB) so an
+      externalised response overshoots it.
+    * ``--max-response-bytes`` is deliberately *generous* (8 MiB).  An
+      externalised payload leaves only a pointer batch on the wire, so the
+      body cap should never be what fails here — if it were tight too, the
+      test would pass while proving nothing about the external cap.
+
+    ``--externalize-threshold`` stays at its 4 KiB default so a modest
+    payload still externalises, which is what lets the under-cap control
+    exercise the same channel without tripping the cap.
+    """
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            _CONFORMANCE_HTTP_STRICT,
+            "--fake-storage",
+            conformance_fake_storage,
+            "--max-externalized-response-bytes",
+            str(64 * 1024),
+            "--max-response-bytes",
+            str(8 * 1024 * 1024),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+        _wait_for_http(port)
+        yield port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def conformance_fake_storage() -> Iterator[str]:
     """Spawn the in-process fake storage service for external-location tests.
 

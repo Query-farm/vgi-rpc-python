@@ -2730,6 +2730,105 @@ class TestHttpResponseCap:
             session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
 
 
+class TestExternalizedResponseCap:
+    """``max_externalized_response_bytes`` must be enforced, not just advertised.
+
+    This is the cap with no escape valve. ``max_response_bytes`` governs
+    what lands on the wire and is *soft* for producer streams, because a
+    continuation token can carry the overshoot to the next turn. Bytes
+    already uploaded to external storage cannot be un-uploaded, so this cap
+    is **hard on every method type** — which also makes it the one whose
+    absence costs real money and real egress before anyone notices.
+
+    Advertising it and not enforcing it is the failure this group exists to
+    catch: a client reads ``VGI-Max-Externalized-Response-Bytes`` and sizes
+    its requests against a limit the server will not actually apply. At
+    least one port shipped exactly that — the field was read only to emit
+    the header and never compared against anything, so a worker capped at
+    512 bytes uploaded 200 KB and answered success.
+
+    Gated on the advertisement, so a port with no external channel skips.
+    A port that *does* advertise has no way out: the whole point is that
+    the header is a promise.
+
+    Required runner fixture:
+
+    * ``conformance_http_externalized_cap_port`` — an HTTP worker with
+      storage wired, a tight ``max_externalized_response_bytes``, and a
+      **generous** ``max_response_bytes``. The body cap must not be what
+      fails, or the group passes while proving nothing.
+    """
+
+    @staticmethod
+    def _client_external_config() -> object:
+        """Build an ``ExternalLocationConfig`` that allows http URLs."""
+        from vgi_rpc.external import ExternalLocationConfig
+
+        return ExternalLocationConfig(url_validator=None)
+
+    def _caps(self, port: int) -> Any:
+        """Read capabilities, skipping unless the external cap is advertised."""
+        from vgi_rpc.http import http_capabilities
+
+        caps = http_capabilities(base_url=f"http://127.0.0.1:{port}")
+        if caps.max_externalized_response_bytes is None:
+            pytest.skip("server does not advertise VGI-Max-Externalized-Response-Bytes")
+        return caps
+
+    def _connect(self, port: int) -> Any:
+        """Open a connection able to resolve external locations."""
+        from vgi_rpc.http import http_connect
+
+        return http_connect(
+            ConformanceService,
+            f"http://127.0.0.1:{port}",
+            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        )
+
+    def test_unary_externalized_overshoot_fails(self, conformance_http_externalized_cap_port: int) -> None:
+        """A unary response whose upload exceeds the cap must fail, not upload."""
+        caps = self._caps(conformance_http_externalized_cap_port)
+        payload = "x" * (caps.max_externalized_response_bytes * 8)
+        with (
+            self._connect(conformance_http_externalized_cap_port) as proxy,
+            pytest.raises(RpcError, match=r"max_externalized_response_bytes"),
+        ):
+            proxy.echo_large_string(value=payload)
+
+    def test_under_cap_still_externalizes(self, conformance_http_externalized_cap_port: int) -> None:
+        """The control: a payload under the cap still round-trips externally.
+
+        Without this, a server that failed *every* externalised response —
+        or refused to externalise at all — would pass the overshoot case
+        and look conformant. The cap has to be a cap, not a wall.
+        """
+        caps = self._caps(conformance_http_externalized_cap_port)
+        # Comfortably above a typical externalize threshold, comfortably
+        # below the cap, so it travels the external channel without
+        # tripping it.
+        payload = "y" * (caps.max_externalized_response_bytes // 8)
+        with self._connect(conformance_http_externalized_cap_port) as proxy:
+            assert proxy.echo_large_string(value=payload) == payload
+
+    def test_producer_gets_no_continuation_escape(self, conformance_http_externalized_cap_port: int) -> None:
+        """Producers do **not** get the soft-cap treatment for this cap.
+
+        ``TestHttpResponseCapSoftWire`` pins the opposite behaviour for
+        ``max_response_bytes``: a producer overshooting the *wire* cap
+        splits across continuation tokens rather than failing. The external
+        cap cannot work that way — the upload has already happened by the
+        time anyone could mint a continuation — so a producer that
+        overshoots it must surface an error like any other method.
+        """
+        caps = self._caps(conformance_http_externalized_cap_port)
+        target_rows = max(4096, (caps.max_externalized_response_bytes * 8) // 16)
+        with (
+            self._connect(conformance_http_externalized_cap_port) as proxy,
+            pytest.raises(RpcError, match=r"max_externalized_response_bytes"),
+        ):
+            list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
+
+
 class TestHttpResponseCapSoftWire:
     """Producer streams have a *soft* wire cap.
 
