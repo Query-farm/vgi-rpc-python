@@ -14,7 +14,7 @@ import sys
 import threading
 from collections.abc import Callable
 from enum import Enum
-from io import IOBase, RawIOBase
+from io import BufferedReader, IOBase, RawIOBase
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast, runtime_checkable
 
 from vgi_rpc.rpc._common import _logger
@@ -33,10 +33,12 @@ def _stderr_open() -> bool:
         return False
 
 
-# Largest byte count handed to a single underlying ``write()``.  Chosen to
-# sit well under ``INT_MAX`` on every platform; ``memoryview`` slicing is
-# free, so the only cost of chunking is one extra syscall per gigabyte.
+# Largest byte count handed to a single underlying ``write()`` or ``read()``.
+# Chosen to sit well under ``INT_MAX`` on every platform; ``memoryview``
+# slicing is free, so the only cost of chunking is one extra syscall per
+# gigabyte.
 _MAX_WRITE_CHUNK = 1 << 30  # 1 GiB
+_MAX_READ_CHUNK = _MAX_WRITE_CHUNK
 
 
 class _ExactWriter(RawIOBase):
@@ -57,9 +59,8 @@ class _ExactWriter(RawIOBase):
     So looping on the return value alone is not enough — the per-call size
     has to be clamped as well, which is what ``_MAX_WRITE_CHUNK`` does.
     Arrow's ``PythonFile`` sink does not re-offer a remainder, so both
-    behaviours have to be absorbed here.  The readers are already hardened
-    against the mirror-image short-*read*; this is the write-side
-    counterpart.
+    behaviours have to be absorbed here.  See :class:`_ClampedReader` for the
+    read-side counterpart.
     """
 
     def __init__(self, raw: IOBase) -> None:
@@ -104,6 +105,78 @@ class _ExactWriter(RawIOBase):
 def _exact(raw: IOBase) -> IOBase:
     """Wrap ``raw`` so partial writes are retried. See :class:`_ExactWriter`."""
     return cast("IOBase", _ExactWriter(raw))
+
+
+class _ClampedRaw(RawIOBase):
+    """Cap each underlying read below ``INT_MAX``; buffering above refills.
+
+    The mirror image of :class:`_ExactWriter`, and the half that was missed
+    when the write side was fixed.  Arrow asks for a whole message body in
+    one call, so a >2 GiB batch produces a single read of that size, and on
+    macOS ``recv_into`` refuses it with ``EINVAL`` exactly as ``send`` does
+    -- the read-side twin of the write bug, on the same two socket
+    transports.
+
+    It presented as a flake rather than a failure.  ``BufferedReader``
+    bypasses its buffer only for requests larger than the buffer, so whether
+    any single request crossed ``INT_MAX`` depended on how much of the body
+    happened to be buffered already: roughly one connection in two died
+    mid-request, the serve loop logged it at DEBUG and carried on, and the
+    peer saw a bare broken pipe with no explanation.
+
+    This sits *under* the buffering rather than over it, which is what keeps
+    it free.  Clamping alone is not sufficient -- pyarrow does not retry a
+    short read, it raises ``Expected to be able to read N bytes for message
+    body, got M`` -- but ``BufferedReader.read`` already loops over its raw
+    until the request is satisfied, in C.  So the refill comes from the layer
+    that was always there, and this class is called once per buffer fill
+    instead of once per Arrow read.  Wrapping the buffered stream from the
+    outside instead measured 2-3x slower on small calls, for no extra safety.
+    """
+
+    def __init__(self, raw: IOBase, owner: IOBase | None = None) -> None:
+        super().__init__()
+        self._raw = raw
+        # The buffered wrapper we took ``raw`` out of, kept so closing this
+        # object still releases whatever it owns (a socket's io refcount).
+        self._owner = owner
+
+    def readinto(self, b: Any, /) -> int:
+        view = memoryview(b).cast("B")
+        if len(view) > _MAX_READ_CHUNK:
+            view = view[:_MAX_READ_CHUNK]
+        return self._raw.readinto(view)  # type: ignore[attr-defined,no-any-return]
+
+    def readable(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def close(self) -> None:
+        try:
+            self._raw.close()
+            if self._owner is not None and not self._owner.closed:
+                self._owner.close()
+        finally:
+            super().close()
+
+
+def _clamped(buffered: IOBase) -> IOBase:
+    """Re-buffer ``buffered`` over a read-clamping raw. See :class:`_ClampedRaw`.
+
+    Args:
+        buffered: A buffered reader, as returned by ``open``/``makefile``.
+
+    Returns:
+        An equivalent buffered reader whose underlying reads are capped.
+        If the stream exposes no ``raw`` to clamp, it is returned unchanged.
+
+    """
+    raw = getattr(buffered, "raw", None)
+    if raw is None:
+        return buffered
+    return cast("IOBase", BufferedReader(_ClampedRaw(raw, buffered)))
 
 
 # ---------------------------------------------------------------------------
@@ -177,11 +250,11 @@ def make_pipe_pair() -> tuple[PipeTransport, PipeTransport]:
             s2c_w,
         )
     client = PipeTransport(
-        os.fdopen(s2c_r, "rb"),
+        _clamped(os.fdopen(s2c_r, "rb")),
         _exact(os.fdopen(c2s_w, "wb", buffering=0)),
     )
     server = PipeTransport(
-        os.fdopen(c2s_r, "rb"),
+        _clamped(os.fdopen(c2s_r, "rb")),
         _exact(os.fdopen(s2c_w, "wb", buffering=0)),
     )
     return client, server
@@ -305,7 +378,7 @@ class SubprocessTransport:
         )
         assert self._proc.stdout is not None
         assert self._proc.stdin is not None
-        self._reader: IOBase = os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False)
+        self._reader: IOBase = _clamped(os.fdopen(self._proc.stdout.fileno(), "rb", closefd=False))
         self._writer: IOBase = _exact(cast("IOBase", self._proc.stdin))
         self._closed = False
         self._stderr_thread: threading.Thread | None = None
@@ -388,7 +461,7 @@ def serve_stdio(server: RpcServer) -> None:
             "It should be launched as a subprocess by an RPC client "
             "(e.g. vgi_rpc.connect()).\n"
         )
-    reader = os.fdopen(sys.stdin.fileno(), "rb", closefd=False)
+    reader = _clamped(os.fdopen(sys.stdin.fileno(), "rb", closefd=False))
     writer = _exact(os.fdopen(sys.stdout.fileno(), "wb", buffering=0, closefd=False))
     if wire_transport_logger.isEnabledFor(logging.DEBUG):
         wire_transport_logger.debug(
@@ -419,7 +492,7 @@ class UnixTransport:
     def __init__(self, sock: socket.socket) -> None:
         """Initialize from a connected AF_UNIX socket."""
         self._sock = sock
-        self._reader: IOBase = cast("IOBase", sock.makefile("rb"))
+        self._reader: IOBase = _clamped(cast("IOBase", sock.makefile("rb")))
         self._writer: IOBase = _exact(cast("IOBase", sock.makefile("wb", buffering=0)))
 
     @property
@@ -748,7 +821,7 @@ class TcpTransport:
         with contextlib.suppress(OSError):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = sock
-        self._reader: IOBase = cast("IOBase", sock.makefile("rb"))
+        self._reader: IOBase = _clamped(cast("IOBase", sock.makefile("rb")))
         self._writer: IOBase = _exact(cast("IOBase", sock.makefile("wb", buffering=0)))
 
     @property
@@ -910,7 +983,7 @@ class NamedPipeTransport:
 
         raw = handle.Detach()  # take ownership from pywin32 (PyHANDLE)
         fd = msvcrt.open_osfhandle(raw, os.O_BINARY)
-        self._reader: IOBase = cast("IOBase", os.fdopen(fd, "rb"))
+        self._reader: IOBase = _clamped(cast("IOBase", os.fdopen(fd, "rb")))
         self._writer: IOBase = _exact(cast("IOBase", os.fdopen(os.dup(fd), "wb", buffering=0)))
 
     @property
