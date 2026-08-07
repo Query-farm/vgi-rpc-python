@@ -268,6 +268,46 @@ class TestServerErrorHeader:
         assert err.error_type == "ValueError"
         assert "init boom with header" in err.error_message
 
+    def test_producer_first_turn_error_returns_200_with_error_header(self, client: _SyncTestClient) -> None:
+        """A producer raising on its FIRST turn must still set X-VGI-RPC-Error.
+
+        Regression. HTTP folds the first producer turn into ``/init``, so this
+        error lands *after* the stream header has been written but *within* the
+        init response. That is a third shape, distinct from the two already
+        covered here: an init-time raise (``fail_stream_init_with_header``,
+        which never gets as far as a header) and a later-turn raise
+        (``fail_stream`` / ``fail_bidi_mid``, which answer a separate request).
+
+        It previously returned an unflagged 200 — the error batch was in the
+        body, but nothing marked the response as a failure. That body is TWO
+        concatenated IPC streams (header + data) and the error rides in the
+        second, so a client reading only the first sees a valid header and no
+        error. The DuckDB extension keyed off the header, found none, and
+        reported a generic transport failure with the worker's message dropped.
+        """
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        req_buf = BytesIO()
+        md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"fail_stream_first_turn", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
+            writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
+
+        resp = client.post(
+            f"{_BASE_URL}{client.prefix}/fail_stream_first_turn/init",
+            content=req_buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("x-vgi-rpc-error") == "true", (
+            "a producer that raises on its first turn must flag the response; "
+            "an unflagged 200 is indistinguishable from a successful stream"
+        )
+        err = _extract_rpc_error(resp)
+        assert err.error_type == "RuntimeError"
+        assert "stream boom on first turn" in err.error_message
+
     def test_stream_exchange_server_error_returns_200_with_error_header(self, client: _SyncTestClient) -> None:
         """Exchange that raises returns 200 with X-VGI-RPC-Error: true (via http_connect)."""
         with (

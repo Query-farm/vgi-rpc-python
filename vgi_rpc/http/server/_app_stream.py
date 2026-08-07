@@ -1084,6 +1084,20 @@ def _run_http_producer_turn(
             outcome.status = "error"
             outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
             outcome.error_message = _truncate_error_message(exc)
+            # Signal the resource layer to surface this as 200 +
+            # ``X-VGI-RPC-Error: true``, the documented shape for a method that
+            # reached the server and raised. Without it the response is an
+            # unflagged 200 and a client cannot tell it from a successful
+            # stream short of parsing the body — which is exactly what the
+            # header exists to avoid, and what every other error path in this
+            # module already does (see the cap-overshoot branch above).
+            #
+            # This matters most on the FIRST producer turn, which HTTP folds
+            # into ``/init``: the response body is then two concatenated IPC
+            # streams (header + data) and the error rides in the second, so a
+            # client that only reads the first stream sees a valid header and
+            # no error at all.
+            _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
             _write_error_batch(writer, schema, exc, server_id=server_id)
     # Close the codec BEFORE getvalue(): the compressed frame is only complete
     # once the stream is finalised.

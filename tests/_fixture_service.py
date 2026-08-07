@@ -128,6 +128,21 @@ class FailStreamState(ProducerState):
 
 
 @dataclass
+class FailStreamFirstTurnState(ProducerState):
+    """State for a stream that fails on its very FIRST produce call.
+
+    Distinct from :class:`FailStreamState`, which emits a batch first. HTTP
+    folds the first producer turn into ``/init``, so raising here fails *after*
+    the stream header has been written but *within* the init response — the one
+    error shape that neither an init-time raise nor a later-turn raise produces.
+    """
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Fail immediately, before emitting anything."""
+        raise RuntimeError("stream boom on first turn")
+
+
+@dataclass
 class FailBidiMidState(ExchangeState):
     """State for a bidi that fails after processing one batch."""
 
@@ -336,6 +351,10 @@ class RpcFixtureService(Protocol):
         """Stream that fails mid-iteration."""
         ...
 
+    def fail_stream_first_turn(self) -> Stream[ProducerState]:
+        """Stream whose producer raises on its first turn (after the header)."""
+        ...
+
     def fail_bidi_mid(self, factor: float) -> Stream[ExchangeState]:
         """Bidi that fails after first batch."""
         ...
@@ -444,6 +463,11 @@ class RpcFixtureServiceImpl:
         """Stream that fails mid-iteration."""
         schema = pa.schema([pa.field("x", pa.int64())])
         return Stream(output_schema=schema, state=FailStreamState())
+
+    def fail_stream_first_turn(self) -> Stream[FailStreamFirstTurnState]:
+        """Stream whose producer raises on its first turn (after the header)."""
+        schema = pa.schema([pa.field("x", pa.int64())])
+        return Stream(output_schema=schema, state=FailStreamFirstTurnState())
 
     def fail_bidi_mid(self, factor: float) -> Stream[FailBidiMidState]:
         """Bidi that fails after processing one batch."""
