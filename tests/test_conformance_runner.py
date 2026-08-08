@@ -26,17 +26,34 @@ from vgi_rpc.rpc import RpcError, serve_pipe
 
 _CONFORMANCE_PIPE = str(Path(__file__).parent / "serve_conformance_pipe.py")
 
+# Split out of the bulk suite run and given its own budget; see
+# ``TestRunnerViaPipe.test_full_suite_all_pass``.
+_HUGE_PAYLOAD_TEST = "large_payload.echo_binary_over_int32_max"
+
 
 class TestRunnerViaPipe:
     """Run the full conformance suite against the reference Python implementation."""
 
     def test_full_suite_all_pass(self) -> None:
-        """All conformance tests should pass against the reference implementation."""
+        """All conformance tests should pass against the reference implementation.
+
+        Every test except ``echo_binary_over_int32_max``, which
+        ``test_huge_payload_round_trip`` below owns.  It is excluded here
+        because it does not fit this test's budget in either dimension: it is
+        ~98% of the suite's wall-clock, and its >2 GiB round trip peaks around
+        6 GB resident -- ``serve_pipe`` runs the server on a thread, so client
+        and server copies land in this one process.  Under ``-n auto`` that
+        leaves nothing for the other workers on a 7 GB macOS runner, and the
+        resulting swapping stretched a 6s test past the 50s cap in ``addopts``.
+        Splitting it out keeps that cost on the one test that declares a budget
+        for it.
+        """
         log_collector = LogCollector()
         with serve_pipe(ConformanceService, ConformanceServiceImpl(), on_log=log_collector) as proxy:
-            suite = run_conformance(proxy, log_collector)
+            suite = run_conformance(proxy, log_collector, filter_patterns=[f"!{_HUGE_PAYLOAD_TEST}"])
         assert suite.success, f"Failed tests: {[r.name for r in suite.results if not r.passed]}"
         assert suite.total > 0
+        assert not any(r.name == _HUGE_PAYLOAD_TEST for r in suite.results)
         # When ``transport`` is not specified, ``run_conformance`` runs every
         # registered test regardless of the per-test ``transports`` filter.
         # HTTP-only tests (``http_response_cap.*``) self-skip via
@@ -44,6 +61,30 @@ class TestRunnerViaPipe:
         # ``http_base_url``; they appear as skipped, not failed.
         assert suite.passed + suite.skipped == suite.total
         assert suite.failed == 0
+
+    # The conformance test declares ``timeout=300.0`` for itself because moving
+    # >2 GiB twice takes seconds even when nothing is wrong.  The 50s
+    # ``--timeout`` in ``addopts`` applies to the pytest function, so without
+    # this mark the inner budget is unreachable and the stopwatch, not the
+    # bytes, decides the outcome on a loaded machine.  Match the two.
+    @pytest.mark.timeout(300)
+    def test_huge_payload_round_trip(self) -> None:
+        """The >2 GiB payload must round-trip, or be refused in a way that leaves the transport usable.
+
+        This is the only place that payload is actually moved -- the other
+        references to it in this file assert on name lists and never run it.
+        v0.42.0 fixed a read-clamping bug that survived precisely because the
+        test exposing it was opt-in and therefore never ran, so assert the test
+        was really selected rather than trusting the filter to have matched.
+        """
+        log_collector = LogCollector()
+        with serve_pipe(ConformanceService, ConformanceServiceImpl(), on_log=log_collector) as proxy:
+            suite = run_conformance(proxy, log_collector, filter_patterns=[_HUGE_PAYLOAD_TEST])
+        ran = [r.name for r in suite.results]
+        assert suite.total == 1, f"expected to select exactly {_HUGE_PAYLOAD_TEST}, ran {ran}"
+        assert suite.results[0].name == _HUGE_PAYLOAD_TEST
+        assert suite.success, f"Failed: {[r.error for r in suite.results if not r.passed]}"
+        assert suite.skipped == 0, "the huge-payload test is required; it must not self-skip"
 
     def test_filter_mechanism(self) -> None:
         """Filter should limit which tests run."""
