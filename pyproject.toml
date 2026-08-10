@@ -289,7 +289,7 @@ dev = [
     # rescue. ty is pre-1.0 and gates nothing here, so the cap costs nothing
     # and stops a routine `uv lock --upgrade` from silently reintroducing it.
     # Retest and lift once upstream terminates again.
-    "ty>=0.0.8,<0.0.64",
+    "ty>=0.0.8,<0.0.70",
     "typer>=0.9",
     "waitress>=2.0",
     "opentelemetry-api>=1.20",
