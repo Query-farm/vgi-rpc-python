@@ -1,8 +1,9 @@
 # vgi-rpc Wire Protocol Specification
 
-**Version**: 1
+**Wire protocol version**: 1
 **Status**: Normative
 **Audience**: Cross-language implementors (Go, Rust, TypeScript, C++, etc.)
+**Reflects**: vgi-rpc 0.42.0
 
 This document specifies the vgi-rpc wire protocol at byte level. A conforming
 implementation can interoperate with the Python reference without reading
@@ -63,12 +64,18 @@ where they appear, and their semantics:
 |-------------|-------|-------------|
 | `vgi_rpc.method` | UTF-8 method name | Target RPC method to invoke. **Required.** |
 | `vgi_rpc.request_version` | `"1"` (ASCII `0x31`) | Wire protocol version. **Required.** |
+| `vgi_rpc.protocol_version` | Canonical semver `MAJOR.MINOR.PATCH` | Application protocol surface version. **Required when the peer Protocol declares one**, absent otherwise. See [Section 13](#protocol-version-negotiation). |
 | `vgi_rpc.request_id` | UTF-8 string (16-char hex) | Per-request correlation ID. Optional; if absent, the server generates a new 16-char hex ID. |
+| `vgi_rpc.cancel` | `"1"` — presence is the signal | Client-initiated stream cancellation, on a stream input batch. See [Section 9](#client-initiated-cancellation). Optional. |
 | `traceparent` | W3C Trace Context string | OpenTelemetry trace propagation. Optional. |
 | `tracestate` | W3C Trace Context string | OpenTelemetry trace state. Optional. |
 | `vgi_rpc.shm_segment_name` | UTF-8 OS name | Shared memory segment name (session-level). Optional. |
 | `vgi_rpc.shm_segment_size` | Decimal integer string | Shared memory segment total size in bytes. Optional. |
 | `vgi_rpc.transport.shm` | `"true"` / `"false"` | Client's shared-memory capability, on the `__transport_options__` request. See [Section 15](#15-transport-capability-negotiation-__transport_options__). Optional. |
+
+HTTP stream continuation requests additionally carry
+`vgi_rpc.stream_state#b64` and `vgi_rpc.call_state#b64` — see the stream-state
+table below.
 
 ### Response / log / error metadata (on response batch custom metadata)
 
@@ -77,6 +84,7 @@ where they appear, and their semantics:
 | `vgi_rpc.log_level` | One of: `EXCEPTION`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` | Severity level. Present on log and error batches. |
 | `vgi_rpc.log_message` | UTF-8 string | Human-readable message text. |
 | `vgi_rpc.log_extra` | JSON string | Additional structured data. Optional. |
+| `vgi_rpc.error_kind` | UTF-8 token (open set) | Stable machine-readable error category on EXCEPTION batches. See [Section 8](#error-kinds). Optional. |
 | `vgi_rpc.server_id` | UTF-8 string (12-char hex) | Server instance identifier for distributed tracing. |
 | `vgi_rpc.request_id` | UTF-8 string | Echoed request correlation ID. |
 | `vgi_rpc.transport.shm` | `"true"` / `"false"` | Server's shared-memory capability, on the `__transport_options__` response. See [Section 15](#15-transport-capability-negotiation-__transport_options__). |
@@ -101,6 +109,7 @@ where they appear, and their semantics:
 | Key (bytes) | Value | Description |
 |-------------|-------|-------------|
 | `vgi_rpc.location` | UTF-8 URL | URL to fetch the externalized batch data. |
+| `vgi_rpc.location.sha256` | UTF-8 hex string | SHA-256 of the uploaded payload **before** compression. Optional; when present the reader MUST verify it after fetching. |
 | `vgi_rpc.location.fetch_ms` | Decimal float string (e.g. `"42.3"`) | Fetch duration in milliseconds (diagnostics, on resolved batches). |
 | `vgi_rpc.location.source` | UTF-8 URL | Original fetch URL (diagnostics, on resolved batches). |
 
@@ -112,6 +121,7 @@ where they appear, and their semantics:
 | `vgi_rpc.request_version` | `"1"` | Wire protocol version. |
 | `vgi_rpc.describe_version` | `"4"` | Introspection format version. |
 | `vgi_rpc.protocol_hash` | UTF-8 hex string | SHA-256 digest over the canonical describe payload. |
+| `vgi_rpc.protocol_version` | Canonical semver | Application protocol surface version. Present only when the Protocol declares one. |
 | `vgi_rpc.server_id` | UTF-8 string | Server instance identifier. |
 
 ---
@@ -309,6 +319,7 @@ the following custom metadata keys:
 | `vgi_rpc.log_level` | Yes | One of: `EXCEPTION`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` |
 | `vgi_rpc.log_message` | Yes | Human-readable message text (UTF-8) |
 | `vgi_rpc.log_extra` | No | JSON object with additional structured data |
+| `vgi_rpc.error_kind` | No | Stable error category; EXCEPTION batches only (see below) |
 | `vgi_rpc.server_id` | No | Server instance identifier |
 | `vgi_rpc.request_id` | No | Request correlation ID |
 
@@ -322,6 +333,29 @@ extracted from the metadata:
 - **error_message**: `vgi_rpc.log_message` value.
 - **remote_traceback**: `log_extra.traceback` (string) or empty string.
 - **request_id**: `vgi_rpc.request_id` value or empty string.
+- **error_kind**: `vgi_rpc.error_kind` value, when present.
+
+### Error kinds
+
+`vgi_rpc.error_kind` carries a stable identifier for errors a *client* is
+expected to branch on, so callers pattern-match a token instead of
+substring-searching a human-readable message. It is emitted as a top-level
+metadata key, mirroring `log_extra.error_kind` — a reader may take either, but
+the top-level key means the JSON blob need not be parsed to dispatch.
+
+The set is **open**: a client MUST treat an unrecognised value as an
+unclassified error rather than rejecting the batch. Well-known values:
+
+| Value | Meaning |
+|-------|---------|
+| `method_not_implemented` | The server has no handler for the requested method (old server vs. new client, or a method that was removed). The intended signal for capability detection with fallback. |
+| `protocol_version_mismatch` | The client's `vgi_rpc.protocol_version` is incompatible with the server's (see [Section 13](#protocol-version-negotiation)). |
+| `session_lost` | An HTTP sticky-session token could not be honoured — expired, evicted, misrouted, or presented under a different principal (see [Section 17](#17-sticky-sessions-http-optional)). |
+| `server_draining` | The server is shutting down and refuses new sticky-session opens. |
+
+A batch carrying `error_kind` is otherwise an ordinary EXCEPTION batch: the
+key adds classification and removes nothing. Implementations that do not emit
+it remain conformant; clients simply lose the ability to branch.
 
 ### `log_extra` JSON structure for EXCEPTION
 
@@ -451,6 +485,33 @@ batch). This repeats until termination.
     |<------ [EOS] -----------------|
 ```
 
+### Client-initiated cancellation
+
+Either stream kind may be terminated early by the client with an explicit
+**cancel batch**, distinct from simply closing the input stream:
+
+- **num_rows**: 0
+- **Schema**: the stream's input schema (the empty schema for producers).
+- **Custom metadata**: `vgi_rpc.cancel` — the reference sets the value `"1"`,
+  but **presence of the key is the signal**; a reader MUST NOT depend on the
+  value.
+
+On receipt the server MUST NOT invoke `process()` / `produce()` for that turn.
+It invokes the stream state's optional `on_cancel` hook — a failure in the hook
+is swallowed, never surfaced to the client — and then ends the stream cleanly
+by closing the output stream. A cancel is not an error: no EXCEPTION batch is
+written, and the exchange terminates normally.
+
+Cancellation is best-effort on the client side: transport errors while sending
+the cancel are swallowed, since the session is being abandoned regardless. After
+cancelling, the session is closed — subsequent `exchange()` / `tick()` calls
+fail locally.
+
+The same key applies over HTTP, where it rides on the `/exchange` request batch
+alongside the state tokens ([Section 10](#stream-exchange-http)). Because a
+cancel is not a method dispatch, the server suppresses dispatch hooks for it;
+the access log still records the call, marked cancelled.
+
 ### Error during streaming
 
 If the server encounters an error during `process()`, it writes an
@@ -481,26 +542,65 @@ The server MUST reject requests with any other Content-Type with HTTP 415
 
 Given a configurable URL prefix (default `/vgi`):
 
+**RPC surface** — Arrow IPC in, Arrow IPC out:
+
 | Endpoint | HTTP Method | Description |
 |----------|-------------|-------------|
 | `{prefix}/{method}` | POST | Unary RPC call |
 | `{prefix}/{method}/init` | POST | Stream initialization (producer and exchange) |
-| `{prefix}/{method}/exchange` | POST | Stream continuation / exchange |
-| `{prefix}/__describe__` | POST | Introspection (unary) |
-| `{prefix}/__upload_url__/init` | POST | Upload URL generation (when enabled) |
-| `{prefix}/__capabilities__` | OPTIONS | Server capability discovery |
+| `{prefix}/{method}/exchange` | POST | Stream continuation / exchange / cancel |
+| `{prefix}/__describe__` | POST | Introspection (unary; a synthetic method on the generic route) |
+| `{prefix}/__upload_url__/init` | POST | Upload URL generation (only when an upload-URL provider is configured) |
+
+**Framework endpoints** — not Arrow IPC:
+
+| Endpoint | HTTP Method | Description |
+|----------|-------------|-------------|
+| `{prefix}/health` | GET, HEAD, OPTIONS | Health check + **capability discovery**. JSON body on GET; capability headers on all three. |
+| `{prefix}/__session__` | DELETE | Sticky-session teardown (only when sticky sessions are enabled). See [Section 17](#17-sticky-sessions-http-optional). |
+| `{prefix}/__introspect_token__` | POST | Token introspection (JSON). See [Section 16](#16-token-introspection-post-prefix__introspect_token__). Always routed; definitively refuses when disabled. |
+
+**Optional, human- and IdP-facing** — present by default in the reference but
+carrying no wire contract; a port may omit them entirely:
+`GET {prefix}` (landing page), `GET {prefix}/describe` (HTML introspection
+page), `/.well-known/oauth-protected-resource` (OAuth resource metadata), and
+`{prefix}/_oauth/{callback,logout,token}` (OAuth PKCE browser flow).
 
 ### Capability discovery
 
-The `OPTIONS {prefix}/__capabilities__` endpoint returns server capabilities
-as HTTP response headers only — there is no Arrow IPC body. Clients parse
-the following headers:
+Capability headers are stamped on **every** response, so a client that has
+already made a call needs no separate probe. The dedicated discovery target is
+`{prefix}/health`, because it is present in every implementation and exempt
+from authentication; `OPTIONS` is the cheapest verb for it (`HEAD` and `GET`
+carry the same headers). There is no Arrow IPC body on any of them.
 
-| Header | Type | Description |
-|--------|------|-------------|
-| `VGI-Max-Request-Bytes` | Integer | Maximum request body size the server will accept. |
-| `VGI-Upload-URL-Support` | `"true"` | Present when the upload URL endpoint is available. |
-| `VGI-Max-Upload-Bytes` | Integer | Maximum upload size for externalized batches. |
+> **Note for implementors migrating from an earlier draft of this document**:
+> the discovery endpoint is `{prefix}/health`, **not** `{prefix}/__capabilities__`.
+> The reference client has never probed the latter.
+
+| Header | Type | Emitted | Description |
+|--------|------|---------|-------------|
+| `VGI-Max-Request-Bytes` | Integer | when configured | Maximum request body size the server accepts inline. Exceeding it is `413` (see [Section 13](#http-status-code-mapping)). |
+| `VGI-Max-Response-Bytes` | Integer | when configured | HTTP body cap. *Soft* for producer streams (covered by continuation tokens), *hard* elsewhere. |
+| `VGI-Max-Externalized-Response-Bytes` | Integer | when configured | Cap on total bytes uploaded to external storage during one response. Always *hard*. |
+| `VGI-Externalization-Enabled` | `"true"` / `"false"` | always | Whether a storage backend is wired up, i.e. whether the client should expect pointer batches at all. |
+| `VGI-Supported-Encodings` | Comma-separated codec tokens | always | Content codings this server will *produce*. See [Content-encoding negotiation](#content-encoding-negotiation). |
+| `VGI-Upload-URL-Support` | `"true"` | when enabled | The upload-URL endpoint is available. |
+| `VGI-Max-Upload-Bytes` | Integer | when enabled + configured | Maximum upload size for externalized batches. |
+| `VGI-Proxy-Proof-Required` | `"true"` | when required | This worker rejects requests lacking a valid proxy proof. |
+| `VGI-Sticky-Enabled` | `"true"` | when enabled | Sticky sessions are available. |
+| `VGI-Sticky-Default-TTL` | Integer seconds | when sticky enabled | TTL applied when a method opens a session without specifying one. |
+| `VGI-Sticky-Echo-Headers` | Comma-separated header names | when configured | Headers the client must replay for the life of a session. |
+| `VGI-Token-Introspection` | `"true"` | when enabled | The token-introspection route is live. |
+
+A capability header that is **absent** means "not configured / not supported",
+with one deliberate exception: an absent `VGI-Supported-Encodings` means a
+server predating the header, for which a client assumes `{zstd}`. A
+*present but empty* value is that server positively stating it speaks no
+compression — the two are not interchangeable.
+
+The server MAY include `Cache-Control: max-age=N` on the discovery response;
+a client that honours it should refresh on expiry.
 
 ### Upload URL generation
 
@@ -530,17 +630,70 @@ The response has one row per requested URL pair.
 |--------|-------------|
 | `Content-Type` | MUST be `application/vnd.apache.arrow.stream` |
 | `X-Request-ID` | Optional. Correlation ID echoed on response. If absent, server generates one. |
+| `Content-Encoding` | Optional. Coding applied to the request body. An unsupported coding is `415`. |
+| `Accept-Encoding` | Optional. Codings the client accepts on the response. |
+| `X-VGI-Accept-Encoding` | Optional. Same, but takes precedence — see [Content-encoding negotiation](#content-encoding-negotiation). |
 | `VGI-Proxy-Proof` | Optional. Per-request HMAC proof that the request arrived through a trusted proxy. See [Proxy Proof](proxy-proof-spec.md). |
+| `VGI-Session-Accept` | Optional. `"true"` opts the client in to sticky sessions. See [Section 17](#17-sticky-sessions-http-optional). |
+| `VGI-Session` | Optional. Resumes an existing sticky session. |
 
 ### Response headers
 
-| Header | Description |
-|--------|-------------|
-| `X-Request-ID` | Echoed or generated request correlation ID. |
-| `VGI-Max-Request-Bytes` | Server-advertised maximum request body size (optional). |
-| `VGI-Upload-URL-Support` | `"true"` when upload URL endpoint is available (optional). |
-| `VGI-Max-Upload-Bytes` | Server-advertised maximum upload size (optional). |
-| `VGI-Proxy-Proof-Required` | `"true"` when the server rejects requests lacking a valid proxy proof (optional). |
+Every response carries the capability headers from
+[Capability discovery](#capability-discovery) above. In addition:
+
+| Header | Emitted | Description |
+|--------|---------|-------------|
+| `X-Request-ID` | always | Echoed or generated request correlation ID. |
+| `X-VGI-RPC-Error` | on server-side errors | `"true"` marks a `200` response whose Arrow IPC body carries an EXCEPTION batch. See [Section 13](#http-status-code-mapping). |
+| `Content-Encoding` | when the response body is compressed | The coding applied. |
+| `X-VGI-Content-Encoding` | instead of the above | Used when the client negotiated via `X-VGI-Accept-Encoding`. |
+| `VGI-Auth-Reason` | on `401` only | Machine-readable reason code from the closed set in [`docs/unauthorized-spec.md`](unauthorized-spec.md). |
+| `VGI-Auth-Proxy-Required` | on `401` only, when applicable | `"true"` when this service's auth depends on headers a reverse proxy must inject. Derived from server *configuration*, so it is identical on every `401` and discloses nothing about the individual request. |
+| `VGI-Session` | when a session was opened | The token the client echoes on subsequent requests. |
+| `VGI-Session-Close` | when a session was closed | `"true"` tells the client to drop its captured token. |
+| `VGI-Echo-<name>` | on a session-opening response, when configured | Instructs the client to send `<name>: <value>` on every subsequent request in the session. |
+
+Servers that enable CORS expose `WWW-Authenticate`, `X-Request-ID`,
+`X-VGI-Content-Encoding`, `X-VGI-RPC-Error`, `VGI-Auth-Reason`, and every
+advertised capability header, so a browser client can read them cross-origin.
+
+### Content-encoding negotiation
+
+Request and response compression are independent: a server may decode a
+compressed request while producing only uncompressed responses.
+
+**Codec tokens** are the usual HTTP ones — `zstd`, `gzip`, and `identity`.
+`identity` is the no-op transform, not a compressor: it exists so a client can
+*explicitly* ask for an uncompressed response, which is otherwise only
+reachable by accident when nothing it offers happens to be producible. It is
+deliberately excluded from `VGI-Supported-Encodings`, since every
+implementation can always do it and advertising it carries no information.
+
+**Requests.** A client may compress the request body and name the coding in
+`Content-Encoding`. A server that does not support the named coding MUST
+answer `415`, not fall through to identity — the body would otherwise reach
+the Arrow reader as garbage. A body that names a supported coding but fails to
+decompress is `400`. Implementations MUST bound decompression output to
+prevent a decompression-bomb DoS.
+
+**Responses.** The client offers codings in `Accept-Encoding` and/or
+`X-VGI-Accept-Encoding`. The server picks the first offered coding it can
+produce, honouring client preference order, with **`X-VGI-Accept-Encoding`
+taking precedence** over the generic header — both in choosing the codec and in
+deciding which response header to stamp. If the first match is `identity`, the
+server MUST honour that and send an uncompressed body rather than continuing
+down the list. No overlap means an uncompressed body.
+
+The custom header exists because general-purpose HTTP clients inject their own
+`Accept-Encoding` (frequently listing `gzip` before `zstd`) that a caller
+cannot suppress, which silently overrides the order vgi-rpc states. The
+difference is not cosmetic — for large Arrow bodies gzip compression measured
+roughly an order of magnitude slower than zstd end-to-end.
+
+The chosen coding is stamped on `Content-Encoding`, or on
+`X-VGI-Content-Encoding` when the client negotiated through the custom header.
+Nothing is stamped for `identity`: an untransformed body is just a body.
 
 ### Unary call (HTTP)
 
@@ -550,13 +703,17 @@ POST {prefix}/{method}
 Request body:  IPC stream (params_schema, 1 request row, EOS)
 Response body: IPC stream (result_schema, 0..N log batches, 1 result/error batch, EOS)
 
-HTTP 200: Success (even when the response contains an error batch)
+HTTP 200: Success — and also server-side errors, which carry
+          X-VGI-RPC-Error: true plus an EXCEPTION batch in the body
 HTTP 400: Protocol error (bad IPC, missing metadata, param validation failure)
 HTTP 401: Authentication failure (JSON envelope or HTML page, NOT Arrow IPC)
 HTTP 404: Unknown method
-HTTP 415: Wrong Content-Type
-HTTP 500: Server implementation error
+HTTP 413: Request body exceeds VGI-Max-Request-Bytes
+HTTP 415: Wrong Content-Type, or an unsupported Content-Encoding
 ```
+
+See [Section 13](#http-status-code-mapping) for the full mapping, including why
+a server implementation error surfaces as `200` rather than `500`.
 
 The method name in the URL path MUST match the `vgi_rpc.method` value in
 the request batch's custom metadata. A mismatch is a 400 error.
@@ -673,6 +830,10 @@ may end with another continuation token.
 
 For **exchange**, the input carries real data plus the state token. The
 response data batch carries an updated state token for the next exchange.
+
+To **cancel**, the client sends a zero-row input batch carrying
+`vgi_rpc.cancel` alongside both tokens ([Section 9](#client-initiated-cancellation)).
+The server ends the stream without dispatching the method.
 
 The client MUST strip `vgi_rpc.stream_state#b64` and `vgi_rpc.call_state#b64`
 from the batch metadata before exposing it to application code.
@@ -1000,6 +1161,8 @@ to remote storage (e.g., S3, GCS) and replaced with pointer batches.
 - **Schema**: Same as the original batch's schema.
 - **Custom metadata**:
   - `vgi_rpc.location`: URL to fetch the batch data (typically a pre-signed URL).
+  - `vgi_rpc.location.sha256`: Optional. SHA-256 hex digest of the payload
+    **before** compression.
 - **Must NOT contain** `vgi_rpc.log_level` (to distinguish from log batches).
 
 ### Externalization (writing)
@@ -1007,9 +1170,18 @@ to remote storage (e.g., S3, GCS) and replaced with pointer batches.
 When a data batch's total buffer size exceeds the threshold:
 
 1. Serialize **all** batches from the current output cycle (log batches + data batch) as a single IPC stream.
-2. Optionally compress with zstd.
-3. Upload to external storage via the `ExternalStorage.upload()` interface.
-4. Replace the entire cycle with a single zero-row pointer batch containing `vgi_rpc.location`.
+2. Compute the SHA-256 of those bytes, before any compression.
+3. Optionally compress with zstd.
+4. Upload to external storage via the `ExternalStorage.upload()` interface.
+5. Replace the entire cycle with a single zero-row pointer batch containing `vgi_rpc.location` (and `vgi_rpc.location.sha256` when the digest was computed).
+
+### Integrity
+
+`vgi_rpc.location.sha256` is optional on the wire — a pointer batch without it
+is valid, which keeps readers compatible with writers that predate the key.
+When the key **is** present, a reader MUST verify the digest against the fetched
+payload (decompressed, if a coding was applied) and MUST fail the resolution
+on mismatch rather than handing the batch to application code.
 
 ### Resolution (reading)
 
@@ -1074,10 +1246,55 @@ metadata with the value `"1"`.
 |-----------|-------|
 | `vgi_rpc.request_version` missing | `VersionError` — server writes an error stream on the empty schema. |
 | `vgi_rpc.request_version` != `"1"` | `VersionError` — server writes an error stream on the empty schema. |
+| `vgi_rpc.protocol_version` missing or mismatched (when enforced) | `ProtocolVersionError` — see below. |
 | `vgi_rpc.method` missing | `RpcError` (ProtocolError) — server writes an error stream. |
 | Unknown method name | `RpcError` (AttributeError) — error stream includes available method names. |
 | Request batch has wrong row count (not 1, on non-empty schema) | `RpcError` (ProtocolError). |
 | Non-optional parameter is null | `TypeError` — error stream on the method's result schema. |
+
+### Protocol version negotiation
+
+`vgi_rpc.request_version` versions the **framing** in this document, and has
+been `"1"` throughout. `vgi_rpc.protocol_version` is a second, independent
+line: it versions the *application's* RPC surface — the set of methods, their
+parameters, and their schemas — so a client and worker built against different
+releases of a service fail with a directional message instead of a schema
+error deep inside a call.
+
+It is **opt-in by declaration**. A Protocol that declares a version (in the
+Python reference, a `protocol_version: ClassVar[str]` on the Protocol class)
+turns the check on for both peers; a Protocol that declares none disables it
+entirely, and the key never appears on the wire.
+
+- **Format**: canonical semver `MAJOR.MINOR.PATCH` — non-negative integers, no
+  leading zeros, **no prereleases and no build metadata**. `1.0.0-rc1` and
+  `1.0.0+build3` are malformed, not merely unusual.
+- **Client obligation**: when the bound Protocol declares a version, the client
+  MUST send it on **every** request batch.
+- **Server obligation**: when its own Protocol declares a version, the server
+  MUST check the client's at the dispatch boundary — before parameter
+  deserialization, so a mismatch cannot be mistaken for a schema problem.
+- **Comparison rule**: exact **major and minor** match. Patch is ignored, so a
+  `1.4.0` client and a `1.4.9` server interoperate.
+- **`__describe__` is exempt.** It is the diagnostic path a version-mismatched
+  client uses to discover what the server actually speaks, so gating it would
+  make the mismatch undiagnosable.
+
+Every failure — absent key, undecodable bytes, malformed semver, or a genuine
+major/minor difference — raises `ProtocolVersionError`, a subclass of
+`VersionError`, and is written as an ordinary error stream carrying
+`error_kind = "protocol_version_mismatch"`. The message MUST state both
+versions and which side to upgrade; a bare "mismatch" leaves the reader to
+guess, which is the whole failure this key exists to prevent.
+
+The server also emits its `protocol_version` in the `__describe__` response
+metadata, so a client can read it without triggering a failure.
+
+> **Relationship to `protocol_hash`**: the hash ([Section 14](#14-introspection-__describe__))
+> is a byte-stable fingerprint of the *Python* describe payload, useful as a
+> drift detector within one runtime. It is **not** guaranteed identical across
+> Arrow implementations, so it is not a cross-language contract.
+> `protocol_version` is.
 
 ### Error stream format
 
@@ -1094,20 +1311,52 @@ IPC Stream (error):
 
 ### HTTP status code mapping
 
+Two distinct classes of failure are deliberately not conflated. A **transport
+or protocol** failure — the request never became a valid RPC call — carries a
+4xx status. An **application** failure — the method was dispatched and raised —
+is reported *in band*, as a `200` whose Arrow IPC body carries an EXCEPTION
+batch.
+
 | Error condition | HTTP status |
 |----------------|-------------|
-| Bad IPC, missing metadata, version mismatch, param validation | 400 Bad Request |
-| Expired or tampered state token | 400 Bad Request |
-| Authentication failure | 401 Unauthorized |
+| Bad IPC, missing metadata, request-version mismatch, param validation | 400 Bad Request |
+| `protocol_version` mismatch | 400 Bad Request |
+| Expired, tampered, or unresolvable state token | 400 Bad Request |
+| Request body fails to decompress | 400 Bad Request |
+| Authentication failure (including proxy proof) | 401 Unauthorized |
 | Unknown method | 404 Not Found |
-| Wrong Content-Type | 415 Unsupported Media Type |
-| Implementation error (unary) | 500 Internal Server Error |
-| Implementation error (stream init) | 500 Internal Server Error |
-| Type error in implementation | 400 Bad Request |
+| Request body exceeds `VGI-Max-Request-Bytes` | 413 Payload Too Large |
+| Wrong `Content-Type`, or unsupported `Content-Encoding` | 415 Unsupported Media Type |
+| **Any error raised by the method implementation** | **200 OK** + `X-VGI-RPC-Error: true` |
+| Response overshoots a hard response cap | 200 OK + `X-VGI-RPC-Error: true` |
 
-> **Note**: Even for HTTP 400/500 responses, the response body is a valid
-> Arrow IPC stream containing an error batch, except for 401 (JSON or HTML,
-> per `docs/unauthorized-spec.md`) and 415 (Falcon default response).
+#### Why implementation errors are `200`
+
+A server implementation error never reaches the client as `500`. The server
+translates it to `200` and marks it with `X-VGI-RPC-Error: true`, because
+intermediaries and HTTP client libraries routinely discard or replace response
+bodies on 5xx — and the body is precisely where the typed error lives. A `500`
+would strip the exception type, message, traceback, and `error_kind` and leave
+the caller with a bare status code.
+
+Clients MUST therefore treat `200` as "a response arrived", not "the call
+succeeded", and classify by inspecting the body — the batch-classification
+algorithm in [Section 7](#7-batch-classification-algorithm) already does this,
+so `X-VGI-RPC-Error` is a fast path and a diagnostic aid, not a second source
+of truth. A client that branches only on status code will silently treat
+failures as successes.
+
+This also means the status code no longer varies with the *class* of exception
+the method raised: a `TypeError` from inside a method body is `200` like any
+other. Caller-supplied shape errors are validated before dispatch, and so
+remain `400`.
+
+> **Note**: For 400 and 413 responses the body is still a valid Arrow IPC
+> stream containing an error batch. The exceptions are 401 (JSON or HTML, per
+> [`docs/unauthorized-spec.md`](unauthorized-spec.md)), 415 (framework default
+> response), and the non-Arrow framework endpoints in
+> [Section 16](#16-token-introspection-post-prefix__introspect_token__) and
+> [Section 17](#17-sticky-sessions-http-optional).
 
 ---
 
@@ -1260,6 +1509,69 @@ Normative for any implementation that enables the route:
 - `VGI-Token-Introspection: true` on `/health` when enabled, absent otherwise.
 
 Conformance group: `TestTokenIntrospection` (optional fixture) and `TestTokenIntrospectionOffMode` (ungated).
+
+---
+
+## 17. Sticky Sessions (HTTP, optional)
+
+**HTTP-only. Optional. Opt-in on both sides.**
+
+Sticky sessions let a method bind a **handle-bearing object** — an open
+database cursor, a loaded model, a file handle, an in-progress generation — to
+the worker process that created it, keyed by a short-lived AEAD-sealed token
+the client echoes on subsequent requests. The state lives in process memory; it
+is never serialized onto the wire.
+
+The other transports are single-process, so sticky is meaningless there: a
+runtime that exposes the session API at all MUST raise on a non-HTTP transport
+rather than silently no-op. When neither side opts in, the wire is
+byte-identical to a framework built before the feature existed.
+
+The full normative contract — token envelope, principal binding, TTL and
+eviction, drain semantics, concurrency, and the `TestSticky` conformance
+group — is [`docs/sticky-sessions-spec.md`](sticky-sessions-spec.md). What
+follows is the wire surface only.
+
+### Request headers
+
+| Header | Required | Purpose |
+|---|---|---|
+| `VGI-Session-Accept: true` | when a method may open a session | Client opt-in. A server MUST refuse to open a session for a request lacking it — otherwise it leaks sessions to clients that are not tracking them. |
+| `VGI-Session: <token>` | when resuming | The token minted on a prior response. |
+
+### Response headers
+
+| Header | Emitted | Purpose |
+|---|---|---|
+| `VGI-Session: <token>` | when a session was opened this request | Token for the client to echo. Base64url, no padding. |
+| `VGI-Session-Close: true` | when the session was closed this request | Client drops its captured token and any echo headers. |
+| `VGI-Echo-<name>: <value>` | once, on the session-opening response | Client MUST strip the `VGI-Echo-` prefix and send `<name>: <value>` on every subsequent request in the session. Used for client-driven routing on platforms that steer by header. |
+
+Capability headers (`VGI-Sticky-Enabled`, `VGI-Sticky-Default-TTL`,
+`VGI-Sticky-Echo-Headers`) are listed under
+[Capability discovery](#capability-discovery).
+
+### Teardown endpoint
+
+```
+DELETE {prefix}/__session__
+VGI-Session: <token>
+```
+
+Idempotent and best-effort. `204 No Content` when the entry was found and
+evicted; `200 OK` on **any** failure — missing header, malformed token,
+identity mismatch, registry miss. The two are deliberately not
+distinguishable, so a stolen token cannot be used to probe whether a session
+exists.
+
+### Failure surfacing
+
+A token that cannot be honoured — expired, evicted, routed to a worker that
+never saw it, or presented under a different principal — surfaces as an
+ordinary EXCEPTION batch with `error_kind = "session_lost"`. A session open
+refused because the server is shutting down surfaces as `server_draining`.
+Neither is retried transparently by the framework: the client is told, and
+decides whether to reopen or fail.
 
 ## Appendix A: IPC Stream EOS Marker
 
