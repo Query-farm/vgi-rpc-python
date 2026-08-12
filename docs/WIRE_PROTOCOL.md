@@ -3,7 +3,7 @@
 **Wire protocol version**: 1
 **Status**: Normative
 **Audience**: Cross-language implementors (Go, Rust, TypeScript, C++, etc.)
-**Reflects**: vgi-rpc 0.42.0
+**Reflects**: vgi-rpc 0.42.1
 
 This document specifies the vgi-rpc wire protocol at byte level. A conforming
 implementation can interoperate with the Python reference without reading
