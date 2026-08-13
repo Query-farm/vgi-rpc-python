@@ -112,16 +112,47 @@ def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
     return out
 
 
+def _already_transparent(master: Image.Image) -> bool:
+    """True when *master* carries its own alpha channel and actually uses it.
+
+    A master exported straight to transparency needs no keying, and keying it
+    anyway would be destructive: ``convert("RGB")`` drops the alpha and leaves
+    whatever RGB sits under the transparent pixels, which is as likely to be
+    black as white — the white-floor test then keys nothing and the result is
+    the mark on a black slab.
+
+    "Uses it" is deliberately a threshold rather than "has an A band": a fully
+    opaque RGBA export is the white-background case wearing an alpha channel,
+    and belongs on the keying path.
+    """
+    if master.mode not in ("RGBA", "LA", "PA"):
+        return False
+    alpha = np.asarray(master.convert("RGBA"))[..., 3]
+    return bool((alpha < 250).mean() > 0.01)
+
+
 def key_out_background(master: Image.Image) -> Image.Image:
     """Replace the master's white background with transparency.
 
+    A master that is already transparent is passed through on its own alpha —
+    cropped to the mark, but otherwise untouched. Round-tripping it through
+    white would re-blend every antialiased edge against a background it was
+    never drawn on.
+
     Args:
-        master: The logo on a white background, in any mode.
+        master: The logo on a white background, or one already transparent.
 
     Returns:
         An RGBA image cropped to the mark's bounding box.
 
     """
+    if _already_transparent(master):
+        image = master.convert("RGBA")
+        opaque = int((np.asarray(image)[..., 3] > 0).sum())
+        print(f"master is already transparent: {opaque:,} px of mark, no keying applied")
+        bbox = image.getbbox()
+        return image.crop(bbox) if bbox else image
+
     rgb = np.asarray(master.convert("RGB")).astype(np.float64)
     background = rgb.min(axis=2) >= _WHITE_FLOOR
     edge = _dilate(background, _EDGE_BAND) & ~background
