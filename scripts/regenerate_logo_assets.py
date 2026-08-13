@@ -4,17 +4,19 @@
 
 r"""Regenerate every brand asset in ``docs/assets`` from one master logo.
 
-The master is committed as ``docs/assets/logo-master.png``: the shield mark on
-a white background, at the highest resolution we have.  Every other asset is
-derived, so a new master is a one-command reroll rather than eight hand edits
-that drift apart:
+The master is committed as ``docs/assets/logo-master.png``: the shield mark at
+the highest resolution we have, on transparency.  Every other asset is derived,
+so a new master is a one-command reroll rather than eight hand edits that drift
+apart:
 
     uv run --with pillow --with numpy python scripts/regenerate_logo_assets.py
 
 Pass ``--master PATH`` to cut the assets from a different source, which also
 replaces the committed master.
 
-Two things here are less obvious than they look.
+A master that is already transparent is passed through on its own alpha.  The
+two notes below are about the other path — keying a master delivered on white,
+which is how every export before this one arrived.
 
 **Background is every near-white pixel, not just the outer margin.** Keying
 only what the border can reach leaves the enclosed gaps opaque — the sky
@@ -113,7 +115,7 @@ def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
 
 
 def _already_transparent(master: Image.Image) -> bool:
-    """True when *master* carries its own alpha channel and actually uses it.
+    """Report whether *master* carries its own alpha channel and actually uses it.
 
     A master exported straight to transparency needs no keying, and keying it
     anyway would be destructive: ``convert("RGB")`` drops the alpha and leaves
