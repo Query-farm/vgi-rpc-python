@@ -165,7 +165,7 @@ class TestDeserializeErrorMessages:
 
         Lenient producers (the Rust/Go/Java SDKs) omit the batch for an empty
         nested value, so a schema-only stream must decode to a zero-row batch
-        rather than raising — otherwise a strict consumer (the Cedar proxy) fails
+        rather than raising — otherwise a strict consumer (Rowfence) fails
         closed on a legitimate response. (Formerly raised
         ``IPCError("No RecordBatch found in provided data")``.)
         """
