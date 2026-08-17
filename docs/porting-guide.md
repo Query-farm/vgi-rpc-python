@@ -329,6 +329,8 @@ Do **not** implement this by replaying the credential through the worker's own a
 
 "The credential is bad" and "I could not find out whether the credential is bad" are different answers, and a caller's cache depends on telling them apart. A rejection may be negative-cached; an outage must not be, or a worker restart takes the fleet down for the cache's lifetime. The reference adds `AuthUnavailableError`, which is deliberately **not** a `ValueError` so that `chain_authenticate` — which advances on `ValueError` — propagates it instead of reading it as "not my credential, try the next" and emerging as a 401 from the end of the chain. It surfaces as `503` with `Retry-After`. A port needs the equivalent distinction in whatever its chaining primitive is.
 
+The same distinction binds the **resolver**, and it is easier to get wrong there: the endpoint's own "did not resolve" is `404`, which is exactly the answer a caller may negative-cache, so a resolver whose backing store is down must not borrow it. In the reference the resolver raises the same `AuthUnavailableError` and the endpoint converts it to `503` + `Retry-After` — not through the uniform-rejection path, which is for definitive answers and carries `Cache-Control: no-store` instead.
+
 ### Conformance
 
 Supply an optional `conformance_http_introspect_port` fixture: a worker with introspection enabled, configured with the exact constants in `_pytest_suite.py` (`_INTROSPECTOR`, `_SUBJECT_TOKEN`, `_SUBJECT_PRINCIPAL`, `_JWS_TRAP_TOKEN`). Omit it and `TestTokenIntrospection` skips; `TestTokenIntrospectionOffMode` runs everywhere regardless, because "off unless enabled" binds every port.

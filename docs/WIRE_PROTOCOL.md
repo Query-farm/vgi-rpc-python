@@ -1505,6 +1505,7 @@ Normative for any implementation that enables the route:
 - An **introspector-principal allowlist** with no permissive default. Authentication is not the same capability as introspection.
 - **JWS-shaped subjects are rejected without being resolved.**
 - **Uniform rejection**: unknown, expired and malformed are byte-identical answers.
+- A resolver that **cannot answer** (its backing store is down) MUST surface as `503` with `Retry-After`, never as the definitive `404`. This is the same distinction as the table above, on the axis the resolver controls: `404` is the one answer a caller is entitled to negative-cache, so a store blip returned as `404` is cached as "this credential is bad".
 - The credential appears in **no** response, error message, log record, or span. Digest it (SHA-256) for diagnostics.
 - `VGI-Token-Introspection: true` on `/health` when enabled, absent otherwise.
 

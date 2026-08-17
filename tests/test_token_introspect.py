@@ -444,3 +444,68 @@ class TestTransientVsDefinitive:
             assert resp.status_code == 401
         finally:
             c.close()
+
+    def test_a_resolver_outage_is_503_not_404(self) -> None:
+        """The same distinction, on the axis the *resolver* controls.
+
+        ``TokenResolver`` is documented to raise ``AuthUnavailableError`` when
+        the answer is not knowable. Uncaught it reached falcon's default handler
+        as a 500 with no ``Retry-After``; refusing with 404 would be worse still,
+        because 404 is the endpoint's *definitive* "did not resolve" and a caller
+        is entitled to negative-cache it — so a backing store blip would be
+        cached as "this credential is bad".
+        """
+
+        def unavailable(_token: str) -> TokenIdentity | None:
+            raise AuthUnavailableError("mapping store unreachable", retry_after=9)
+
+        c = _client(introspect_resolver=unavailable)
+        try:
+            resp = _post(c, _PROXY, {"token": _SUBJECT})
+            assert resp.status_code == 503
+            assert resp.headers.get("retry-after") == "9"
+            # Not the definitive shape: no `no-store` rejection body to cache.
+            assert b"unresolved" not in resp.content
+        finally:
+            c.close()
+
+    def test_a_resolver_returning_none_is_still_definitive(self) -> None:
+        """The distinction only pays if the ordinary refusal is unchanged."""
+        c = _client()
+        try:
+            resp = _post(c, _PROXY, {"token": "not-a-known-credential"})
+            assert resp.status_code == 404
+            assert json.loads(resp.content) == {"error": "unresolved"}
+            assert resp.headers.get("cache-control") == "no-store"
+        finally:
+            c.close()
+
+    def test_the_credential_is_not_in_the_outage_response(self) -> None:
+        """An outage path is still a path the credential must not travel."""
+
+        def unavailable(_token: str) -> TokenIdentity | None:
+            raise AuthUnavailableError("mapping store unreachable")
+
+        c = _client(introspect_resolver=unavailable)
+        try:
+            resp = _post(c, _PROXY, {"token": _SUBJECT})
+            assert _SUBJECT.encode() not in resp.content
+        finally:
+            c.close()
+
+
+class TestPublicImportPath:
+    """A worker author writing a resolver must not have to import a private module."""
+
+    def test_the_resolver_types_are_exported(self) -> None:
+        """``TokenIdentity``/``TokenResolver`` are the two types a resolver needs."""
+        import vgi_rpc.http as http_pkg
+        import vgi_rpc.http.server as server_pkg
+        from vgi_rpc.http import TokenIdentity as FromHttp
+        from vgi_rpc.http.server import TokenIdentity as FromServer
+
+        assert FromHttp is FromServer is TokenIdentity
+        assert "TokenIdentity" in http_pkg.__all__
+        assert "TokenResolver" in http_pkg.__all__
+        assert "TokenIdentity" in server_pkg.__all__
+        assert "TokenResolver" in server_pkg.__all__

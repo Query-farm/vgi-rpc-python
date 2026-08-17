@@ -101,7 +101,7 @@ from vgi_rpc.http._unauthorized import (
     declare_proxy_headers,
     proxy_headers_of,
 )
-from vgi_rpc.http.server import make_wsgi_app, serve_http
+from vgi_rpc.http.server import TokenIdentity, TokenResolver, make_wsgi_app, serve_http
 from vgi_rpc.http.server._sticky import DrainHandle, drain_handle
 
 with contextlib.suppress(ImportError):
@@ -175,6 +175,8 @@ __all__ = [
     "parse_use_id_token_as_bearer",
     "make_wsgi_app",
     "serve_http",
+    "TokenIdentity",
+    "TokenResolver",
     "request_upload_urls",
     "XfccElement",
     "mtls_authenticate_xfcc",

@@ -17,11 +17,15 @@ The Falcon/WSGI server is split across focused modules:
 * :mod:`_factory` — ``make_wsgi_app``.
 * :mod:`_serve` — ``serve_http`` waitress wrapper.
 
-Only ``make_wsgi_app`` and ``serve_http`` are part of the public API;
-everything else is considered internal.
+* :mod:`_introspect` — the token-introspection endpoint and its resolver types.
+
+``make_wsgi_app``, ``serve_http`` and the two introspection types a worker needs
+to write a resolver are part of the public API; everything else is considered
+internal.
 """
 
 from ._factory import make_wsgi_app
+from ._introspect import TokenIdentity, TokenResolver
 from ._serve import serve_http
 
-__all__ = ["make_wsgi_app", "serve_http"]
+__all__ = ["TokenIdentity", "TokenResolver", "make_wsgi_app", "serve_http"]

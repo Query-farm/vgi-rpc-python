@@ -47,6 +47,7 @@ from http import HTTPStatus
 
 import falcon
 
+from vgi_rpc.http._unauthorized import AuthUnavailableError
 from vgi_rpc.rpc import _get_auth_and_metadata
 
 _logger = logging.getLogger("vgi_rpc.http.introspect")
@@ -275,7 +276,28 @@ class _TokenIntrospectionResource:
             self._refuse(resp, HTTPStatus.NOT_FOUND, "unresolved")
             return
 
-        identity = self._resolver(token)
+        try:
+            identity = self._resolver(token)
+        except AuthUnavailableError as exc:
+            # "I could not find out" is not "it did not resolve". Refusing with
+            # 404 here would hand the caller a *definitive* answer for an outage,
+            # and a caller that negative-caches definitive answers — which is the
+            # correct thing to do — would cache it. Deliberately not routed
+            # through `_refuse`: that shape is for definitive rejections, and a
+            # transient needs `Retry-After` instead of `Cache-Control: no-store`.
+            _logger.warning(
+                "introspection unavailable: %s",
+                exc,
+                extra={
+                    "principal": caller,
+                    "token_digest": digest,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise falcon.HTTPServiceUnavailable(
+                description=str(exc),
+                retry_after=exc.retry_after,
+            ) from exc
         if identity is None:
             _logger.info(
                 "introspection: credential did not resolve",
