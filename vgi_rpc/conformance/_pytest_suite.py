@@ -3309,6 +3309,10 @@ _SUBJECT_TOKEN = "conformance-opaque-subject-token"
 _SUBJECT_PRINCIPAL = "subject@conformance.example"
 #: JWS-shaped and resolvable by the fixture — see the test that posts it.
 _JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
+#: The fixture's resolver must signal "I could not find out" for this one —
+#: whatever its language's equivalent of a transient backing-store failure is.
+#: Part of the fixture contract, like the constants above.
+_UNAVAILABLE_TOKEN = "conformance-unavailable-token"
 
 #: Statuses a caller may treat as final. Anything else — including a transport
 #: failure — must be retried rather than cached, which is the distinction the
@@ -3460,6 +3464,35 @@ class TestTokenIntrospection:
         port = self._port(request)
         resp = httpx2.options(f"http://127.0.0.1:{port}/health", timeout=5.0)
         assert resp.headers.get(_INTROSPECT_ENABLED_HEADER.lower()) == "true"
+
+    def test_a_resolver_outage_is_transient_not_definitive(self, request: pytest.FixtureRequest) -> None:
+        """An unknowable answer must not borrow the "did not resolve" one.
+
+        The easiest way to get this wrong, and the most expensive. The endpoint's
+        own rejection is 404, which is exactly the answer a caller is entitled to
+        **negative-cache** — so a resolver whose backing store is briefly down,
+        reported as 404, is cached as "this credential is bad" for the cache's
+        lifetime. The reference caught this in production shape: a caller that
+        answers 401 on a cached rejection turns a thirty-second blip into a
+        fleet-wide re-login storm, because the DuckDB extension treats a second
+        401 after a token refresh as fatal.
+
+        An uncaught resolver error is the other failure this catches: it lands as
+        500 with no ``Retry-After``, which is at least transient, but leaves the
+        caller no retry hint and the operator no signal.
+        """
+        resp = self._post(self._port(request), _INTROSPECTOR, {"token": _UNAVAILABLE_TOKEN})
+        assert resp.status_code not in _DEFINITIVE, (
+            f"a resolver outage answered {resp.status_code}, which a caller may negative-cache — "
+            "an unreachable backing store would be remembered as a bad credential"
+        )
+        assert resp.status_code == 503, f"a resolver outage must be 503, got {resp.status_code}"
+        assert resp.headers.get("retry-after"), "503 without Retry-After leaves the caller no retry hint"
+
+    def test_an_outage_does_not_leak_the_credential(self, request: pytest.FixtureRequest) -> None:
+        """An error path is still a path the credential must not travel."""
+        resp = self._post(self._port(request), _INTROSPECTOR, {"token": _UNAVAILABLE_TOKEN})
+        assert _UNAVAILABLE_TOKEN not in resp.text
 
 
 class TestTokenIntrospectionOffMode:

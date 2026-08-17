@@ -333,9 +333,12 @@ The same distinction binds the **resolver**, and it is easier to get wrong there
 
 ### Conformance
 
-Supply an optional `conformance_http_introspect_port` fixture: a worker with introspection enabled, configured with the exact constants in `_pytest_suite.py` (`_INTROSPECTOR`, `_SUBJECT_TOKEN`, `_SUBJECT_PRINCIPAL`, `_JWS_TRAP_TOKEN`). Omit it and `TestTokenIntrospection` skips; `TestTokenIntrospectionOffMode` runs everywhere regardless, because "off unless enabled" binds every port.
+Supply an optional `conformance_http_introspect_port` fixture: a worker with introspection enabled, configured with the exact constants in `_pytest_suite.py` (`_INTROSPECTOR`, `_SUBJECT_TOKEN`, `_SUBJECT_PRINCIPAL`, `_JWS_TRAP_TOKEN`, `_UNAVAILABLE_TOKEN`). Omit it and `TestTokenIntrospection` skips; `TestTokenIntrospectionOffMode` runs everywhere regardless, because "off unless enabled" binds every port.
 
-Note that `_JWS_TRAP_TOKEN` must be **resolvable** by your fixture's resolver. Against an unknown JWS a port with no shape guard rejects it as unknown and passes for the wrong reason; resolvable, the shape guard is the only thing that can produce a rejection.
+Two of those constants are traps, and both exist because the obvious implementation passes without them:
+
+- `_JWS_TRAP_TOKEN` must be **resolvable** by your fixture's resolver. Against an unknown JWS a port with no shape guard rejects it as unknown and passes for the wrong reason; resolvable, the shape guard is the only thing that can produce a rejection.
+- `_UNAVAILABLE_TOKEN` must make your resolver signal **"I could not find out"** — whatever your language's equivalent of the reference's `AuthUnavailableError` is. Your fixture therefore needs a resolver with *three* answers, not two: an identity, "does not resolve", and "unknowable". A port that folds the third into the second answers `404`, which a caller may negative-cache — so a briefly unreachable backing store is remembered as a bad credential for the cache's lifetime.
 
 ## HTTP proxy proof
 

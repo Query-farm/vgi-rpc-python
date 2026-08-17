@@ -62,6 +62,12 @@ CONFORMANCE_SUBJECT_TTL = 300
 #: JWS shapes answers 200 and fails.
 CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
 
+#: The credential the resolver reports as *unknowable* rather than unknown. The
+#: shared suite posts it to check that a backing-store outage surfaces as a
+#: transient 503 and not as the endpoint's own definitive 404 — which a caller
+#: may negative-cache, turning a brief outage into a remembered bad credential.
+CONFORMANCE_UNAVAILABLE_TOKEN = "conformance-unavailable-token"
+
 
 def _maybe_access_log(server: RpcServer, path: str | None) -> None:
     """Wire the access log, if the runner asked for one.
@@ -85,7 +91,28 @@ def _maybe_access_log(server: RpcServer, path: str | None) -> None:
 
 
 def _conformance_resolver(token: str) -> TokenIdentity | None:
-    """Resolve the one fixed subject credential the shared tests post."""
+    """Resolve the fixed credentials the shared tests post.
+
+    Three answers, deliberately: an identity, ``None`` for "does not resolve",
+    and ``AuthUnavailableError`` for "I could not find out". The third is not a
+    flavour of the second — a caller may negative-cache ``None``'s 404, so an
+    outage reported that way is remembered as a bad credential.
+
+    Args:
+        token: The opaque credential posted to the endpoint.
+
+    Returns:
+        The identity, or ``None`` when the credential does not resolve.
+
+    Raises:
+        AuthUnavailableError: For ``CONFORMANCE_UNAVAILABLE_TOKEN``, standing in
+            for a backing store that cannot be reached.
+
+    """
+    if token == CONFORMANCE_UNAVAILABLE_TOKEN:
+        from vgi_rpc.http import AuthUnavailableError
+
+        raise AuthUnavailableError("conformance: mapping store unreachable")
     if token in (CONFORMANCE_SUBJECT_TOKEN, CONFORMANCE_JWS_TRAP_TOKEN):
         return TokenIdentity(
             principal=CONFORMANCE_SUBJECT_PRINCIPAL,
