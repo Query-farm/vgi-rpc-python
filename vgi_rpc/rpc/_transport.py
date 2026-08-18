@@ -483,6 +483,21 @@ def serve_stdio(server: RpcServer) -> None:
 # UnixTransport + make_unix_pair + serve_unix
 # ---------------------------------------------------------------------------
 
+#: Socket buffer asked for on a Unix domain socket, both ends.  macOS defaults
+#: one to 8192 bytes (``net.local.stream.sendspace``) against ~64 KiB for a
+#: pipe, so a megabyte of Arrow crosses the kernel in 128 trips instead of a
+#: handful; Linux is more generous but still below this.  Best effort — the
+#: kernel clamps to its own maximum, and a refusal is not worth failing a
+#: connection over.
+_UNIX_SOCKET_BUFFER_BYTES = 1 << 20
+
+
+def _widen_socket_buffers(sock: socket.socket) -> None:
+    """Request ``_UNIX_SOCKET_BUFFER_BYTES`` of send and receive buffer."""
+    for option in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+        with contextlib.suppress(OSError):
+            sock.setsockopt(socket.SOL_SOCKET, option, _UNIX_SOCKET_BUFFER_BYTES)
+
 
 class UnixTransport:
     """Transport backed by a connected Unix domain socket.
@@ -497,6 +512,7 @@ class UnixTransport:
 
     def __init__(self, sock: socket.socket) -> None:
         """Initialize from a connected AF_UNIX socket."""
+        _widen_socket_buffers(sock)
         self._sock = sock
         self._reader: IOBase = _clamped(cast("IOBase", sock.makefile("rb")))
         self._writer: IOBase = _exact(cast("IOBase", sock.makefile("wb", buffering=0)))
@@ -826,6 +842,10 @@ class TcpTransport:
         """Initialize from a connected AF_INET socket."""
         with contextlib.suppress(OSError):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # Deliberately no SO_SNDBUF/SO_RCVBUF here, unlike UnixTransport: TCP
+        # already starts at 128 KiB and grows, an explicit SO_RCVBUF *disables*
+        # Linux's receive-window auto-tuning and pins the window at whatever we
+        # guessed, and measuring it on loopback showed no gain either way.
         self._sock = sock
         self._reader: IOBase = _clamped(cast("IOBase", sock.makefile("rb")))
         self._writer: IOBase = _exact(cast("IOBase", sock.makefile("wb", buffering=0)))

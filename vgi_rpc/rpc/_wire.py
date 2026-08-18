@@ -1060,19 +1060,29 @@ def _read_unary_response(
     except RpcError:
         _drain_stream(reader)
         raise
-    _drain_stream(reader)
-    if not info.has_return:
+    try:
+        _drain_stream(reader)
+        if not info.has_return:
+            if wire_response_logger.isEnabledFor(logging.DEBUG):
+                wire_response_logger.debug("Read unary response: method=%s, void return", info.name)
+            return None
+        value = batch.batch.column("result")[0].as_py()
+        _validate_result(info.name, value, info.result_type)
         if wire_response_logger.isEnabledFor(logging.DEBUG):
-            wire_response_logger.debug("Read unary response: method=%s, void return", info.name)
-        return None
-    value = batch.batch.column("result")[0].as_py()
-    _validate_result(info.name, value, info.result_type)
-    if wire_response_logger.isEnabledFor(logging.DEBUG):
-        wire_response_logger.debug(
-            "Read unary response: method=%s, result_type=%s",
-            info.name,
-            type(value).__name__,
-        )
-    if value is None:
-        return None
-    return _deserialize_value(value, info.result_type, reader.ipc_validation)
+            wire_response_logger.debug(
+                "Read unary response: method=%s, result_type=%s",
+                info.name,
+                type(value).__name__,
+            )
+        if value is None:
+            return None
+        return _deserialize_value(value, info.result_type, reader.ipc_validation)
+    finally:
+        # Free the shm region the response arrived in, if it did.  A stream
+        # hands its batch to the caller, who owns the release; a unary batch
+        # never escapes this function, so nobody else can do it.  ``as_py()``
+        # above has already copied the values out, so the region is dead by
+        # here.  Without this the client never frees a single region: a long
+        # session walks toward the segment's 4094-allocation ceiling, and
+        # because no region is ever reused every call faults in cold pages.
+        batch.release()
