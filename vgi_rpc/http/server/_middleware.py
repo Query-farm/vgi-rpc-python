@@ -24,7 +24,7 @@ import logging
 import types as _types
 from collections.abc import Callable, Iterable
 from io import BytesIO, IOBase
-from typing import Any
+from typing import Any, NoReturn
 
 import falcon
 import pyarrow as pa
@@ -93,14 +93,11 @@ class _TransportNotifyMiddleware:
 class _MaxRequestBytesMiddleware:
     """Falcon middleware enforcing the advertised ``max_request_bytes`` cap.
 
-    Returns ``413 Payload Too Large`` for any RPC route whose request
-    body exceeds the configured limit.  Skipped for capability /
-    upload-URL routes whose bodies are intrinsically small and not
-    user-controlled.  This is the server-side enforcement counterpart
-    to the ``VGI-Max-Request-Bytes`` capability header — when the
-    client externalizes via ``__upload_url__/init`` instead of POSTing
-    inline, the request body shrinks to a pointer batch (small) and
-    sails through.
+    Returns ``413 Payload Too Large`` for any RPC route whose request body
+    exceeds the configured limit, including the upload-URL control route.
+    Requests with ``Content-Length`` are rejected before reading.  Chunked
+    requests are read once with a one-byte sentinel and the bounded result is
+    handed to the normal request/decompression path through request context.
     """
 
     __slots__ = ("_exempt_prefixes", "_max_bytes")
@@ -117,14 +114,23 @@ class _MaxRequestBytesMiddleware:
                 return
         cl = req.content_length
         if cl is not None and cl > self._max_bytes:
-            raise falcon.HTTPPayloadTooLarge(
-                title="Request body exceeds max_request_bytes",
-                description=(
-                    f"Request body of {cl} bytes exceeds the server's advertised "
-                    f"max_request_bytes={self._max_bytes}.  Use the upload-URL "
-                    f"flow (__upload_url__/init) to externalize large inputs."
-                ),
-            )
+            self._raise_too_large(cl)
+        if cl is None:
+            body = req.bounded_stream.read(self._max_bytes + 1)
+            if len(body) > self._max_bytes:
+                self._raise_too_large(len(body))
+            req.context.capped_request_body = body
+
+    def _raise_too_large(self, size: int) -> NoReturn:
+        """Raise Falcon's standardized 413 response."""
+        raise falcon.HTTPPayloadTooLarge(
+            title="Request body exceeds max_request_bytes",
+            description=(
+                f"Request body of at least {size} bytes exceeds the server's advertised "
+                f"max_request_bytes={self._max_bytes}.  Use the upload-URL "
+                f"flow (__upload_url__/init) to externalize large inputs."
+            ),
+        )
 
 
 class _DrainRequestMiddleware:
@@ -528,7 +534,9 @@ class _CompressionMiddleware:
                 ),
             )
         try:
-            compressed = req.bounded_stream.read()
+            compressed = getattr(req.context, "capped_request_body", None)
+            if compressed is None:
+                compressed = req.bounded_stream.read()
             decompressed = _decompress_with_encoding(req_enc, compressed, max_output_size=self._max_decompressed_bytes)
             # pa.BufferReader rather than BytesIO: Arrow reads through this
             # from C++, and a BytesIO makes it cross back into Python for

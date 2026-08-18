@@ -44,6 +44,22 @@ from vgi_rpc.conformance import (
     build_rich_header,
     run_describe_conformance,
 )
+from vgi_rpc.conformance._adversarial_http import TestAdversarialHttpRequestContract  # noqa: F401
+from vgi_rpc.conformance._external_pytest import (
+    TestExternalFetchFailures,  # noqa: F401
+    TestExternalInputRoutes,  # noqa: F401
+    TestExternalStorageUrlPair,  # noqa: F401
+)
+from vgi_rpc.conformance._lifecycle_tests import (
+    assert_cancel_before_exchange_once,
+    assert_cancel_close_ordering_safe,
+    assert_cancel_exchange_once,
+    assert_cancel_idempotent_once,
+    assert_cancel_producer_once,
+    assert_exchange_error_recovery,
+    assert_producer_error_recovery,
+    assert_unary_error_recovery,
+)
 from vgi_rpc.conformance.proof_harness import ProofUnsupported, ProofWorker, ProofWorkerFactory
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
@@ -1241,27 +1257,17 @@ class TestErrorRecovery:
     def test_unary_error_then_success(self, conformance_conn: ConnFactory) -> None:
         """Verify unary error then successful unary call."""
         with conformance_conn() as proxy:
-            with pytest.raises(RpcError):
-                proxy.raise_value_error(message="boom")
-            assert proxy.echo_int(value=42) == 42
+            assert_unary_error_recovery(proxy)
 
     def test_stream_mid_error_then_unary(self, conformance_conn: ConnFactory) -> None:
         """Verify mid-stream error then successful unary call."""
         with conformance_conn() as proxy:
-            with pytest.raises(RpcError):
-                for _ab in proxy.produce_error_mid_stream(emit_before_error=1):
-                    pass
-            assert proxy.echo_string(value="ok") == "ok"
+            assert_producer_error_recovery(proxy)
 
     def test_exchange_error_then_exchange(self, conformance_conn: ConnFactory) -> None:
         """Verify exchange error then new successful exchange."""
         with conformance_conn() as proxy:
-            with proxy.exchange_error_on_nth(fail_on=1) as session, pytest.raises(RpcError):
-                session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
-
-            with proxy.exchange_scale(factor=2.0) as session2:
-                out = session2.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
-                assert out.batch.column("value")[0].as_py() == pytest.approx(10.0)
+            assert_exchange_error_recovery(proxy)
 
     def test_multiple_sequential_sessions(self, conformance_conn: ConnFactory) -> None:
         """Verify multiple sequential sessions on same transport."""
@@ -1328,55 +1334,27 @@ class TestCancel:
     def test_cancel_producer_mid_stream(self, conformance_conn: ConnFactory) -> None:
         """Cancelling a producer mid-stream fires on_cancel() on the server."""
         with conformance_conn() as proxy:
-            proxy.reset_cancel_probe()
-            session = proxy.cancellable_producer()
-            it = iter(session)
-            for _ in range(3):
-                next(it)
-            session.cancel()
-            produce_calls, _, on_cancel_calls = proxy.cancel_probe_counters()
-            assert on_cancel_calls == 1
-            assert produce_calls >= 3
-            assert proxy.echo_int(value=42) == 42
+            assert_cancel_producer_once(proxy)
 
     def test_cancel_exchange_after_n(self, conformance_conn: ConnFactory) -> None:
         """Cancelling after N exchanges stops further processing and fires on_cancel()."""
         with conformance_conn() as proxy:
-            proxy.reset_cancel_probe()
-            session = proxy.cancellable_exchange()
-            session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
-            session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
-            session.cancel()
-            _, exchange_calls, on_cancel_calls = proxy.cancel_probe_counters()
-            assert exchange_calls == 2
-            assert on_cancel_calls == 1
+            assert_cancel_exchange_once(proxy)
 
     def test_cancel_before_any_exchange(self, conformance_conn: ConnFactory) -> None:
         """Cancelling before any exchange leaves the transport usable."""
         with conformance_conn() as proxy:
-            proxy.reset_cancel_probe()
-            session = proxy.cancellable_exchange()
-            session.cancel()
-            _, exchange_calls, _ = proxy.cancel_probe_counters()
-            assert exchange_calls == 0
-            assert proxy.echo_int(value=1) == 1
+            assert_cancel_before_exchange_once(proxy)
 
     def test_cancel_idempotent(self, conformance_conn: ConnFactory) -> None:
-        """cancel(), cancel() and close()+cancel() and cancel()+close() are all safe."""
+        """Repeated explicit cancellation invokes server cleanup exactly once."""
         with conformance_conn() as proxy:
-            proxy.reset_cancel_probe()
-            s1 = proxy.cancellable_exchange()
-            s1.cancel()
-            s1.cancel()
-            s2 = proxy.cancellable_exchange()
-            s2.close()
-            s2.cancel()
-            s3 = proxy.cancellable_exchange()
-            s3.cancel()
-            s3.close()
-            _, _, on_cancel_calls = proxy.cancel_probe_counters()
-            # HTTP cancel POSTs only when a state token is live; tolerate both counts.
-            assert on_cancel_calls in (2, 3)
+            assert_cancel_idempotent_once(proxy)
+
+    def test_cancel_close_ordering(self, conformance_conn: ConnFactory) -> None:
+        """Both close/cancel orderings are safe and leave the transport reusable."""
+        with conformance_conn() as proxy:
+            assert_cancel_close_ordering_safe(proxy)
 
     def test_exchange_after_cancel_raises(self, conformance_conn: ConnFactory) -> None:
         """Using an exchange session after cancel() raises ProtocolError."""

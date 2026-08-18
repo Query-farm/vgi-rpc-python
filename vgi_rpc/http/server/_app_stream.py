@@ -240,6 +240,11 @@ def _run_stream_init_sync(
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+        except Exception as exc:
+            # External pointer resolution can fail before stream state exists.
+            # Surface that failure through the Arrow RPC error envelope so the
+            # client receives the cause and the HTTP worker remains reusable.
+            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
         # Inject ctx if the implementation accepts it
         server_id = app._server.server_id

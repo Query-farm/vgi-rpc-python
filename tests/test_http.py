@@ -355,7 +355,7 @@ class TestServerErrorHeader:
         )
         try:
             # /init for the transform exchange — small payload, fits the cap.
-            init_schema = pa.schema([pa.field("factor", pa.float64())])
+            init_schema = pa.schema([pa.field("factor", pa.float64(), nullable=False)])
             init_req = BytesIO()
             init_md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"transform", REQUEST_VERSION_KEY: REQUEST_VERSION})
             with ipc.new_stream(init_req, init_schema) as writer:
@@ -1999,7 +1999,12 @@ class TestRequestId:
         from vgi_rpc.rpc import _write_request
 
         buf = BytesIO()
-        schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
+        schema = pa.schema(
+            [
+                pa.field("a", pa.float64(), nullable=False),
+                pa.field("b", pa.float64(), nullable=False),
+            ]
+        )
         _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
         resp = client.post(
             f"{_BASE_URL}{client.prefix}/add",
@@ -2015,7 +2020,12 @@ class TestRequestId:
         from vgi_rpc.rpc import _write_request
 
         buf = BytesIO()
-        schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
+        schema = pa.schema(
+            [
+                pa.field("a", pa.float64(), nullable=False),
+                pa.field("b", pa.float64(), nullable=False),
+            ]
+        )
         _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
         resp = client.post(
             f"{_BASE_URL}{client.prefix}/add",
@@ -2168,7 +2178,7 @@ class TestZstdCompression:
 
         # Build a minimal unary request
         req_buf = BytesIO()
-        schema = pa.schema([pa.field("name", pa.utf8())])
+        schema = pa.schema([pa.field("name", pa.utf8(), nullable=False)])
         request_metadata = pa.KeyValueMetadata({b"vgi_rpc.method": b"greet", b"vgi_rpc.request_version": b"1"})
         with ipc.new_stream(req_buf, schema) as writer:
             batch = pa.RecordBatch.from_pydict({"name": ["Test"]}, schema=schema)
@@ -2227,7 +2237,7 @@ class TestZstdCompression:
 
         # Build a minimal IPC request
         req_buf = BytesIO()
-        schema = pa.schema([pa.field("name", pa.utf8())])
+        schema = pa.schema([pa.field("name", pa.utf8(), nullable=False)])
         request_metadata = pa.KeyValueMetadata({b"vgi_rpc.method": b"greet", b"vgi_rpc.request_version": b"1"})
         with ipc.new_stream(req_buf, schema) as writer:
             batch = pa.RecordBatch.from_pydict({"name": ["Test"]}, schema=schema)
@@ -2555,7 +2565,7 @@ class TestCompressionNegotiation:
     def _greet_request_body(name: str) -> bytes:
         """Build a complete uncompressed Arrow IPC ``greet`` request."""
         req_buf = BytesIO()
-        schema = pa.schema([pa.field("name", pa.utf8())])
+        schema = pa.schema([pa.field("name", pa.utf8(), nullable=False)])
         md = pa.KeyValueMetadata({b"vgi_rpc.method": b"greet", b"vgi_rpc.request_version": b"1"})
         with ipc.new_stream(req_buf, schema) as writer:
             writer.write_batch(pa.RecordBatch.from_pydict({"name": [name]}, schema=schema), custom_metadata=md)
@@ -3257,7 +3267,10 @@ class TestCookiesServerSide:
     def test_set_cookie_emits_header(self) -> None:
         """ctx.set_cookie emits Set-Cookie with the expected attributes."""
         tc = falcon.testing.TestClient(_cookie_app())
-        fields: list[pa.Field[Any]] = [pa.field("value", pa.utf8()), pa.field("max_age", pa.int64())]
+        fields: list[pa.Field[Any]] = [
+            pa.field("value", pa.utf8(), nullable=False),
+            pa.field("max_age", pa.int64(), nullable=False),
+        ]
         schema = pa.schema(fields)
         from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
 
@@ -3588,7 +3601,7 @@ class TestEmitAndFinishSameTick:
         """Build the ``/emit_and_finish/init`` request body."""
         from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
 
-        schema = pa.schema([pa.field("rows", pa.int64())])
+        schema = pa.schema([pa.field("rows", pa.int64(), nullable=False)])
         buf = BytesIO()
         md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"emit_and_finish", REQUEST_VERSION_KEY: REQUEST_VERSION})
         with ipc.new_stream(buf, schema) as writer:

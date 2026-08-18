@@ -79,6 +79,7 @@ from vgi_rpc.rpc._wire import (
     _drain_stream,
     _flush_collector,
     _read_request,
+    _validate_call_signature,
     _validate_params,
     _validate_result,
     _write_error_batch,
@@ -935,6 +936,13 @@ class RpcServer:
             _deserialize_params(kwargs, info.param_types, self._ipc_validation)
 
             try:
+                _validate_call_signature(
+                    info.name,
+                    kwargs,
+                    info.param_types,
+                    info.param_defaults,
+                    info.params_schema,
+                )
                 _validate_params(info.name, kwargs, info.param_types)
             except TypeError as exc:
                 err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA

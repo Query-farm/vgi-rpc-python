@@ -1792,6 +1792,50 @@ class TestRequestVersion:
         assert result_batch.column(0)[0].as_py() == 7.0
 
 
+class TestRawParameterSchema:
+    """Raw transports reject parameter-schema drift before dispatch."""
+
+    def test_wrong_nullability_rejected_and_next_request_succeeds(self) -> None:
+        """A valid IPC request with the wrong schema does not poison the pipe."""
+        from io import BytesIO
+
+        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc import _dispatch_log_or_error, _drain_stream
+        from vgi_rpc.rpc._wire import _write_request
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        declared = rpc_methods(RpcFixtureService)["add"].params_schema
+        wrong = pa.schema([pa.field(field.name, field.type, nullable=True) for field in declared])
+        metadata = pa.KeyValueMetadata({RPC_METHOD_KEY: b"add", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        bad_buf = BytesIO()
+        with pa.ipc.new_stream(bad_buf, wrong) as writer:
+            writer.write_batch(
+                pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=wrong),
+                custom_metadata=metadata,
+            )
+        good_buf = BytesIO()
+        _write_request(good_buf, "add", declared, {"a": 3.0, "b": 4.0})
+
+        request = BytesIO(bad_buf.getvalue() + good_buf.getvalue())
+        response = BytesIO()
+        transport = PipeTransport(request, response)
+        server.serve_one(transport)
+        server.serve_one(transport)
+
+        response.seek(0)
+        reader = ValidatedReader(pa.ipc.open_stream(response), IpcValidation.NONE)
+        with pytest.raises(RpcError, match="nullable"):
+            while True:
+                batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+                _dispatch_log_or_error(batch, custom_metadata)
+        _drain_stream(reader)
+
+        reader = ValidatedReader(pa.ipc.open_stream(response), IpcValidation.NONE)
+        result, _custom_metadata = reader.read_next_batch_with_custom_metadata()
+        _drain_stream(reader)
+        assert result.column("result")[0].as_py() == 7.0
+
+
 # ---------------------------------------------------------------------------
 # Tests: Invalid bidi state (HTTP transport)
 # ---------------------------------------------------------------------------

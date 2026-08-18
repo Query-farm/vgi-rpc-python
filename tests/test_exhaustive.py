@@ -1177,7 +1177,7 @@ class TestServeOneServerErrors:
                 return str(x)
 
         server = RpcServer(P, Impl())
-        schema = pa.schema([pa.field("x", pa.int64())])
+        schema = pa.schema([pa.field("x", pa.int64(), nullable=False)])
         with pytest.raises(RpcError, match="not optional"):
             _serve_one_roundtrip(server, "need", schema, {"x": None})
 

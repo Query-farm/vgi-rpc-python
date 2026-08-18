@@ -2,6 +2,12 @@
 
 The `vgi-rpc-test` CLI tool runs the conformance suite against any worker that speaks the vgi-rpc wire protocol (Arrow IPC over stdin/stdout, HTTP, Unix sockets, or TCP sockets).
 
+The CLI validates a worker/server implementation by driving it with the
+Python reference client. It does not exercise the client implementation in a
+foreign-language SDK. Each port must therefore also run local client tests
+against the Python reference worker, especially for schema-sensitive exchange
+inputs such as all-null, dictionary-encoded, and nested columns.
+
 ## Install
 
 ```bash

@@ -94,7 +94,12 @@ def _craft_request(
 
 def _craft_valid_add(a: float = 1.0, b: float = 2.0) -> bytes:
     """Build a valid 'add' request."""
-    schema = pa.schema([pa.field("a", pa.float64()), pa.field("b", pa.float64())])
+    schema = pa.schema(
+        [
+            pa.field("a", pa.float64(), nullable=False),
+            pa.field("b", pa.float64(), nullable=False),
+        ]
+    )
     batch = pa.RecordBatch.from_pydict({"a": [a], "b": [b]}, schema=schema)
     return _craft_request("add", schema, batch)
 

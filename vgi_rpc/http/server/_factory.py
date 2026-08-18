@@ -409,17 +409,15 @@ def make_wsgi_app(
         # before the sticky middleware itself.
         middleware.append(_ServerIdEnvMiddleware(server.server_id))
 
-    # Enforce the advertised max_request_bytes cap server-side.  The
-    # __upload_url__/init route (and capability-discovery routes) are
-    # exempt because their payloads are intrinsically tiny.
+    # Enforce the advertised max_request_bytes cap server-side.  The upload
+    # URL control route accepts a tiny valid request, but it is still an
+    # attacker-controlled POST body and must not bypass the allocation guard.
+    # Capability discovery has no request body and remains exempt.
     if max_request_bytes is not None:
         middleware.append(
             _MaxRequestBytesMiddleware(
                 max_request_bytes,
-                exempt_prefixes=(
-                    f"{prefix}/__upload_url__",
-                    f"{prefix}/health",
-                ),
+                exempt_prefixes=(f"{prefix}/health",),
             )
         )
 

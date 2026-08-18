@@ -19,7 +19,6 @@ Usage::
 
 from __future__ import annotations
 
-import contextlib
 import fnmatch
 import math
 import threading
@@ -30,6 +29,16 @@ from typing import Any, Literal, cast
 
 import pyarrow as pa
 
+from vgi_rpc.conformance._lifecycle_tests import (
+    assert_cancel_before_exchange_once,
+    assert_cancel_close_ordering_safe,
+    assert_cancel_exchange_once,
+    assert_cancel_idempotent_once,
+    assert_cancel_producer_once,
+    assert_exchange_error_recovery,
+    assert_producer_error_recovery,
+    assert_unary_error_recovery,
+)
 from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.conformance._types import (
     AllTypes,
@@ -44,7 +53,7 @@ from vgi_rpc.conformance._types import (
 from vgi_rpc.introspect import DESCRIBE_VERSION, ServiceDescription
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
-from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, Stream, StreamState
+from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError
 
 # Default per-test timeout in seconds for the standalone runner.
 DEFAULT_TEST_TIMEOUT: float = 5.0
@@ -1237,27 +1246,17 @@ def _test_http_response_cap_externalized(proxy: ConformanceService, logs: LogCol
 
 @_conformance_test(category="error_recovery", name="unary_error_then_success")
 def _test_unary_error_then_success(proxy: ConformanceService, logs: LogCollector) -> None:
-    with contextlib.suppress(RpcError):
-        proxy.raise_value_error(message="boom")
-    assert proxy.echo_int(value=42) == 42
+    assert_unary_error_recovery(proxy)
 
 
 @_conformance_test(category="error_recovery", name="stream_error_then_unary")
 def _test_stream_error_then_unary(proxy: ConformanceService, logs: LogCollector) -> None:
-    with contextlib.suppress(RpcError):
-        for _ab in proxy.produce_error_mid_stream(emit_before_error=1):
-            pass
-    assert proxy.echo_string(value="ok") == "ok"
+    assert_producer_error_recovery(proxy)
 
 
 @_conformance_test(category="error_recovery", name="exchange_error_then_exchange")
 def _test_exchange_error_then_exchange(proxy: ConformanceService, logs: LogCollector) -> None:
-    with contextlib.suppress(RpcError), proxy.exchange_error_on_nth(fail_on=1) as session:
-        session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
-
-    with proxy.exchange_scale(factor=2.0) as session2:
-        out = session2.exchange(AnnotatedBatch.from_pydict({"value": [5.0]}))
-        assert abs(cast("float", out.batch.column("value")[0].as_py()) - 10.0) < 1e-6
+    assert_exchange_error_recovery(proxy)
 
 
 @_conformance_test(category="error_recovery", name="multiple_sequential_sessions")
@@ -1275,64 +1274,29 @@ def _test_multiple_sequential_sessions(proxy: ConformanceService, logs: LogColle
 # ---------------------------------------------------------------------------
 
 
-def _consume_n(session: Stream[StreamState], n: int) -> list[AnnotatedBatch]:
-    """Pull the first *n* batches from *session* without exhausting it."""
-    it = iter(session)
-    return [next(it) for _ in range(n)]
-
-
 @_conformance_test(category="cancel", name="producer_mid_stream")
 def _test_cancel_producer_mid_stream(proxy: ConformanceService, logs: LogCollector) -> None:
-    proxy.reset_cancel_probe()
-    session = proxy.cancellable_producer()
-    _consume_n(session, 3)
-    session.cancel()
-    produce_calls, _exchange_calls, on_cancel_calls = proxy.cancel_probe_counters()
-    assert on_cancel_calls == 1, f"expected on_cancel_calls=1, got {on_cancel_calls}"
-    assert produce_calls >= 3, f"expected produce_calls>=3, got {produce_calls}"
-    # Transport is clean for the next call.
-    assert proxy.echo_int(value=42) == 42
+    assert_cancel_producer_once(proxy)
 
 
 @_conformance_test(category="cancel", name="exchange_after_n")
 def _test_cancel_exchange_after_n(proxy: ConformanceService, logs: LogCollector) -> None:
-    proxy.reset_cancel_probe()
-    session = proxy.cancellable_exchange()
-    session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
-    session.exchange(AnnotatedBatch.from_pydict({"value": [2.0]}))
-    session.cancel()
-    _produce_calls, exchange_calls, on_cancel_calls = proxy.cancel_probe_counters()
-    assert exchange_calls == 2, f"expected exchange_calls=2, got {exchange_calls}"
-    assert on_cancel_calls == 1, f"expected on_cancel_calls=1, got {on_cancel_calls}"
+    assert_cancel_exchange_once(proxy)
 
 
 @_conformance_test(category="cancel", name="before_any_exchange")
 def _test_cancel_before_any_exchange(proxy: ConformanceService, logs: LogCollector) -> None:
-    proxy.reset_cancel_probe()
-    session = proxy.cancellable_exchange()
-    session.cancel()
-    _produce_calls, exchange_calls, _on_cancel_calls = proxy.cancel_probe_counters()
-    assert exchange_calls == 0, f"expected exchange_calls=0, got {exchange_calls}"
-    # Transport is clean for the next call.
-    assert proxy.echo_int(value=1) == 1
+    assert_cancel_before_exchange_once(proxy)
 
 
 @_conformance_test(category="cancel", name="idempotent")
 def _test_cancel_idempotent(proxy: ConformanceService, logs: LogCollector) -> None:
-    proxy.reset_cancel_probe()
-    s1 = proxy.cancellable_exchange()
-    s1.cancel()
-    s1.cancel()  # second cancel is a no-op
-    s2 = proxy.cancellable_exchange()
-    s2.close()
-    s2.cancel()  # cancel after close is a no-op
-    s3 = proxy.cancellable_exchange()
-    s3.cancel()
-    s3.close()  # close after cancel is a no-op
-    _p, _e, on_cancel_calls = proxy.cancel_probe_counters()
-    # HTTP cancel POSTs only when a state token is present; on pipe every
-    # cancel() writes a cancel batch that the server observes. Accept 2 or 3.
-    assert on_cancel_calls in (2, 3), f"expected on_cancel_calls in (2, 3), got {on_cancel_calls}"
+    assert_cancel_idempotent_once(proxy)
+
+
+@_conformance_test(category="cancel", name="close_ordering")
+def _test_cancel_close_ordering(proxy: ConformanceService, logs: LogCollector) -> None:
+    assert_cancel_close_ordering_safe(proxy)
 
 
 @_conformance_test(category="cancel", name="exchange_after_cancel_raises")
@@ -1349,7 +1313,9 @@ def _test_exchange_after_cancel_raises(proxy: ConformanceService, logs: LogColle
 @_conformance_test(category="cancel", name="transport_reusable")
 def _test_transport_reusable_after_cancel(proxy: ConformanceService, logs: LogCollector) -> None:
     session = proxy.cancellable_producer()
-    _consume_n(session, 2)
+    iterator = iter(session)
+    next(iterator)
+    next(iterator)
     session.cancel()
     # After a mid-stream cancel, the transport is cleanly available again.
     assert len(list(proxy.produce_n(count=3))) == 3

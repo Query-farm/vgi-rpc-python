@@ -444,7 +444,14 @@ def _read_request(
             f"Unsupported request version {version_bytes!r}, expected {REQUEST_VERSION!r}. "
             f"Set the 'vgi_rpc.request_version' custom_metadata value to {REQUEST_VERSION!r}."
         )
-    method_name = method_name_bytes.decode()
+    try:
+        method_name = method_name_bytes.decode()
+    except UnicodeDecodeError as exc:
+        raise RpcError(
+            "ProtocolError",
+            "Invalid 'vgi_rpc.method' in request batch custom_metadata: the method name must be valid UTF-8.",
+            "",
+        ) from exc
     # Store trace context in contextvar for hook consumption (pipe/subprocess transport)
     tp = custom_metadata.get(TRACEPARENT_KEY) if custom_metadata else None
     if tp is not None:
@@ -698,40 +705,6 @@ def _validate_params(method_name: str, kwargs: dict[str, object], param_types: d
             raise TypeError(f"{method_name}() parameter '{name}' is not optional but got None")
 
 
-def _arrow_type_family(t: pa.DataType) -> str:
-    """Group an Arrow type into the family a parameter check cares about.
-
-    Coarse on purpose. Within a family the declared type governs and Arrow's
-    own cast handles the difference (float32 into a float64 parameter, date32
-    into date64); across families there is no reading of the caller's bytes
-    that yields the declared type, which is the case worth a 400.
-
-    Args:
-        t: The Arrow type to classify.
-
-    Returns:
-        A family name, or ``"other"`` for types this check does not police.
-
-    """
-    if pa.types.is_boolean(t):
-        return "boolean"
-    if pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_decimal(t):
-        return "numeric"
-    if pa.types.is_string(t) or pa.types.is_large_string(t):
-        return "string"
-    if pa.types.is_binary(t) or pa.types.is_large_binary(t) or pa.types.is_fixed_size_binary(t):
-        return "binary"
-    if pa.types.is_temporal(t):
-        return "temporal"
-    if pa.types.is_list(t) or pa.types.is_large_list(t) or pa.types.is_fixed_size_list(t):
-        return "list"
-    if pa.types.is_struct(t):
-        return "struct"
-    if pa.types.is_map(t):
-        return "map"
-    return "other"
-
-
 def _validate_call_signature(
     method_name: str,
     kwargs: dict[str, object],
@@ -751,14 +724,10 @@ def _validate_call_signature(
     after the call — cannot tell a caller's bad request from an exception the
     method body raised, and so answered 400 to both.
 
-    Types are compared as **Arrow** types, against the schema the batch
-    actually arrived with, not as Python types against the decoded values.
-    The wire carries Arrow, the declared contract is an Arrow schema, and by
-    the time kwargs exist ``as_py()`` has already collapsed the distinctions
-    that matter — a ``float64`` and a ``decimal128`` parameter are both
-    ``float``-ish objects, and a ``timestamp`` is indistinguishable from a
-    ``date``. Checking the decoded Python value re-derives, badly, something
-    the schema states exactly.
+    Field count, order, names, Arrow types, and top-level nullability are
+    compared against the declared schema. Schema and field metadata are not
+    part of the parameter contract because Arrow implementations do not all
+    preserve their ordering or representation across IPC boundaries.
 
     Args:
         method_name: Name of the method being dispatched.
@@ -768,9 +737,9 @@ def _validate_call_signature(
         params_schema: The method's declared Arrow parameter schema.
 
     Raises:
-        TypeError: If ``kwargs`` names a parameter the method does not
-            declare, omits one that has no default, or arrived as an Arrow
-            type from a different family than the declared one.
+        TypeError: If the request schema differs from the declared parameter
+            contract, if ``kwargs`` names an undeclared parameter, or if a
+            required parameter is absent.
 
     """
     # ``ctx`` is injected by the framework after this check, never sent by a
@@ -784,22 +753,24 @@ def _validate_call_signature(
     request_schema = _current_request_param_schema.get()
     if request_schema is None:
         return  # no batch was read (in-process test client, synthetic call)
-    for field in request_schema:
-        if field.name not in param_types:
-            continue
-        declared_index = params_schema.get_field_index(field.name)
-        if declared_index < 0:
-            continue
-        declared = params_schema.field(declared_index).type
-        if field.type == declared:
-            continue
-        got, want = _arrow_type_family(field.type), _arrow_type_family(declared)
-        if "other" in (got, want):
-            continue  # not policed — see _arrow_type_family
-        if got != want:
+    if len(request_schema) != len(params_schema):
+        raise TypeError(
+            f"{method_name}() parameter schema expected {len(params_schema)} fields, got {len(request_schema)}"
+        )
+    for index, (field, declared) in enumerate(zip(request_schema, params_schema, strict=True)):
+        if field.name != declared.name:
             raise TypeError(
-                f"{method_name}() parameter {field.name!r} expected Arrow type {declared} "
+                f"{method_name}() parameter schema field {index} expected name {declared.name!r}, got {field.name!r}"
+            )
+        if field.type != declared.type:
+            raise TypeError(
+                f"{method_name}() parameter {field.name!r} expected Arrow type {declared.type} "
                 f"but the request batch carried {field.type}"
+            )
+        if field.nullable != declared.nullable:
+            raise TypeError(
+                f"{method_name}() parameter {field.name!r} expected nullable={declared.nullable}, "
+                f"but the request batch carried nullable={field.nullable}"
             )
 
 

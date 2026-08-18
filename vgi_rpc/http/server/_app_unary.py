@@ -103,6 +103,13 @@ def _run_unary_sync(
             _validate_params(info.name, kwargs, info.param_types)
         except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+        except Exception as exc:
+            # Resolving an ExternalLocation is part of reading the request but
+            # a storage 404, checksum mismatch, or bounded-fetch failure is not
+            # malformed Arrow supplied by the caller.  Preserve it as a typed
+            # RPC server error instead of letting Falcon replace it with an
+            # opaque JSON 500 response.
+            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
         # Pre-built __describe__ batch — write directly, skip implementation call.
         describe_batch = app._server._describe_batch
