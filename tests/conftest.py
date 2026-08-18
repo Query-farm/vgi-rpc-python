@@ -816,6 +816,47 @@ def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterato
 
 
 @pytest.fixture(scope="session")
+def conformance_http_external_security_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Spawn the canonical external-fetch security configuration.
+
+    The encoded and decoded caps deliberately differ so the shared suite can
+    prove both accounting stages independently.  The host policy admits the
+    fixture's ``127.0.0.1`` URLs but rejects its ``localhost`` redirect alias.
+    Cross-language ports should expose an equivalent fixture configuration.
+    """
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            _CONFORMANCE_HTTP,
+            "--port",
+            str(port),
+            "--fake-storage",
+            conformance_fake_storage,
+            "--max-request-bytes",
+            "1048576",
+            "--max-fetch-bytes",
+            "4096",
+            "--max-decompressed-fetch-bytes",
+            "8192",
+            "--reject-localhost-redirects",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        actual_port = int(line.split(":", 1)[1])
+        _wait_for_http(actual_port)
+        yield actual_port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def conformance_http_externalize_always_port(conformance_fake_storage: str) -> Iterator[int]:
     """Spawn a conformance HTTP worker that externalizes EVERY non-empty batch.
 

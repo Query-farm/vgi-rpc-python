@@ -19,11 +19,12 @@ from __future__ import annotations
 import argparse
 import socket
 import sys
+from urllib.parse import urlparse
 
 import falcon
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
-from vgi_rpc.external import Compression, ExternalLocationConfig
+from vgi_rpc.external import Compression, ExternalLocationConfig, FetchConfig
 from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
 from vgi_rpc.http.server._introspect import TokenIdentity
 from vgi_rpc.rpc import AuthContext, RpcServer
@@ -159,7 +160,7 @@ class _TestDrainResource:
         # Tests need the reverse so they don't poison the fixture.
         if self._handle is not None:
             # Walk to the underlying _SessionRegistry via the bound shutdown method.
-            registry = self._handle.shutdown.__self__  # type: ignore[attr-defined]
+            registry = self._handle.shutdown.__self__  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
             registry.set_draining(False)
         resp.status = falcon.HTTP_204
 
@@ -217,6 +218,26 @@ def main() -> None:
         choices=("none", "zstd"),
         default="none",
         help="Compression for externalized batches.",
+    )
+    parser.add_argument(
+        "--max-fetch-bytes",
+        type=int,
+        default=None,
+        help="Encoded/on-wire cap for resolving external request pointers.",
+    )
+    parser.add_argument(
+        "--max-decompressed-fetch-bytes",
+        type=int,
+        default=None,
+        help="Decoded cap for resolving external request pointers.",
+    )
+    parser.add_argument(
+        "--reject-localhost-redirects",
+        action="store_true",
+        help=(
+            "Allow the fixture's 127.0.0.1 storage URL but reject a redirect "
+            "to localhost. Test-only redirect-hop validation affordance."
+        ),
     )
     parser.add_argument(
         "--no-sticky",
@@ -394,11 +415,25 @@ def main() -> None:
     from vgi_rpc.conformance.fake_storage import FakeStorageBackend
 
     backend = FakeStorageBackend(args.fake_storage)
+
+    def external_url_validator(url: str) -> None:
+        """Apply the external-security fixture's host policy."""
+        if not args.reject_localhost_redirects:
+            return
+        if urlparse(url).hostname != "127.0.0.1":
+            raise ValueError("external-security fixture permits only 127.0.0.1")
+
+    fetch_defaults = FetchConfig()
+    fetch_config = FetchConfig(
+        max_fetch_bytes=(fetch_defaults.max_fetch_bytes if args.max_fetch_bytes is None else args.max_fetch_bytes),
+        max_decompressed_bytes=args.max_decompressed_fetch_bytes,
+    )
     external_location = ExternalLocationConfig(
         storage=backend,
         externalize_threshold_bytes=args.externalize_threshold,
         compression=Compression() if args.compression == "zstd" else None,
-        url_validator=None,
+        fetch_config=fetch_config,
+        url_validator=external_url_validator if args.reject_localhost_redirects else None,
     )
     server = RpcServer(
         ConformanceService,

@@ -45,8 +45,10 @@ from vgi_rpc.conformance import (
     run_describe_conformance,
 )
 from vgi_rpc.conformance._adversarial_http import TestAdversarialHttpRequestContract  # noqa: F401
+from vgi_rpc.conformance._adversarial_raw import TestAdversarialRawRequestContract  # noqa: F401
 from vgi_rpc.conformance._external_pytest import (
     TestExternalFetchFailures,  # noqa: F401
+    TestExternalFetchSecurity,  # noqa: F401
     TestExternalInputRoutes,  # noqa: F401
     TestExternalStorageUrlPair,  # noqa: F401
 )

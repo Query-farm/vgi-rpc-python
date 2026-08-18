@@ -1183,6 +1183,27 @@ When the key **is** present, a reader MUST verify the digest against the fetched
 payload (decompressed, if a coding was applied) and MUST fail the resolution
 on mismatch rather than handing the batch to application code.
 
+### Fetch safety
+
+Readers that resolve external pointers MUST apply their configured URL policy
+to the initial URL and to every redirect target *before* issuing that hop. A
+reader MUST bound redirect following; rejecting redirects entirely is also
+valid. This prevents an allowed public URL from redirecting the reader to a
+loopback or private service.
+
+The encoded bytes received from storage and the decoded bytes passed to the
+Arrow reader have independent operator-configured limits. The encoded limit
+MUST be enforced while streaming the response, even if `Content-Length` is
+absent or false. The decoded limit MUST be enforced after applying the named
+`Content-Encoding`. Implementations MAY keep their historical decoded limit
+as the default when adding the separate setting.
+
+Diagnostic errors, logs, traces, and exception chains MUST NOT expose URL
+userinfo, query strings, or fragments. In particular, signed query parameters
+are bearer credentials. Diagnostic URLs retain only scheme, host, port, and
+path. The `vgi_rpc.location` pointer and `vgi_rpc.location.source` provenance
+remain unchanged application metadata.
+
 ### Resolution (reading)
 
 ```
@@ -1195,14 +1216,13 @@ resolve_external_location(batch, custom_metadata, config):
 
   url = custom_metadata["vgi_rpc.location"]
 
-  // Validate URL (default: HTTPS only)
-  config.url_validator(url)
-
   // Fetch with retries
   // Default: max 3 total attempts (max_retries=2, capped at 2)
   // Retry delay: 0.5s fixed between attempts
   // Retryable errors: network/OS errors, Arrow parse errors, HTTP client errors
-  data = fetch_url(url, config.fetch_config)
+  // Validate the initial URL and every redirect target before requesting it.
+  // Enforce independent encoded and decoded byte caps.
+  data = fetch_url(url, config.fetch_config, config.url_validator)
 
   // Decompress if needed (zstd)
   // Open as IPC stream, dispatch log batches, extract data batch

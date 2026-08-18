@@ -6,7 +6,9 @@ The CLI validates a worker/server implementation by driving it with the
 Python reference client. It does not exercise the client implementation in a
 foreign-language SDK. Each port must therefore also run local client tests
 against the Python reference worker, especially for schema-sensitive exchange
-inputs such as all-null, dictionary-encoded, and nested columns.
+inputs such as all-null, dictionary-encoded, and nested columns. The exact
+worker and schema contract are defined in
+[Native-client conformance](native-client-conformance.md).
 
 ## Install
 
@@ -213,7 +215,14 @@ Some tests can't run against one already-running server, because the state under
 |---|---|---|---|
 | `proof_worker_factory` | `TestProxyProof` | skip — the feature is wholly optional | [proxy-proof-spec.md](proxy-proof-spec.md) |
 | `conformance_http_no_compression_port` | `test_empty_advertisement_means_never_compressed` | skip | — |
+| `conformance_http_external_security_port` | `TestExternalFetchSecurity` | skip — requires a server wired to the fake-storage redirect routes and small encoded/decoded caps | [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#fetch-safety) |
 | `conformance_http_sticky_short_ttl_port`<br>`conformance_http_sticky_peer_ports`<br>`conformance_http_sticky_auth_port` | the three `TestSticky` failure paths | **fail**, if the server advertises `VGI-Sticky-Enabled` — skip otherwise | [sticky-sessions-spec.md](sticky-sessions-spec.md) §9.1 |
+
+The external-security fixture uses the shared fake-storage service, a 4 KiB
+encoded cap, an 8 KiB decoded cap, and a URL policy that permits
+`127.0.0.1` but rejects the fake service's `localhost` redirect alias. Ports
+may express those settings through their native configuration API; they do not
+need to copy the Python worker's command-line flags.
 
 The sticky row is the one to note: a port may decline sticky entirely, but a port that *claims* it cannot quietly omit the tests that prove sessions are refused when they should be. Everything else on this page skips silently when unsupplied, which is why the sticky fixtures name themselves in the failure message.
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import traceback
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -23,6 +24,7 @@ from vgi_rpc.external_fetch import (
     _is_presigned_url,
     _reset_session,
     fetch_url,
+    redact_url,
 )
 
 # ---------------------------------------------------------------------------
@@ -465,6 +467,102 @@ class TestFetchMaxBytes:
                     fetch_url(url, config)
 
 
+class TestFetchRedirectSecurity:
+    """Redirect targets are bounded, validated, and safe to diagnose."""
+
+    @staticmethod
+    def _stored_url(base_url: str, data: bytes) -> str:
+        """Upload bytes to the real fake-storage fixture and return its download URL."""
+        import httpx2
+
+        allocation = httpx2.post(f"{base_url}/alloc", json={}, timeout=5.0).json()
+        response = httpx2.put(allocation["upload_url"], content=data, timeout=5.0)
+        response.raise_for_status()
+        return str(allocation["download_url"])
+
+    def test_same_host_redirect_is_followed_and_each_hop_validated(self) -> None:
+        """A valid same-host redirect preserves existing fetch behavior."""
+        from vgi_rpc.conformance.fake_storage import serve_in_thread
+
+        base_url, shutdown = serve_in_thread()
+        try:
+            payload = b"same-host redirect"
+            download_url = self._stored_url(base_url, payload)
+            redirect_url = download_url.replace("/download/", "/redirect/", 1)
+            validated: list[str] = []
+            with FetchConfig() as config:
+                result = fetch_url(redirect_url, config, url_validator=validated.append)
+            assert result == payload
+            assert redirect_url in validated
+            assert download_url in validated
+        finally:
+            shutdown()
+
+    def test_disallowed_localhost_hop_is_never_fetched(self) -> None:
+        """Validation runs before the redirect target receives a request."""
+        import httpx2
+
+        from vgi_rpc.conformance.fake_storage import serve_in_thread
+
+        base_url, shutdown = serve_in_thread()
+        try:
+            download_url = self._stored_url(base_url, b"must not be fetched")
+            redirect_url = download_url.replace("/download/", "/redirect-localhost/", 1)
+            before = int(httpx2.get(f"{base_url}/_stats", timeout=5.0).json().get("download_requests", 0))
+
+            def reject_localhost(url: str) -> None:
+                if "//localhost:" in url:
+                    raise ValueError("secret validator detail")
+
+            with FetchConfig() as config, pytest.raises(ValueError, match="URL rejected"):
+                fetch_url(redirect_url, config, url_validator=reject_localhost)
+            after = int(httpx2.get(f"{base_url}/_stats", timeout=5.0).json().get("download_requests", 0))
+            assert after == before
+        finally:
+            shutdown()
+
+    def test_redirect_loop_stops_at_configured_limit(self) -> None:
+        """Each request follows at most max_redirects hops."""
+        from vgi_rpc.conformance.fake_storage import serve_in_thread
+
+        base_url, shutdown = serve_in_thread()
+        try:
+            download_url = self._stored_url(base_url, b"loop")
+            loop_url = download_url.replace("/download/", "/redirect-loop/", 1)
+            with (
+                FetchConfig(max_redirects=2) as config,
+                pytest.raises(RuntimeError, match=r"max_redirects=2"),
+            ):
+                fetch_url(loop_url, config)
+        finally:
+            shutdown()
+
+    def test_signed_url_is_redacted_from_exception_and_chain(self) -> None:
+        """Third-party response errors cannot retain signing credentials in a traceback."""
+        from vgi_rpc.conformance.fake_storage import serve_in_thread
+
+        secret = "unit-secret-signature"
+        base_url, shutdown = serve_in_thread()
+        try:
+            url = f"{base_url}/download/missing?X-Amz-Credential=credential&X-Amz-Signature={secret}#fragment-secret"
+            with FetchConfig() as config, pytest.raises(aiohttp.ClientResponseError) as exc_info:
+                fetch_url(url, config)
+            rendered = "".join(traceback.format_exception(exc_info.value))
+            assert secret not in rendered
+            assert "X-Amz-Credential" not in rendered
+            assert "fragment-secret" not in rendered
+            assert redact_url(url) in rendered
+        finally:
+            shutdown()
+
+    def test_redact_url_strips_userinfo_query_and_fragment(self) -> None:
+        """Diagnostic URL rendering retains only routing-safe components."""
+        assert (
+            redact_url("https://alice:password@example.com:8443/path?X-Amz-Signature=secret#fragment")
+            == "https://example.com:8443/path"
+        )
+
+
 class TestFetchChunkValidation:
     """Tests for Range chunk validation in _fetch_one_chunk."""
 
@@ -762,15 +860,14 @@ class TestFetchErrors:
             def raise_for_status(self) -> None:
                 pass
 
-        class _HeadCtx:
-            async def __aenter__(self) -> _Resp:
-                return _Resp()
+            def release(self) -> None:
+                pass
 
-            async def __aexit__(self, *exc: object) -> bool:
-                return False
+        async def _head(_url: str, **_kwargs: object) -> _Resp:
+            return _Resp()
 
         client = AsyncMock()
-        client.head = lambda _url: _HeadCtx()
+        client.head = _head
 
         content_length, accept_ranges, _ = asyncio.run(_head_probe("https://example.com/bad-cl", client))
         assert content_length is None
@@ -1004,6 +1101,31 @@ class TestFetchDecompression:
                 result = fetch_url(url, config)
 
             assert result == raw_data
+
+    def test_explicit_decompressed_cap_is_independent_of_fetch_cap(self) -> None:
+        """A body under the encoded cap can still exceed the decoded cap."""
+        raw_data = b"x" * 20_000
+        compressed = zstandard.ZstdCompressor().compress(raw_data)
+        url = "https://example.com/zstd-decoded-cap"
+        with (
+            FetchConfig(
+                parallel_threshold_bytes=10_000_000,
+                max_fetch_bytes=4096,
+                max_decompressed_bytes=8192,
+            ) as config,
+            mock_aiohttp() as mock,
+        ):
+            mock.head(
+                url,
+                headers={"Content-Length": str(len(compressed)), "Content-Encoding": "zstd"},
+            )
+            mock.get(
+                url,
+                body=compressed,
+                headers={"Content-Length": str(len(compressed)), "Content-Encoding": "zstd"},
+            )
+            with pytest.raises(RuntimeError, match="max_decompressed_bytes=8192"):
+                fetch_url(url, config)
 
     def test_fetch_zstd_parallel_path(self) -> None:
         """Range requests on compressed blob → reassemble → decompress."""

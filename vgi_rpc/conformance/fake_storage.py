@@ -31,6 +31,13 @@ service or implement the contract independently:
   ``Accept-Ranges: bytes``, and (if applicable) ``Content-Encoding``.
 * ``GET /blob/{id}`` returns ``200`` (or ``206`` for ``Range`` requests)
   with the stored bytes.
+* ``GET|HEAD /redirect/{id}`` redirects to the same-host download URL.
+* ``GET|HEAD /redirect-localhost/{id}`` redirects from ``127.0.0.1`` to
+  ``localhost``.  Security tests configure a validator that rejects that hop
+  and assert the download route is never reached.
+* ``GET|HEAD /redirect-loop/{id}`` redirects to itself.
+* ``GET /_stats`` includes per-route request counters in addition to the
+  legacy ``object_count``.
 
 The service is in-memory only — every restart loses its objects, which
 is exactly what tests want.
@@ -83,6 +90,7 @@ class _BlobStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._blobs: dict[str, tuple[bytes, str | None]] = {}
+        self._hits: dict[str, int] = {}
 
     def allocate(self) -> str:
         return uuid.uuid4().hex
@@ -95,9 +103,14 @@ class _BlobStore:
         with self._lock:
             return self._blobs.get(blob_id)
 
+    def hit(self, name: str) -> None:
+        """Increment one observable route counter."""
+        with self._lock:
+            self._hits[name] = self._hits.get(name, 0) + 1
+
     def stats(self) -> dict[str, int]:
         with self._lock:
-            return {"object_count": len(self._blobs)}
+            return {"object_count": len(self._blobs), **self._hits}
 
 
 def _parse_range(header: str, total: int) -> tuple[int, int] | None:
@@ -145,6 +158,23 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
 
         if method == "POST" and path == "/alloc":
             return _handle_alloc(environ, start_response, store, base_url)
+        redirect_prefix = next(
+            (prefix for prefix in ("/redirect/", "/redirect-localhost/", "/redirect-loop/") if path.startswith(prefix)),
+            None,
+        )
+        if redirect_prefix is not None and method in ("GET", "HEAD"):
+            blob_id = path[len(redirect_prefix) :]
+            if not blob_id or "/" in blob_id:
+                return _respond(start_response, "404 Not Found", b"unknown blob")
+            store.hit(redirect_prefix.strip("/").replace("-", "_") + "_requests")
+            if redirect_prefix == "/redirect-loop/":
+                target = f"{base_url}{redirect_prefix}{blob_id}"
+            elif redirect_prefix == "/redirect-localhost/":
+                target = f"{base_url.replace('127.0.0.1', 'localhost')}/download/{blob_id}"
+            else:
+                target = f"{base_url}/download/{blob_id}"
+            start_response("302 Found", [("Location", target), ("Content-Length", "0")])
+            return [b""]
         route_prefix = next(
             (prefix for prefix in ("/blob/", "/upload/", "/download/") if path.startswith(prefix)),
             None,
@@ -157,6 +187,8 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
                 return _respond(start_response, "403 Forbidden", b"upload URL only permits PUT")
             if route_prefix == "/download/" and method not in ("GET", "HEAD"):
                 return _respond(start_response, "403 Forbidden", b"download URL only permits GET or HEAD")
+            if route_prefix == "/download/":
+                store.hit("download_requests")
             if method == "PUT":
                 return _handle_put(environ, start_response, store, blob_id)
             if method == "HEAD":

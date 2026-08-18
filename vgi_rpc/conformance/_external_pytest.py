@@ -11,6 +11,7 @@ tests must place one on each inbound HTTP route explicitly.
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Iterable
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -64,7 +65,12 @@ def _pointer_body(original_body: bytes, location: str, *, sha256: str | None = N
     return out.getvalue()
 
 
-def _upload_body(storage_url: str, body: bytes) -> tuple[str, str]:
+def _upload_body(
+    storage_url: str,
+    body: bytes,
+    *,
+    content_encoding: str | None = None,
+) -> tuple[str, str]:
     """Upload an IPC body and return ``(download_url, raw_sha256)``."""
     import httpx2
 
@@ -74,14 +80,33 @@ def _upload_body(storage_url: str, body: bytes) -> tuple[str, str]:
     legacy_url = str(allocation["object_url"])
     upload_url = str(allocation.get("upload_url", legacy_url))
     download_url = str(allocation.get("download_url", legacy_url))
+    headers = {"Content-Type": "application/octet-stream"}
+    if content_encoding is not None:
+        headers["Content-Encoding"] = content_encoding
     put_response = httpx2.put(
         upload_url,
         content=body,
-        headers={"Content-Type": "application/octet-stream"},
+        headers=headers,
         timeout=5.0,
     )
     put_response.raise_for_status()
     return download_url, hashlib.sha256(body).hexdigest()
+
+
+def _storage_stats(storage_url: str) -> dict[str, int]:
+    """Read fake-storage counters."""
+    import httpx2
+
+    response = httpx2.get(f"{storage_url}/_stats", timeout=5.0)
+    response.raise_for_status()
+    return {str(key): int(value) for key, value in response.json().items()}
+
+
+def _redirect_url(download_url: str, route: str) -> str:
+    """Replace the method-bound download route with a redirect fixture route."""
+    marker = "/download/"
+    assert marker in download_url
+    return download_url.replace(marker, f"/{route}/", 1)
 
 
 def _external_pointer_body(storage_url: str, original_body: bytes) -> bytes:
@@ -286,6 +311,121 @@ class TestExternalFetchFailures:
             assert _result_value(_post(client, "/echo_int", original)) == 11
 
 
+class TestExternalFetchSecurity:
+    """External fetches validate redirects, enforce both caps, and redact credentials."""
+
+    def test_same_host_redirect_succeeds(
+        self,
+        conformance_http_external_security_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """An allowed redirect remains usable after per-hop validation."""
+        import httpx2
+
+        original = _request_body("echo_int", value=23)
+        download_url, checksum = _upload_body(conformance_fake_storage, original)
+        pointer = _pointer_body(original, _redirect_url(download_url, "redirect"), sha256=checksum)
+        base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            assert _result_value(_post(client, "/echo_int", pointer)) == 23
+
+    def test_disallowed_redirect_hop_is_not_fetched(
+        self,
+        conformance_http_external_security_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """A redirect target is validated before the target receives HEAD or GET."""
+        import httpx2
+
+        original = _request_body("echo_int", value=29)
+        download_url, checksum = _upload_body(conformance_fake_storage, original)
+        pointer = _pointer_body(original, _redirect_url(download_url, "redirect-localhost"), sha256=checksum)
+        before = _storage_stats(conformance_fake_storage).get("download_requests", 0)
+        base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            _assert_rpc_error_response(_post(client, "/echo_int", pointer), match="URL rejected")
+            assert _result_value(_post(client, "/echo_int", original)) == 29
+        after = _storage_stats(conformance_fake_storage).get("download_requests", 0)
+        assert after == before, "the rejected localhost redirect target was fetched"
+
+    def test_redirect_loop_is_bounded(
+        self,
+        conformance_http_external_security_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """A redirect cycle fails instead of consuming the call deadline."""
+        import httpx2
+
+        original = _request_body("echo_int", value=31)
+        download_url, checksum = _upload_body(conformance_fake_storage, original)
+        pointer = _pointer_body(original, _redirect_url(download_url, "redirect-loop"), sha256=checksum)
+        base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            _assert_rpc_error_response(_post(client, "/echo_int", pointer), match="redirect limit")
+
+    def test_encoded_body_cap_is_independent(
+        self,
+        conformance_http_external_security_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """More than 4 KiB on the storage wire is rejected before dispatch."""
+        import httpx2
+
+        value = os.urandom(5_000).hex()
+        original = _request_body("echo_string", value=value)
+        assert len(original) > 4096
+        download_url, checksum = _upload_body(conformance_fake_storage, original)
+        pointer = _pointer_body(original, download_url, sha256=checksum)
+        base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            _assert_rpc_error_response(_post(client, "/echo_string", pointer), match="max_fetch_bytes")
+
+    def test_decoded_zstd_cap_is_independent(
+        self,
+        conformance_http_external_security_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """A small encoded body cannot inflate beyond the 8 KiB decoded cap."""
+        import httpx2
+        import zstandard
+
+        original = _request_body("echo_string", value="x" * 20_000)
+        encoded = zstandard.ZstdCompressor().compress(original)
+        assert len(encoded) < 4096
+        assert len(original) > 8192
+        download_url, _encoded_checksum = _upload_body(
+            conformance_fake_storage,
+            encoded,
+            content_encoding="zstd",
+        )
+        pointer = _pointer_body(original, download_url, sha256=hashlib.sha256(original).hexdigest())
+        base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            _assert_rpc_error_response(_post(client, "/echo_string", pointer), match="max_decompressed_bytes")
+
+    def test_signed_query_is_redacted_from_rpc_error(
+        self,
+        conformance_http_external_security_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """Neither the error message nor remote traceback echoes signed credentials."""
+        import httpx2
+
+        secret = "conformance-secret-signature"
+        original = _request_body("echo_int", value=37)
+        location = (
+            f"{conformance_fake_storage}/download/conformance-missing-signed"
+            f"?X-Amz-Credential=credential&X-Amz-Signature={secret}"
+        )
+        pointer = _pointer_body(original, location)
+        base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            response = _post(client, "/echo_int", pointer)
+        assert secret.encode() not in response.content
+        assert b"X-Amz-Credential" not in response.content
+        _assert_rpc_error_response(response)
+
+
 class TestExternalStorageUrlPair:
     """Upload URL providers must vend method-correct URL pairs."""
 
@@ -371,4 +511,9 @@ class TestExternalStorageUrlPair:
         assert response.content == payload
 
 
-__all__ = ["TestExternalFetchFailures", "TestExternalInputRoutes", "TestExternalStorageUrlPair"]
+__all__ = [
+    "TestExternalFetchFailures",
+    "TestExternalFetchSecurity",
+    "TestExternalInputRoutes",
+    "TestExternalStorageUrlPair",
+]

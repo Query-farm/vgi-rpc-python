@@ -80,7 +80,7 @@ from pyarrow import ipc
 
 from vgi_rpc._codec import Encoding as _CodecEncoding
 from vgi_rpc._codec import compress as _codec_compress
-from vgi_rpc.external_fetch import FetchConfig, fetch_url
+from vgi_rpc.external_fetch import FetchConfig, fetch_url, redact_url
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import (
     LOCATION_FETCH_MS_KEY,
@@ -124,11 +124,8 @@ __all__ = [
 
 
 def _sanitize_url(url: str) -> str:
-    """Strip query parameters from a URL to avoid leaking pre-signed credentials."""
-    from urllib.parse import urlparse, urlunparse
-
-    parsed = urlparse(url)
-    return urlunparse(parsed._replace(query="", fragment=""))
+    """Backward-compatible alias for the shared credential-safe URL redactor."""
+    return redact_url(url)
 
 
 #: Bytes uploaded to external storage during the call in flight.
@@ -169,7 +166,7 @@ def _traced_upload(
         kind=_otel_trace.SpanKind.CLIENT,
     ) as span:
         url = storage.upload(ipc_bytes, schema, content_encoding=content_encoding)
-        span.set_attribute("url", _sanitize_url(url))
+        span.set_attribute("url", redact_url(url))
         span.set_attribute("upload_bytes", len(ipc_bytes))
         if content_encoding is not None:
             span.set_attribute("compression", content_encoding)
@@ -534,9 +531,6 @@ def resolve_external_location(
     assert url_bytes is not None
     url = url_bytes.decode()
 
-    if config.url_validator is not None:
-        config.url_validator(url)
-
     import aiohttp
     from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
@@ -548,7 +542,7 @@ def resolve_external_location(
     if _HAS_OTEL:
         tracer = _otel_trace.get_tracer("vgi_rpc", "0.1.0")
         span = tracer.start_span("vgi_rpc.external/fetch", kind=_otel_trace.SpanKind.CLIENT)
-        span.set_attribute("url", _sanitize_url(url))
+        span.set_attribute("url", redact_url(url))
 
     t0 = time.monotonic()
     try:
@@ -575,16 +569,20 @@ def resolve_external_location(
         elapsed_ms = (time.monotonic() - t0) * 1000
         if span is not None:
             span.set_status(_otel_trace.StatusCode.ERROR, str(exc))
-            span.record_exception(exc)
+            # Third-party HTTP exceptions can retain the complete signed URL
+            # in request_info. Record only a reconstructed, redacted error.
+            span.record_exception(RuntimeError(f"ExternalLocation resolution failed: {redact_url(url)}"))
             span.set_attribute("fetch_duration_ms", elapsed_ms)
             span.end()
         _logger.error(
             "ExternalLocation resolution failed: %s (attempts=%d)",
-            url,
+            redact_url(url),
             max_retries + 1,
-            extra={"url": url, "attempts": max_retries + 1, "error_type": type(exc).__name__},
+            extra={"url": redact_url(url), "attempts": max_retries + 1, "error_type": type(exc).__name__},
         )
-        raise RuntimeError(f"Failed to resolve ExternalLocation after {max_retries + 1} attempts: {url}") from exc
+        raise RuntimeError(
+            f"Failed to resolve ExternalLocation after {max_retries + 1} attempts: {redact_url(url)}"
+        ) from None
 
 
 def _fetch_and_resolve(
@@ -599,14 +597,16 @@ def _fetch_and_resolve(
     from vgi_rpc.rpc import _dispatch_log_or_error
 
     t0 = time.monotonic()
-    data = fetch_url(url, config.fetch_config)
+    data = fetch_url(url, config.fetch_config, url_validator=config.url_validator)
     elapsed_ms = (time.monotonic() - t0) * 1000
 
     # Verify SHA-256 if present (data is already decompressed = raw IPC bytes)
     if expected_sha256 is not None:
         actual_sha256 = hashlib.sha256(data).hexdigest()
         if actual_sha256 != expected_sha256:
-            raise RuntimeError(f"SHA-256 checksum mismatch for {url}: expected {expected_sha256}, got {actual_sha256}")
+            raise RuntimeError(
+                f"SHA-256 checksum mismatch for {redact_url(url)}: expected {expected_sha256}, got {actual_sha256}"
+            )
 
     reader = ValidatedReader(ipc.open_stream(BytesIO(data)), ipc_validation)
     data_batches: list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]] = []
@@ -619,7 +619,9 @@ def _fetch_and_resolve(
 
         # Prevent redirect loops
         if fetched_cm is not None and fetched_cm.get(LOCATION_KEY) is not None:
-            raise RuntimeError(f"Redirect loop detected: fetched batch from {url} contains vgi_rpc.location")
+            raise RuntimeError(
+                f"Redirect loop detected: fetched batch from {redact_url(url)} contains vgi_rpc.location"
+            )
 
         # Dispatch log batches
         if _dispatch_log_or_error(fetched_batch, fetched_cm, on_log):
@@ -628,9 +630,11 @@ def _fetch_and_resolve(
         data_batches.append((fetched_batch, fetched_cm))
 
     if len(data_batches) == 0:
-        raise RuntimeError(f"No data batch found in ExternalLocation stream from {url}")
+        raise RuntimeError(f"No data batch found in ExternalLocation stream from {redact_url(url)}")
     if len(data_batches) > 1:
-        raise RuntimeError(f"Multiple data batches ({len(data_batches)}) found in ExternalLocation stream from {url}")
+        raise RuntimeError(
+            f"Multiple data batches ({len(data_batches)}) found in ExternalLocation stream from {redact_url(url)}"
+        )
 
     resolved_batch, resolved_cm = data_batches[0]
 
@@ -644,6 +648,8 @@ def _fetch_and_resolve(
     fetch_metadata = pa.KeyValueMetadata(
         {
             LOCATION_FETCH_MS_KEY: f"{elapsed_ms:.1f}".encode(),
+            # Provenance remains the original URL for wire compatibility.
+            # It is application data, unlike diagnostic errors/logs/spans.
             LOCATION_SOURCE_KEY: url.encode(),
         }
     )
@@ -770,13 +776,13 @@ def maybe_externalize_collector(
     )
     _logger.debug(
         "Batch externalized: %s (%d bytes raw, %d bytes uploaded, compressed=%s, sha256=%s)",
-        url,
+        redact_url(url),
         raw_size,
         len(ipc_bytes),
         content_encoding is not None,
         data_sha256,
         extra={
-            "url": url,
+            "url": redact_url(url),
             "raw_size_bytes": raw_size,
             "uploaded_size_bytes": len(ipc_bytes),
             "compressed": content_encoding is not None,
@@ -855,13 +861,13 @@ def maybe_externalize_batch(
     )
     _logger.debug(
         "Batch externalized: %s (%d bytes raw, %d bytes uploaded, compressed=%s, sha256=%s)",
-        url,
+        redact_url(url),
         raw_size,
         len(ipc_bytes),
         content_encoding is not None,
         data_sha256,
         extra={
-            "url": url,
+            "url": redact_url(url),
             "raw_size_bytes": raw_size,
             "uploaded_size_bytes": len(ipc_bytes),
             "compressed": content_encoding is not None,

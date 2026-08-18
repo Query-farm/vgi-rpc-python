@@ -32,10 +32,12 @@ import math
 import re
 import threading
 import time
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
 from vgi_rpc._codec import Encoding as _CodecEncoding
 
@@ -45,9 +47,35 @@ if TYPE_CHECKING:
 __all__ = [
     "FetchConfig",
     "fetch_url",
+    "redact_url",
 ]
 
 _logger = logging.getLogger(__name__)
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def redact_url(url: str) -> str:
+    """Return a diagnostic-safe URL with credentials and bearer data removed.
+
+    Query strings on external-location URLs commonly contain S3/GCS signing
+    credentials.  Userinfo and fragments can carry credentials too.  Keep only
+    the scheme, host, port, and path so errors remain actionable without
+    turning logs or remote tracebacks into credential stores.
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return "<invalid-url>"
+        host = parsed.hostname
+        if host is None:
+            return "<invalid-url>"
+        rendered_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        if parsed.port is not None:
+            rendered_host = f"{rendered_host}:{parsed.port}"
+        return urlunparse((parsed.scheme, rendered_host, parsed.path, "", "", ""))
+    except (TypeError, ValueError):
+        return "<invalid-url>"
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +111,13 @@ class FetchConfig:
         chunk_size_bytes: Size of each Range request chunk.
         max_parallel_requests: Semaphore limit on concurrent requests.
         timeout_seconds: Overall deadline for the fetch.
-        max_fetch_bytes: Hard cap on total download size.
+        max_fetch_bytes: Hard cap on encoded/on-wire download size.
+        max_decompressed_bytes: Hard cap after content decoding. ``None``
+            preserves the historical effective limit of
+            ``16 * max_fetch_bytes``.
+        max_redirects: Maximum redirects followed by each probe or data
+            request. Every target is passed through the caller's URL validator
+            before it is requested. Set to ``0`` to reject redirects.
         speculative_retry_multiplier: Launch a hedge request for chunks
             taking longer than ``multiplier * median``.  Set to ``0`` to
             disable hedging.
@@ -99,6 +133,8 @@ class FetchConfig:
     max_parallel_requests: int = 8
     timeout_seconds: float = 60.0
     max_fetch_bytes: int = 256 * 1024 * 1024
+    max_decompressed_bytes: int | None = None
+    max_redirects: int = 5
     speculative_retry_multiplier: float = 2.0
     max_speculative_hedges: int = 4
 
@@ -193,7 +229,7 @@ def _reset_session(config: FetchConfig, *, url: str = "") -> None:
 
     _logger.warning(
         "Resetting aiohttp session due to stale connection",
-        extra={"url": url},
+        extra={"url": redact_url(url)},
     )
     pool = config._pool
     with pool.lock:
@@ -215,7 +251,12 @@ def _reset_session(config: FetchConfig, *, url: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_url(url: str, config: FetchConfig) -> bytes:
+def fetch_url(
+    url: str,
+    config: FetchConfig,
+    *,
+    url_validator: Callable[[str], None] | None = None,
+) -> bytes:
     """Fetch URL contents, using parallel Range requests when beneficial.
 
     Uses a persistent connection pool owned by *config*.  Stale
@@ -225,6 +266,8 @@ def fetch_url(url: str, config: FetchConfig) -> bytes:
     Args:
         url: The URL to fetch.
         config: Fetch configuration controlling parallelism and limits.
+        url_validator: Optional validator applied to the initial URL and every
+            redirect target before issuing a request.
 
     Returns:
         The complete response body as bytes.
@@ -241,10 +284,12 @@ def fetch_url(url: str, config: FetchConfig) -> bytes:
     pool = _ensure_pool(config)
     if pool.loop is None or pool.session is None:  # pragma: no cover
         raise RuntimeError("FetchPool not properly initialized")
-    future = asyncio.run_coroutine_threadsafe(
-        _fetch_with_probe(url, config, pool.session),
-        pool.loop,
+    fetch = (
+        _fetch_with_probe(url, config, pool.session)
+        if url_validator is None
+        else _fetch_with_probe(url, config, pool.session, url_validator)
     )
+    future = asyncio.run_coroutine_threadsafe(fetch, pool.loop)
     try:
         data = future.result()
     except (aiohttp.ServerDisconnectedError, ConnectionResetError):
@@ -252,18 +297,20 @@ def fetch_url(url: str, config: FetchConfig) -> bytes:
         new_pool = config._pool
         if new_pool.loop is None or new_pool.session is None:  # pragma: no cover
             raise RuntimeError("FetchPool not properly initialized after reset") from None
-        retry_future = asyncio.run_coroutine_threadsafe(
-            _fetch_with_probe(url, config, new_pool.session),
-            new_pool.loop,
+        retry_fetch = (
+            _fetch_with_probe(url, config, new_pool.session)
+            if url_validator is None
+            else _fetch_with_probe(url, config, new_pool.session, url_validator)
         )
+        retry_future = asyncio.run_coroutine_threadsafe(retry_fetch, new_pool.loop)
         data = retry_future.result()
     duration_ms = (time.monotonic() - t0) * 1000
     _logger.debug(
         "Fetch completed: %s (%d bytes, %.1fms)",
-        url,
+        redact_url(url),
         len(data),
         duration_ms,
-        extra={"url": url, "size_bytes": len(data), "duration_ms": round(duration_ms, 2)},
+        extra={"url": redact_url(url), "size_bytes": len(data), "duration_ms": round(duration_ms, 2)},
     )
     return data
 
@@ -285,7 +332,111 @@ async def _read_response_body(resp: aiohttp.ClientResponse, config: FetchConfig)
     return b"".join(chunks)
 
 
-async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.ClientSession) -> bytes:
+def _validate_url(url: str, validator: Callable[[str], None] | None) -> None:
+    """Validate one request target while keeping validator diagnostics secret-safe."""
+    if validator is None:
+        return
+    try:
+        validator(url)
+    except Exception as exc:
+        # Preserve useful, historically exposed validator diagnostics while
+        # ensuring a callback that interpolates the input URL cannot leak its
+        # credentials into an RPC error.  Suppress the original exception so
+        # its args do not survive in ``__context__``.
+        message = str(exc).replace(url, redact_url(url))
+        parsed = urlparse(url)
+        secrets = [parsed.username, parsed.password, *(value for _, value in parse_qsl(parsed.query))]
+        for secret in secrets:
+            if secret:
+                message = message.replace(secret, "<redacted>")
+        raise ValueError(f"ExternalLocation URL rejected: {message}") from None
+
+
+@asynccontextmanager
+async def _request_following_redirects(
+    client: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    config: FetchConfig,
+    url_validator: Callable[[str], None] | None,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """Issue one request, manually validating and bounding every redirect."""
+    current_url = url
+    response: aiohttp.ClientResponse | None = None
+    try:
+        for redirect_count in range(config.max_redirects + 1):
+            _validate_url(current_url, url_validator)
+            try:
+                if method == "HEAD":
+                    response = await client.head(current_url, headers=headers, allow_redirects=False)
+                else:
+                    response = await client.get(current_url, headers=headers, allow_redirects=False)
+            except (TimeoutError, ConnectionResetError):
+                raise
+            except Exception as exc:
+                import aiohttp as _aiohttp
+
+                if isinstance(exc, _aiohttp.ServerDisconnectedError):
+                    raise
+                raise _aiohttp.ClientConnectionError(
+                    f"ExternalLocation {method} failed for {redact_url(current_url)}"
+                ) from None
+
+            if response.status not in _REDIRECT_STATUSES:
+                yield response
+                return
+
+            location = response.headers.get("Location")
+            response.release()
+            response = None
+            if redirect_count >= config.max_redirects:
+                raise RuntimeError(
+                    f"ExternalLocation redirect limit exceeded (max_redirects={config.max_redirects}) "
+                    f"at {redact_url(current_url)}"
+                )
+            if not location:
+                raise RuntimeError(f"ExternalLocation redirect had no Location header at {redact_url(current_url)}")
+            next_url = urljoin(current_url, location)
+            if not urlparse(next_url).scheme or not urlparse(next_url).netloc:
+                raise RuntimeError(f"ExternalLocation redirect target is invalid at {redact_url(current_url)}")
+            current_url = next_url
+    finally:
+        if response is not None:
+            response.release()
+
+
+def _raise_for_status_redacted(resp: aiohttp.ClientResponse, url: str) -> None:
+    """Raise an aiohttp error without retaining its signed request URL."""
+    if 200 <= resp.status < 300:
+        return
+    import aiohttp as _aiohttp
+    from aiohttp.client_reqrep import RequestInfo
+    from yarl import URL
+
+    safe_url = URL(redact_url(url))
+    request_info = RequestInfo(
+        safe_url,
+        resp.method,
+        resp.request_info.headers,
+        real_url=safe_url,
+    )
+    raise _aiohttp.ClientResponseError(
+        request_info,
+        (),
+        status=resp.status,
+        message=resp.reason or "",
+        headers=resp.headers,
+    ) from None
+
+
+async def _fetch_with_probe(
+    url: str,
+    config: FetchConfig,
+    client: aiohttp.ClientSession,
+    url_validator: Callable[[str], None] | None = None,
+) -> bytes:
     """Core async fetch: probe, then parallel Range GETs or simple GET.
 
     For normal URLs this issues a HEAD request first to learn
@@ -306,9 +457,9 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
     still-compressed bytes — which fail SHA-256 verification upstream.
     """
     if _is_presigned_url(url):
-        content_length, accept_ranges, content_encoding = await _range_probe(url, client)
+        content_length, accept_ranges, content_encoding = await _range_probe(url, client, config, url_validator)
     else:
-        content_length, accept_ranges, content_encoding = await _head_probe(url, client)
+        content_length, accept_ranges, content_encoding = await _head_probe(url, client, config, url_validator)
 
     # Guard: reject before downloading
     if content_length is not None and content_length > config.max_fetch_bytes:
@@ -327,18 +478,18 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
     if use_parallel:
         if content_length is None:  # pragma: no cover — guarded by use_parallel check
             raise RuntimeError("content_length unexpectedly None on parallel path")
-        data = await _fetch_chunks_with_hedging(client, url, content_length, config)
+        data = await _fetch_chunks_with_hedging(client, url, content_length, config, url_validator)
     else:
         # Simple path: single GET
-        async with client.get(url) as resp:
-            resp.raise_for_status()
+        async with _request_following_redirects(client, "GET", url, config, url_validator) as resp:
+            _raise_for_status_redacted(resp, url)
             # The delivering response is authoritative for the codec: an
             # origin that rejected the probe still names its encoding here.
             content_encoding = resp.headers.get("Content-Encoding", "") or content_encoding
             data = await _read_response_body(resp, config)
 
-    # Decompress if the server names a codec we know.  Cap decompressed
-    # size at 16 * max_fetch_bytes so a small, highly compressible
+    # Decompress if the server names a codec we know.  The explicit decoded
+    # cap defaults to 16 * max_fetch_bytes so a small, highly compressible
     # response (or a deliberately crafted bomb from a malicious / compromised
     # storage backend) cannot OOM the client the way an unbounded
     # ``decompress(data)`` would by trusting the frame header's declared
@@ -356,18 +507,35 @@ async def _fetch_with_probe(url: str, config: FetchConfig, client: aiohttp.Clien
     if codec is not None:
         from vgi_rpc._codec import decompress as _codec_decompress
 
-        max_decompressed = config.max_fetch_bytes * 16
+        max_decompressed = (
+            config.max_fetch_bytes * 16 if config.max_decompressed_bytes is None else config.max_decompressed_bytes
+        )
         try:
             data = _codec_decompress(codec, data, max_output_size=max_decompressed)
-        except Exception as exc:
+        except Exception:
             raise RuntimeError(
-                f"Failed to decompress {codec.value} data ({len(data)} compressed bytes) from {url}"
-            ) from exc
+                f"Failed to decompress {codec.value} data ({len(data)} encoded bytes) "
+                f"without exceeding max_decompressed_bytes={max_decompressed} from {redact_url(url)}"
+            ) from None
+
+    max_decompressed = (
+        config.max_fetch_bytes * 16 if config.max_decompressed_bytes is None else config.max_decompressed_bytes
+    )
+    if len(data) > max_decompressed:
+        raise RuntimeError(
+            f"ExternalLocation decoded body exceeded max_decompressed_bytes "
+            f"({len(data)} > {max_decompressed}) from {redact_url(url)}"
+        )
 
     return data
 
 
-async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | None, str, str]:
+async def _head_probe(
+    url: str,
+    client: aiohttp.ClientSession,
+    config: FetchConfig | None = None,
+    url_validator: Callable[[str], None] | None = None,
+) -> tuple[int | None, str, str]:
     """Issue a HEAD request and return (content_length, accept_ranges, content_encoding).
 
     Returns ``(None, "", "")`` if the server does not support HEAD (405, 501),
@@ -377,10 +545,11 @@ async def _head_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | No
     import aiohttp as _aiohttp
 
     try:
-        async with client.head(url) as resp:
+        effective_config = config or FetchConfig()
+        async with _request_following_redirects(client, "HEAD", url, effective_config, url_validator) as resp:
             if resp.status in (403, 405, 501):
                 return None, "", ""
-            resp.raise_for_status()
+            _raise_for_status_redacted(resp, url)
             content_length_str = resp.headers.get("Content-Length")
             accept_ranges = resp.headers.get("Accept-Ranges", "")
             content_encoding = resp.headers.get("Content-Encoding", "")
@@ -430,13 +599,18 @@ def _content_length_from_content_range(content_range: str) -> int | None:
         return None
 
 
-async def _range_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | None, str, str]:
+async def _range_probe(
+    url: str,
+    client: aiohttp.ClientSession,
+    config: FetchConfig,
+    url_validator: Callable[[str], None] | None,
+) -> tuple[int | None, str, str]:
     """Issue a tiny probe GET (Range: bytes=0-0) for pre-signed URLs."""
     import aiohttp as _aiohttp
 
     headers = {"Range": "bytes=0-0"}
     try:
-        async with client.get(url, headers=headers) as resp:
+        async with _request_following_redirects(client, "GET", url, config, url_validator, headers=headers) as resp:
             content_encoding = resp.headers.get("Content-Encoding", "")
 
             if resp.status == 206:
@@ -456,7 +630,7 @@ async def _range_probe(url: str, client: aiohttp.ClientSession) -> tuple[int | N
             if resp.status in (403, 405, 501):
                 return None, "", ""
 
-            resp.raise_for_status()
+            _raise_for_status_redacted(resp, url)
             return None, "", content_encoding  # pragma: no cover
     except _aiohttp.ClientResponseError as exc:
         if exc.status in (403, 405, 501):
@@ -490,6 +664,8 @@ async def _fetch_one_chunk(
     start: int,
     end: int,
     semaphore: asyncio.Semaphore,
+    config: FetchConfig,
+    url_validator: Callable[[str], None] | None,
 ) -> bytes:
     """Fetch a single byte range.
 
@@ -501,17 +677,17 @@ async def _fetch_one_chunk(
     expected_size = end - start + 1
     async with semaphore:
         headers = {"Range": f"bytes={start}-{end}"}
-        async with client.get(url, headers=headers) as resp:
-            resp.raise_for_status()
+        async with _request_following_redirects(client, "GET", url, config, url_validator, headers=headers) as resp:
+            _raise_for_status_redacted(resp, url)
             if resp.status != 206:
                 raise RuntimeError(
-                    f"Expected HTTP 206 for Range request, got {resp.status} (bytes={start}-{end} of {url})"
+                    f"Expected HTTP 206 for Range request, got {resp.status} (bytes={start}-{end} of {redact_url(url)})"
                 )
             data = await resp.read()
             if len(data) != expected_size:
                 raise RuntimeError(
                     f"Range chunk size mismatch: expected {expected_size} bytes, "
-                    f"got {len(data)} (bytes={start}-{end} of {url})"
+                    f"got {len(data)} (bytes={start}-{end} of {redact_url(url)})"
                 )
             return data
 
@@ -521,6 +697,7 @@ async def _fetch_chunks_with_hedging(
     url: str,
     content_length: int,
     config: FetchConfig,
+    url_validator: Callable[[str], None] | None,
 ) -> bytes:
     """Parallel chunk fetching with time-based multi-chunk speculative hedging."""
     ranges = _compute_ranges(content_length, config.chunk_size_bytes)
@@ -539,7 +716,7 @@ async def _fetch_chunks_with_hedging(
         t0 = time.monotonic()
 
         async def _timed_fetch() -> tuple[int, bytes]:
-            data = await _fetch_one_chunk(client, url, start, end, semaphore)
+            data = await _fetch_one_chunk(client, url, start, end, semaphore, config, url_validator)
             elapsed = time.monotonic() - t0
             completion_times.append(elapsed)
             return idx, data
