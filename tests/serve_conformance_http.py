@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import socket
 import sys
+import threading
 from urllib.parse import urlparse
 
 import falcon
@@ -68,6 +69,22 @@ CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0
 #: transient 503 and not as the endpoint's own definitive 404 — which a caller
 #: may negative-cache, turning a brief outage into a remembered bad credential.
 CONFORMANCE_UNAVAILABLE_TOKEN = "conformance-unavailable-token"
+
+
+class _FailServeStartOnce(ConformanceServiceImpl):
+    """Conformance implementation whose first lifecycle notification fails."""
+
+    def __init__(self) -> None:
+        self._serve_start_calls = 0
+        self._serve_start_lock = threading.Lock()
+
+    def on_serve_start(self, kind: object) -> None:
+        """Raise on the first call and accept the framework's retry."""
+        del kind
+        with self._serve_start_lock:
+            self._serve_start_calls += 1
+            if self._serve_start_calls == 1:
+                raise RuntimeError("conformance injected on_serve_start failure")
 
 
 def _maybe_access_log(server: RpcServer, path: str | None) -> None:
@@ -335,6 +352,11 @@ def main() -> None:
             "the suite's own HTTP client cannot otherwise detect."
         ),
     )
+    parser.add_argument(
+        "--fail-serve-start-once",
+        action="store_true",
+        help="Test-only: fail the first on_serve_start notification, then accept its retry.",
+    )
     args = parser.parse_args()
 
     call_state_cache_entries = 0 if args.no_call_state_cache else 4096
@@ -356,12 +378,13 @@ def main() -> None:
     # Mirror make_wsgi_app's own default so the plain worker keeps shipping
     # the documented value in VGI-Sticky-Default-TTL.
     sticky_default_ttl: float = 300.0 if args.sticky_ttl is None else float(args.sticky_ttl)
+    impl = _FailServeStartOnce() if args.fail_serve_start_once else ConformanceServiceImpl()
 
     if not args.fake_storage:
         # Plain HTTP server, no external storage.
         server = RpcServer(
             ConformanceService,
-            ConformanceServiceImpl(),
+            impl,
             enable_describe=args.describe,
         )
         _maybe_access_log(server, args.access_log)
@@ -439,7 +462,7 @@ def main() -> None:
     )
     server = RpcServer(
         ConformanceService,
-        ConformanceServiceImpl(),
+        impl,
         enable_describe=args.describe,
         external_location=external_location,
     )

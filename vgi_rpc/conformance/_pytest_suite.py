@@ -63,6 +63,10 @@ from vgi_rpc.conformance._lifecycle_tests import (
     assert_unary_error_recovery,
 )
 from vgi_rpc.conformance._request_limits_pytest import TestCompressedHttpRequestCap  # noqa: F401
+from vgi_rpc.conformance._transport_lifecycle_pytest import (  # noqa: F401
+    TestServeStartLifecycle,
+    TestTransportKindContext,
+)
 from vgi_rpc.conformance.proof_harness import ProofUnsupported, ProofWorker, ProofWorkerFactory
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
@@ -1300,8 +1304,16 @@ class TestConnectionReuse:
     skips the drain fails on the second. These tests pin that requirement.
     """
 
+    @pytest.mark.timeout(30)
     def test_many_sequential_unary_calls(self, conformance_conn: ConnFactory) -> None:
-        """A long run of consecutive unary calls on one connection all succeed."""
+        """A long run of consecutive unary calls on one connection all succeed.
+
+        This deliberately performs 100 RPCs.  The externalize-always variant
+        adds one storage upload and fetch to every call, so the module's 5s
+        single-RPC timeout is not an appropriate aggregate budget under xdist
+        load.  Thirty seconds remains below the suite-wide 50s ceiling while
+        still detecting a hung connection.
+        """
         with conformance_conn() as proxy:
             for i in range(25):
                 assert proxy.echo_string(value=f"call-{i}") == f"call-{i}"
@@ -1417,45 +1429,39 @@ class TestExternalLocation:
     """
 
     @staticmethod
-    def _client_external_config() -> object:
-        """Build an ``ExternalLocationConfig`` that allows http URLs."""
+    @contextlib.contextmanager
+    def _connect(port: int, *, compression_level: int | None = 1) -> Any:
+        """Connect with an owned fetch pool and deterministically close it."""
         from vgi_rpc.external import ExternalLocationConfig
+        from vgi_rpc.http import http_connect
 
-        return ExternalLocationConfig(url_validator=None)
+        config = ExternalLocationConfig(url_validator=None)
+        try:
+            with http_connect(
+                ConformanceService,
+                f"http://127.0.0.1:{port}",
+                external_location=config,
+                compression_level=compression_level,
+            ) as proxy:
+                yield proxy
+        finally:
+            config.fetch_config.close()
 
     def test_small_payload_inline(self, conformance_http_with_storage_port: int) -> None:
         """Below-threshold payloads round-trip inline (no externalization)."""
-        from vgi_rpc.http import http_connect
-
-        with http_connect(
-            ConformanceService,
-            f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-        ) as proxy:
+        with self._connect(conformance_http_with_storage_port) as proxy:
             assert proxy.echo_string(value="small") == "small"
 
     def test_large_payload_externalized(self, conformance_http_with_storage_port: int) -> None:
         """Above-threshold response triggers externalization and transparent re-fetch."""
-        from vgi_rpc.http import http_connect
-
         big = "x" * 32_000
-        with http_connect(
-            ConformanceService,
-            f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-        ) as proxy:
+        with self._connect(conformance_http_with_storage_port) as proxy:
             assert proxy.echo_large_string(value=big) == big
 
     def test_large_payload_externalized_with_zstd(self, conformance_http_with_zstd_storage_port: int) -> None:
         """Externalized batches with zstd compression decompress on the client."""
-        from vgi_rpc.http import http_connect
-
         big = ("vgi-rpc " * 8000).strip()
-        with http_connect(
-            ConformanceService,
-            f"http://127.0.0.1:{conformance_http_with_zstd_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-        ) as proxy:
+        with self._connect(conformance_http_with_zstd_storage_port) as proxy:
             assert proxy.echo_large_string(value=big) == big
 
     def test_capabilities_advertise_externalization(self, conformance_http_with_storage_port: int) -> None:
@@ -1524,15 +1530,9 @@ class TestExternalLocation:
         """
         import httpx2
 
-        from vgi_rpc.http import http_connect
-
         before = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         big = "z" * 32_000
-        with http_connect(
-            ConformanceService,
-            f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-        ) as proxy:
+        with self._connect(conformance_http_with_storage_port) as proxy:
             assert proxy.echo_large_string(value=big) == big
         after = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         assert after > before, f"expected new objects in fake storage, before={before} after={after}"
@@ -1562,20 +1562,13 @@ class TestExternalLocation:
 
         import httpx2
 
-        from vgi_rpc.http import http_connect
-
         before = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         # Use a high-entropy payload (hex-encoded random bytes) so wire
         # compression can't shrink it under max_request_bytes.  Disable
         # request compression on this connection so the *wire* body
         # stays large enough to trip the server's 413 enforcement.
         big = os.urandom(20_000).hex()  # 40 000 chars of pseudo-random hex
-        with http_connect(
-            ConformanceService,
-            f"http://127.0.0.1:{conformance_http_with_storage_port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-            compression_level=None,
-        ) as proxy:
+        with self._connect(conformance_http_with_storage_port, compression_level=None) as proxy:
             assert proxy.echo_large_string(value=big) == big
         after = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
         # At least 2 new objects: client's request upload + server's response upload.
@@ -2740,13 +2733,6 @@ class TestExternalizedResponseCap:
       fails, or the group passes while proving nothing.
     """
 
-    @staticmethod
-    def _client_external_config() -> object:
-        """Build an ``ExternalLocationConfig`` that allows http URLs."""
-        from vgi_rpc.external import ExternalLocationConfig
-
-        return ExternalLocationConfig(url_validator=None)
-
     def _caps(self, port: int) -> Any:
         """Read capabilities, skipping unless the external cap is advertised."""
         from vgi_rpc.http import http_capabilities
@@ -2756,15 +2742,22 @@ class TestExternalizedResponseCap:
             pytest.skip("server does not advertise VGI-Max-Externalized-Response-Bytes")
         return caps
 
+    @contextlib.contextmanager
     def _connect(self, port: int) -> Any:
-        """Open a connection able to resolve external locations."""
+        """Open a connection and deterministically release its fetch pool."""
+        from vgi_rpc.external import ExternalLocationConfig
         from vgi_rpc.http import http_connect
 
-        return http_connect(
-            ConformanceService,
-            f"http://127.0.0.1:{port}",
-            external_location=self._client_external_config(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-        )
+        config = ExternalLocationConfig(url_validator=None)
+        try:
+            with http_connect(
+                ConformanceService,
+                f"http://127.0.0.1:{port}",
+                external_location=config,
+            ) as proxy:
+                yield proxy
+        finally:
+            config.fetch_config.close()
 
     def test_unary_externalized_overshoot_fails(self, conformance_http_externalized_cap_port: int) -> None:
         """A unary response whose upload exceeds the cap must fail, not upload."""

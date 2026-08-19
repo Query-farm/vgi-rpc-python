@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import httpx2
 import pytest
@@ -52,6 +55,106 @@ _CONFORMANCE_TCP = str(Path(__file__).parent / "serve_conformance_tcp.py")
 
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 """Type alias for the ``make_conn`` fixture return type."""
+
+
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+    """Keep ``-n auto`` bounded for this subprocess-heavy test suite.
+
+    A logical CPU is a poor proxy for useful parallelism here: each xdist
+    worker may own several session-scoped HTTP/socket worker processes.  On
+    large CI hosts, unconstrained ``auto`` therefore creates a startup storm
+    that makes readiness slower while consuming substantially more memory.
+    Four xdist workers retain parallel file execution without multiplying the
+    conformance server farm by the host's (occasionally very large) CPU count.
+
+    Pytest-xdist honours its standard ``PYTEST_XDIST_AUTO_NUM_WORKERS``
+    override before consulting this hook, so callers can still choose a
+    different value explicitly.
+    """
+    del config
+    return min(4, os.process_cpu_count() or 1)
+
+
+def _stderr_tail(stderr_file: BinaryIO, *, limit: int = 8192) -> str:
+    """Return a decoded tail of a seekable subprocess stderr file."""
+    stderr_file.flush()
+    size = stderr_file.seek(0, os.SEEK_END)
+    stderr_file.seek(max(0, size - limit))
+    return stderr_file.read().decode("utf-8", errors="replace").strip()
+
+
+def _stop_process(proc: subprocess.Popen[bytes]) -> None:
+    """Reap *proc*, escalating from terminate to kill after five seconds."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    else:
+        proc.wait()
+
+
+@contextmanager
+def _spawn_ready_process(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    startup_timeout: float = 30.0,
+) -> Iterator[tuple[subprocess.Popen[bytes], str]]:
+    """Spawn a worker and yield its first stdout line within a hard deadline.
+
+    ``Popen.stdout.readline()`` has no timeout.  A worker that remained alive
+    without printing readiness could consequently hang fixture setup forever
+    (``timeout_func_only`` intentionally excludes setup).  A daemon reader
+    thread gives the blocking read a portable deadline, including on Windows,
+    while a seekable temporary stderr file avoids pipe backpressure and makes
+    startup failures actionable.
+    """
+    # Explicit close in the common teardown keeps the handle alive for both
+    # subprocess diagnostics and process reaping.
+    stderr_file = tempfile.TemporaryFile()  # noqa: SIM115
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_file, env=env)
+    result: queue.Queue[bytes | BaseException] = queue.Queue(maxsize=1)
+
+    def _readline() -> None:
+        try:
+            assert proc.stdout is not None
+            result.put(proc.stdout.readline())
+        except BaseException as exc:  # pragma: no cover - defensive OS failure
+            result.put(exc)
+
+    reader = threading.Thread(target=_readline, name="vgi-test-worker-readiness", daemon=True)
+    reader.start()
+    try:
+        try:
+            item = result.get(timeout=startup_timeout)
+        except queue.Empty as exc:
+            stderr = _stderr_tail(stderr_file)
+            raise RuntimeError(
+                f"worker did not emit readiness within {startup_timeout:g}s: {cmd!r}; "
+                f"rc={proc.poll()!r}; stderr={stderr!r}"
+            ) from exc
+        if isinstance(item, BaseException):
+            raise item
+        if not item:
+            proc.wait(timeout=5)
+            stderr = _stderr_tail(stderr_file)
+            raise RuntimeError(f"worker exited before readiness: {cmd!r}; rc={proc.returncode!r}; stderr={stderr!r}")
+        yield proc, item.decode("utf-8", errors="replace").strip()
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        stderr = _stderr_tail(stderr_file)
+        if stderr and hasattr(exc, "add_note"):
+            exc.add_note(f"worker stderr tail:\n{stderr}")
+        raise
+    finally:
+        _stop_process(proc)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        stderr_file.close()
 
 
 def _worker_cmd() -> list[str]:
@@ -94,23 +197,11 @@ def _wait_for_http(port: int, timeout: float = 30.0) -> None:
 @pytest.fixture(scope="session")
 def http_server_port() -> Iterator[int]:
     """Spawn a single HTTP server subprocess for the entire test session."""
-    proc = subprocess.Popen(
-        _http_worker_cmd(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process(_http_worker_cmd()) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         port = int(line.split(":", 1)[1])
-
         _wait_for_http(port)
-
         yield port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="session")
@@ -208,57 +299,30 @@ def fixture_tcp_addr() -> Iterator[tuple[str, int]]:
 def unix_socket_server() -> Iterator[str]:
     """Spawn a single Unix socket server subprocess for the entire test session."""
     path = _short_unix_path("fix")
-    proc = subprocess.Popen(
-        [sys.executable, _SERVE_FIXTURE_UNIX, path],
-        stdout=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([sys.executable, _SERVE_FIXTURE_UNIX, path]) as (_, line):
         assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
         _wait_for_unix(path)
         yield path
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="session")
 def conformance_unix_path() -> Iterator[str]:
     """Spawn a single conformance Unix socket server for the session."""
     path = _short_unix_path("conf")
-    proc = subprocess.Popen(
-        [sys.executable, _CONFORMANCE_UNIX, path],
-        stdout=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([sys.executable, _CONFORMANCE_UNIX, path]) as (_, line):
         assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
         _wait_for_unix(path)
         yield path
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="session")
 def unix_threaded_socket_server() -> Iterator[str]:
     """Spawn a threaded Unix socket server subprocess for the entire test session."""
     path = _short_unix_path("fixt")
-    proc = subprocess.Popen(
-        [sys.executable, _SERVE_FIXTURE_UNIX_THREADED, path],
-        stdout=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([sys.executable, _SERVE_FIXTURE_UNIX_THREADED, path]) as (_, line):
         assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
         _wait_for_unix(path)
         yield path
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 _LAUNCHER_CONFORMANCE_RUNNER = str(Path(__file__).parent / "_launcher_conformance_run_server.py")
@@ -303,19 +367,10 @@ def conformance_unix_launcher_path() -> Iterator[str]:
 def conformance_unix_threaded_path() -> Iterator[str]:
     """Spawn a threaded conformance Unix socket server for the session."""
     path = _short_unix_path("cont")
-    proc = subprocess.Popen(
-        [sys.executable, _CONFORMANCE_UNIX_THREADED, path],
-        stdout=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([sys.executable, _CONFORMANCE_UNIX_THREADED, path]) as (_, line):
         assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
         _wait_for_unix(path)
         yield path
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="session")
@@ -329,21 +384,12 @@ def conformance_tcp_addr() -> Iterator[tuple[str, int]]:
         The ``(host, port)`` the server is listening on.
 
     """
-    proc = subprocess.Popen(
-        [sys.executable, _CONFORMANCE_TCP, "127.0.0.1", "0"],
-        stdout=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([sys.executable, _CONFORMANCE_TCP, "127.0.0.1", "0"]) as (_, line):
         assert line.startswith("TCP:"), f"Expected TCP:<host>:<port>, got: {line!r}"
         host, _, port_str = line[len("TCP:") :].rpartition(":")
         port = int(port_str)
         _wait_for_tcp(host, port)
         yield (host, port)
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -502,43 +548,22 @@ def _conformance_http_cmd() -> list[str]:
 @pytest.fixture(scope="session")
 def conformance_http_port() -> Iterator[int]:
     """Spawn a single conformance HTTP server subprocess for the session."""
-    proc = subprocess.Popen(
-        _conformance_http_cmd(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process(_conformance_http_cmd()) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         port = int(line.split(":", 1)[1])
 
         _wait_for_http(port)
-
         yield port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @contextmanager
 def _spawn_conformance_http(*extra_args: str) -> Iterator[int]:
     """Spawn a conformance HTTP worker with *extra_args*, yielding its port."""
-    proc = subprocess.Popen(
-        [*_conformance_http_cmd(), *extra_args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([*_conformance_http_cmd(), *extra_args]) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         port = int(line.split(":", 1)[1])
         _wait_for_http(port)
         yield port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 # Shared AEAD key for the sticky worker pair.  Both peers can decrypt each
@@ -547,7 +572,7 @@ def _spawn_conformance_http(*extra_args: str) -> Iterator[int]:
 _STICKY_PEER_TOKEN_KEY = "5f" * 32
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_sticky_short_ttl_port() -> Iterator[int]:
     """Spawn a sticky conformance HTTP worker with a ~1s default session TTL.
 
@@ -562,7 +587,7 @@ def conformance_http_sticky_short_ttl_port() -> Iterator[int]:
         yield port
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_sticky_peer_ports() -> Iterator[tuple[int, int]]:
     """Spawn two sticky conformance HTTP workers that share one AEAD token key.
 
@@ -577,7 +602,7 @@ def conformance_http_sticky_peer_ports() -> Iterator[tuple[int, int]]:
         yield port_a, port_b
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_sticky_auth_port() -> Iterator[int]:
     """Spawn a sticky conformance HTTP worker that authenticates by header.
 
@@ -589,7 +614,7 @@ def conformance_http_sticky_auth_port() -> Iterator[int]:
         yield port
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_cold_call_cache_port() -> Iterator[int]:
     """Spawn a conformance HTTP server with the call-state cache disabled.
 
@@ -604,7 +629,7 @@ def conformance_http_cold_call_cache_port() -> Iterator[int]:
         yield port
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[int, Path]]:
     """Spawn a conformance HTTP worker writing an access log, yielding (port, path).
 
@@ -618,7 +643,7 @@ def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Ite
         yield port, log_path
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_introspect_port() -> Iterator[int]:
     """Spawn a conformance HTTP worker with token introspection enabled.
 
@@ -636,7 +661,7 @@ def conformance_http_introspect_port() -> Iterator[int]:
 CONFORMANCE_CORS_ORIGIN = "https://conformance.example"
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
     """Spawn a conformance HTTP server with CORS *and* storage enabled.
 
@@ -661,7 +686,7 @@ def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
         yield port
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_no_compression_port() -> Iterator[int]:
     """Spawn a conformance HTTP server with response compression disabled.
 
@@ -673,33 +698,84 @@ def conformance_http_no_compression_port() -> Iterator[int]:
     present-but-empty ``VGI-Supported-Encodings`` that distinguishes
     "speaks no compression" from an absent header on a legacy server.
     """
-    proc = subprocess.Popen(
-        [*_conformance_http_cmd(), "--no-compression"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
-        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
-        port = int(line.split(":", 1)[1])
-
-        _wait_for_http(port)
-
+    with _spawn_conformance_http("--no-compression") as port:
         yield port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_small_request_cap_port() -> Iterator[int]:
     """Spawn the canonical 4 KiB encoded/decoded request-cap worker."""
     with _spawn_conformance_http("--max-request-bytes", "4096") as port:
         yield port
 
 
+@pytest.fixture(scope="class")
+def conformance_http_serve_start_fail_once_port() -> Iterator[int]:
+    """Spawn a worker whose first ``on_serve_start`` notification fails.
+
+    Readiness is checked at the TCP layer: an HTTP health request would itself
+    fire the lifecycle hook and consume the injected failure before the shared
+    conformance case can observe it.
+    """
+    with _spawn_ready_process([*_conformance_http_cmd(), "--fail-serve-start-once"]) as (_, line):
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+        _wait_for_tcp("127.0.0.1", port)
+        yield port
+
+
 @pytest.fixture(scope="session")
+def conformance_transport_kind_probes() -> tuple[tuple[str, Callable[[], str]], ...]:
+    """Return wire probes for every Python transport kind.
+
+    This deliberately uses a standalone, versionless probe Protocol instead
+    of adding a method to ``ConformanceService``.  Adding a method there is a
+    major protocol change, and older workers would reject the bumped version
+    before an optional conformance test could capability-skip.
+    """
+    from typing import Protocol
+
+    from vgi_rpc import CallContext
+    from vgi_rpc.http import http_connect, make_sync_client
+    from vgi_rpc.rpc import RpcServer, _RpcProxy, make_pipe_pair, make_tcp_pair, make_unix_pair
+
+    class _KindProbe(Protocol):
+        def report_transport_kind(self) -> str: ...
+
+    class _KindProbeImpl:
+        def report_transport_kind(self, ctx: CallContext) -> str:
+            assert ctx.kind is not None
+            return ctx.kind.value
+
+    def _probe_pair(pair_factory: Callable[[], tuple[Any, Any]]) -> str:
+        client_transport, server_transport = pair_factory()
+        server = RpcServer(_KindProbe, _KindProbeImpl())
+        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+        thread.start()
+        try:
+            return str(_RpcProxy(_KindProbe, client_transport, None).report_transport_kind())
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+    def _probe_http() -> str:
+        server = RpcServer(_KindProbe, _KindProbeImpl())
+        client = make_sync_client(server, token_key=b"conformance-kind")
+        with http_connect(_KindProbe, client=client) as proxy:
+            return str(proxy.report_transport_kind())
+
+    probes: list[tuple[str, Callable[[], str]]] = [
+        ("pipe", lambda: _probe_pair(make_pipe_pair)),
+        ("http", _probe_http),
+        ("tcp", lambda: _probe_pair(make_tcp_pair)),
+    ]
+    if sys.platform != "win32":
+        probes.append(("unix", lambda: _probe_pair(make_unix_pair)))
+    return tuple(probes)
+
+
+@pytest.fixture(scope="class")
 def conformance_http_strict_cap_port() -> Iterator[int]:
     """Spawn a strict-cap conformance HTTP server for HTTP-only strict-fail tests.
 
@@ -708,26 +784,15 @@ def conformance_http_strict_cap_port() -> Iterator[int]:
     tests can deliberately overshoot the caps via ``produce_oversized_batch``,
     ``oversized_unary``, and ``exchange_oversized``.
     """
-    proc = subprocess.Popen(
-        [sys.executable, _CONFORMANCE_HTTP_STRICT],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([sys.executable, _CONFORMANCE_HTTP_STRICT]) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         port = int(line.split(":", 1)[1])
 
         _wait_for_http(port)
-
         yield port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_externalized_cap_port(conformance_fake_storage: str) -> Iterator[int]:
     """Spawn a worker whose *external-channel* cap is the one that bites.
 
@@ -745,7 +810,7 @@ def conformance_http_externalized_cap_port(conformance_fake_storage: str) -> Ite
     payload still externalises, which is what lets the under-cap control
     exercise the same channel without tripping the cap.
     """
-    proc = subprocess.Popen(
+    with _spawn_ready_process(
         [
             sys.executable,
             _CONFORMANCE_HTTP_STRICT,
@@ -755,20 +820,12 @@ def conformance_http_externalized_cap_port(conformance_fake_storage: str) -> Ite
             str(64 * 1024),
             "--max-response-bytes",
             str(8 * 1024 * 1024),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+        ]
+    ) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         port = int(line.split(":", 1)[1])
         _wait_for_http(port)
         yield port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="session")
@@ -789,7 +846,7 @@ def conformance_fake_storage() -> Iterator[str]:
         shutdown()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterator[int]:
     """Spawn a conformance HTTP worker wired against the fake storage service.
 
@@ -798,7 +855,7 @@ def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterato
     payload.
     """
     port = _free_port()
-    proc = subprocess.Popen(
+    with _spawn_ready_process(
         [
             sys.executable,
             _CONFORMANCE_HTTP,
@@ -806,23 +863,15 @@ def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterato
             str(port),
             "--fake-storage",
             conformance_fake_storage,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+        ]
+    ) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         actual_port = int(line.split(":", 1)[1])
         _wait_for_http(actual_port)
         yield actual_port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_external_security_port(conformance_fake_storage: str) -> Iterator[int]:
     """Spawn the canonical external-fetch security configuration.
 
@@ -832,7 +881,7 @@ def conformance_http_external_security_port(conformance_fake_storage: str) -> It
     Cross-language ports should expose an equivalent fixture configuration.
     """
     port = _free_port()
-    proc = subprocess.Popen(
+    with _spawn_ready_process(
         [
             sys.executable,
             _CONFORMANCE_HTTP,
@@ -847,20 +896,12 @@ def conformance_http_external_security_port(conformance_fake_storage: str) -> It
             "--max-decompressed-fetch-bytes",
             "8192",
             "--reject-localhost-redirects",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+        ]
+    ) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         actual_port = int(line.split(":", 1)[1])
         _wait_for_http(actual_port)
         yield actual_port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="session")
@@ -877,7 +918,7 @@ def conformance_http_externalize_always_port(conformance_fake_storage: str) -> I
     externalization at the framework level — those still flow inline.
     """
     port = _free_port()
-    proc = subprocess.Popen(
+    with _spawn_ready_process(
         [
             sys.executable,
             _CONFORMANCE_HTTP,
@@ -894,27 +935,19 @@ def conformance_http_externalize_always_port(conformance_fake_storage: str) -> I
             # externalization across the full method matrix.
             "--max-request-bytes",
             "1048576",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+        ]
+    ) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         actual_port = int(line.split(":", 1)[1])
         _wait_for_http(actual_port)
         yield actual_port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> Iterator[int]:
     """Spawn a conformance HTTP worker with the fake storage and zstd compression on."""
     port = _free_port()
-    proc = subprocess.Popen(
+    with _spawn_ready_process(
         [
             sys.executable,
             _CONFORMANCE_HTTP,
@@ -924,20 +957,12 @@ def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> It
             conformance_fake_storage,
             "--compression",
             "zstd",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+        ]
+    ) as (_, line):
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         actual_port = int(line.split(":", 1)[1])
         _wait_for_http(actual_port)
         yield actual_port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="session")
@@ -972,21 +997,15 @@ def proof_worker_factory() -> Iterator[Callable[..., Any]]:
         ]
         if not config.replay_cache:
             cmd.append("--proof-no-replay-cache")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            assert proc.stdout is not None
-            line = proc.stdout.readline().decode().strip()
+        with _spawn_ready_process(cmd) as (_, line):
             assert line == f"PORT:{port}", f"Expected PORT:{port}, got: {line!r}"
             _wait_for_http(port)
             yield ProofWorker(port=port, prefix="/vgi", config=config)
-        finally:
-            proc.terminate()
-            proc.wait(timeout=5)
 
     yield spawn
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_auth_port() -> Iterator[int]:
     """Spawn a conformance HTTP worker with a reject-all auth callback.
 
@@ -995,23 +1014,13 @@ def conformance_http_auth_port() -> Iterator[int]:
     401, but the health probe must still succeed.
     """
     port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, _CONFORMANCE_HTTP_AUTH, "--port", str(port)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
+    with _spawn_ready_process([sys.executable, _CONFORMANCE_HTTP_AUTH, "--port", str(port)]) as (_, line):
         assert line == f"PORT:{port}", f"Expected PORT:{port}, got: {line!r}"
         _wait_for_http(port)
         yield port
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def conformance_http_auth_reason_port(conformance_http_auth_port: int) -> int:
     """Return a worker whose ``authenticate`` honours ``X-Conformance-Auth-Reason``.
 
@@ -1090,21 +1099,39 @@ def conformance_conn(
             host, tcp_port = request.getfixturevalue("conformance_tcp_addr")
             return tcp_connect(ConformanceService, host, tcp_port, on_log=on_log)
         if request.param == "http_roundrobin":
-            ports: tuple[int, int] = request.getfixturevalue("conformance_http_two_servers")
-            client = _make_roundrobin_client(ports)
-            return http_connect(ConformanceService, client=client, on_log=on_log)
+
+            @contextlib.contextmanager
+            def _roundrobin_conn() -> Iterator[Any]:
+                ports: tuple[int, int] = request.getfixturevalue("conformance_http_two_servers")
+                client = _make_roundrobin_client(ports)
+                try:
+                    with http_connect(ConformanceService, client=client, on_log=on_log) as proxy:
+                        yield proxy
+                finally:
+                    client.close()
+
+            return _roundrobin_conn()
         if request.param == "http_externalize_always":
             from vgi_rpc.external import ExternalLocationConfig
 
-            ext_port = request.getfixturevalue("conformance_http_externalize_always_port")
-            return http_connect(
-                ConformanceService,
-                f"http://127.0.0.1:{ext_port}",
-                on_log=on_log,
-                # Server uses http://127.0.0.1 download URLs from the
-                # in-process fake storage; disable the HTTPS-only validator.
-                external_location=ExternalLocationConfig(url_validator=None),
-            )
+            @contextlib.contextmanager
+            def _external_conn() -> Iterator[Any]:
+                ext_port = request.getfixturevalue("conformance_http_externalize_always_port")
+                config = ExternalLocationConfig(url_validator=None)
+                try:
+                    with http_connect(
+                        ConformanceService,
+                        f"http://127.0.0.1:{ext_port}",
+                        on_log=on_log,
+                        # Server uses http://127.0.0.1 download URLs from the
+                        # in-process fake storage; disable the HTTPS-only validator.
+                        external_location=config,
+                    ) as proxy:
+                        yield proxy
+                finally:
+                    config.fetch_config.close()
+
+            return _external_conn()
         return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
 
     return factory
@@ -1225,27 +1252,21 @@ def conformance_http_two_servers() -> Iterator[tuple[int, int]]:
     os.unlink(probe_path)
     env = {**os.environ, "VGI_RPC_CONFORMANCE_PROBE_FILE": probe_path}
 
-    def _spawn(port: int) -> subprocess.Popen[bytes]:
-        proc = subprocess.Popen(
-            [sys.executable, _CONFORMANCE_HTTP_SHARED, "--port", str(port), "--key", key_hex],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
-        assert proc.stdout is not None
-        line = proc.stdout.readline().decode().strip()
-        assert line == f"PORT:{port}", f"Expected PORT:{port}, got: {line!r}"
-        _wait_for_http(port)
-        return proc
+    with contextlib.ExitStack() as stack:
 
-    proc_a = _spawn(port_a)
-    proc_b = _spawn(port_b)
-    try:
+        def _spawn(port: int) -> None:
+            _, line = stack.enter_context(
+                _spawn_ready_process(
+                    [sys.executable, _CONFORMANCE_HTTP_SHARED, "--port", str(port), "--key", key_hex],
+                    env=env,
+                )
+            )
+            assert line == f"PORT:{port}", f"Expected PORT:{port}, got: {line!r}"
+            _wait_for_http(port)
+
+        _spawn(port_a)
+        _spawn(port_b)
         yield (port_a, port_b)
-    finally:
-        for proc in (proc_a, proc_b):
-            proc.terminate()
-            proc.wait(timeout=5)
         if os.path.exists(probe_path):
             os.unlink(probe_path)
 
