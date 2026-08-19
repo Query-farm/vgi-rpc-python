@@ -44,6 +44,7 @@ from vgi_rpc.conformance import (
     build_rich_header,
     run_describe_conformance,
 )
+from vgi_rpc.conformance._request_limits_pytest import TestCompressedHttpRequestCap  # noqa: F401
 from vgi_rpc.conformance.proof_harness import ProofUnsupported, ProofWorker, ProofWorkerFactory
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message

@@ -238,8 +238,21 @@ def _run_stream_init_sync(
             # method raises past this point takes the ordinary error path.
             _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults, info.params_schema)
             _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError, KeyError, ValueError) as exc:
+            # KeyError/ValueError are how a caller-supplied value fails to
+            # deserialize -- notably an unrecognised member of a dictionary-
+            # encoded enum, which reaches ``base[value]`` in _deserialize_value.
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+        except Exception as exc:
+            # The list above is *not* the set of things this block can raise, and
+            # treating it as one let everything else escape the RPC layer
+            # entirely: Falcon caught it and answered its default
+            # ``{"title": "500 Internal Server Error"}`` page, with no Arrow
+            # body, no error type and no message. A client then has nothing to
+            # report but the status code, and the cause exists only in the
+            # server's log. Anything unclassified is still answered as an RPC
+            # error -- as 500, since we cannot show it is the caller's fault.
+            raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
         # Inject ctx if the implementation accepts it
         server_id = app._server.server_id

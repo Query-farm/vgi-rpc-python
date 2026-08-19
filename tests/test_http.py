@@ -1876,6 +1876,7 @@ class TestUploadUrlEndpoint:
         self,
         storage: MockStorage | None = None,
         max_upload_bytes: int | None = None,
+        max_request_bytes: int | None = None,
         authenticate: Callable[[falcon.Request], AuthContext] | None = None,
         default_headers: dict[str, str] | None = None,
     ) -> _SyncTestClient:
@@ -1885,6 +1886,7 @@ class TestUploadUrlEndpoint:
             token_key=b"test",
             upload_url_provider=storage,
             max_upload_bytes=max_upload_bytes,
+            max_request_bytes=max_request_bytes,
             authenticate=authenticate,
             default_headers=default_headers,
         )
@@ -1940,6 +1942,21 @@ class TestUploadUrlEndpoint:
 
         urls = request_upload_urls(count=200, client=client)
         assert len(urls) == 100
+        client.close()
+
+    def test_oversized_control_body_is_rejected_before_allocation(self) -> None:
+        """The upload control route obeys max_request_bytes before allocation."""
+        storage = MockStorage()
+        client = self._make_client(storage, max_request_bytes=1024)
+
+        response = client.post(
+            f"{_BASE_URL}{client.prefix}/__upload_url__/init",
+            content=b"x" * 1025,
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert response.status_code == 413
+        assert storage._counter == 0
+        assert len(request_upload_urls(count=1, client=client)) == 1
         client.close()
 
     def test_404_when_not_configured(self) -> None:

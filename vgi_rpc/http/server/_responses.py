@@ -158,7 +158,9 @@ def _get_request_stream(req: falcon.Request) -> IOBase | pa.NativeFile:
     # buffer. Arrow consumes the whole stream regardless -- an IPC message
     # cannot be parsed incrementally here -- so this trades nothing for
     # keeping the reads in C++ instead of calling back into Python.
-    body = req.bounded_stream.read()
+    body = getattr(req.context, "capped_request_body", None)
+    if body is None:
+        body = req.bounded_stream.read()
     _current_request_batch.set(body)
     return pa.BufferReader(body)
 

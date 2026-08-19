@@ -932,11 +932,18 @@ class RpcServer:
                     _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
                     return
 
-            _deserialize_params(kwargs, info.param_types, self._ipc_validation)
-
+            # Request validation. Both steps are answered with a typed error
+            # stream rather than allowed to propagate: an exception escaping
+            # here leaves the client waiting on a reply that is never written,
+            # so a bad request reads as a dead connection instead of as the
+            # error it is. ``_deserialize_params`` was previously unguarded,
+            # and it is the step that raises on caller-supplied data — an
+            # unrecognised member of a dictionary-encoded enum reaches
+            # ``base[value]`` and raises KeyError.
             try:
+                _deserialize_params(kwargs, info.param_types, self._ipc_validation)
                 _validate_params(info.name, kwargs, info.param_types)
-            except TypeError as exc:
+            except Exception as exc:
                 err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
                 _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
                 return

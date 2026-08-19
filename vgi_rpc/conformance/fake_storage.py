@@ -15,13 +15,13 @@ equivalent for testing purposes, plus a ready-made
 :class:`ExternalStorage` adapter (:class:`FakeStorageBackend`) so the
 Python conformance worker can be wired up against it.
 
-Wire contract — four endpoints, each implementation can run this exact
+Wire contract — the legacy four endpoints plus method-bound URL aliases,
+each implementation can run this exact
 service or implement the contract independently:
 
 * ``POST /alloc`` with optional JSON ``{"content_encoding": "zstd"}``
-  body returns ``{"object_url": "http://host:port/blob/{id}"}``.  The
-  returned URL is the same path used for both ``PUT`` (upload) and
-  ``GET`` (download).
+  body returns ``object_url`` (the legacy dual-method URL), ``upload_url``
+  (PUT-only), and ``download_url`` (GET/HEAD-only).
 * ``PUT /blob/{id}`` accepts the raw bytes (and an optional
   ``Content-Encoding`` request header which the service echoes back on
   ``HEAD``/``GET``).  Returns ``204``.
@@ -29,6 +29,11 @@ service or implement the contract independently:
   ``Accept-Ranges: bytes``, and (if applicable) ``Content-Encoding``.
 * ``GET /blob/{id}`` returns ``200`` (or ``206`` for ``Range`` requests)
   with the stored bytes.
+* ``GET|HEAD /redirect/{id}`` redirects to the same-host download URL.
+* ``GET|HEAD /redirect-localhost/{id}`` redirects from ``127.0.0.1`` to
+  ``localhost`` for per-hop policy tests.
+* ``GET|HEAD /redirect-loop/{id}`` redirects to itself.
+* ``GET /_stats`` includes per-route request counters.
 
 The service is in-memory only — every restart loses its objects, which
 is exactly what tests want.
@@ -81,6 +86,7 @@ class _BlobStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._blobs: dict[str, tuple[bytes, str | None]] = {}
+        self._hits: dict[str, int] = {}
 
     def allocate(self) -> str:
         return uuid.uuid4().hex
@@ -93,9 +99,14 @@ class _BlobStore:
         with self._lock:
             return self._blobs.get(blob_id)
 
+    def hit(self, name: str) -> None:
+        """Increment one observable route counter."""
+        with self._lock:
+            self._hits[name] = self._hits.get(name, 0) + 1
+
     def stats(self) -> dict[str, int]:
         with self._lock:
-            return {"object_count": len(self._blobs)}
+            return {"object_count": len(self._blobs), **self._hits}
 
 
 def _parse_range(header: str, total: int) -> tuple[int, int] | None:
@@ -143,10 +154,37 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
 
         if method == "POST" and path == "/alloc":
             return _handle_alloc(environ, start_response, store, base_url)
-        if path.startswith("/blob/"):
-            blob_id = path[len("/blob/") :]
+        redirect_prefix = next(
+            (prefix for prefix in ("/redirect/", "/redirect-localhost/", "/redirect-loop/") if path.startswith(prefix)),
+            None,
+        )
+        if redirect_prefix is not None and method in ("GET", "HEAD"):
+            blob_id = path[len(redirect_prefix) :]
             if not blob_id or "/" in blob_id:
                 return _respond(start_response, "404 Not Found", b"unknown blob")
+            store.hit(redirect_prefix.strip("/").replace("-", "_") + "_requests")
+            if redirect_prefix == "/redirect-loop/":
+                target = f"{base_url}{redirect_prefix}{blob_id}"
+            elif redirect_prefix == "/redirect-localhost/":
+                target = f"{base_url.replace('127.0.0.1', 'localhost')}/download/{blob_id}"
+            else:
+                target = f"{base_url}/download/{blob_id}"
+            start_response("302 Found", [("Location", target), ("Content-Length", "0")])
+            return [b""]
+        route_prefix = next(
+            (prefix for prefix in ("/blob/", "/upload/", "/download/") if path.startswith(prefix)),
+            None,
+        )
+        if route_prefix is not None:
+            blob_id = path[len(route_prefix) :]
+            if not blob_id or "/" in blob_id:
+                return _respond(start_response, "404 Not Found", b"unknown blob")
+            if route_prefix == "/upload/" and method != "PUT":
+                return _respond(start_response, "403 Forbidden", b"upload URL only permits PUT")
+            if route_prefix == "/download/" and method not in ("GET", "HEAD"):
+                return _respond(start_response, "403 Forbidden", b"download URL only permits GET or HEAD")
+            if route_prefix == "/download/":
+                store.hit("download_requests")
             if method == "PUT":
                 return _handle_put(environ, start_response, store, blob_id)
             if method == "HEAD":
@@ -173,7 +211,13 @@ def _handle_alloc(
     blob_id = store.allocate()
     # Pre-allocate an empty entry so HEAD/GET before PUT returns 404 cleanly
     # (we only insert on PUT).
-    body = json.dumps({"object_url": f"{base_url}/blob/{blob_id}"}).encode()
+    body = json.dumps(
+        {
+            "object_url": f"{base_url}/blob/{blob_id}",
+            "upload_url": f"{base_url}/upload/{blob_id}",
+            "download_url": f"{base_url}/download/{blob_id}",
+        }
+    ).encode()
     return _respond(start_response, "200 OK", body, content_type="application/json")
 
 
@@ -327,14 +371,16 @@ class FakeStorageBackend:
         alloc_body = {"content_encoding": content_encoding} if content_encoding else {}
         alloc_resp = self._client.post(f"{self._base_url}/alloc", json=alloc_body)
         alloc_resp.raise_for_status()
-        object_url = alloc_resp.json()["object_url"]
+        allocation = alloc_resp.json()
+        upload_url = allocation.get("upload_url", allocation["object_url"])
+        download_url = allocation.get("download_url", allocation["object_url"])
 
         put_headers = {"Content-Type": "application/octet-stream"}
         if content_encoding:
             put_headers["Content-Encoding"] = content_encoding
-        put_resp = self._client.put(object_url, content=data, headers=put_headers)
+        put_resp = self._client.put(upload_url, content=data, headers=put_headers)
         put_resp.raise_for_status()
-        return str(object_url)
+        return str(download_url)
 
     def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
         """Allocate a fresh blob and return an ``UploadUrl`` (``UploadUrlProvider``)."""
@@ -344,12 +390,11 @@ class FakeStorageBackend:
 
         alloc_resp = self._client.post(f"{self._base_url}/alloc", json={})
         alloc_resp.raise_for_status()
-        object_url = alloc_resp.json()["object_url"]
-        # The fake storage uses the same URL path for PUT and GET; HTTP
-        # method disambiguation rather than presigning per method.
+        allocation = alloc_resp.json()
+        object_url = allocation["object_url"]
         return UploadUrl(
-            upload_url=object_url,
-            download_url=object_url,
+            upload_url=allocation.get("upload_url", object_url),
+            download_url=allocation.get("download_url", object_url),
             expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
 

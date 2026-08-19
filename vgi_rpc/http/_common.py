@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from vgi_rpc._codec import (
     DecompressionError,
+    DecompressionLimitExceeded,
     Encoding,
     available_encodings,
     compress,
@@ -22,6 +23,7 @@ from vgi_rpc.rpc import _EMPTY_SCHEMA
 
 __all__ = [
     "DecompressionError",
+    "DecompressionLimitExceeded",
     "Encoding",
     "available_encodings",
     "compress",

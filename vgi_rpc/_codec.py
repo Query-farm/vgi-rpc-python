@@ -15,6 +15,7 @@ import zlib
 
 __all__ = [
     "DecompressionError",
+    "DecompressionLimitExceeded",
     "Encoding",
     "available_encodings",
     "compress",
@@ -51,6 +52,10 @@ class Encoding(enum.Enum):
 
 class DecompressionError(Exception):
     """Raised when a codec-agnostic decompression fails or exceeds the cap."""
+
+
+class DecompressionLimitExceeded(DecompressionError):
+    """Raised when decoded output would exceed its configured byte cap."""
 
 
 def _zstd_available() -> bool:
@@ -141,7 +146,7 @@ def _decompress_body_zstd(data: bytes, *, max_output_size: int | None = None) ->
 
     # Refuse the frame up-front when the header claims more than allowed.
     if declared is not None and declared > max_output_size:
-        raise zstandard.ZstdError(
+        raise DecompressionLimitExceeded(
             f"Compressed frame declares decompressed size {declared} bytes, "
             f"which exceeds max_output_size={max_output_size}"
         )
@@ -159,7 +164,7 @@ def _decompress_body_zstd(data: bytes, *, max_output_size: int | None = None) ->
                 break
             total += len(chunk)
             if total > max_output_size:
-                raise zstandard.ZstdError(f"Decompressed output exceeds max_output_size={max_output_size}")
+                raise DecompressionLimitExceeded(f"Decompressed output exceeds max_output_size={max_output_size}")
             chunks.append(chunk)
     return b"".join(chunks)
 
@@ -195,11 +200,11 @@ def _decompress_body_gzip(data: bytes, *, max_output_size: int | None = None) ->
             inbuf = do.unconsumed_tail
         else:
             inbuf, remaining = remaining, b""
-        chunk = do.decompress(inbuf, _DECOMPRESS_CHUNK_BYTES)
+        chunk = do.decompress(inbuf, min(_DECOMPRESS_CHUNK_BYTES, max_output_size - total + 1))
         if chunk:
             total += len(chunk)
             if total > max_output_size:
-                raise DecompressionError(f"Decompressed gzip output exceeds max_output_size={max_output_size}")
+                raise DecompressionLimitExceeded(f"Decompressed gzip output exceeds max_output_size={max_output_size}")
             chunks.append(chunk)
         if not chunk and not do.unconsumed_tail:
             break
@@ -207,7 +212,7 @@ def _decompress_body_gzip(data: bytes, *, max_output_size: int | None = None) ->
     if tail:
         total += len(tail)
         if total > max_output_size:
-            raise DecompressionError(f"Decompressed gzip output exceeds max_output_size={max_output_size}")
+            raise DecompressionLimitExceeded(f"Decompressed gzip output exceeds max_output_size={max_output_size}")
         chunks.append(tail)
     return b"".join(chunks)
 

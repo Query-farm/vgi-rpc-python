@@ -693,6 +693,13 @@ def conformance_http_no_compression_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_small_request_cap_port() -> Iterator[int]:
+    """Spawn the canonical 4 KiB encoded/decoded request-cap worker."""
+    with _spawn_conformance_http("--max-request-bytes", "4096") as port:
+        yield port
+
+
+@pytest.fixture(scope="session")
 def conformance_http_strict_cap_port() -> Iterator[int]:
     """Spawn a strict-cap conformance HTTP server for HTTP-only strict-fail tests.
 
