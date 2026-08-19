@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, Protocol
 
 import httpx2
 import pytest
@@ -75,7 +75,17 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
     return min(4, os.process_cpu_count() or 1)
 
 
-def _stderr_tail(stderr_file: BinaryIO, *, limit: int = 8192) -> str:
+class _SeekableBinaryFile(Protocol):
+    """Structural type shared by binary files and NamedTemporaryFile wrappers."""
+
+    def flush(self) -> None: ...
+
+    def seek(self, offset: int, whence: int = 0) -> int: ...
+
+    def read(self, size: int = -1) -> bytes: ...
+
+
+def _stderr_tail(stderr_file: _SeekableBinaryFile, *, limit: int = 8192) -> str:
     """Return a decoded tail of a seekable subprocess stderr file."""
     stderr_file.flush()
     size = stderr_file.seek(0, os.SEEK_END)

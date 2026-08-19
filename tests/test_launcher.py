@@ -41,6 +41,7 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -223,7 +224,9 @@ def test_stale_socket_file_cleaned_up(state_dir: Path) -> None:
     """A dangling socket file with no listener is unlinked and a fresh worker spawns."""
     hash_id = compute_hash(_worker_argv())
     stale_sock = state_dir / f"{hash_id}.sock"
-    stale_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # The test is skipped on Windows at runtime, but the test module is still
+    # type-checked there and Windows stubs do not expose ``socket.AF_UNIX``.
+    stale_listener = socket.socket(cast("Any", socket).AF_UNIX, socket.SOCK_STREAM)
     stale_listener.bind(str(stale_sock))
     stale_listener.close()
     assert stale_sock.exists()
