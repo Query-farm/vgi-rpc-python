@@ -232,16 +232,19 @@ def _run_stream_init_sync(
             if app._server._protocol_version_parts is not None and method_name != "__describe__":
                 md = _current_request_metadata.get()
                 app._server._check_protocol_version(md.get(PROTOCOL_VERSION_KEY) if md is not None else None)
-            _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
+            try:
+                _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
+            except (KeyError, ValueError) as exc:
+                # Keep caller-value conversion failures in the HTTP 400 path
+                # without treating external-location resolver failures raised
+                # before deserialization as malformed Arrow.
+                raise TypeError(str(exc)) from exc
             # See the note in _app_unary.py: caller-controlled shape is refused
             # while the request is still being validated, so anything the init
             # method raises past this point takes the ordinary error path.
             _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults, info.params_schema)
             _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError, KeyError, ValueError) as exc:
-            # KeyError/ValueError are how a caller-supplied value fails to
-            # deserialize -- notably an unrecognised member of a dictionary-
-            # encoded enum, which reaches ``base[value]`` in _deserialize_value.
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
         except Exception as exc:
             # External pointer resolution can fail before stream state exists.

@@ -95,16 +95,20 @@ def _run_unary_sync(
             if app._server._protocol_version_parts is not None and method_name != "__describe__":
                 md = _current_request_metadata.get()
                 app._server._check_protocol_version(md.get(PROTOCOL_VERSION_KEY) if md is not None else None)
-            _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
+            try:
+                _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
+            except (KeyError, ValueError) as exc:
+                # These are caller-value conversion failures (notably an
+                # unknown dictionary-encoded enum member), so classify them as
+                # malformed parameters without also misclassifying failures
+                # raised earlier by external-location resolution.
+                raise TypeError(str(exc)) from exc
             # Caller-controlled shape is refused *here*, while the request is
             # still being validated, so that anything raised past this point
             # is the method's own and gets the ordinary error path.
             _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults, info.params_schema)
             _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError, KeyError, ValueError) as exc:
-            # KeyError/ValueError are how a caller-supplied value fails to
-            # deserialize -- notably an unrecognised member of a dictionary-
-            # encoded enum, which reaches ``base[value]`` in _deserialize_value.
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
         except Exception as exc:
             # Resolving an ExternalLocation is part of reading the request but
