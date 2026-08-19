@@ -146,13 +146,23 @@ class FetchConfig:
         """Close the pooled session, stop the event loop, and join the thread."""
         pool = self._pool
         with pool.lock:
-            if pool.session is not None and pool.loop is not None and not pool.loop.is_closed():
-                asyncio.run_coroutine_threadsafe(pool.session.close(), pool.loop).result(timeout=5)
+            loop = pool.loop
+            thread = pool.thread
+            if pool.session is not None and loop is not None and not loop.is_closed():
+                asyncio.run_coroutine_threadsafe(pool.session.close(), loop).result(timeout=5)
             pool.session = None
-            if pool.loop is not None and not pool.loop.is_closed():
-                pool.loop.call_soon_threadsafe(pool.loop.stop)
-            if pool.thread is not None:
-                pool.thread.join(timeout=5)
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(loop.stop)
+            if thread is not None:
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    raise RuntimeError("external fetch event-loop thread did not stop within 5s")
+            # ``loop.stop()`` and joining its thread do not release the event
+            # loop's selector or self-pipe descriptors. Close it explicitly
+            # before dropping the last owned reference; repeated short-lived
+            # client configs otherwise exhaust macOS's common 256-FD limit.
+            if loop is not None and not loop.is_closed():
+                loop.close()
             pool.loop = None
             pool.thread = None
 

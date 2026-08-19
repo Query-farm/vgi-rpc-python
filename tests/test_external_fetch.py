@@ -1052,8 +1052,10 @@ class TestFetchPool:
         assert pool.session is not None
         assert pool.loop is not None
         assert pool.thread is not None
+        loop = pool.loop
 
         config.close()
+        assert loop.is_closed()
         assert pool.session is None
         assert pool.loop is None
         assert pool.thread is None
@@ -1063,8 +1065,11 @@ class TestFetchPool:
         with FetchConfig() as config:
             pool = _ensure_pool(config)
             assert pool.session is not None
+            assert pool.loop is not None
+            loop = pool.loop
 
         # After exiting context, pool is cleaned up
+        assert loop.is_closed()
         assert config._pool.session is None
         assert config._pool.loop is None
         assert config._pool.thread is None
