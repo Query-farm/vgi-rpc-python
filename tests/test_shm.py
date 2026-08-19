@@ -145,6 +145,15 @@ class GenerateDictState(StreamState, ArrowSerializableDataclass):
         self.current += 1
 
 
+@dataclass
+class EchoState(StreamState, ArrowSerializableDataclass):
+    """Echo exchange inputs without retaining them beyond a process turn."""
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit the current input batch."""
+        out.emit(input.batch)
+
+
 class ShmTestService(Protocol):
     """Minimal RPC service for SHM integration tests."""
 
@@ -158,6 +167,10 @@ class ShmTestService(Protocol):
 
     def generate_dict(self, count: int) -> Stream[GenerateDictState]:
         """Generate a stream of dictionary-encoded batches."""
+        ...
+
+    def echo(self) -> Stream[EchoState]:
+        """Echo batches over a bidirectional stream."""
         ...
 
 
@@ -175,6 +188,10 @@ class ShmTestServiceImpl:
     def generate_dict(self, count: int) -> Stream[GenerateDictState]:
         """Generate a stream of dictionary-encoded batches."""
         return Stream(output_schema=_DICT_OUTPUT_SCHEMA, state=GenerateDictState(count=count))
+
+    def echo(self) -> Stream[EchoState]:
+        """Create a bidirectional echo stream."""
+        return Stream(output_schema=_TEST_SCHEMA, input_schema=_TEST_SCHEMA, state=EchoState())
 
 
 def _make_shm_conn(
@@ -902,6 +919,24 @@ class TestShmIntegration:
 
             allocs = shm._allocator._read_allocs()
             assert len(allocs) == 0
+        finally:
+            _cleanup_shm(shm)
+
+    def test_exchange_releases_final_shm_input_at_eos(self) -> None:
+        """The last exchange input must not remain allocated after stream EOS."""
+        client, server, shm, rpc_server = _make_shm_conn()
+        try:
+            thread = threading.Thread(target=rpc_server.serve_one, args=(server,), daemon=True)
+            thread.start()
+            proxy = _RpcProxy(ShmTestService, client)
+            with proxy.echo() as session:
+                response = session.exchange(AnnotatedBatch(_make_batch(10)))
+                assert response.batch.equals(_make_batch(10))
+                response.release()
+            client.close()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            assert shm._allocator._read_allocs() == []
         finally:
             _cleanup_shm(shm)
 

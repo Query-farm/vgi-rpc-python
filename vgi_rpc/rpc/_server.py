@@ -1259,6 +1259,19 @@ class RpcServer:
                     error_message = str(exc)
                     with contextlib.suppress(BrokenPipeError, OSError):
                         _write_error_batch(output_writer, output_schema, exc, server_id=self._server_id)
+                finally:
+                    # Release the final input before closing the output IPC
+                    # stream. Observing output EOS must guarantee that the
+                    # peer has relinquished every SHM region from this call;
+                    # doing this only in the outer dispatch finally creates a
+                    # race where a client sees EOS while the last slot is
+                    # still live.
+                    if prev_input is not None:
+                        try:
+                            prev_input.release()
+                        except Exception:
+                            _logger.debug("failed to release final stream input", exc_info=True)
+                        prev_input = None
         finally:
             duration_ms = (time.monotonic() - start) * 1000
             _emit_access_log(
