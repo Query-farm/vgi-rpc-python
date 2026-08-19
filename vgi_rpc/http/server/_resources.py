@@ -233,6 +233,11 @@ class _UploadUrlResource:
                     raise TypeError(f"Method mismatch: expected '{_UPLOAD_URL_METHOD}', got '{ipc_method}'")
             except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
                 raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+            except Exception as exc:
+                # Same reasoning as the unary/stream guards: an unclassified
+                # failure while reading the request must still leave as an RPC
+                # error with a type and a message, not as Falcon's default page.
+                raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
             count = kwargs.get("count", 1)
             if not isinstance(count, int):

@@ -22,6 +22,8 @@ from vgi_rpc.external_fetch import (
     _ensure_pool,
     _head_probe,
     _is_presigned_url,
+    _range_probe,
+    _read_range_response_body,
     _reset_session,
     fetch_url,
     redact_url,
@@ -270,6 +272,56 @@ class TestPresignedRangeProbe:
             assert result == data
             assert seen_probe_ranges == ["bytes=0-0"]
 
+    def test_chunked_probe_stops_after_one_byte_sentinel(self) -> None:
+        """A malicious 206 probe cannot make the client buffer its full body."""
+
+        class _MaliciousChunkedContent:
+            def __init__(self) -> None:
+                self.remaining = 1024 * 1024
+                self.total_returned = 0
+                self.max_read_size = 0
+
+            async def read(self, size: int) -> bytes:
+                self.max_read_size = max(self.max_read_size, size)
+                returned = min(size, self.remaining)
+                self.remaining -= returned
+                self.total_returned += returned
+                return b"x" * returned
+
+        class _Response:
+            status = 206
+
+            def __init__(self) -> None:
+                self.headers = {
+                    "Content-Range": "bytes 0-0/1048576",
+                    "Accept-Ranges": "bytes",
+                }
+                self.content = _MaliciousChunkedContent()
+
+        class _ResponseContext:
+            def __init__(self, response: _Response) -> None:
+                self.response = response
+
+            async def __aenter__(self) -> _Response:
+                return self.response
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+        response = _Response()
+        config = FetchConfig(max_fetch_bytes=4096)
+        with (
+            patch(
+                "vgi_rpc.external_fetch._request_following_redirects",
+                return_value=_ResponseContext(response),
+            ),
+            pytest.raises(RuntimeError, match="expected 1 bytes, got at least 2"),
+        ):
+            asyncio.run(_range_probe("https://example.test/object", object(), config, None))  # type: ignore[arg-type]
+
+        assert response.content.total_returned == 2
+        assert response.content.max_read_size <= 2
+
     def test_presigned_probe_200_falls_back_to_plain_get(self) -> None:
         """If the probe Range is ignored (200), the fetch falls back to plain GET."""
         data = b"range ignored"
@@ -465,6 +517,35 @@ class TestFetchMaxBytes:
 
                 with pytest.raises(RuntimeError, match="Range chunk size mismatch"):
                     fetch_url(url, config)
+
+    def test_chunked_range_stops_at_one_byte_past_expected_size(self) -> None:
+        """A chunked 206 body is refused before the remainder is buffered."""
+
+        class _MaliciousChunkedContent:
+            def __init__(self) -> None:
+                self.remaining = 1024 * 1024
+                self.total_returned = 0
+                self.max_read_size = 0
+
+            async def read(self, size: int) -> bytes:
+                self.max_read_size = max(self.max_read_size, size)
+                if self.remaining == 0:
+                    return b""
+                returned = min(size, self.remaining)
+                self.remaining -= returned
+                self.total_returned += returned
+                return b"x" * returned
+
+        class _Response:
+            def __init__(self) -> None:
+                self.content = _MaliciousChunkedContent()
+
+        response = _Response()
+        config = FetchConfig(max_fetch_bytes=4096)
+        with pytest.raises(RuntimeError, match="expected 100 bytes, got at least 101"):
+            asyncio.run(_read_range_response_body(response, 100, config))  # type: ignore[arg-type]
+        assert response.content.total_returned == 101
+        assert response.content.max_read_size <= 101
 
 
 class TestFetchRedirectSecurity:

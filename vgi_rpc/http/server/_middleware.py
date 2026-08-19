@@ -124,7 +124,7 @@ class _MaxRequestBytesMiddleware:
 
     def _raise_too_large(self, size: int) -> NoReturn:
         """Raise Falcon's standardized 413 response."""
-        raise falcon.HTTPPayloadTooLarge(
+        raise falcon.HTTPContentTooLarge(
             title="Request body exceeds max_request_bytes",
             description=(
                 f"Request body of at least {size} bytes exceeds the server's advertised "
@@ -549,7 +549,7 @@ class _CompressionMiddleware:
             # and is exactly what the client sent.
             _current_request_batch.set(decompressed)
         except DecompressionLimitExceeded as exc:
-            raise falcon.HTTPPayloadTooLarge(
+            raise falcon.HTTPContentTooLarge(
                 title="Request body exceeds max_request_bytes after decompression",
                 description=(
                     f"Decompressed {req_enc.value} request body exceeds the server's advertised "

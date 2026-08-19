@@ -342,6 +342,35 @@ async def _read_response_body(resp: aiohttp.ClientResponse, config: FetchConfig)
     return b"".join(chunks)
 
 
+async def _read_range_response_body(
+    resp: aiohttp.ClientResponse,
+    expected_size: int,
+    config: FetchConfig,
+) -> bytes:
+    """Read one 206 body without buffering beyond its range or global cap."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        # Once either boundary is reached, read one byte only: EOF proves the
+        # response is exact, while a byte is a bounded sentinel proving the
+        # origin exceeded the range/global contract.
+        sentinel = min(expected_size - total + 1, config.max_fetch_bytes - total + 1)
+        chunk = await resp.content.read(min(65536, max(1, sentinel)))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > config.max_fetch_bytes:
+            raise RuntimeError(
+                f"ExternalLocation range fetch exceeded max_fetch_bytes ({total} > {config.max_fetch_bytes} bytes)"
+            )
+        if total > expected_size:
+            raise RuntimeError(f"Range chunk size mismatch: expected {expected_size} bytes, got at least {total}")
+        chunks.append(chunk)
+    if total != expected_size:
+        raise RuntimeError(f"Range chunk size mismatch: expected {expected_size} bytes, got {total}")
+    return b"".join(chunks)
+
+
 def _validate_url(url: str, validator: Callable[[str], None] | None) -> None:
     """Validate one request target while keeping validator diagnostics secret-safe."""
     if validator is None:
@@ -628,7 +657,10 @@ async def _range_probe(
                 content_length = _content_length_from_content_range(content_range)
                 # A 206 response implies byte-range support even if the header is omitted.
                 accept_ranges = resp.headers.get("Accept-Ranges", "bytes")
-                await resp.read()
+                # The probe requested exactly one byte.  Origins are not
+                # trusted to honour that range, so retain only the expected
+                # byte and read at most one extra sentinel before rejecting.
+                await _read_range_response_body(resp, 1, config)
                 return content_length, accept_ranges, content_encoding
 
             # Range unsupported/ignored by origin; caller falls back to plain GET.
@@ -693,13 +725,10 @@ async def _fetch_one_chunk(
                 raise RuntimeError(
                     f"Expected HTTP 206 for Range request, got {resp.status} (bytes={start}-{end} of {redact_url(url)})"
                 )
-            data = await resp.read()
-            if len(data) != expected_size:
-                raise RuntimeError(
-                    f"Range chunk size mismatch: expected {expected_size} bytes, "
-                    f"got {len(data)} (bytes={start}-{end} of {redact_url(url)})"
-                )
-            return data
+            try:
+                return await _read_range_response_body(resp, expected_size, config)
+            except RuntimeError as exc:
+                raise RuntimeError(f"{exc} (bytes={start}-{end} of {redact_url(url)})") from None
 
 
 async def _fetch_chunks_with_hedging(

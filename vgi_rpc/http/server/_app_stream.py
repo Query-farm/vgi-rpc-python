@@ -238,7 +238,10 @@ def _run_stream_init_sync(
             # method raises past this point takes the ordinary error path.
             _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults, info.params_schema)
             _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError, KeyError, ValueError) as exc:
+            # KeyError/ValueError are how a caller-supplied value fails to
+            # deserialize -- notably an unrecognised member of a dictionary-
+            # encoded enum, which reaches ``base[value]`` in _deserialize_value.
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
         except Exception as exc:
             # External pointer resolution can fail before stream state exists.
