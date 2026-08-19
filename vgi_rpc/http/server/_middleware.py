@@ -52,6 +52,7 @@ from vgi_rpc.rpc._common import (
 
 from .._common import (
     _ARROW_CONTENT_TYPE,
+    DecompressionLimitExceeded,
     Encoding,
     available_encodings,
     parse_encoding_list,
@@ -547,6 +548,14 @@ class _CompressionMiddleware:
             # access log is specified to carry. Capturing it costs nothing
             # and is exactly what the client sent.
             _current_request_batch.set(decompressed)
+        except DecompressionLimitExceeded as exc:
+            raise falcon.HTTPPayloadTooLarge(
+                title="Request body exceeds max_request_bytes after decompression",
+                description=(
+                    f"Decompressed {req_enc.value} request body exceeds the server's advertised "
+                    f"max_request_bytes={self._max_decompressed_bytes}."
+                ),
+            ) from exc
         except Exception as exc:
             raise falcon.HTTPBadRequest(
                 title="Decompression Error",

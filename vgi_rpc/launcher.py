@@ -39,6 +39,7 @@ import logging
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -97,7 +98,9 @@ def default_state_dir() -> Path:
     Linux uses ``$XDG_RUNTIME_DIR/vgi-rpc/`` when set (systemd-managed,
     auto-cleaned on logout).  macOS and other POSIX use
     ``$TMPDIR/vgi-rpc-$UID/`` (per-user namespacing).  Windows uses
-    ``$TMP/vgi-rpc/``.  The directory is created mode 0700 if missing.
+    ``$TMP/vgi-rpc/``.  The directory is created mode 0700 if missing.  That
+    prevents cross-UID pathname replacement; it is not a security boundary
+    against another process running as the same user.
     """
     if sys.platform == "win32":
         base = Path(tempfile.gettempdir()) / "vgi-rpc"
@@ -152,6 +155,32 @@ def _probe(path: str | Path) -> bool:
     finally:
         s.close()
     return True
+
+
+def _unlink_stale_socket(path: str | Path) -> None:
+    """Best-effort removal of a stable stale socket entry.
+
+    Portable pathname APIs cannot atomically compare an inode and unlink that
+    same inode.  Callers should therefore keep sockets in a private (0700)
+    directory; this check is not same-UID adversarial-swap protection.
+    """
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(entry.st_mode):
+        raise RuntimeError(f"refusing to replace pre-existing non-socket path: {path}")
+    os.unlink(path)
+
+
+def _require_socket_or_absent(path: str | Path) -> None:
+    """Refuse an occupied launcher path unless it is a real socket inode."""
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(entry.st_mode):
+        raise RuntimeError(f"refusing to replace pre-existing non-socket path: {path}")
 
 
 def _write_meta(meta_path: Path, worker_argv: Iterable[str], cwd: str, sock_path: str) -> None:
@@ -287,12 +316,13 @@ def launch(config: LaunchConfig) -> str:
         raise RuntimeError(f"failed to acquire {lock_path} within {config.connect_timeout}s") from exc
 
     try:
+        _require_socket_or_absent(sock_path)
         # Probe — maybe a worker is already serving.
         if _probe(sock_path):
             return str(sock_path)
-        # Stale socket cleanup; broaden OSError for Windows ERROR_SHARING_VIOLATION.
-        with contextlib.suppress(OSError):
-            os.unlink(sock_path)
+        # Only a real stale socket inode is ours to replace. A regular file or
+        # symlink may contain user data or redirect outside the state dir.
+        _unlink_stale_socket(sock_path)
         if meta_path is not None:
             _write_meta(meta_path, config.worker_argv, os.getcwd(), str(sock_path))
         proc = _spawn_worker(

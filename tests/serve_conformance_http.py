@@ -374,6 +374,7 @@ def main() -> None:
                 host=args.host,
                 port=args.port,
                 compression_level=compression_level,
+                max_request_bytes=args.max_request_bytes,
                 call_state_cache_entries=call_state_cache_entries,
                 cors_origins=args.cors_origin,
             )
@@ -386,6 +387,7 @@ def main() -> None:
         app = make_wsgi_app(
             server,
             compression_level=compression_level,
+            max_request_bytes=args.max_request_bytes,
             enable_sticky=True,
             sticky_echo_headers=sticky_echo_headers,
             token_key=token_key,

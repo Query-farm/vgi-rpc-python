@@ -9,6 +9,7 @@ import contextlib
 import logging
 import os
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -550,13 +551,23 @@ def make_unix_pair() -> tuple[UnixTransport, UnixTransport]:
 
 
 def _check_no_existing_listener(path: str) -> None:
-    """Raise ``RuntimeError`` if another process is already listening on *path*.
+    """Refuse non-sockets and raise if another process listens on *path*.
 
     Best-effort defense-in-depth — between this probe and the caller's bind,
     another process could still claim the socket.  The launcher coordinates
     via flock at a higher layer; this guards against accidental misuse where
-    two workers are pointed at the same path.
+    two workers are pointed at the same path. Stable regular files and
+    symlinks are preserved. Portable pathname APIs cannot close the final
+    check/unlink race against a malicious same-UID process, so callers needing
+    isolation should use a private (0700) parent directory.
     """
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(entry.st_mode):
+        raise RuntimeError(f"refusing to replace pre-existing non-socket path: {path}")
+
     test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         test_sock.connect(path)
@@ -565,6 +576,36 @@ def _check_no_existing_listener(path: str) -> None:
     finally:
         test_sock.close()
     raise RuntimeError(f"another process is already listening on {path}")
+
+
+def _unlink_stale_unix_socket(path: str) -> None:
+    """Best-effort unlink of a stable stale socket entry.
+
+    This protects accidental collisions, not same-UID adversarial path swaps;
+    use a private (0700) parent directory for isolation.
+    """
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(entry.st_mode):
+        raise RuntimeError(f"refusing to replace pre-existing non-socket path: {path}")
+    os.unlink(path)
+
+
+def _unlink_bound_unix_socket(path: str, identity: tuple[int, int]) -> None:
+    """Best-effort cleanup when the stable dirent still names our socket.
+
+    The identity check is not atomic with unlink and therefore is not a
+    same-UID adversarial-swap guarantee.
+    """
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISSOCK(entry.st_mode) and (entry.st_dev, entry.st_ino) == identity:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 def serve_unix(
@@ -619,50 +660,43 @@ def serve_unix(
     if idle_timeout is not None and not threaded:
         raise ValueError("idle_timeout requires threaded=True")
     _check_no_existing_listener(path)
+    _unlink_stale_unix_socket(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    # Best-effort cleanup of any stale socket file.  Broad ``OSError`` catch
-    # because Windows can raise ``ERROR_SHARING_VIOLATION`` (a ``PermissionError``
-    # subclass) if the kernel still considers the file in use.
-    with contextlib.suppress(OSError):
-        os.unlink(path)
-    # Bind under a restrictive umask so the socket dirent is owner-only.  On
-    # Windows ``os.umask`` is a no-op for AF_UNIX permissions, so we follow
-    # up with an explicit chmod (also a belt-and-suspenders on POSIX in case
-    # the caller had a relaxed umask in scope before us).
-    saved_umask = os.umask(0o077)
+    bound_identity: tuple[int, int] | None = None
     try:
-        sock.bind(path)
-    finally:
-        os.umask(saved_umask)
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
-    # Even in sequential mode the listen backlog only governs the kernel's
-    # pending-connection queue; it does *not* affect how many connections we
-    # service at once.  ``listen(1)`` is fragile on macOS, where the backlog
-    # is enforced strictly and the brief window between ``serve()`` returning
-    # and the next ``accept()`` can drop incoming connects with
-    # ECONNREFUSED.  16 leaves margin without changing serving semantics.
-    sock.listen(128 if threaded else 16)
-    if wire_transport_logger.isEnabledFor(logging.DEBUG):
-        wire_transport_logger.debug(
-            "serve_unix: server_id=%s, protocol=%s, path=%s, threaded=%s, idle_timeout=%s",
-            server.server_id,
-            server.protocol_name,
-            path,
-            threaded,
-            idle_timeout,
-        )
-    if on_bound is not None:
-        on_bound(path)
-    try:
+        # Bind under a restrictive umask so the socket dirent is owner-only.
+        saved_umask = os.umask(0o077)
+        try:
+            sock.bind(path)
+        finally:
+            os.umask(saved_umask)
+        entry = os.lstat(path)
+        bound_identity = (entry.st_dev, entry.st_ino)
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+        # Even in sequential mode the listen backlog only governs the kernel's
+        # pending-connection queue; it does *not* affect how many connections
+        # we service at once.  A margin avoids brief macOS ECONNREFUSED windows.
+        sock.listen(128 if threaded else 16)
+        if wire_transport_logger.isEnabledFor(logging.DEBUG):
+            wire_transport_logger.debug(
+                "serve_unix: server_id=%s, protocol=%s, path=%s, threaded=%s, idle_timeout=%s",
+                server.server_id,
+                server.protocol_name,
+                path,
+                threaded,
+                idle_timeout,
+            )
+        if on_bound is not None:
+            on_bound(path)
         if threaded:
             _serve_socket_threaded(server, sock, max_connections, idle_timeout, UnixTransport, "vgi-unix")
         else:
             _serve_socket_sequential(server, sock, UnixTransport)
     finally:
         sock.close()
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+        if bound_identity is not None:
+            _unlink_bound_unix_socket(path, bound_identity)
 
 
 def _serve_socket_sequential(

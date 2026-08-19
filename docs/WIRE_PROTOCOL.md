@@ -674,8 +674,11 @@ implementation can always do it and advertising it carries no information.
 `Content-Encoding`. A server that does not support the named coding MUST
 answer `415`, not fall through to identity — the body would otherwise reach
 the Arrow reader as garbage. A body that names a supported coding but fails to
-decompress is `400`. Implementations MUST bound decompression output to
-prevent a decompression-bomb DoS.
+decompress is `400`. `VGI-Max-Request-Bytes`, when advertised, applies both to
+the encoded HTTP body and independently to the decoded body passed to Arrow;
+either limit is a `413`. Implementations MUST enforce the decoded limit while
+decompressing (or from a trustworthy frame-size precheck) so a compressed body
+cannot force an allocation larger than the advertised cap.
 
 **Responses.** The client offers codings in `Accept-Encoding` and/or
 `X-VGI-Accept-Encoding`. The server picks the first offered coding it can

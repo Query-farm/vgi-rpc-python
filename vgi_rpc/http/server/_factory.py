@@ -423,9 +423,11 @@ def make_wsgi_app(
 
     # Compression middleware decompresses request bodies and compresses
     # responses — must come before auth so handlers read plaintext bodies.
-    # Decompression cap is 16x the wire cap: generous enough for normal
-    # compression ratios on Arrow IPC bodies, tight enough that a tiny
-    # compressed body cannot claim hundreds of MB and OOM the server.
+    # The advertised request cap applies independently before and after
+    # content decoding. A compressed body can fit on the wire yet expand
+    # beyond the bytes the server promised to accept; reject that expansion
+    # at the codec boundary before Arrow sees it or a decompressor allocates
+    # the declared output.
     #
     # The two directions are configured **independently**: what we accept on
     # a request body (``decodable``) and what we will produce on a response
@@ -459,7 +461,7 @@ def make_wsgi_app(
         codec_levels = {enc: (compression_level if enc is Encoding.ZSTD else 6) for enc in decodable}
     enabled_encodings: tuple[Encoding, ...] = tuple(codec_levels)
     if decodable or codec_levels:
-        max_decompressed_bytes = max_request_bytes * 16 if max_request_bytes is not None else None
+        max_decompressed_bytes = max_request_bytes
         middleware.append(
             _CompressionMiddleware(
                 codec_levels,

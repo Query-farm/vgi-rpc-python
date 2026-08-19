@@ -9,7 +9,8 @@ Coverage:
 * Single-instance: concurrent launchers serialise on the per-hash flock; only
   one worker is ever spawned for the same tuple.
 * Defensive bind: ``serve_unix`` refuses to clobber a path with an existing
-  listener (defense in depth even if the launcher coordinator misbehaves).
+  listener, regular file, or symlink (defense in depth even if the launcher
+  coordinator misbehaves).
 * Stale-socket recovery: a dangling ``.sock`` file with no listener gets
   unlinked and a fresh worker is spawned.
 * Idle self-shutdown: worker exits after the configured idle period and the
@@ -190,11 +191,41 @@ def test_defensive_bind_refuses_existing_listener() -> None:
 
 
 @_SKIP_WIN
+@pytest.mark.parametrize("entry_kind", ("regular", "symlink"))
+def test_defensive_bind_preserves_non_socket_path(entry_kind: str) -> None:
+    """``serve_unix`` never binds over or deletes a regular file or symlink."""
+    from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+    from vgi_rpc.rpc import RpcServer, serve_unix
+
+    base = Path(tempfile.gettempdir()) / f"vgi-bind-{uuid.uuid4().hex[:8]}"
+    base.mkdir(mode=0o700)
+    target = base / "valuable-data"
+    target.write_text("preserve me", encoding="utf-8")
+    path = target if entry_kind == "regular" else base / "occupied.sock"
+    if entry_kind == "symlink":
+        path.symlink_to(target)
+    try:
+        with pytest.raises(RuntimeError, match="refusing to replace pre-existing non-socket"):
+            serve_unix(
+                RpcServer(ConformanceService, ConformanceServiceImpl()),
+                str(path),
+                on_bound=lambda _path: pytest.fail("serve_unix bound over the occupied path"),
+            )
+        assert target.read_text(encoding="utf-8") == "preserve me"
+        if entry_kind == "symlink":
+            assert path.is_symlink()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@_SKIP_WIN
 def test_stale_socket_file_cleaned_up(state_dir: Path) -> None:
     """A dangling socket file with no listener is unlinked and a fresh worker spawns."""
     hash_id = compute_hash(_worker_argv())
     stale_sock = state_dir / f"{hash_id}.sock"
-    stale_sock.touch()
+    stale_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale_listener.bind(str(stale_sock))
+    stale_listener.close()
     assert stale_sock.exists()
 
     config = LaunchConfig(
@@ -208,6 +239,28 @@ def test_stale_socket_file_cleaned_up(state_dir: Path) -> None:
     # Same path we expect, and now actually accepting.
     assert path == str(stale_sock)
     _connect_and_close(path)
+
+
+@_SKIP_WIN
+@pytest.mark.parametrize("entry_kind", ("regular", "symlink"))
+def test_launcher_preserves_non_socket_path(state_dir: Path, entry_kind: str) -> None:
+    """Launcher startup refuses rather than removing an occupied non-socket path."""
+    target = state_dir / "valuable-data"
+    target.write_text("preserve me", encoding="utf-8")
+    path = target if entry_kind == "regular" else state_dir / "explicit.sock"
+    if entry_kind == "symlink":
+        path.symlink_to(target)
+    config = LaunchConfig(
+        worker_argv=tuple(_worker_argv()),
+        socket_path=str(path),
+        connect_timeout=2.0,
+        worker_startup_timeout=2.0,
+    )
+    with pytest.raises(RuntimeError, match="refusing to replace pre-existing non-socket"):
+        launch(config)
+    assert target.read_text(encoding="utf-8") == "preserve me"
+    if entry_kind == "symlink":
+        assert path.is_symlink()
 
 
 @_SKIP_WIN

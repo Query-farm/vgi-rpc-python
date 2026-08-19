@@ -2213,6 +2213,9 @@ class TestZstdCompression:
         any frame claiming more than the configured cap is rejected
         before allocation.
         """
+        from unittest import mock
+
+        from vgi_rpc._codec import DecompressionLimitExceeded
         from vgi_rpc.http._common import _compress_body, _decompress_body
 
         bomb_raw = b"\x00" * (16 * 1024 * 1024)  # 16 MiB of zeros
@@ -2222,11 +2225,14 @@ class TestZstdCompression:
 
         # With a 1 MiB cap, the bomb's claimed 16 MiB output must be refused
         # rather than allocated.
-        with pytest.raises(Exception, match=r"max_output_size|exceeds|too large|cannot decompress"):
+        with (
+            mock.patch("zstandard.ZstdDecompressor") as decompressor,
+            pytest.raises(DecompressionLimitExceeded, match=r"max_output_size|exceeds"),
+        ):
             _decompress_body(bomb, max_output_size=1024 * 1024)
+        decompressor.assert_not_called()
 
-        # Sanity: the same call without a cap *would* succeed (current bug).
-        # Run only at small size to keep the test cheap.
+        # A normal frame beneath the cap still decodes.
         small = _compress_body(b"x" * 1024, 3)
         out = _decompress_body(small, max_output_size=1024 * 1024)
         assert out == b"x" * 1024

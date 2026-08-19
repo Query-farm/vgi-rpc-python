@@ -62,6 +62,7 @@ from vgi_rpc.conformance._lifecycle_tests import (
     assert_producer_error_recovery,
     assert_unary_error_recovery,
 )
+from vgi_rpc.conformance._request_limits_pytest import TestCompressedHttpRequestCap  # noqa: F401
 from vgi_rpc.conformance.proof_harness import ProofUnsupported, ProofWorker, ProofWorkerFactory
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
