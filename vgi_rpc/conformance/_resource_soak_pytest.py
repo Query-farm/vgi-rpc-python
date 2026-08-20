@@ -96,6 +96,7 @@ class ResourceSoakTarget:
         pid: Operating-system process ID of the worker under observation.
         connect: Create a fresh client connection to the worker.
         limits: Runtime-specific retained-resource budgets.
+        warmup_multiplier: Runtime-specific multiplier for unmeasured warm-up.
 
     """
 
@@ -103,6 +104,7 @@ class ResourceSoakTarget:
     pid: int
     connect: Callable[[], AbstractContextManager[ResourceSoakConnection]]
     limits: ResourceSoakLimits = ResourceSoakLimits()
+    warmup_multiplier: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,8 +298,9 @@ class TestResourceSoak:
         per_epoch = 100 * _scale()
 
         def warm_up(proxy: ResourceSoakConnection) -> None:
-            for value in range(50):
+            for value in range(5 * per_epoch * target.warmup_multiplier):
                 assert proxy.echo_int(value=value) == value
+                assert math.isclose(proxy.add_floats(a=float(value), b=0.5), value + 0.5)
 
         def epoch(proxy: ResourceSoakConnection) -> int:
             for value in range(per_epoch):
@@ -322,7 +325,7 @@ class TestResourceSoak:
             session.cancel()
 
         def warm_up(proxy: ResourceSoakConnection) -> None:
-            for _ in range(3):
+            for _ in range(5 * per_epoch * target.warmup_multiplier):
                 cycle(proxy)
 
         def epoch(proxy: ResourceSoakConnection) -> int:
@@ -337,7 +340,7 @@ class TestResourceSoak:
         """Repeated connect/call/close cycles do not retain server resources."""
         target = _target(request)
         per_epoch = 20 * _scale()
-        for value in range(5):
+        for value in range(5 * per_epoch * target.warmup_multiplier):
             with target.connect() as proxy:
                 assert proxy.echo_int(value=value) == value
         baseline = _settled_sample(target)

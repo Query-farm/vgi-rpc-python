@@ -238,13 +238,18 @@ The sticky row is the one to note: a port may decline sticky entirely, but a por
 `TestResourceSoak` is a black-box retained-resource check rather than a wire
 feature. A runner opts in with a **function-scoped**
 `conformance_resource_soak_target` fixture returning
-`ResourceSoakTarget(name, pid, connect, limits)` from
+`ResourceSoakTarget(name, pid, connect, limits, warmup_multiplier=1)` from
 `vgi_rpc.conformance._resource_soak_pytest`:
 
 - `pid` identifies one newly started, otherwise idle worker process;
 - `connect()` returns a fresh context-managed `ConformanceService` client;
 - `limits` supplies runtime-specific RSS budgets while descriptor/handle,
   thread, and child-process drift stays near exact; and
+- `warmup_multiplier` may be raised for runtimes whose allocator, JIT, or
+  thread pools need more representative traffic before reaching steady state.
+  Warm-up is one full measured workload times this value, so it remains
+  representative when `VGI_RPC_SOAK_SCALE` changes; it never reduces the
+  measured operation count or relaxes a budget; and
 - teardown stops and reaps that worker after the scenario.
 
 Do not point this fixture at a session-wide worker shared with unrelated tests.
