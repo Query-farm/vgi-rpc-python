@@ -367,15 +367,14 @@ class FakeStorageBackend:
 
     def __init__(self, base_url: str) -> None:
         """Bind to a running fake-storage service at ``base_url``."""
-        import httpx2
-
         self._base_url = base_url.rstrip("/")
-        self._client = httpx2.Client(timeout=10.0)
 
     def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Allocate a URL, PUT bytes, return the GET URL (``ExternalStorage``)."""
+        import httpx2
+
         alloc_body = {"content_encoding": content_encoding} if content_encoding else {}
-        alloc_resp = self._client.post(f"{self._base_url}/alloc", json=alloc_body)
+        alloc_resp = httpx2.post(f"{self._base_url}/alloc", json=alloc_body, timeout=10.0)
         alloc_resp.raise_for_status()
         allocation = alloc_resp.json()
         upload_url = allocation.get("upload_url", allocation["object_url"])
@@ -384,7 +383,7 @@ class FakeStorageBackend:
         put_headers = {"Content-Type": "application/octet-stream"}
         if content_encoding:
             put_headers["Content-Encoding"] = content_encoding
-        put_resp = self._client.put(upload_url, content=data, headers=put_headers)
+        put_resp = httpx2.put(upload_url, content=data, headers=put_headers, timeout=10.0)
         put_resp.raise_for_status()
         return str(download_url)
 
@@ -392,9 +391,11 @@ class FakeStorageBackend:
         """Allocate a fresh blob and return an ``UploadUrl`` (``UploadUrlProvider``)."""
         from datetime import datetime, timedelta
 
+        import httpx2
+
         from vgi_rpc.external import UploadUrl
 
-        alloc_resp = self._client.post(f"{self._base_url}/alloc", json={})
+        alloc_resp = httpx2.post(f"{self._base_url}/alloc", json={}, timeout=10.0)
         alloc_resp.raise_for_status()
         allocation = alloc_resp.json()
         object_url = allocation["object_url"]
@@ -405,8 +406,7 @@ class FakeStorageBackend:
         )
 
     def close(self) -> None:
-        """Release the underlying HTTP client."""
-        self._client.close()
+        """Retain the adapter cleanup protocol; requests own their clients."""
 
 
 # ---------------------------------------------------------------------------
