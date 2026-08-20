@@ -20,9 +20,14 @@ def _snapshot(rss: int, *, descriptors: int = 5, threads: int = 2, children: int
     return ProcessResourceSnapshot(rss, descriptors, threads, children)
 
 
-def test_rss_slope_uses_all_epochs() -> None:
-    """Least-squares slope identifies steady retained growth."""
+def test_rss_slope_identifies_steady_retained_growth() -> None:
+    """The median epoch delta identifies steady retained growth."""
     assert _rss_slope(tuple(_snapshot(value) for value in (100, 120, 140, 160))) == pytest.approx(20.0)
+
+
+def test_rss_slope_ignores_one_time_allocator_step() -> None:
+    """One arena reservation followed by a plateau is not a steady leak."""
+    assert _rss_slope(tuple(_snapshot(value) for value in (100, 100, 180, 180, 180, 180))) == 0.0
 
 
 def test_report_accepts_a_plateau_after_warmup() -> None:

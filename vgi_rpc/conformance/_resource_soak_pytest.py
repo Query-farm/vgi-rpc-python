@@ -25,7 +25,9 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
+from itertools import pairwise
 from pathlib import Path
+from statistics import median
 from typing import Protocol, cast
 
 import psutil
@@ -73,7 +75,7 @@ class ResourceSoakLimits:
 
     Attributes:
         rss_growth_bytes: Maximum last-sample RSS growth above baseline.
-        rss_slope_bytes_per_epoch: Maximum positive least-squares RSS slope.
+        rss_slope_bytes_per_epoch: Maximum median retained RSS per epoch.
         descriptor_growth: Maximum file-descriptor or Windows-handle growth.
         thread_growth: Maximum worker thread growth.
         child_growth: Maximum descendant-process growth.
@@ -135,7 +137,7 @@ class ResourceSoakReport:
         operations: Number of measured logical operations.
         baseline: Post-warm-up resource sample.
         samples: Resource sample after every measured epoch.
-        rss_slope_bytes_per_epoch: Least-squares slope across baseline and epochs.
+        rss_slope_bytes_per_epoch: Median RSS delta between consecutive epochs.
 
     """
 
@@ -179,15 +181,18 @@ def sample_process_resources(pid: int) -> ProcessResourceSnapshot:
 
 
 def _rss_slope(samples: tuple[ProcessResourceSnapshot, ...]) -> float:
-    """Return the least-squares RSS slope in bytes per epoch."""
+    """Return the median consecutive RSS delta in bytes per epoch.
+
+    Allocators commonly reserve one arena at a nondeterministic epoch and then
+    plateau. A least-squares fit across a short soak mistakes that isolated
+    step for steady retention. The median delta rejects sustained growth while
+    the separate final-growth limit still bounds all retained arena capacity.
+
+    """
     if len(samples) < 2:
         return 0.0
-    count = len(samples)
-    mean_x = (count - 1) / 2
-    mean_y = sum(sample.rss_bytes for sample in samples) / count
-    numerator = sum((index - mean_x) * (sample.rss_bytes - mean_y) for index, sample in enumerate(samples))
-    denominator = sum((index - mean_x) ** 2 for index in range(count))
-    return numerator / denominator if denominator else 0.0
+    deltas = [current.rss_bytes - previous.rss_bytes for previous, current in pairwise(samples)]
+    return float(median(deltas))
 
 
 def _scale() -> int:
