@@ -97,7 +97,7 @@ try:
 
     _HAS_OTEL = True
 except ImportError:
-    _otel_trace = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    _otel_trace = None  # type: ignore[assignment]
     _HAS_OTEL = False
 
 if TYPE_CHECKING:
@@ -160,6 +160,7 @@ def _traced_upload(
     if not _HAS_OTEL:
         return storage.upload(ipc_bytes, schema, content_encoding=content_encoding)
 
+    assert _otel_trace is not None
     tracer = _otel_trace.get_tracer("vgi_rpc", "0.1.0")
     with tracer.start_as_current_span(
         "vgi_rpc.external/upload",
@@ -540,6 +541,7 @@ def resolve_external_location(
 
     span: _OtelSpan | None = None
     if _HAS_OTEL:
+        assert _otel_trace is not None
         tracer = _otel_trace.get_tracer("vgi_rpc", "0.1.0")
         span = tracer.start_span("vgi_rpc.external/fetch", kind=_otel_trace.SpanKind.CLIENT)
         span.set_attribute("url", redact_url(url))
@@ -561,6 +563,7 @@ def resolve_external_location(
         result = retryer(_fetch_and_resolve, batch.schema, url, config, on_log, ipc_validation, expected_sha256)
         elapsed_ms = (time.monotonic() - t0) * 1000
         if span is not None:
+            assert _otel_trace is not None
             span.set_attribute("fetch_duration_ms", elapsed_ms)
             span.set_status(_otel_trace.StatusCode.OK)
             span.end()
@@ -568,6 +571,7 @@ def resolve_external_location(
     except (*retry_types,) as exc:
         elapsed_ms = (time.monotonic() - t0) * 1000
         if span is not None:
+            assert _otel_trace is not None
             span.set_status(_otel_trace.StatusCode.ERROR, str(exc))
             # Third-party HTTP exceptions can retain the complete signed URL
             # in request_info. Record only a reconstructed, redacted error.
