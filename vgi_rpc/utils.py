@@ -527,9 +527,31 @@ class ArrowType:
                 list[list[int]], ArrowType(pa.list_(pa.list_(pa.int32())))
             ]
 
+    Nullability normally follows the Python annotation — ``X | None`` is a
+    nullable column, with or without an ``Annotated`` wrapper. Set ``nullable``
+    only where the wire genuinely disagrees with the Python type, which happens
+    in two directions:
+
+        # Optional in Python because it has a default, never null on the wire —
+        # the serializer substitutes b"" for None.
+        cursor: Annotated[bytes | None, ArrowType(pa.binary(), nullable=False)] = None
+
+        # Not Optional in Python, but a peer may omit the column's value.
+        tag: Annotated[str, ArrowType(pa.string(), nullable=True)]
+
+    An explicit value is a claim about the BYTES, so it should be made only
+    where the serializer's behaviour backs it up. Leaving it ``None`` (derive
+    from the annotation) is right almost always.
+
+    Attributes:
+        arrow_type: The Arrow type to use for this field.
+        nullable: Wire nullability override; ``None`` derives it from the
+            Python annotation.
+
     """
 
     arrow_type: pa.DataType
+    nullable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -981,6 +1003,44 @@ def _is_optional_type(python_type: object) -> tuple[object, bool]:
     return python_type, False
 
 
+def _resolve_field_nullability(field_type: object) -> bool:
+    """Decide whether a field's Arrow column is nullable.
+
+    Nullability is a property of the annotation, not of the Arrow type, so it
+    has to be read THROUGH any ``Annotated`` wrapper rather than off the type
+    the wrapper resolves to. :func:`_is_optional_type` deliberately does not do
+    that — it is the type-stripping helper used by :func:`_infer_arrow_type`,
+    which must see the wrapper intact to find an :class:`ArrowType` marker
+    inside it — so asking it directly answers "is the OUTER annotation a
+    union", which for ``Annotated[X | None, ...]`` is always no.
+
+    That silently made every ``Annotated`` optional field a non-null column.
+    The values did not change, so the batch simply carried nulls in a column
+    its own schema called non-null, and the mismatch surfaced only in peers
+    that compare schemas field by field.
+
+    An explicit ``ArrowType(..., nullable=...)`` wins over the annotation, for
+    the fields where the wire and the Python type genuinely differ.
+
+    Args:
+        field_type: The resolved annotation (from ``get_type_hints`` with
+            ``include_extras=True``, so ``Annotated`` is preserved).
+
+    Returns:
+        True if the Arrow field should be nullable.
+
+    """
+    inner = field_type
+    if get_origin(field_type) is Annotated:
+        args = get_args(field_type)
+        for marker in args[1:]:
+            if isinstance(marker, ArrowType) and marker.nullable is not None:
+                return marker.nullable
+        inner = args[0]
+    _, nullable = _is_optional_type(inner)
+    return nullable
+
+
 def _infer_arrow_type(python_type: object) -> pa.DataType:
     """Infer Arrow type from Python type annotation.
 
@@ -1149,12 +1209,12 @@ class _ArrowSchemaDescriptor:
             # Check for explicit ClassVar override (legacy support)
             if field_name in overrides:
                 arrow_type = overrides[field_name]
-                _, nullable = _is_optional_type(field_type)
+                nullable = _resolve_field_nullability(field_type)
                 arrow_fields.append(pa.field(field_name, arrow_type, nullable=nullable))
                 continue
 
             # Infer Arrow type from Python type (handles Annotated[T, ArrowType(...)] internally)
-            _, nullable = _is_optional_type(field_type)
+            nullable = _resolve_field_nullability(field_type)
             try:
                 arrow_type = _infer_arrow_type(field_type)
                 arrow_fields.append(pa.field(field_name, arrow_type, nullable=nullable))

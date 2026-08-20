@@ -822,6 +822,91 @@ class TestSchemaCaching:
 
 
 # ---------------------------------------------------------------------------
+# TestAnnotatedNullability
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AnnotatedNullability(ArrowSerializableDataclass):
+    """Every combination of Annotated wrapper, optionality and explicit override."""
+
+    plain_optional: bytes | None = None
+    plain_required: bytes = b""
+    annotated_optional: Annotated[bytes | None, ArrowType(pa.binary())] = None
+    annotated_required: Annotated[bytes, ArrowType(pa.binary())] = b""
+    other_marker_optional: Annotated[bytes | None, "unrelated metadata"] = None
+    forced_non_null: Annotated[bytes | None, ArrowType(pa.binary(), nullable=False)] = None
+    forced_nullable: Annotated[bytes, ArrowType(pa.binary(), nullable=True)] = b""
+
+
+class TestAnnotatedNullability:
+    """Nullability is read through an ``Annotated`` wrapper, not off the type it wraps.
+
+    ``get_origin(Annotated[X | None, ...])`` is ``Annotated``, never a union, so
+    a nullability check that asks the outer annotation directly answers "no" for
+    every wrapped optional field. That produced batches whose values were null in
+    a column the schema called non-null — invisible in this SDK, because the same
+    (wrong) schema described both the write and the read, and fatal in a peer that
+    compares schemas field by field.
+    """
+
+    def test_optional_under_annotated_is_nullable(self) -> None:
+        """``Annotated[X | None, ArrowType(...)]`` is nullable, like the bare union."""
+        schema = AnnotatedNullability.ARROW_SCHEMA
+        assert schema.field("annotated_optional").nullable is True
+        assert schema.field("plain_optional").nullable is True
+
+    def test_any_annotation_marker_preserves_optionality(self) -> None:
+        """The wrapper is what hid it, so a non-``ArrowType`` marker hid it too."""
+        assert AnnotatedNullability.ARROW_SCHEMA.field("other_marker_optional").nullable is True
+
+    def test_required_stays_non_null(self) -> None:
+        """A non-optional annotation is still a non-null column, wrapped or not."""
+        schema = AnnotatedNullability.ARROW_SCHEMA
+        assert schema.field("annotated_required").nullable is False
+        assert schema.field("plain_required").nullable is False
+
+    def test_explicit_override_wins_in_both_directions(self) -> None:
+        """``ArrowType(nullable=...)`` overrides the annotation either way."""
+        schema = AnnotatedNullability.ARROW_SCHEMA
+        assert schema.field("forced_non_null").nullable is False
+        assert schema.field("forced_nullable").nullable is True
+
+    def test_explicit_type_survives_the_optional_wrapper(self) -> None:
+        """Reading nullability through the wrapper must not consume the ArrowType.
+
+        The type override and the nullability live in the same annotation, and
+        the tempting one-line fix — teach :func:`_is_optional_type` to strip
+        ``Annotated`` — throws the marker away with the wrapper:
+        :func:`_infer_arrow_type` asks that same helper first and recurses into
+        the bare type, so the override is never seen. It fails SILENTLY, as a
+        widened type rather than an error, which is why the witness here is a
+        narrowing override (``int32``, not the inferred ``int64``) and not one
+        of the uninferable types that would have raised either way.
+        """
+
+        @dataclass(frozen=True)
+        class Narrowed(ArrowSerializableDataclass):
+            count: Annotated[int | None, ArrowType(pa.int32())] = None
+            bounds: Annotated[pa.RecordBatch | None, ArrowType(pa.binary())] = None
+
+        count = Narrowed.ARROW_SCHEMA.field("count")
+        assert count.type == pa.int32(), "the ArrowType override was consumed with the wrapper"
+        assert count.nullable is True
+
+        bounds = Narrowed.ARROW_SCHEMA.field("bounds")
+        assert bounds.type == pa.binary()
+        assert bounds.nullable is True
+
+    def test_null_round_trips_through_the_nullable_column(self) -> None:
+        """The values were always null; only the schema disagreed."""
+        value = AnnotatedNullability()
+        restored = AnnotatedNullability.deserialize_from_bytes(value.serialize_to_bytes())
+        assert restored.annotated_optional is None
+        assert restored.other_marker_optional is None
+
+
+# ---------------------------------------------------------------------------
 # TestSerializationEdgeCases
 # ---------------------------------------------------------------------------
 

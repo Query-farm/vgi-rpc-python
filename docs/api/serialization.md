@@ -51,7 +51,31 @@ These dataclasses work directly as RPC parameters and return types. They're also
 | `Enum` | `dictionary(int32, utf8)` |
 | `Optional[T]` | nullable `T` |
 | nested `ArrowSerializableDataclass` | `struct` |
-| `Annotated[T, ArrowType(...)]` | explicit override |
+| `Annotated[T, ArrowType(...)]` | explicit type override |
+| `Annotated[T \| None, ArrowType(...)]` | explicit type override, still nullable |
+| `Annotated[T, ArrowType(..., nullable=...)]` | explicit type AND nullability |
+
+### Nullability
+
+`Optional[T]` is a nullable column whether or not it is wrapped in `Annotated`.
+Before 0.43.0 the wrapper hid it — `get_origin(Annotated[T | None, ...])` is
+`Annotated`, never a union — so every annotated optional field was described as
+non-null while its values were free to be null. Nothing in one SDK notices that,
+because the same schema describes both the write and the read; a peer comparing
+schemas field by field rejects the batch.
+
+Set `nullable` only where the wire genuinely disagrees with the Python type:
+
+```python
+# Optional in Python because it has a default, never null on the wire.
+cursor: Annotated[bytes | None, ArrowType(pa.binary(), nullable=False)] = None
+
+# Not Optional in Python, but a peer may omit the value.
+tag: Annotated[str, ArrowType(pa.string(), nullable=True)]
+```
+
+An explicit value is a claim about the bytes, so make it only where the
+serializer backs it up. Deriving from the annotation is right almost always.
 
 ## API Reference
 
