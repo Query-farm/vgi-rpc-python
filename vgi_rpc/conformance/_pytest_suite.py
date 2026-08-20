@@ -63,6 +63,7 @@ from vgi_rpc.conformance._lifecycle_tests import (
     assert_unary_error_recovery,
 )
 from vgi_rpc.conformance._request_limits_pytest import TestCompressedHttpRequestCap  # noqa: F401
+from vgi_rpc.conformance._resource_soak_pytest import TestResourceSoak  # noqa: F401
 from vgi_rpc.conformance._transport_lifecycle_pytest import (  # noqa: F401
     TestServeStartLifecycle,
     TestTransportKindContext,

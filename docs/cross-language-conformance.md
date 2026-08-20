@@ -218,6 +218,7 @@ Some tests can't run against one already-running server, because the state under
 | `conformance_http_small_request_cap_port` | `TestCompressedHttpRequestCap` | skip — requires a worker advertising a deliberately small `max_request_bytes` cap | [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#content-encoding-negotiation) |
 | `conformance_http_external_security_port` | `TestExternalFetchSecurity` | skip — requires a server wired to the fake-storage redirect routes and small encoded/decoded caps | [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#fetch-safety) |
 | `conformance_http_sticky_short_ttl_port`<br>`conformance_http_sticky_peer_ports`<br>`conformance_http_sticky_auth_port` | the three `TestSticky` failure paths | **fail**, if the server advertises `VGI-Sticky-Enabled` — skip otherwise | [sticky-sessions-spec.md](sticky-sessions-spec.md) §9.1 |
+| `conformance_resource_soak_target` | `TestResourceSoak` | skip — requires a dedicated process PID and connection factory | Resource soak contract below |
 
 The external-security fixture uses the shared fake-storage service, a 4 KiB
 encoded cap, an 8 KiB decoded cap, and a URL policy that permits
@@ -231,6 +232,39 @@ The shared group checks the cap independently on the encoded HTTP body and the
 decoded Arrow body, then reuses the same HTTP client after each rejection.
 
 The sticky row is the one to note: a port may decline sticky entirely, but a port that *claims* it cannot quietly omit the tests that prove sessions are refused when they should be. Everything else on this page skips silently when unsupplied, which is why the sticky fixtures name themselves in the failure message.
+
+### Resource soak contract
+
+`TestResourceSoak` is a black-box retained-resource check rather than a wire
+feature. A runner opts in with a **function-scoped**
+`conformance_resource_soak_target` fixture returning
+`ResourceSoakTarget(name, pid, connect, limits)` from
+`vgi_rpc.conformance._resource_soak_pytest`:
+
+- `pid` identifies one newly started, otherwise idle worker process;
+- `connect()` returns a fresh context-managed `ConformanceService` client;
+- `limits` supplies runtime-specific RSS budgets while descriptor/handle,
+  thread, and child-process drift stays near exact; and
+- teardown stops and reaps that worker after the scenario.
+
+Do not point this fixture at a session-wide worker shared with unrelated tests.
+Warm-up deliberately precedes the baseline, but another test opening sockets,
+loading modules, or triggering a JVM/JIT in the measured PID still makes the
+result meaningless.
+
+The default PR-scale tranche runs 1,000 unary operations, 150 stream
+completion/error/cancellation operations, and 100 fresh connections. Set
+`VGI_RPC_SOAK_SCALE` to an integer from 1 through 20 to multiply each epoch
+without letting any one pytest case exceed the suite's 50-second ceiling.
+`VGI_RPC_SOAK_REPORT_DIR` writes one JSON file per scenario containing the
+post-warm-up baseline, every epoch sample, operation count, and least-squares
+RSS slope. CI should retain these reports when a job fails so a threshold
+failure is diagnosable rather than merely red.
+
+The portable sampler observes RSS, Unix file descriptors or Windows handles,
+native threads, and recursive child processes. It intentionally complements,
+rather than replaces, language-local exact accounting for Arrow allocators,
+shared-memory blocks, task/goroutine registries, and sticky-session entries.
 
 `VGI-Proxy-Proof-Required: true` is what an *operator or proxy* reads to confirm a deployed worker enforces (see [proxy-proof-spec.md](proxy-proof-spec.md) §2.2); the conformance suite asserts the header rather than being gated on it.
 

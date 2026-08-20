@@ -1,0 +1,52 @@
+name: Resource soak
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-reference:
+    name: Python reference resource soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras --python 3.13
+
+      - name: Run maximum fast-soak scale
+        env:
+          VGI_RPC_SOAK_SCALE: "20"
+          VGI_RPC_SOAK_REPORT_DIR: resource-soak-reports
+        run: uv run --python 3.13 pytest -q -n0 tests/test_conformance.py::TestResourceSoak
+
+      - name: Print resource reports
+        if: always()
+        shell: bash
+        run: |
+          if compgen -G 'resource-soak-reports/*.json' > /dev/null; then
+            for report in resource-soak-reports/*.json; do
+              echo "===== $report ====="
+              cat "$report"
+            done
+          fi
+
+      - name: Upload resource reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-resource-soak-reports
+          path: resource-soak-reports
+          if-no-files-found: warn

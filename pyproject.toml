@@ -58,7 +58,7 @@ oauth = ["joserfc>=1.0"]
 # consumer a resolution into the vulnerable range, not about our own exposure.
 mtls = ["cryptography>=50.0"]
 sentry = ["sentry-sdk>=2.0"]
-conformance = ["jsonschema>=4.0"]
+conformance = ["jsonschema>=4.0", "psutil>=6.0"]
 
 [project.scripts]
 vgi-rpc = "vgi_rpc.cli:app"
@@ -282,6 +282,8 @@ dev = [
     "pytest-ruff>=0.1",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.6",
+    "psutil>=6.0",
+    "types-psutil>=6.0",
     "ruff>=0.1",
     # Capped below 0.0.64: at 0.0.66, `ty check` stopped terminating on the
     # sibling vgi-python tree -- it ran past ten minutes locally and, in CI,

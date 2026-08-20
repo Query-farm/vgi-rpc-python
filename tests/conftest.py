@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx2
 import pytest
@@ -24,6 +24,9 @@ import pytest
 from vgi_rpc.introspect import ServiceDescription
 from vgi_rpc.pool import WorkerPool
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
+
+if TYPE_CHECKING:
+    from vgi_rpc.conformance._resource_soak_pytest import ResourceSoakTarget
 
 _SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
 
@@ -564,6 +567,42 @@ def conformance_http_port() -> Iterator[int]:
 
         _wait_for_http(port)
         yield port
+
+
+@pytest.fixture
+def conformance_resource_soak_target() -> Iterator[ResourceSoakTarget]:
+    """Spawn an isolated Python HTTP worker for black-box resource sampling."""
+    from typing import cast
+
+    from vgi_rpc.conformance import ConformanceService
+    from vgi_rpc.conformance._resource_soak_pytest import (
+        ResourceSoakConnection,
+        ResourceSoakLimits,
+        ResourceSoakTarget,
+    )
+    from vgi_rpc.http import http_connect
+
+    with _spawn_ready_process([*_conformance_http_cmd(), "--no-sticky", "--no-compression"]) as (proc, line):
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+        _wait_for_http(port)
+
+        def connect() -> contextlib.AbstractContextManager[ResourceSoakConnection]:
+            connection = http_connect(ConformanceService, f"http://127.0.0.1:{port}")
+            return cast("contextlib.AbstractContextManager[ResourceSoakConnection]", connection)
+
+        yield ResourceSoakTarget(
+            name="python-http",
+            pid=proc.pid,
+            connect=connect,
+            limits=ResourceSoakLimits(
+                rss_growth_bytes=32 * 1024 * 1024,
+                rss_slope_bytes_per_epoch=2 * 1024 * 1024,
+                descriptor_growth=3,
+                thread_growth=1,
+                child_growth=0,
+            ),
+        )
 
 
 @contextmanager
