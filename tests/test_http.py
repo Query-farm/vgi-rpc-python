@@ -3701,3 +3701,189 @@ class TestEmitAndFinishSameTick:
             "before this was fixed the pre-flight was skipped whenever finish() had been called"
         )
         assert uploads == [], "the cap must refuse before paying for the upload, not report afterwards"
+
+
+# ---------------------------------------------------------------------------
+# Tests: producer tick metadata across HTTP turns
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _TickMetaState(StreamState):
+    """Producer that reports, per batch, the tick ``custom_metadata`` it was handed.
+
+    Overrides ``process`` rather than subclassing ``ProducerState`` precisely
+    because the tick's metadata is the thing under test — ``ProducerState``
+    drops the input parameter on the floor.
+    """
+
+    count: int
+    i: int = 0
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit one row naming every metadata key/value this tick carried."""
+        md = input.custom_metadata
+        seen = (
+            ";".join(f"{k.decode()}={v.decode('utf-8', 'replace')}" for k, v in sorted(md.items()))
+            if md is not None
+            else ""
+        )
+        out.emit_pydict({"i": [self.i], "seen": [seen]})
+        self.i += 1
+        if self.i >= self.count:
+            out.finish()
+
+
+class _TickMetaService(Protocol):
+    """Protocol exposing the tick-metadata-reporting producer."""
+
+    def tick_meta(self, count: int) -> Stream[StreamState]: ...
+
+
+class _TickMetaServiceImpl:
+    """Implementation for :class:`_TickMetaService`."""
+
+    def tick_meta(self, count: int) -> Stream[_TickMetaState]:
+        """Build the tick-metadata-reporting producer stream."""
+        fields: list[pa.Field[Any]] = [pa.field("i", pa.int64()), pa.field("seen", pa.utf8())]
+        schema = pa.schema(fields)
+        return Stream(output_schema=schema, state=_TickMetaState(count=count))
+
+
+class TestProducerTickMetadata:
+    """A producer's tick metadata must survive every HTTP turn, not just ``/init``.
+
+    On the pipe transport a producer is driven by real tick batches, so the
+    client's per-tick ``custom_metadata`` reaches ``process()`` on every tick.
+    Over HTTP the ticks are HTTP turns, and the server used to forward the
+    request metadata on the ``/init`` turn only — every ``/exchange``
+    continuation built its tick from the module-level ``_TICK_BATCH``, whose
+    metadata is ``None``.
+
+    That silently strands every *between-tick* update a client sends
+    mid-stream.  The concrete casualty is DuckDB's dynamic filter pushdown:
+    the VGI extension re-encodes ``vgi_pushdown_filters`` on each tick as a
+    Top-N boundary tightens or a join-key ``IN`` set resolves, and over HTTP
+    the worker kept filtering on the ``/init`` snapshot for the life of the
+    stream.  vgi-rpc-typescript (``src/http/dispatch.ts``) already forwards it.
+    """
+
+    @staticmethod
+    def _read_batches(body: bytes) -> list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]]:
+        """Read every (batch, custom_metadata) pair out of an IPC response body."""
+        reader = ValidatedReader(ipc.open_stream(BytesIO(body)), IpcValidation.NONE)
+        out: list[tuple[pa.RecordBatch, pa.KeyValueMetadata | None]] = []
+        while True:
+            try:
+                out.append(reader.read_next_batch_with_custom_metadata())
+            except StopIteration:
+                break
+        return out
+
+    def test_continuation_metadata_reaches_process(self) -> None:
+        """Each turn's request metadata is delivered to that turn's first ``process()``.
+
+        Drives the wire directly rather than through ``http_connect``: the
+        Python client has no API for attaching per-tick metadata to a producer
+        continuation, but the C++ client does exactly this, so the raw request
+        is the honest reproduction of the failing case.
+        """
+        from vgi_rpc.metadata import (
+            CALL_STATE_KEY,
+            CANCEL_KEY,
+            REQUEST_VERSION,
+            REQUEST_VERSION_KEY,
+            RPC_METHOD_KEY,
+            STATE_KEY,
+        )
+        from vgi_rpc.rpc import _EMPTY_SCHEMA
+        from vgi_rpc.utils import empty_batch
+
+        filters_key = b"vgi_pushdown_filters"
+
+        client = make_sync_client(
+            RpcServer(_TickMetaService, _TickMetaServiceImpl()),
+            token_key=b"test-key",
+        )
+        try:
+            # --- /init: turn 1 drives tick 0. ---
+            init_schema = pa.schema([pa.field("count", pa.int64(), nullable=False)])
+            init_req = BytesIO()
+            init_md = pa.KeyValueMetadata({RPC_METHOD_KEY: b"tick_meta", REQUEST_VERSION_KEY: REQUEST_VERSION})
+            with ipc.new_stream(init_req, init_schema) as writer:
+                writer.write_batch(
+                    pa.RecordBatch.from_pydict({"count": [3]}, schema=init_schema),
+                    custom_metadata=init_md,
+                )
+            init_resp = client.post(
+                f"{_BASE_URL}/tick_meta/init",
+                content=init_req.getvalue(),
+                headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            )
+            assert init_resp.status_code == 200, init_resp.content
+            batches = self._read_batches(init_resp.content)
+            assert batches[0][0].column("i")[0].as_py() == 0
+            init_sentinel_md = batches[-1][1]
+            assert init_sentinel_md is not None
+            token = init_sentinel_md.get(STATE_KEY)
+            call_token = init_sentinel_md.get(CALL_STATE_KEY)
+            assert isinstance(token, bytes), "init must hand back a continuation cursor"
+            assert isinstance(call_token, bytes), "init must hand back the call token"
+
+            # --- /exchange turns 2 and 3, each carrying a DIFFERENT filter. ---
+            # Two distinct values, not one: a fix that merely froze /init's
+            # metadata and replayed it forever would satisfy a single-value
+            # assertion.  Tightening is the whole point.
+            seen_per_turn: list[str] = []
+            for filter_value in (b"i > 10", b"i > 42"):
+                ex_req = BytesIO()
+                ex_md = pa.KeyValueMetadata(
+                    {
+                        STATE_KEY: token,
+                        CALL_STATE_KEY: call_token,
+                        filters_key: filter_value,
+                    }
+                )
+                with ipc.new_stream(ex_req, _EMPTY_SCHEMA) as writer:
+                    writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=ex_md)
+                ex_resp = client.post(
+                    f"{_BASE_URL}/tick_meta/exchange",
+                    content=ex_req.getvalue(),
+                    headers={"Content-Type": _ARROW_CONTENT_TYPE},
+                )
+                assert ex_resp.status_code == 200, ex_resp.content
+                ex_batches = self._read_batches(ex_resp.content)
+                data = ex_batches[0][0]
+                assert data.num_rows == 1, f"expected one data row per turn, got {data.num_rows}"
+                seen_per_turn.append(data.column("seen")[0].as_py())
+                sentinel_md = ex_batches[-1][1]
+                if sentinel_md is not None:
+                    next_token = sentinel_md.get(STATE_KEY)
+                    if isinstance(next_token, bytes):
+                        token = next_token
+
+            assert seen_per_turn[0] == f"{filters_key.decode()}=i > 10", (
+                "a continuation turn's request custom_metadata must reach that turn's "
+                f"first process() call; got {seen_per_turn[0]!r}"
+            )
+            assert seen_per_turn[1] == f"{filters_key.decode()}=i > 42", (
+                "each turn must deliver ITS OWN metadata — a tightened filter on turn 3 "
+                f"must not be masked by turn 2's; got {seen_per_turn[1]!r}"
+            )
+
+            # The framework keys are transport bookkeeping.  The pipe transport
+            # never puts them on a tick, so surfacing them here would be a
+            # transport-parity break — and STATE_KEY's value is a sealed AEAD
+            # cursor token that must not be readable from user code.
+            for turn_seen in seen_per_turn:
+                assert STATE_KEY.decode() not in turn_seen, (
+                    f"the sealed cursor token must not be visible to user code; got {turn_seen!r}"
+                )
+                assert CALL_STATE_KEY.decode() not in turn_seen, (
+                    f"the call token must not be visible to user code; got {turn_seen!r}"
+                )
+                assert CANCEL_KEY.decode() not in turn_seen, (
+                    f"the cancel marker must not be visible to user code; got {turn_seen!r}"
+                )
+        finally:
+            client.close()

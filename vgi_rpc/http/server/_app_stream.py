@@ -385,9 +385,16 @@ def _run_http_producer_init(
     # producer's first process() call. Without this the first turn sees the empty
     # _TICK_BATCH and never observes first-tick metadata (e.g. the result-cache
     # conditional-revalidation validators vgi.cache.if_none_match), which on the pipe
-    # transport ride a real first tick. Only the init turn carries it; continuation
-    # /exchange turns pass their own client tick metadata as usual.
-    init_request_metadata = _current_request_metadata.get()
+    # transport ride a real first tick. The continuation /exchange turns do the same
+    # with their own request metadata — see the producer branch of
+    # ``_run_stream_exchange_sync``.
+    # Stripped for the same reason as on the continuation turn (see there): the
+    # cursor/cancel keys are transport bookkeeping, not user metadata. An honest
+    # client never puts them on an /init body — it has not been issued a cursor
+    # yet — so this is defence against a crafted one, not a behaviour change.
+    # The rest of the /init envelope (method / request+protocol version / shm /
+    # trace keys) does reach the first tick, unchanged from before.
+    tick_request_metadata = strip_keys(_current_request_metadata.get(), STATE_KEY, CALL_STATE_KEY, CANCEL_KEY)
     produce_buf = _run_http_producer_turn(
         app,
         schema=result.output_schema,
@@ -402,7 +409,7 @@ def _run_http_producer_init(
         transport_metadata=transport_metadata,
         outcome=outcome,
         sink=sink,
-        init_request_metadata=init_request_metadata,
+        tick_request_metadata=tick_request_metadata,
     )
     # `produce_buf` is a native BufferReader now; read it out to splice into the
     # init response, which still carries a header written ahead of it.
@@ -618,6 +625,23 @@ def _run_stream_exchange_sync(
                     auth=auth,
                     transport_metadata=transport_metadata,
                     outcome=outcome,
+                    # A continuation turn's request metadata IS that turn's first
+                    # tick metadata — the pipe transport delivers a real tick batch
+                    # with the client's metadata on it, and this is the HTTP
+                    # equivalent. Dropping it silently strands every between-tick
+                    # update a client sends mid-stream (DuckDB tightens
+                    # vgi_pushdown_filters on each tick as a Top-N boundary moves or
+                    # a join-key IN set resolves), so the worker would keep filtering
+                    # on the /init snapshot for the life of the stream.
+                    #
+                    # The framework keys are stripped: the pipe transport never puts
+                    # them on a tick, so forwarding them would break transport parity
+                    # — and STATE_KEY's value is an AEAD cursor token that has no
+                    # business being visible in user-facing input.custom_metadata.
+                    # (CANCEL_KEY cannot survive to here — the cancel branch above
+                    # returns — but it is stripped for the same parity reason, so the
+                    # rule is stated once rather than depending on control flow.)
+                    tick_request_metadata=strip_keys(custom_metadata, STATE_KEY, CALL_STATE_KEY, CANCEL_KEY),
                 )
         # Exchange — lockstep one input batch in, one output batch out.
         # External resolution + coercion + state.process + token mint +
@@ -836,7 +860,7 @@ def _run_http_producer_turn(
     transport_metadata: Mapping[str, Any],
     outcome: _DispatchOutcome,
     sink: _ClientLogSink | None = None,
-    init_request_metadata: pa.KeyValueMetadata | None = None,
+    tick_request_metadata: pa.KeyValueMetadata | None = None,
     owns_response_body: bool = False,
     call_token: bytes | None = None,
     call_state_bytes: bytes | None = None,
@@ -889,11 +913,24 @@ def _run_http_producer_turn(
             (``status``, ``error_type``, ``error_message``).
         sink: Optional log sink to flush before producing (initial request
             only).  Continuation calls pass ``None``.
-        init_request_metadata: The init request's Arrow ``custom_metadata``,
-            passed only by the init turn.  Delivered to the producer's FIRST
-            ``process()`` call as the tick's ``custom_metadata`` (HTTP folds the
-            first producer turn into ``/init``, so this is the first tick), then
-            reset to the empty tick.  ``None`` on continuation turns.
+        tick_request_metadata: This turn's request ``custom_metadata``, with the
+            cursor/cancel framework keys (``STATE_KEY`` / ``CALL_STATE_KEY`` /
+            ``CANCEL_KEY``) already stripped by the caller.  Delivered to the FIRST
+            ``process()`` call of this turn as the tick's ``custom_metadata``,
+            then reset to the empty tick.  Both turn kinds pass it: HTTP folds
+            the first producer turn into ``/init`` (so the ``/init`` body's
+            metadata is the first tick's), and each ``/exchange`` continuation
+            carries the client's metadata for the tick that turn drives — which
+            is how between-tick pushdown updates (``vgi_pushdown_filters``) and
+            the result-cache validators (``vgi.cache.if_none_match``) reach a
+            producer over HTTP, as they do on a real tick over the pipe.
+
+            Only the first ``process()`` of the turn sees it.  When
+            ``max_response_bytes`` is configured and one turn drives several
+            ticks, the later ticks see the empty ``_TICK_BATCH``: the client
+            has no opportunity to update its metadata mid-turn, so there is
+            nothing newer to deliver.  ``None`` when the request carried no
+            user metadata.
         owns_response_body: True when this turn's output IS the whole HTTP
             body, which is what makes it safe to compress into the IPC
             stream (see the codec note below).  False for the init turn,
@@ -984,15 +1021,16 @@ def _run_http_producer_turn(
             kind=app._server.transport_kind,
             implementation=app._server.implementation,
         )
-        # The producer's FIRST tick carries the init request's metadata when this is
-        # the init turn (HTTP folds the first producer turn into /init), so a producer
-        # that reads first-tick metadata — e.g. the result-cache revalidation
-        # validators vgi.cache.if_none_match — observes it exactly as on the pipe
-        # transport. Later ticks (and continuation /exchange turns) use the empty
-        # _TICK_BATCH.
+        # The FIRST tick of this turn carries the request's user metadata — the
+        # /init body's on the init turn (HTTP folds the first producer turn into
+        # /init), the /exchange body's on a continuation turn. That is what lets a
+        # producer observe between-tick updates (DuckDB's vgi_pushdown_filters, the
+        # result-cache validators vgi.cache.if_none_match) exactly as it does on a
+        # real tick over the pipe transport. Later ticks within the same turn use
+        # the empty _TICK_BATCH — the client cannot revise its metadata mid-turn.
         first_tick = (
-            AnnotatedBatch(batch=_TICK_BATCH.batch, custom_metadata=init_request_metadata)
-            if init_request_metadata is not None
+            AnnotatedBatch(batch=_TICK_BATCH.batch, custom_metadata=tick_request_metadata)
+            if tick_request_metadata is not None
             else _TICK_BATCH
         )
         try:

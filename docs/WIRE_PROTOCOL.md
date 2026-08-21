@@ -831,6 +831,25 @@ For **producer continuation**, the input is a zero-row batch on empty schema
 with the state token. The response may contain multiple data batches and
 may end with another continuation token.
 
+That zero-row input batch is a **tick**, and its custom metadata is the
+tick's metadata. A server MUST deliver it to the FIRST `process()` call of
+that turn, exactly as the pipe transport delivers the metadata riding a real
+tick batch — with `vgi_rpc.stream_state#b64`, `vgi_rpc.call_state#b64` and
+`vgi_rpc.cancel` stripped first, since those are transport bookkeeping that
+never appears on a pipe tick and the state token is a sealed cursor that
+application code must not be able to read.
+
+This is what carries **between-tick updates**: a client that revises its
+per-tick metadata mid-stream — DuckDB tightens `vgi_pushdown_filters` on each
+tick as a Top-N boundary moves or a join-key `IN` set resolves — has no other
+channel to reach the producer. A server that builds every continuation tick
+from a constant empty batch strands those updates silently: the stream still
+completes, the rows are still correct, and the worker simply keeps filtering
+on the `/init` snapshot for the life of the stream. Only the first `process()`
+of a turn sees the metadata; when `VGI-Max-Response-Bytes` lets one turn drive
+several ticks, the later ticks see empty metadata, because the client had no
+opportunity to revise it mid-turn.
+
 For **exchange**, the input carries real data plus the state token. The
 response data batch carries an updated state token for the next exchange.
 
