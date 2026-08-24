@@ -3,7 +3,7 @@
 **Wire protocol version**: 1
 **Status**: Normative
 **Audience**: Cross-language implementors (Go, Rust, TypeScript, C++, etc.)
-**Reflects**: vgi-rpc 0.42.1
+**Reflects**: vgi-rpc 0.43.0
 
 This document specifies the vgi-rpc wire protocol at byte level. A conforming
 implementation can interoperate with the Python reference without reading
@@ -1071,9 +1071,9 @@ shared memory and replaced with pointer batches on the pipe.
 > batches) to a server that has confirmed `vgi_rpc.transport.shm = "true"`.
 > A server that cannot do SHM (non-POSIX host, missing runtime support, or a
 > server predating the method) reports `"false"` (or errors), and the client
-> falls back to the inline pipe transport. (HTTP servers advertise the same
-> capability via the `OPTIONS {prefix}/__capabilities__` endpoint in Section
-> 10.)
+> falls back to the inline pipe transport. HTTP servers advertise their
+> deployment capabilities on every response; the dedicated discovery probe is
+> `OPTIONS {prefix}/health` (Section 10).
 
 ### Segment header format
 
@@ -1463,8 +1463,8 @@ columns contain Arrow schemas serialized via `pa.Schema.serialize()`.
 `__transport_options__` is a built-in synthetic unary method (parallel to
 `__describe__`) through which a client and server discover each other's
 **transport** capabilities — chiefly whether the shared-memory side-channel
-(Section 11) may be used. It is the pipe / subprocess / AF-UNIX analogue of the
-HTTP `OPTIONS {prefix}/__capabilities__` endpoint (Section 10).
+(Section 11) may be used. HTTP deployment capabilities use response headers;
+the dedicated discovery probe is `OPTIONS {prefix}/health` (Section 10).
 
 It is **mandatory before SHM is used**: a client that has SHM available MUST NOT
 write SHM pointer batches (or advertise a segment) to a server unless that server
