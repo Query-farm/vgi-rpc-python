@@ -478,8 +478,8 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
             assert _read_batches(empty.content) == []
 
 
-def test_buffered_producer_init_returns_multiple_pending_batches_and_cursor() -> None:
-    """A native producer client must queue every init data batch before the cursor."""
+def test_response_cap_preserves_one_transition_per_producer_request() -> None:
+    """A response cap must not coalesce multiple producer transitions."""
     import httpx2
 
     with _running_worker("--prefix", "/vgi", "--producer-turn-bytes", "16384") as (base_url, _ca):
@@ -495,10 +495,10 @@ def test_buffered_producer_init_returns_multiple_pending_batches_and_cursor() ->
         response.raise_for_status()
         batches = _read_batches(response.content)
 
-    assert len(batches) >= 3
+    assert len(batches) == 2
     data = [(batch, metadata) for batch, metadata in batches if metadata is None or metadata.get(STATE_KEY) is None]
-    assert len(data) >= 2
-    assert [batch.column("index")[0].as_py() for batch, _metadata in data] == list(range(len(data)))
+    assert len(data) == 1
+    assert data[0][0].column("index")[0].as_py() == 0
     sentinel, metadata = batches[-1]
     assert sentinel.num_rows == 0
     assert metadata is not None

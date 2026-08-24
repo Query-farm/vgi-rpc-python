@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from decimal import Decimal
+from typing import Any
 
 import pyarrow as pa
 
@@ -44,6 +45,7 @@ from ._types import (
     LargeProducerState,
     LoggingExchangeState,
     LoggingProducerState,
+    NestedContainers,
     OversizedBatchState,
     OversizedExchangeState,
     Point,
@@ -53,6 +55,7 @@ from ._types import (
     SessionCounterProducerState,
     SingleProducerState,
     Status,
+    TickMetadataState,
     WideTypes,
     ZeroColumnExchangeState,
     _CancelProbe,
@@ -141,6 +144,18 @@ class ConformanceServiceImpl:
 
     def echo_optional_int(self, value: int | None) -> int | None:
         """Echo an optional int."""
+        return value
+
+    def echo_optional_point(self, point: Point | None) -> Point | None:
+        """Echo an optional Point."""
+        return point
+
+    def echo_annotated_optional_int(self, value: int | None) -> int | None:
+        """Echo an annotated optional int."""
+        return value
+
+    def echo_outer_optional_non_null(self, value: int | None) -> int | None:
+        """Echo the non-null value used to exercise an explicit schema override."""
         return value
 
     # ------------------------------------------------------------------
@@ -259,6 +274,36 @@ class ConformanceServiceImpl:
         """Echo a DeepNested dataclass."""
         return data
 
+    def pack_nested_containers(
+        self,
+        statuses: list[Status],
+        points: list[Point],
+        status_by_name: dict[str, Status],
+    ) -> NestedContainers:
+        """Pack recursively typed containers after verifying server reconstruction."""
+        if any(not isinstance(status, Status) for status in statuses):
+            raise TypeError("statuses were not reconstructed as Status members")
+        if any(not isinstance(point, Point) for point in points):
+            raise TypeError("points were not reconstructed as Point instances")
+        if any(not isinstance(status, Status) for status in status_by_name.values()):
+            raise TypeError("status_by_name values were not reconstructed as Status members")
+        batch = pa.RecordBatch.from_pydict({"value": [1, 2]})
+        return NestedContainers(
+            statuses=statuses,
+            points=points,
+            status_by_name=status_by_name,
+            frozen_statuses=frozenset(statuses),
+            tagged_status=statuses[0] if statuses else None,
+            tagged_point=points[0] if points else None,
+            tagged_batch=batch,
+        )
+
+    def echo_status_list(self, statuses: list[Status]) -> list[Status]:
+        """Echo enum members nested in a top-level list."""
+        if any(not isinstance(status, Status) for status in statuses):
+            raise TypeError("statuses were not reconstructed as Status members")
+        return statuses
+
     def echo_dict_encoded_string(self, value: str) -> str:
         """Echo a dictionary-encoded string."""
         return value
@@ -338,6 +383,12 @@ class ConformanceServiceImpl:
     def produce_n(self, count: int) -> Stream[CounterState]:
         """Produce count batches."""
         return Stream(output_schema=_COUNTER_SCHEMA, state=CounterState(count=count))
+
+    def produce_tick_metadata(self, count: int) -> Stream[TickMetadataState]:
+        """Report application metadata attached to each producer tick."""
+        fields: list[pa.Field[Any]] = [pa.field("index", pa.int64()), pa.field("seen", pa.string())]
+        schema = pa.schema(fields)
+        return Stream(output_schema=schema, state=TickMetadataState(count=count))
 
     def produce_empty(self) -> Stream[EmptyProducerState]:
         """Produce zero batches."""

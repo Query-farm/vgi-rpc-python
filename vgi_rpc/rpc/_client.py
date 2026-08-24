@@ -181,8 +181,11 @@ class StreamSession:
             self._closed = True  # Bypass close() — transport is broken.
             raise RpcError("TransportError", f"Transport failed during stream exchange (read): {exc}", "") from exc
 
-    def tick(self) -> AnnotatedBatch:
+    def tick(self, custom_metadata: pa.KeyValueMetadata | None = None) -> AnnotatedBatch:
         """Send a tick batch (producer streams) and receive the output batch.
+
+        Args:
+            custom_metadata: Optional metadata to attach to the producer tick.
 
         Returns:
             The next output batch.
@@ -198,7 +201,8 @@ class StreamSession:
         if wire_stream_logger.isEnabledFor(logging.DEBUG):
             wire_stream_logger.debug("Stream tick")
         try:
-            self._write_batch(_TICK_BATCH)
+            tick_batch = _TICK_BATCH if custom_metadata is None else AnnotatedBatch(_TICK_BATCH.batch, custom_metadata)
+            self._write_batch(tick_batch)
         except _TRANSPORT_ERRORS as exc:
             # Set _closed directly — calling close() would attempt I/O on the broken transport.
             self._closed = True
@@ -418,6 +422,17 @@ class _RpcProxy:
                     object.__setattr__(transport, "_last_stream_session", session)  # __slots__
                 return session
             except RpcError:
+                # A raw server that rejects stream initialization still has to
+                # consume the call's input-stream boundary before it can accept
+                # another request on this connection. Header-bearing streams
+                # can surface that error before a StreamSession exists, so send
+                # an empty input stream here to complete the failed call.
+                if info.header_type is not None:
+                    with (
+                        contextlib.suppress(*_TRANSPORT_ERRORS),
+                        new_ipc_stream(transport.writer, _EMPTY_SCHEMA),
+                    ):
+                        pass
                 raise
             except _TRANSPORT_ERRORS as exc:
                 raise RpcError(

@@ -8,10 +8,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import Enum
 from io import IOBase
-from typing import TYPE_CHECKING, Any, cast, get_origin
+from typing import TYPE_CHECKING, Any, get_args, get_origin
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -60,19 +60,18 @@ from vgi_rpc.rpc._debug import (
     wire_request_logger,
     wire_response_logger,
 )
-from vgi_rpc.rpc._types import (
-    AnnotatedBatch,
-    RpcMethodInfo,
-    _unwrap_annotated,
-)
+from vgi_rpc.rpc._types import AnnotatedBatch, RpcMethodInfo
 from vgi_rpc.shm import ShmSegment, is_shm_pointer_batch, maybe_write_to_shm, resolve_shm_batch
 from vgi_rpc.utils import (
     ArrowSerializableDataclass,
     IpcValidation,
     ValidatedReader,
-    _is_optional_type,
+    _annotation_details,
+    _has_binary_arrow_type,
+    _resolve_field_nullability,
     empty_batch,
     new_ipc_stream,
+    serialize_record_batch_bytes,
 )
 
 if TYPE_CHECKING:
@@ -130,7 +129,7 @@ def _coerce_input_batch(batch: pa.RecordBatch, target_schema: pa.Schema) -> pa.R
     return batch
 
 
-def _convert_for_arrow(val: object) -> object:
+def _convert_for_arrow(val: object, type_hint: object | None = None, *, _nested: bool = False) -> object:
     """Convert a Python value for Arrow serialization.
 
     Inverse of ``_deserialize_value``.  Handles types that Arrow cannot
@@ -141,14 +140,39 @@ def _convert_for_arrow(val: object) -> object:
     - frozenset → list
     - dict → list of tuples (for map types)
     """
+    if val is None:
+        return None
     if isinstance(val, ArrowSerializableDataclass):
-        return val.serialize_to_bytes()
+        if not _nested or (type_hint is not None and _has_binary_arrow_type(type_hint)):
+            return val.serialize_to_bytes()
+        return val._to_row_dict()
+    if isinstance(val, pa.Schema):
+        return val.serialize().to_pybytes()
+    if isinstance(val, pa.RecordBatch):
+        return serialize_record_batch_bytes(val)
     if isinstance(val, Enum):
         return val.name
+    base = type_hint
+    if type_hint is not None:
+        base, _, _ = _annotation_details(type_hint)
+    origin = get_origin(base)
+    args = get_args(base)
     if isinstance(val, frozenset):
-        return list(val)
+        element_type = args[0] if origin is frozenset and args else None
+        return [_convert_for_arrow(item, element_type, _nested=True) for item in val]
     if isinstance(val, dict):
-        return list(val.items())
+        key_type = args[0] if origin is dict and len(args) >= 2 else None
+        value_type = args[1] if origin is dict and len(args) >= 2 else None
+        return [
+            (
+                _convert_for_arrow(key, key_type, _nested=True),
+                _convert_for_arrow(item, value_type, _nested=True),
+            )
+            for key, item in val.items()
+        ]
+    if isinstance(val, list):
+        element_type = args[0] if origin is list and args else None
+        return [_convert_for_arrow(item, element_type, _nested=True) for item in val]
     return val
 
 
@@ -161,6 +185,7 @@ def _write_request(
     shm: ShmSegment | None = None,
     protocol_version: str | None = None,
     extra_metadata: dict[bytes, bytes] | None = None,
+    param_types: Mapping[str, object] | None = None,
 ) -> None:
     """Write a request as a complete IPC stream (schema + 1 batch + EOS).
 
@@ -183,7 +208,8 @@ def _write_request(
     """
     arrays: list[pa.Array[Any]] = []
     for f in params_schema:
-        val = _convert_for_arrow(kwargs.get(f.name))
+        type_hint = param_types.get(f.name) if param_types is not None else None
+        val = _convert_for_arrow(kwargs.get(f.name), type_hint)
         arrays.append(pa.array([val], type=f.type))
     batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
     md: dict[bytes, bytes] = dict(extra_metadata) if extra_metadata else {}
@@ -290,7 +316,11 @@ class _ClientLogSink:
         self._schema = None
 
 
-def _build_result_batch(result_schema: pa.Schema, value: object) -> pa.RecordBatch:
+def _build_result_batch(
+    result_schema: pa.Schema,
+    value: object,
+    result_type: object | None = None,
+) -> pa.RecordBatch:
     """Construct the unary result batch from a returned Python value.
 
     Extracted from :func:`_write_result_batch` so HTTP callers can build
@@ -299,7 +329,7 @@ def _build_result_batch(result_schema: pa.Schema, value: object) -> pa.RecordBat
     """
     if len(result_schema) == 0:
         return pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
-    wire_value = _convert_for_arrow(value)
+    wire_value = _convert_for_arrow(value, result_type)
     return pa.RecordBatch.from_arrays([pa.array([wire_value], type=result_schema.field(0).type)], schema=result_schema)
 
 
@@ -311,6 +341,7 @@ def _write_result_batch(
     *,
     shm: ShmSegment | None = None,
     prebuilt: pa.RecordBatch | None = None,
+    result_type: object | None = None,
 ) -> int:
     """Write a unary result batch to an already-open IPC stream writer.
 
@@ -323,6 +354,8 @@ def _write_result_batch(
         prebuilt: Optional pre-built batch; when supplied, ``value`` is
             ignored.  Lets callers (HTTP unary path) construct the
             batch eagerly to pre-flight the external-channel cap.
+        result_type: Declared Python return annotation, used for recursive
+            conversion of container elements.
 
     Returns:
         Bytes uploaded to external storage during this call.  ``0`` when no
@@ -331,7 +364,7 @@ def _write_result_batch(
         external-channel cap should add this to a running total.
 
     """
-    batch = prebuilt if prebuilt is not None else _build_result_batch(result_schema, value)
+    batch = prebuilt if prebuilt is not None else _build_result_batch(result_schema, value, result_type)
     _record_output(batch)
     if shm is not None:
         batch, cm = maybe_write_to_shm(batch, None, shm)
@@ -651,24 +684,16 @@ def _deserialize_value(value: object, type_hint: object, ipc_validation: IpcVali
     Enum, dict, frozenset.  Each branch narrows the value type with
     ``isinstance`` before performing type-specific operations.
     """
-    inner, _ = _is_optional_type(type_hint)
-    base = _unwrap_annotated(inner)
+    base, _, _ = _annotation_details(type_hint)
     if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
         if not isinstance(value, bytes):
             raise TypeError(f"Expected bytes for {base.__name__} deserialization, got {type(value).__name__}")
         reader = ValidatedReader(ipc.open_stream(value), ipc_validation)
         batch, metadata = reader.read_next_batch_with_custom_metadata()
         return base.deserialize_from_batch(batch, metadata, ipc_validation=ipc_validation)
-    if isinstance(base, type) and issubclass(base, Enum):
-        if not isinstance(value, str):
-            raise TypeError(f"Expected str for {base.__name__} deserialization, got {type(value).__name__}")
-        return base[value]
-    origin = get_origin(base)
-    if origin is dict and isinstance(value, list):
-        return dict(cast("list[tuple[object, object]]", value))
-    if origin is frozenset and isinstance(value, list):
-        return frozenset(value)
-    return value
+    if isinstance(base, type) and issubclass(base, Enum) and not isinstance(value, str):
+        raise TypeError(f"Expected str for {base.__name__} deserialization, got {type(value).__name__}")
+    return ArrowSerializableDataclass._convert_value_for_deserialization(value, type_hint, ipc_validation)
 
 
 def _deserialize_params(
@@ -700,8 +725,7 @@ def _validate_params(method_name: str, kwargs: dict[str, object], param_types: d
         ptype = param_types.get(name)
         if ptype is None:
             continue
-        _, is_nullable = _is_optional_type(ptype)
-        if not is_nullable:
+        if not _resolve_field_nullability(ptype):
             raise TypeError(f"{method_name}() parameter '{name}' is not optional but got None")
 
 
@@ -784,8 +808,7 @@ def _validate_result(method_name: str, value: object, result_type: object) -> No
         return
     if result_type is None or result_type is type(None):
         return
-    _, is_nullable = _is_optional_type(result_type)
-    if not is_nullable:
+    if not _resolve_field_nullability(result_type):
         raise TypeError(f"{method_name}() expected a non-None return value but got None")
 
 
@@ -978,7 +1001,15 @@ def _send_request(
             sorted(set(info.param_defaults) - set(kwargs)),
         )
     _validate_params(info.name, merged, info.param_types)
-    _write_request(writer, info.name, info.params_schema, merged, shm=shm, protocol_version=protocol_version)
+    _write_request(
+        writer,
+        info.name,
+        info.params_schema,
+        merged,
+        shm=shm,
+        protocol_version=protocol_version,
+        param_types=info.param_types,
+    )
 
 
 def _read_batch_with_log_check(

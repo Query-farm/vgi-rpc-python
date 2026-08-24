@@ -1075,7 +1075,14 @@ class RpcServer:
                     error_message = str(exc)
                     _write_error_batch(writer, schema, exc, server_id=self._server_id)
                     return
-                _write_result_batch(writer, info.result_schema, result, self._external_config, shm=shm)
+                _write_result_batch(
+                    writer,
+                    info.result_schema,
+                    result,
+                    self._external_config,
+                    shm=shm,
+                    result_type=info.result_type,
+                )
         finally:
             duration_ms = (time.monotonic() - start) * 1000
             _emit_access_log(
@@ -1136,6 +1143,15 @@ class RpcServer:
             error_message = str(exc)
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+            # The request IPC stream is followed by a distinct input IPC
+            # stream on persistent transports.  Even when construction fails,
+            # consume that second stream through EOS before the serve loop
+            # interprets the next bytes as a new request.  The error response
+            # is written first so the client can observe it and close its input
+            # writer without deadlocking.
+            with contextlib.suppress(pa.ArrowInvalid, OSError, EOFError, StopIteration):
+                input_reader = ValidatedReader(ipc.open_stream(transport.reader), self._ipc_validation)
+                _drain_stream(input_reader)
             return
         finally:
             if status == "error":

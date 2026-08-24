@@ -12,7 +12,6 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType, TracebackType
 from typing import (
-    Annotated,
     Any,
     ClassVar,
     Self,
@@ -32,7 +31,13 @@ from vgi_rpc.rpc._common import (
     CallContext,
     MethodType,
 )
-from vgi_rpc.utils import ArrowSerializableDataclass, _infer_arrow_type, _is_optional_type, empty_batch
+from vgi_rpc.utils import (
+    ArrowSerializableDataclass,
+    _annotation_details,
+    _infer_arrow_type,
+    _resolve_field_nullability,
+    empty_batch,
+)
 
 # ---------------------------------------------------------------------------
 # Stream return types
@@ -599,8 +604,11 @@ class Stream[S: StreamState, H: (ArrowSerializableDataclass | None) = None]:
         """
         raise NotImplementedError
 
-    def tick(self) -> AnnotatedBatch:
+    def tick(self, custom_metadata: pa.KeyValueMetadata | None = None) -> AnnotatedBatch:
         """Send a tick and receive output (client-side stub for producer streams).
+
+        Args:
+            custom_metadata: Optional application metadata to attach to the tick.
 
         Returns:
             The next output batch (on the server-side implementation).
@@ -711,10 +719,9 @@ def _extract_param_docs(doc: str | None) -> dict[str, str]:
 
 
 def _unwrap_annotated(hint: object) -> object:
-    """Unwrap Annotated[T, ...] to T, or return hint unchanged."""
-    if get_origin(hint) is Annotated:
-        return get_args(hint)[0]
-    return hint
+    """Unwrap interleaved ``Annotated``/``Optional`` wrappers to their base type."""
+    base, _, _ = _annotation_details(hint)
+    return base
 
 
 def _classify_return_type(hint: object) -> tuple[MethodType, object, bool]:
@@ -723,12 +730,14 @@ def _classify_return_type(hint: object) -> tuple[MethodType, object, bool]:
     Returns (method_type, result_type, has_return).
     Handles both bare ``Stream`` and generic forms like ``Stream[MyState]``.
     """
+    base, _, _ = _annotation_details(hint)
+
     # Bare class reference
-    if hint is Stream:
+    if base is Stream:
         return MethodType.STREAM, hint, False
 
     # Generic form: Stream[S]
-    origin = get_origin(hint)
+    origin = get_origin(base)
     if origin is Stream:
         return MethodType.STREAM, hint, False
 
@@ -743,12 +752,12 @@ def _build_params_schema(hints: dict[str, object]) -> pa.Schema:
     for name, hint in hints.items():
         if name in ("self", "return"):
             continue
-        inner, is_nullable = _is_optional_type(hint)
-        base = _unwrap_annotated(inner)
+        base, _, _ = _annotation_details(hint)
+        is_nullable = _resolve_field_nullability(hint)
         if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
             fields.append(pa.field(name, pa.binary(), nullable=is_nullable))
         else:
-            arrow_type = _infer_arrow_type(inner)  # handles Annotated natively
+            arrow_type = _infer_arrow_type(hint)  # handles Annotated natively
             fields.append(pa.field(name, arrow_type, nullable=is_nullable))
     return pa.schema(fields)
 
@@ -759,12 +768,12 @@ def _build_result_schema(result_type: object) -> pa.Schema:
         return _EMPTY_SCHEMA
 
     # ArrowSerializableDataclass — serialize whole dataclass as binary blob
-    base = _unwrap_annotated(result_type)
+    base, _, _ = _annotation_details(result_type)
+    is_nullable = _resolve_field_nullability(result_type)
     if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
-        return pa.schema([pa.field("result", pa.binary())])
+        return pa.schema([pa.field("result", pa.binary(), nullable=is_nullable)])
 
-    inner, is_nullable = _is_optional_type(result_type)
-    arrow_type = _infer_arrow_type(inner)  # handles Annotated natively
+    arrow_type = _infer_arrow_type(result_type)  # handles Annotated natively
     return pa.schema([pa.field("result", arrow_type, nullable=is_nullable)])
 
 
@@ -854,7 +863,8 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
         header_type: type[ArrowSerializableDataclass] | None = None
         is_exchange: bool | None = None
         if method_type == MethodType.STREAM:
-            stream_args = get_args(return_hint)
+            stream_type, _, _ = _annotation_details(return_hint)
+            stream_args = get_args(stream_type)
             if stream_args:
                 s_arg = stream_args[0]
                 if isinstance(s_arg, type):

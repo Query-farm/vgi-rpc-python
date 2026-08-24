@@ -415,6 +415,23 @@ class TestResumableServerStream:
             values = [ab.batch.column("i")[0].as_py() for ab in batches]
             assert values == list(range(10))
 
+    def test_repeated_iteration_stays_finished(self, resumable_client: _SyncTestClient) -> None:
+        """A completed HTTP producer cannot replay its continuation cursor."""
+        with http_connect(RpcFixtureService, client=resumable_client) as proxy:
+            stream = proxy.generate(count=3)
+            assert [ab.batch.column("i")[0].as_py() for ab in stream] == [0, 1, 2]
+            assert list(stream) == []
+
+    def test_partial_iteration_resumes_without_replay(self, resumable_client: _SyncTestClient) -> None:
+        """Closing an iterator retains unconsumed batches and advances its cursor."""
+        with http_connect(RpcFixtureService, client=resumable_client) as proxy:
+            stream = proxy.generate(count=4)
+            iterator = cast("Any", iter(stream))
+            assert next(iterator).batch.column("i")[0].as_py() == 0
+            iterator.close()
+            remaining = [ab.batch.column("i")[0].as_py() for ab in stream]
+            assert remaining == [1, 2, 3]
+
     def test_resumable_with_logs(self, resumable_client: _SyncTestClient) -> None:
         """Log messages are delivered across continuation boundaries."""
         logs: list[Message] = []
@@ -3804,6 +3821,9 @@ class TestProducerTickMetadata:
         client = make_sync_client(
             RpcServer(_TickMetaService, _TickMetaServiceImpl()),
             token_key=b"test-key",
+            # A generous cap used to coalesce all three state transitions
+            # into /init. Lock-step requires one transition regardless of cap.
+            max_response_bytes=8 * 1024 * 1024,
         )
         try:
             # --- /init: turn 1 drives tick 0. ---

@@ -16,9 +16,8 @@ All endpoints use ``Content-Type: application/vnd.apache.arrow.stream``.
 
 Streaming is implemented statelessly: each exchange is a separate HTTP POST
 carrying serialized state in Arrow custom metadata (``vgi_rpc.stream_state#b64``).
-When ``max_response_bytes`` is set, producer-stream responses are
-split across multiple exchanges; the client transparently resumes via
-``POST /vgi/{method}/exchange``.
+Every producer POST performs exactly one state transition and returns at most
+one data batch; unfinished streams resume via ``POST /vgi/{method}/exchange``.
 
 Optional dependencies: ``pip install vgi-rpc[http]``
 """

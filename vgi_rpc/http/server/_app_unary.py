@@ -184,7 +184,7 @@ def _run_unary_sync(
                     # Build the result batch eagerly so we can pre-flight the
                     # external-channel cap before paying for an upload that
                     # would violate it.
-                    result_batch = _build_result_batch(schema, result)
+                    result_batch = _build_result_batch(schema, result, info.result_type)
                     ext_cfg = app._server.external_config
                     predicted_external = (
                         predict_externalize_bytes_for_batch(result_batch, ext_cfg) if ext_cfg is not None else 0

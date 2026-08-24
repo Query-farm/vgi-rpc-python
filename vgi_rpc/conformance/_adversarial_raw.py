@@ -29,10 +29,10 @@ if TYPE_CHECKING:
 
 
 def _raw_transport(proxy: ConformanceService) -> Any:
-    """Return the proxy's byte-stream transport or skip an HTTP matrix row."""
+    """Return the proxy's byte-stream transport supplied by the raw-only fixture."""
     transport = getattr(proxy, "_transport", None)
     if transport is None or not hasattr(transport, "reader") or not hasattr(transport, "writer"):
-        pytest.skip("request is only meaningful for persistent raw transports")
+        raise AssertionError("conformance_raw_conn supplied a non-raw transport")
     return transport
 
 
@@ -67,15 +67,15 @@ class TestAdversarialRawRequestContract:
     """Persistent raw transports enforce the declared request contract."""
 
     @pytest.mark.parametrize("mutation", _SCHEMA_MUTATIONS)
-    def test_parameter_contract(self, conformance_conn: Any, mutation: str) -> None:
+    def test_parameter_contract(self, conformance_raw_conn: Any, mutation: str) -> None:
         """Schema and row-count drift is rejected without poisoning framing."""
-        with conformance_conn() as proxy:
+        with conformance_raw_conn() as proxy:
             _assert_rejected_and_reusable(proxy, _schema_mutation_body("add_floats", mutation))
 
     @pytest.mark.parametrize("mutation", _METADATA_MUTATIONS)
-    def test_dispatch_metadata_contract(self, conformance_conn: Any, mutation: str) -> None:
+    def test_dispatch_metadata_contract(self, conformance_raw_conn: Any, mutation: str) -> None:
         """Required dispatch metadata is enforced on raw transports too."""
-        with conformance_conn() as proxy:
+        with conformance_raw_conn() as proxy:
             _assert_rejected_and_reusable(proxy, _metadata_mutation_body("add_floats", mutation))
 
 

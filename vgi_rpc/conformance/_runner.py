@@ -44,6 +44,7 @@ from vgi_rpc.conformance._types import (
     AllTypes,
     BoundingBox,
     ConformanceHeader,
+    NestedContainers,
     Point,
     RichHeader,
     Status,
@@ -381,6 +382,24 @@ def _test_empty_string_vs_null(proxy: ConformanceService, logs: LogCollector) ->
     assert proxy.echo_optional_string(value=None) is None
 
 
+@_conformance_test(category="optional", name="optional_point")
+def _test_optional_point(proxy: ConformanceService, logs: LogCollector) -> None:
+    assert proxy.echo_optional_point(point=None) is None
+    point = Point(x=3.0, y=4.0)
+    assert proxy.echo_optional_point(point=point) == point
+
+
+@_conformance_test(category="optional", name="annotated_optional_int")
+def _test_annotated_optional_int(proxy: ConformanceService, logs: LogCollector) -> None:
+    assert proxy.echo_annotated_optional_int(value=None) is None
+    assert proxy.echo_annotated_optional_int(value=17) == 17
+
+
+@_conformance_test(category="optional", name="outer_optional_non_null")
+def _test_outer_optional_non_null(proxy: ConformanceService, logs: LogCollector) -> None:
+    assert proxy.echo_outer_optional_non_null(value=23) == 23
+
+
 # ---------------------------------------------------------------------------
 # Dataclass tests
 # ---------------------------------------------------------------------------
@@ -483,6 +502,28 @@ def _test_echo_all_types_with_nulls(proxy: ConformanceService, logs: LogCollecto
 def _test_inspect_point(proxy: ConformanceService, logs: LogCollector) -> None:
     result = proxy.inspect_point(point=Point(x=1.5, y=2.5))
     assert result == "Point(1.5, 2.5)"
+
+
+@_conformance_test(category="dataclass", name="nested_container_types")
+def _test_nested_container_types(proxy: ConformanceService, logs: LogCollector) -> None:
+    statuses = [Status.ACTIVE, Status.CLOSED]
+    points = [Point(x=1.0, y=2.0), Point(x=3.0, y=4.0)]
+    status_by_name = {"a": Status.ACTIVE, "c": Status.CLOSED}
+    result = proxy.pack_nested_containers(
+        statuses=statuses,
+        points=points,
+        status_by_name=status_by_name,
+    )
+    assert isinstance(result, NestedContainers)
+    assert result.statuses == statuses
+    assert result.points == points
+    assert result.status_by_name == status_by_name
+    assert result.frozen_statuses == frozenset(statuses)
+    assert result.tagged_status is Status.ACTIVE
+    assert result.tagged_point == points[0]
+    assert result.tagged_batch is not None
+    assert result.tagged_batch.equals(pa.RecordBatch.from_pydict({"value": [1, 2]}))
+    assert proxy.echo_status_list(statuses=statuses) == statuses
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +903,18 @@ def _test_produce_n(proxy: ConformanceService, logs: LogCollector) -> None:
         assert cast("int", ab.batch.column("value")[0].as_py()) == i * 10
 
 
+@_conformance_test(category="producer_stream", name="tick_metadata")
+def _test_tick_metadata(proxy: ConformanceService, logs: LogCollector) -> None:
+    md = pa.KeyValueMetadata({b"vgi.conformance.tick": b"updated"})
+    session = cast("Any", proxy.produce_tick_metadata(count=2 if logs.http_base_url is not None else 1))
+    if logs.http_base_url is not None:
+        first, _ = session.next_with_token()
+        assert first is not None
+    observed = session.tick(md)
+    assert observed.batch.column("seen").to_pylist() == ["updated"]
+    session.close()
+
+
 @_conformance_test(category="producer_stream", name="produce_empty")
 def _test_produce_empty(proxy: ConformanceService, logs: LogCollector) -> None:
     batches = list(proxy.produce_empty())
@@ -1185,6 +1238,28 @@ def _test_http_response_cap_exchange(proxy: ConformanceService, logs: LogCollect
     raise AssertionError(
         f"expected RpcError but exchange_oversized(rows_per_batch={target_rows}) returned without error"
     )
+
+
+@_conformance_test(category="http_response_cap", name="producer_lockstep", transports=("http",))
+def _test_http_response_cap_producer_lockstep(proxy: ConformanceService, logs: LogCollector) -> None:
+    """Verify that a response cap never coalesces producer state transitions."""
+    caps = _http_capabilities_or_skip(logs)
+    if caps.max_response_bytes is None:
+        raise _ConformanceSkip("server has no max_response_bytes configured")
+
+    session = cast("Any", proxy.produce_n(count=3))
+    try:
+        first, first_token = session.next_with_token()
+        assert first is not None
+        assert first.batch.column("index")[0].as_py() == 0
+        assert first_token is not None, "unfinished first turn must carry a continuation token"
+
+        second, second_token = session.next_with_token()
+        assert second is not None
+        assert second.batch.column("index")[0].as_py() == 1
+        assert second_token is not None, "unfinished second turn must carry a continuation token"
+    finally:
+        session.close()
 
 
 @_conformance_test(category="http_response_cap", name="producer_external_strict_fail", transports=("http",))
@@ -1558,8 +1633,11 @@ _EXPECTED_METHODS = frozenset(
         "echo_large_string",
         "echo_list",
         "echo_nested_list",
+        "echo_annotated_optional_int",
         "echo_optional_int",
+        "echo_optional_point",
         "echo_optional_string",
+        "echo_outer_optional_non_null",
         "echo_point",
         "echo_string",
         "echo_time",
@@ -1574,6 +1652,7 @@ _EXPECTED_METHODS = frozenset(
         "echo_dict_encoded_string",
         "echo_embedded_arrow",
         "echo_wide_types",
+        "echo_status_list",
         "echo_with_all_log_levels",
         "echo_with_info_log",
         "echo_with_log_extras",
@@ -1588,12 +1667,14 @@ _EXPECTED_METHODS = frozenset(
         "exchange_with_rich_header",
         "exchange_zero_columns",
         "inspect_point",
+        "pack_nested_containers",
         "produce_dynamic_schema",
         "produce_empty",
         "produce_error_mid_stream",
         "produce_error_on_init",
         "produce_large_batches",
         "produce_n",
+        "produce_tick_metadata",
         "produce_single",
         "produce_with_header",
         "produce_with_header_and_logs",
@@ -1659,8 +1740,11 @@ _UNARY_METHODS = frozenset(
         "echo_large_string",
         "echo_list",
         "echo_nested_list",
+        "echo_annotated_optional_int",
         "echo_optional_int",
+        "echo_optional_point",
         "echo_optional_string",
+        "echo_outer_optional_non_null",
         "echo_point",
         "echo_string",
         "echo_time",
@@ -1675,11 +1759,13 @@ _UNARY_METHODS = frozenset(
         "echo_dict_encoded_string",
         "echo_embedded_arrow",
         "echo_wide_types",
+        "echo_status_list",
         "echo_with_all_log_levels",
         "echo_with_info_log",
         "echo_with_log_extras",
         "echo_with_multi_logs",
         "inspect_point",
+        "pack_nested_containers",
         "oversized_unary",
         "raise_runtime_error",
         "raise_type_error",
@@ -1717,6 +1803,7 @@ _STREAM_METHODS = frozenset(
         "produce_error_on_init",
         "produce_large_batches",
         "produce_n",
+        "produce_tick_metadata",
         "produce_oversized_batch",
         "produce_single",
         "produce_with_header",
@@ -1768,7 +1855,7 @@ def _test_desc_method_count(desc: ServiceDescription) -> None:
     # close_counter) + 2 sticky streaming methods (stream_session_counter
     # / exchange_session_counter), added 2026-05 alongside the HTTP-only
     # Sticky.* conformance group.
-    assert len(desc.methods) == 81
+    assert len(desc.methods) == 87
 
 
 # ---------------------------------------------------------------------------
@@ -1879,6 +1966,25 @@ def _test_desc_params_produce_n(desc: ServiceDescription) -> None:
     assert schema.field("count").type == pa.int64()
 
 
+@_describe_test(category="describe_param_schemas", name="annotation_nullability")
+def _test_desc_annotation_nullability(desc: ServiceDescription) -> None:
+    optional_point = desc.methods["echo_optional_point"]
+    assert optional_point.params_schema.field("point").type == pa.binary()
+    assert optional_point.params_schema.field("point").nullable is True
+    assert optional_point.result_schema.field("result").type == pa.binary()
+    assert optional_point.result_schema.field("result").nullable is True
+
+    annotated_optional = desc.methods["echo_annotated_optional_int"]
+    assert annotated_optional.params_schema.field("value").type == pa.int32()
+    assert annotated_optional.params_schema.field("value").nullable is True
+    assert annotated_optional.result_schema.field("result").nullable is True
+
+    explicit_non_null = desc.methods["echo_outer_optional_non_null"]
+    assert explicit_non_null.params_schema.field("value").type == pa.int32()
+    assert explicit_non_null.params_schema.field("value").nullable is False
+    assert explicit_non_null.result_schema.field("result").nullable is False
+
+
 # ---------------------------------------------------------------------------
 # Describe stream_properties tests
 # ---------------------------------------------------------------------------
@@ -1970,7 +2076,7 @@ def _test_desc_protocol_version_surfaces(desc: ServiceDescription) -> None:
     which is the intended forcing function.
     """
     assert desc.protocol_version, "protocol_version must be present in describe response"
-    # ConformanceService.protocol_version is "1.0.0"; the field is the source
+    # ConformanceService.protocol_version is "2.0.0"; the field is the source
     # of truth, so don't hardcode the value here — fetch it.
     from vgi_rpc.conformance._protocol import ConformanceService
 

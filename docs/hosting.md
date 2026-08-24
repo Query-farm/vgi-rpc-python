@@ -314,7 +314,7 @@ handler = make_lambda_handler(app)
 - Set `externalize_threshold_bytes` well below the payload limit (512 KB is a good starting point) to leave headroom for log batches and metadata
 - Use zstd compression — it reduces S3 storage and fetch time
 - Store the token key in AWS Secrets Manager and cache it in the Lambda init phase
-- For producer streams, set `max_response_bytes` to split large streaming responses across multiple HTTP turns; the server mints continuation tokens at the cap and the client transparently resumes
+- For producer streams, use `max_response_bytes` as the per-turn sizing budget exposed to the worker. Every unfinished turn returns a continuation token and the client transparently resumes; the server still invokes the producer exactly once per request
 
 ### Cloudflare Workers
 

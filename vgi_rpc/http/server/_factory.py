@@ -138,16 +138,13 @@ def make_wsgi_app(
         max_response_bytes: HTTP body cap.  Measured against the on-wire
             body size only (``resp_buf.tell()``); externalised payloads
             are governed by the separate ``max_externalized_response_bytes``
-            below.  Applies to every HTTP method (unary, exchange, and
-            producer streams).  For producer streams it controls when
-            the framework mints a continuation token to split a long
-            response across multiple HTTP turns.  When ``None`` (the
-            default), no body cap is enforced — producer streams emit
-            one batch per HTTP response for incremental streaming, and
-            unary/exchange responses are unbounded.  Phase B introduces
-            strict-fail when a body would exceed this cap and
-            externalisation cannot rescue it; until then the cap only
-            governs producer continuation-token boundaries.
+            below. Applies to every HTTP method (unary, exchange, and
+            producer streams). Producer streams are always lock-step: one
+            request performs one state transition and returns at most one data
+            batch, followed by a continuation token when unfinished. A single
+            producer batch may overshoot this soft wire cap; unary and exchange
+            responses strict-fail when they cannot be externalised under it.
+            When ``None`` (the default), response bodies are unbounded.
         max_externalized_response_bytes: Cap on the *external* channel —
             total bytes uploaded to external storage across one HTTP
             response (one producer turn or one unary/exchange call).

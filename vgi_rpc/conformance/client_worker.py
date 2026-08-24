@@ -368,8 +368,9 @@ def make_client_conformance_app(
             response pointers and the ``__upload_url__`` request flow.
         external_threshold: Response-externalization threshold and advertised
             direct-request limit when external mode is enabled.
-        producer_turn_bytes: Optional HTTP response cap used to buffer multiple
-            producer batches in one turn before issuing a continuation token.
+        producer_turn_bytes: Optional HTTP response cap advertised to clients.
+            It constrains one lock-step turn and never permits multiple producer
+            state transitions in a single response.
 
     Returns:
         ``(app, close)``. The idempotent ``close`` callback releases the
@@ -565,7 +566,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="BYTES",
-        help="buffer producer batches up to this HTTP response size before continuation",
+        help="advertise this per-turn HTTP response-size budget to producer workers",
     )
     parser.add_argument("--tls", action="store_true", help="serve HTTPS with an ephemeral localhost CA")
     args = parser.parse_args()

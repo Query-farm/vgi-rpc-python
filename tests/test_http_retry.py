@@ -639,30 +639,33 @@ class TestOptionsWithRetry:
 class TestHttpConnectWithRetry:
     """Integration tests: retry through http_connect proxy."""
 
-    def test_unary_recovers(self, real_client: _SyncTestClient) -> None:
-        """Unary call succeeds after transient failure."""
+    def test_unary_does_not_retry(self, real_client: _SyncTestClient) -> None:
+        """Unary dispatch is not replayed after a transient response."""
         wrapper = _TransientFailureClient(real_client, failure_status=502, failures=1)
-        with http_connect(
-            RpcFixtureService,
-            client=wrapper,  # type: ignore[arg-type]
-            retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
-        ) as proxy:
-            result = proxy.add(a=3.0, b=4.0)
-        assert result == 7.0
-        assert wrapper.call_count == 2
+        with (
+            http_connect(
+                RpcFixtureService,
+                client=wrapper,  # type: ignore[arg-type]
+                retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+            ) as proxy,
+            pytest.raises(RpcError, match="HttpError"),
+        ):
+            proxy.add(a=3.0, b=4.0)
+        assert wrapper.call_count == 1
 
-    def test_stream_init_recovers(self, real_client: _SyncTestClient) -> None:
-        """Stream init succeeds after transient failure."""
+    def test_stream_init_does_not_retry(self, real_client: _SyncTestClient) -> None:
+        """Stream initialization is not replayed after a transient response."""
         wrapper = _TransientFailureClient(real_client, failure_status=503, failures=1)
-        with http_connect(
-            RpcFixtureService,
-            client=wrapper,  # type: ignore[arg-type]
-            retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
-        ) as proxy:
-            session = proxy.generate(count=2)
-            batches = list(session)
-        assert len(batches) > 0
-        assert wrapper.call_count >= 2
+        with (
+            http_connect(
+                RpcFixtureService,
+                client=wrapper,  # type: ignore[arg-type]
+                retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+            ) as proxy,
+            pytest.raises(RpcError, match="HttpError"),
+        ):
+            proxy.generate(count=2)
+        assert wrapper.call_count == 1
 
     def test_stream_exchange_does_not_retry(self, real_client: _SyncTestClient) -> None:
         """Stream exchange does NOT retry — exchange calls may not be idempotent."""
@@ -696,8 +699,8 @@ class TestHttpConnectWithRetry:
             with pytest.raises(RpcError, match="HttpError"):
                 session.exchange(AnnotatedBatch(batch=input_batch))
 
-    def test_retry_exhaustion_raises(self, real_client: _SyncTestClient) -> None:
-        """HttpTransientError raised when retries exhausted through proxy."""
+    def test_retry_config_does_not_enable_rpc_replay(self, real_client: _SyncTestClient) -> None:
+        """Retry configuration applies to safe control requests, not RPC dispatch."""
         wrapper = _TransientFailureClient(real_client, failure_status=502, failures=10)
         with (
             http_connect(
@@ -705,10 +708,11 @@ class TestHttpConnectWithRetry:
                 client=wrapper,  # type: ignore[arg-type]
                 retry=HttpRetryConfig(max_retries=2, backoff_base=0.001),
             ) as proxy,
-            pytest.raises(HttpTransientError) as exc_info,
+            pytest.raises(RpcError) as exc_info,
         ):
             proxy.add(a=1.0, b=2.0)
-        assert exc_info.value.status_code == 502
+        assert exc_info.value.error_type == "HttpError"
+        assert wrapper.call_count == 1
 
     def test_no_retry_default(self, real_client: _SyncTestClient) -> None:
         """Without retry config, 503 raises plain RpcError (not HttpTransientError)."""
@@ -724,16 +728,19 @@ class TestHttpConnectWithRetry:
         assert not isinstance(exc_info.value, HttpTransientError)
         assert exc_info.value.error_type == "HttpError"
 
-    def test_429_with_retry_after(self, real_client: _SyncTestClient) -> None:
-        """429 with Retry-After header: retry succeeds."""
+    def test_429_does_not_replay_rpc(self, real_client: _SyncTestClient) -> None:
+        """Even Retry-After cannot make an arbitrary RPC safe to replay."""
         wrapper = _TransientFailureClient(real_client, failure_status=429, failures=1, retry_after="1")
-        with http_connect(
-            RpcFixtureService,
-            client=wrapper,  # type: ignore[arg-type]
-            retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
-        ) as proxy:
-            result = proxy.add(a=5.0, b=3.0)
-        assert result == 8.0
+        with (
+            http_connect(
+                RpcFixtureService,
+                client=wrapper,  # type: ignore[arg-type]
+                retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+            ) as proxy,
+            pytest.raises(RpcError, match="HttpError"),
+        ):
+            proxy.add(a=5.0, b=3.0)
+        assert wrapper.call_count == 1
 
 
 class TestHttpIntrospectWithRetry:

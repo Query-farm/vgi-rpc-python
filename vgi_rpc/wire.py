@@ -143,11 +143,6 @@ def find_state_token(data: bytes) -> bytes | None:
     single-stream request case returns after its first batch), or ``None`` if
     absent or the body is unparseable.
 
-    Note:
-        For a response that rotates the token across multiple data batches, the
-        *last* token is the continuation the peer will send next; this returns
-        the first. Single-token responses (the common case) make them identical.
-
     Args:
         data: The (decompressed) request or response IPC body bytes.
 

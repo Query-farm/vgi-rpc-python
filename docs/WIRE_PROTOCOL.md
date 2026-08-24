@@ -663,6 +663,11 @@ advertised capability header, so a browser client can read them cross-origin.
 Request and response compression are independent: a server may decode a
 compressed request while producing only uncompressed responses.
 
+The portable CI conformance profile is intentionally stricter than that
+deployment-level flexibility: its primary HTTP worker MUST advertise and
+implement both `zstd` and `gzip` for requests and responses. A dedicated
+compression-disabled fixture verifies the valid empty-advertisement mode.
+
 **Codec tokens** are the usual HTTP ones — `zstd`, `gzip`, and `identity`.
 `identity` is the no-op transform, not a compressor: it exists so a client can
 *explicitly* ask for an uncompressed response, which is otherwise only
@@ -734,23 +739,27 @@ stream:
 
 #### Producer stream init response
 
-The response body contains the complete producer output:
+The `/init` request also drives the producer's first lock-step turn. The
+response body contains the output of that single `process()` invocation:
 
 ```
 Response body:
   [IPC stream: header_schema, 0..N log batches, 1 header row, EOS]   (if header declared)
-  [IPC stream: output_schema, (log* + data)*, EOS]
+  [IPC stream: output_schema, 0..N log batches interleaved with
+   0..1 data batch, then 0..1 continuation batch, EOS]
 ```
 
-All produced data batches are included inline. If the response body would
-exceed `max_response_bytes` (the operator-configured HTTP body cap), the
-server stops producing and appends a **continuation batch**: a zero-row
-batch with `vgi_rpc.stream_state#b64` in its custom metadata. The client
-then follows up with `/exchange` requests carrying that token. For
-producer streams the wire cap is *soft* — continuation tokens cover the
-overshoot. The companion cap `max_externalized_response_bytes` governs
-external-channel uploads independently and is *hard*: a producer that
-would exceed it surfaces an `RpcError` rather than continuing.
+If the invocation does not finish the producer, the server appends a
+**continuation batch**: a zero-row batch with `vgi_rpc.stream_state#b64` in
+its custom metadata. The client then follows up with an `/exchange` request
+carrying that token, which drives exactly one more turn.
+
+`max_response_bytes` is the operator-configured per-turn sizing budget exposed
+to the producer. It does not change the number of invocations in the response.
+For producer streams the wire cap is *soft*: a single emitted batch may
+overshoot it. The companion cap `max_externalized_response_bytes` governs
+external-channel uploads independently and is *hard*: a producer that would
+exceed it surfaces an `RpcError` rather than continuing.
 
 #### Exchange stream init response
 
@@ -828,8 +837,9 @@ client controls directly, has a cross-principal disclosure bug even though
 every functional test still passes.
 
 For **producer continuation**, the input is a zero-row batch on empty schema
-with the state token. The response may contain multiple data batches and
-may end with another continuation token.
+with the state token. The server invokes `process()` exactly once. The
+response may contain at most one data batch and, if the producer is not
+finished, ends with another continuation token.
 
 That zero-row input batch is a **tick**, and its custom metadata is the
 tick's metadata. A server MUST deliver it to the FIRST `process()` call of
@@ -837,7 +847,8 @@ that turn, exactly as the pipe transport delivers the metadata riding a real
 tick batch — with `vgi_rpc.stream_state#b64`, `vgi_rpc.call_state#b64` and
 `vgi_rpc.cancel` stripped first, since those are transport bookkeeping that
 never appears on a pipe tick and the state token is a sealed cursor that
-application code must not be able to read.
+application code must not be able to read. Each HTTP producer request carries
+exactly one tick and drives exactly one `process()` call.
 
 This is what carries **between-tick updates**: a client that revises its
 per-tick metadata mid-stream — DuckDB tightens `vgi_pushdown_filters` on each
@@ -845,10 +856,9 @@ tick as a Top-N boundary moves or a join-key `IN` set resolves — has no other
 channel to reach the producer. A server that builds every continuation tick
 from a constant empty batch strands those updates silently: the stream still
 completes, the rows are still correct, and the worker simply keeps filtering
-on the `/init` snapshot for the life of the stream. Only the first `process()`
-of a turn sees the metadata; when `VGI-Max-Response-Bytes` lets one turn drive
-several ticks, the later ticks see empty metadata, because the client had no
-opportunity to revise it mid-turn.
+on the `/init` snapshot for the life of the stream. `VGI-Max-Response-Bytes`
+is only a per-turn sizing budget; it never permits a server to consume more
+than one tick or invoke `process()` more than once in a request.
 
 For **exchange**, the input carries real data plus the state token. The
 response data batch carries an updated state token for the next exchange.

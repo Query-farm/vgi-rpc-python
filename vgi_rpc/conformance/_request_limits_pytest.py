@@ -78,11 +78,11 @@ class TestCompressedHttpRequestCap:
             assert 512 <= cap <= 64 * 1024, f"fixture must advertise a deliberately small request cap, got {cap}"
 
             advertised_raw = options.headers.get(_CODECS_HEADER)
-            if advertised_raw is None:
-                pytest.skip("server predates request-codec advertisement")
+            assert advertised_raw is not None, "server must advertise request codecs"
             advertised = {item.strip().lower() for item in advertised_raw.split(",") if item.strip()}
-            if codec not in advertised:
-                pytest.skip(f"server does not advertise {codec} support")
+            assert advertised == {"zstd", "gzip"}, (
+                f"the conformance worker must support both zstd and gzip, got {sorted(advertised)}"
+            )
 
             encoding = Encoding(codec)
             expanded = _request_body("echo_string", value="x" * max(32 * 1024, cap * 8))

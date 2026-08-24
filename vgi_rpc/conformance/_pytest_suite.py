@@ -36,6 +36,7 @@ from vgi_rpc.conformance import (
     ContainerWideTypes,
     DeepNested,
     EmbeddedArrow,
+    NestedContainers,
     Point,
     RichHeader,
     Status,
@@ -113,14 +114,9 @@ _REQUESTABLE_REASONS = (
 pytestmark = pytest.mark.timeout(5)
 
 
-def _is_subprocess(request: pytest.FixtureRequest) -> bool:
-    """Check if current parametrized transport is subprocess."""
-    return str(request.node.callspec.params.get("conformance_conn")) == "subprocess"
-
-
-def _is_http(request: pytest.FixtureRequest) -> bool:
-    """Check if current parametrized transport is http."""
-    return str(request.node.callspec.params.get("conformance_conn")) == "http"
+def _uses_http(request: pytest.FixtureRequest) -> bool:
+    """Check whether the transport variant uses the HTTP client."""
+    return str(request.node.callspec.params.get("conformance_conn")).startswith("http")
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +251,24 @@ class TestUnaryOptional:
             assert proxy.echo_optional_string(value="") == ""
             assert proxy.echo_optional_string(value=None) is None
 
+    def test_optional_point(self, conformance_conn: ConnFactory) -> None:
+        """Optional dataclass values use nullable binary on the RPC wire."""
+        with conformance_conn() as proxy:
+            assert proxy.echo_optional_point(point=None) is None
+            point = Point(x=3.0, y=4.0)
+            assert proxy.echo_optional_point(point=point) == point
+
+    def test_annotated_optional_int(self, conformance_conn: ConnFactory) -> None:
+        """Optionality is preserved when Annotated is the outer wrapper."""
+        with conformance_conn() as proxy:
+            assert proxy.echo_annotated_optional_int(value=None) is None
+            assert proxy.echo_annotated_optional_int(value=17) == 17
+
+    def test_outer_optional_non_null(self, conformance_conn: ConnFactory) -> None:
+        """An explicit non-null override inside Optional remains callable."""
+        with conformance_conn() as proxy:
+            assert proxy.echo_outer_optional_non_null(value=23) == 23
+
 
 # ---------------------------------------------------------------------------
 # Unary: Dataclass Round-trip
@@ -362,6 +376,28 @@ class TestUnaryDataclass:
         with conformance_conn() as proxy:
             result = proxy.inspect_point(point=Point(x=1.5, y=2.5))
             assert result == "Point(1.5, 2.5)"
+
+    def test_nested_container_types(self, conformance_conn: ConnFactory) -> None:
+        """Enums and dataclasses reconstruct recursively inside containers."""
+        statuses = [Status.ACTIVE, Status.CLOSED]
+        points = [Point(x=1.0, y=2.0), Point(x=3.0, y=4.0)]
+        status_by_name = {"a": Status.ACTIVE, "c": Status.CLOSED}
+        with conformance_conn() as proxy:
+            result = proxy.pack_nested_containers(
+                statuses=statuses,
+                points=points,
+                status_by_name=status_by_name,
+            )
+            assert isinstance(result, NestedContainers)
+            assert result.statuses == statuses
+            assert result.points == points
+            assert result.status_by_name == status_by_name
+            assert result.frozen_statuses == frozenset(statuses)
+            assert result.tagged_status is Status.ACTIVE
+            assert result.tagged_point == points[0]
+            assert result.tagged_batch is not None
+            assert result.tagged_batch.equals(pa.RecordBatch.from_pydict({"value": [1, 2]}))
+            assert proxy.echo_status_list(statuses=statuses) == statuses
 
 
 # ---------------------------------------------------------------------------
@@ -979,6 +1015,18 @@ class TestProducerStream:
                 assert ab.batch.column("index")[0].as_py() == i
                 assert ab.batch.column("value")[0].as_py() == i * 10
 
+    def test_tick_metadata(self, conformance_conn: ConnFactory, request: pytest.FixtureRequest) -> None:
+        """Application metadata on a producer tick reaches ``process``."""
+        md = pa.KeyValueMetadata({b"vgi.conformance.tick": b"updated"})
+        with conformance_conn() as proxy:
+            session: Any = proxy.produce_tick_metadata(count=2 if _uses_http(request) else 1)
+            if _uses_http(request):
+                first, _ = session.next_with_token()
+                assert first is not None
+            observed = session.tick(md)
+            assert observed.batch.column("seen").to_pylist() == ["updated"]
+            session.close()
+
     def test_produce_empty(self, conformance_conn: ConnFactory) -> None:
         """Produce zero batches."""
         with conformance_conn() as proxy:
@@ -1014,15 +1062,12 @@ class TestProducerStream:
             # HTTP may deliver the error before any batches depending on transport.
             assert count <= 3
 
-    def test_produce_error_on_init(self, conformance_conn: ConnFactory, request: pytest.FixtureRequest) -> None:
-        """Raise RpcError immediately on init.
-
-        Skipped on subprocess because stream init errors corrupt the shared transport.
-        """
-        if _is_subprocess(request):
-            pytest.skip("stream init errors corrupt shared subprocess transport")
-        with conformance_conn() as proxy, pytest.raises(RpcError, match="intentional init error"):
-            list(proxy.produce_error_on_init())
+    def test_produce_error_on_init(self, conformance_conn: ConnFactory) -> None:
+        """An init error is typed and leaves the same connection reusable."""
+        with conformance_conn() as proxy:
+            with pytest.raises(RpcError, match="intentional init error"):
+                list(proxy.produce_error_on_init())
+            assert proxy.echo_int(value=42) == 42
 
 
 # ---------------------------------------------------------------------------
@@ -1121,18 +1166,15 @@ class TestExchangeStream:
             with pytest.raises(RpcError, match="intentional error"):
                 session.exchange(AnnotatedBatch.from_pydict({"value": [3.0]}))
 
-    def test_error_on_init(self, conformance_conn: ConnFactory, request: pytest.FixtureRequest) -> None:
-        """Verify RpcError when exchange stream init raises.
-
-        Skipped on pipe/subprocess: stream init errors without headers leave
-        the pipe transport in an inconsistent state because the client sends
-        a tick before reading the error response.
-        Only tested on HTTP where each exchange is a separate request.
-        """
-        if not _is_http(request):
-            pytest.skip("exchange init errors only clean on HTTP transport")
-        with conformance_conn() as proxy, pytest.raises(RpcError, match="intentional exchange init error"):
-            proxy.exchange_error_on_init()
+    def test_error_on_init(self, conformance_conn: ConnFactory) -> None:
+        """An exchange init error is typed and preserves the framing boundary."""
+        with conformance_conn() as proxy:
+            with pytest.raises(RpcError, match="intentional exchange init error"):
+                session = proxy.exchange_error_on_init()
+                # HTTP reports the error from /init. Raw lock-step clients may
+                # observe it only after sending the first exchange input.
+                session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
+            assert proxy.echo_int(value=42) == 42
 
     def test_empty_exchange_session(self, conformance_conn: ConnFactory) -> None:
         """Open stream, close without exchanging."""
@@ -2232,6 +2274,14 @@ def _response_codec(resp: httpx2.Response) -> str | None:
     return ce.strip().lower() if ce else None
 
 
+def _required_encodings(port: int) -> list[str]:
+    """Return the mandatory conformance-worker codecs or fail with context."""
+    advertised = _advertised_encodings(port)
+    assert advertised is not None, "conformance worker must advertise VGI-Supported-Encodings"
+    assert set(advertised) == {"zstd", "gzip"}, f"conformance worker must support both zstd and gzip, got {advertised}"
+    return advertised
+
+
 class TestHttpCompressionNegotiationConformance:
     """Cross-language conformance for HTTP response-codec negotiation.
 
@@ -2247,13 +2297,9 @@ class TestHttpCompressionNegotiationConformance:
     * A codec chosen only because of the custom request header is stamped
       on ``X-VGI-Content-Encoding``, since such a client's fetch layer
       would mangle or auto-decode a standard ``Content-Encoding``.
-    * ``VGI-Supported-Encodings`` advertises what the server can actually
-      do.  Present-but-empty means "no compression"; absent means a legacy
-      server (assume zstd).
-
-    Capability-gated throughout: servers advertising no codecs (compression
-    disabled — the default in several SDKs) skip the codec-specific cases
-    but must still prove they send nothing compressed.
+    * The primary conformance worker advertises and implements both mandatory
+      codecs, ``zstd`` and ``gzip``. A separately configured worker may still
+      advertise an empty set to prove compression-disabled behaviour.
     """
 
     # Large and highly compressible, so it clears every implementation's
@@ -2317,9 +2363,7 @@ class TestHttpCompressionNegotiationConformance:
         The advertisement is what a client negotiates its *request*
         encoding against, so anything listed there has to round-trip.
         """
-        advertised = _advertised_encodings(conformance_http_port)
-        if not advertised:
-            pytest.skip("server advertises no codecs")
+        advertised = _required_encodings(conformance_http_port)
         for codec in advertised:
             resp = self._echo_compressed(conformance_http_port, codec)
             assert resp.status_code == 200, f"{codec}: {resp.status_code}: {resp.content[:200]!r}"
@@ -2358,35 +2402,29 @@ class TestHttpCompressionNegotiationConformance:
             assert self._echoed_value(resp) == self.PAYLOAD
 
     def test_supported_encodings_is_advertised(self, conformance_http_port: int) -> None:
-        """The header is present, lists only real codecs, and omits identity."""
-        advertised = _advertised_encodings(conformance_http_port)
-        if advertised is None:
-            pytest.skip("server does not advertise VGI-Supported-Encodings")
-        assert set(advertised) <= {"zstd", "gzip"}, advertised
+        """The primary worker advertises both mandatory codecs and not identity."""
+        advertised = _required_encodings(conformance_http_port)
         # identity is always available, so advertising it carries no
         # information and would wrongly imply it is a compressor.
         assert "identity" not in advertised
 
     def test_identity_forces_an_uncompressed_response(self, conformance_http_port: int) -> None:
         """``identity`` first in the custom header wins over any codec after it."""
-        if _advertised_encodings(conformance_http_port) is None:
-            pytest.skip("server does not advertise VGI-Supported-Encodings")
+        _required_encodings(conformance_http_port)
         resp = self._echo(
             conformance_http_port,
             {"X-VGI-Accept-Encoding": "identity", "Accept-Encoding": "gzip, zstd"},
         )
         assert _response_codec(resp) is None, "identity must not be answered with a codec"
 
-    def test_custom_header_alone_negotiates(self, conformance_http_port: int) -> None:
+    @pytest.mark.parametrize("codec", ("zstd", "gzip"))
+    def test_custom_header_alone_negotiates(self, conformance_http_port: int, codec: str) -> None:
         """The browser case: ``fetch()`` cannot set ``Accept-Encoding`` at all.
 
         A codec reachable only via the custom header must be stamped on
         ``X-VGI-Content-Encoding``, not ``Content-Encoding``.
         """
-        advertised = _advertised_encodings(conformance_http_port)
-        if not advertised:
-            pytest.skip("server advertises no response codecs")
-        codec = advertised[0]
+        _required_encodings(conformance_http_port)
         # httpx2 injects its own ``Accept-Encoding`` unless told otherwise —
         # the same trap cpp-httplib sets.  Blanking it is what actually
         # reproduces a browser, where the header cannot be set at all; leave
@@ -2401,9 +2439,7 @@ class TestHttpCompressionNegotiationConformance:
 
     def test_custom_header_outranks_gzip_first_standard(self, conformance_http_port: int) -> None:
         """The cpp-httplib regression: a gzip-first Accept-Encoding must not win."""
-        advertised = _advertised_encodings(conformance_http_port)
-        if not advertised or "zstd" not in advertised:
-            pytest.skip("server cannot produce zstd")
+        _required_encodings(conformance_http_port)
         resp = self._echo(
             conformance_http_port,
             {
@@ -2448,8 +2484,7 @@ class TestHttpCompressionNegotiationConformance:
 
     def test_unproducible_codec_is_not_forced(self, conformance_http_port: int) -> None:
         """Offering only a codec the server can't produce yields an uncompressed body."""
-        if _advertised_encodings(conformance_http_port) is None:
-            pytest.skip("server does not advertise VGI-Supported-Encodings")
+        _required_encodings(conformance_http_port)
         resp = self._echo(conformance_http_port, {"Accept-Encoding": "br"})
         assert _response_codec(resp) is None, "server must not claim a codec it was never offered"
 
@@ -2482,7 +2517,7 @@ class TestDescribeConformance:
         # close_counter) + 2 sticky streaming methods (stream_session_counter
         # / exchange_session_counter), added 2026-05 alongside the
         # Sticky.* conformance group.
-        assert len(conformance_describe.methods) == 81
+        assert len(conformance_describe.methods) == 87
         assert conformance_describe.protocol_name == "ConformanceService"
         echo_str = conformance_describe.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY
@@ -2813,6 +2848,23 @@ class TestHttpResponseCapSoftWire:
     transparently.  The opposite direction (strict-fail) is exercised
     in :class:`TestHttpResponseCap` for unary and exchange.
     """
+
+    def test_cap_does_not_coalesce_producer_turns(self, conformance_http_strict_cap_port: int) -> None:
+        """A response cap never authorizes more than one state transition."""
+        from vgi_rpc.http import http_connect
+
+        with http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_strict_cap_port}") as proxy:
+            session: Any = proxy.produce_n(count=3)
+            first, first_token = session.next_with_token()
+            assert first is not None
+            assert first.batch.column("index")[0].as_py() == 0
+            assert first_token is not None, "unfinished first turn must carry a continuation token"
+
+            second, second_token = session.next_with_token()
+            assert second is not None
+            assert second.batch.column("index")[0].as_py() == 1
+            assert second_token is not None, "unfinished second turn must carry a continuation token"
+            session.close()
 
     def test_producer_overshoot_uses_continuation(self, conformance_http_strict_cap_port: int) -> None:
         """Oversize producer emit splits across continuation tokens, not RpcError."""

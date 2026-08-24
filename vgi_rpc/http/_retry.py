@@ -1,11 +1,16 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""HTTP retry logic for transient failures.
+"""HTTP retry logic for replay-safe transient failures.
 
 Provides ``HttpRetryConfig`` for opt-in retry of transient HTTP errors
 (429, 502, 503, 504) and connection failures, and ``HttpTransientError``
 raised when retries are exhausted.
+
+RPC dispatches do not use these helpers: a proxy may return a transient
+status after the server committed a side effect, so replay requires an
+application-level idempotency contract. The HTTP client uses this policy for
+replay-safe discovery and control requests only.
 
 Logger: ``vgi_rpc.http.retry`` — retry attempts are logged at DEBUG level.
 """
@@ -31,14 +36,13 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("vgi_rpc.http.retry")
 
-# Default status codes produced by reverse proxies (nginx, ALB, etc.)
-# that indicate transient failures safe to retry.
+# Default status codes handled by replay-safe requests.
 _DEFAULT_RETRYABLE: frozenset[int] = frozenset({429, 502, 503, 504})
 
 
 @dataclass(frozen=True)
 class HttpRetryConfig:
-    """Configuration for retrying transient HTTP failures.
+    """Configuration for retrying replay-safe transient HTTP failures.
 
     Attributes:
         max_retries: Number of retry attempts (total calls = max_retries + 1).

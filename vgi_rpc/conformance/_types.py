@@ -29,6 +29,7 @@ from vgi_rpc.rpc import (
     ExchangeState,
     OutputCollector,
     ProducerState,
+    StreamState,
 )
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
@@ -165,6 +166,19 @@ class EmbeddedArrow(ArrowSerializableDataclass):
 
 
 @dataclass(frozen=True)
+class NestedContainers(ArrowSerializableDataclass):
+    """Enums and dataclasses nested in containers and annotation wrappers."""
+
+    statuses: list[Status]
+    points: list[Point]
+    status_by_name: dict[str, Status]
+    frozen_statuses: frozenset[Status]
+    tagged_status: Annotated[Status, "conformance-tag"] | None
+    tagged_point: Annotated[Point, "conformance-tag"] | None
+    tagged_batch: Annotated[pa.RecordBatch, ArrowType(pa.binary())] | None
+
+
+@dataclass(frozen=True)
 class ConformanceHeader(ArrowSerializableDataclass):
     """Stream header for conformance testing."""
 
@@ -193,6 +207,23 @@ class CounterState(ProducerState):
             return
         out.emit_pydict({"index": [self.current], "value": [self.current * 10]})
         self.current += 1
+
+
+@dataclass
+class TickMetadataState(StreamState):
+    """Report the application metadata attached to each producer tick."""
+
+    count: int
+    current: int = 0
+
+    def process(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit the conformance metadata value observed on this tick."""
+        raw = input.custom_metadata.get(b"vgi.conformance.tick") if input.custom_metadata is not None else None
+        seen = raw.decode("utf-8", "replace") if raw is not None else ""
+        out.emit_pydict({"index": [self.current], "seen": [seen]})
+        self.current += 1
+        if self.current >= self.count:
+            out.finish()
 
 
 @dataclass

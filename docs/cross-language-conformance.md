@@ -201,7 +201,7 @@ For wire protocol details, see [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md).
 
 ## Capability-gated test groups
 
-Some conformance tests target opt-in HTTP features. They run only when the server's `OPTIONS /health` capability headers advertise the feature, and skip cleanly otherwise — so a port that doesn't implement the feature stays fully conformant on the core wire surface while the dedicated suite verifies anyone who does opt in.
+Some conformance tests target opt-in HTTP features. They run only when the server's `OPTIONS /health` capability headers advertise the feature, and skip cleanly otherwise — so a port that doesn't implement the feature stays fully conformant on the core wire surface while the dedicated suite verifies anyone who does opt in. HTTP body compression is no longer in that category: the primary CI conformance worker must advertise and implement both `zstd` and `gzip` in both directions.
 
 | Capability header | Test group | Spec |
 |---|---|---|
@@ -227,9 +227,11 @@ may express those settings through their native configuration API; they do not
 need to copy the Python worker's command-line flags.
 
 The small-request-cap fixture advertises a 4 KiB `max_request_bytes` limit and
-enables every request codec the worker claims in `VGI-Supported-Encodings`.
-The shared group checks the cap independently on the encoded HTTP body and the
-decoded Arrow body, then reuses the same HTTP client after each rejection.
+enables the mandatory `zstd` and `gzip` request codecs. The shared group checks
+the cap independently on the encoded HTTP body and the decoded Arrow body,
+then reuses the same HTTP client after each rejection. The separate
+`conformance_http_no_compression_port` fixture remains valid: it exercises an
+explicitly compression-disabled deployment, not the primary CI worker profile.
 
 The sticky row is the one to note: a port may decline sticky entirely, but a port that *claims* it cannot quietly omit the tests that prove sessions are refused when they should be. Everything else on this page skips silently when unsupplied, which is why the sticky fixtures name themselves in the failure message.
 

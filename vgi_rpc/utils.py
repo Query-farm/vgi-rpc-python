@@ -585,11 +585,8 @@ def _is_transient_field(field_type: object) -> bool:
         True if the annotation is ``Annotated[T, Transient()]``.
 
     """
-    if get_origin(field_type) is Annotated:
-        for arg in get_args(field_type)[1:]:
-            if isinstance(arg, Transient):
-                return True
-    return False
+    _, _, markers = _annotation_details(field_type)
+    return any(isinstance(marker, Transient) for marker in markers)
 
 
 def _has_binary_arrow_type(field_type: object) -> bool:
@@ -598,11 +595,46 @@ def _has_binary_arrow_type(field_type: object) -> bool:
     When a field is ``Annotated[SomeDataclass, ArrowType(pa.binary())]``, the
     value should be serialized to IPC bytes rather than a struct dict.
     """
-    if get_origin(field_type) is Annotated:
-        for arg in get_args(field_type)[1:]:
-            if isinstance(arg, ArrowType) and arg.arrow_type == pa.binary():
-                return True
-    return False
+    _, _, markers = _annotation_details(field_type)
+    return any(isinstance(marker, ArrowType) and marker.arrow_type == pa.binary() for marker in markers)
+
+
+def _annotation_details(python_type: object) -> tuple[object, bool, tuple[object, ...]]:
+    """Normalize interleaved ``Annotated`` and ``Optional`` wrappers.
+
+    Both ``Annotated[T | None, marker]`` and
+    ``Annotated[T, marker] | None`` are valid spellings.  Callers that peel
+    only their first wrapper either lose the marker or fail to discover the
+    optionality, depending on which spelling was used.
+
+    Args:
+        python_type: Type annotation to normalize.
+
+    Returns:
+        ``(base_type, is_optional, markers)``. Markers retain annotation
+        order; Python already flattens directly nested ``Annotated`` wrappers.
+
+    """
+    current = python_type
+    nullable = False
+    markers: list[object] = []
+    while True:
+        origin = get_origin(current)
+        args = get_args(current)
+        if origin is Annotated:
+            if not args:
+                break
+            current = args[0]
+            markers.extend(args[1:])
+            continue
+        if origin is UnionType or origin is Union:
+            non_none_types = [arg for arg in args if arg is not type(None)]
+            if len(non_none_types) == 1 and len(args) == 2:
+                nullable = True
+                current = non_none_types[0]
+                continue
+        break
+    return current, nullable, tuple(markers)
 
 
 class _FieldPlan(NamedTuple):
@@ -663,10 +695,7 @@ def _serialization_plan(cls: "type[ArrowSerializableDataclass]") -> _Serializati
     for f in dataclass_fields(cls):
         field_type = type_hints.get(f.name, f.type)
         transient = _is_transient_field(field_type)
-        unwrapped = field_type
-        if get_origin(field_type) is Annotated:
-            args = get_args(field_type)
-            unwrapped = args[0] if args else field_type
+        unwrapped, _, _ = _annotation_details(field_type)
         has_default = f.default is not MISSING or f.default_factory is not MISSING
         if not transient and not has_default:
             required_fields.append(f.name)
@@ -873,8 +902,7 @@ def _compact_plan(cls: "type[ArrowSerializableDataclass]") -> "_CompactPlan | No
             if field_plan.transient:
                 transient.append((field_plan.name, field_plan.default, field_plan.default_factory))
                 continue
-            inner, _nullable = _is_optional_type(field_plan.unwrapped_type)
-            runtime = _COMPACT_TYPES.get(inner)
+            runtime = _COMPACT_TYPES.get(field_plan.unwrapped_type)
             if runtime is None:
                 supported = False
                 break
@@ -883,7 +911,7 @@ def _compact_plan(cls: "type[ArrowSerializableDataclass]") -> "_CompactPlan | No
                     name=field_plan.name,
                     field_type=field_plan.unwrapped_type,
                     runtime=runtime,
-                    exact=cast("type", inner),
+                    exact=cast("type", field_plan.unwrapped_type),
                 )
             )
 
@@ -1030,14 +1058,10 @@ def _resolve_field_nullability(field_type: object) -> bool:
         True if the Arrow field should be nullable.
 
     """
-    inner = field_type
-    if get_origin(field_type) is Annotated:
-        args = get_args(field_type)
-        for marker in args[1:]:
-            if isinstance(marker, ArrowType) and marker.nullable is not None:
-                return marker.nullable
-        inner = args[0]
-    _, nullable = _is_optional_type(inner)
+    _, nullable, markers = _annotation_details(field_type)
+    for marker in markers:
+        if isinstance(marker, ArrowType) and marker.nullable is not None:
+            return marker.nullable
     return nullable
 
 
@@ -1487,8 +1511,8 @@ class ArrowSerializableDataclass:
         if value is None:
             return None
 
-        # Unwrap Optional type
-        inner_type, _ = _is_optional_type(field_type)
+        # Normalize Optional and Annotated in either nesting order.
+        inner_type, _, _ = _annotation_details(field_type)
 
         # Handle pa.Schema reconstruction from bytes
         if inner_type is pa.Schema:
@@ -1568,11 +1592,25 @@ class ArrowSerializableDataclass:
 
         # Handle frozenset reconstruction
         if get_origin(inner_type) is frozenset and isinstance(value, list):
-            return frozenset(value)
+            args = get_args(inner_type)
+            if not args:
+                return frozenset(value)
+            element_type = args[0]
+            return frozenset(cls._convert_value_for_deserialization(v, element_type, ipc_validation) for v in value)
 
         # Handle dict reconstruction from list of tuples
         if get_origin(inner_type) is dict and isinstance(value, list):
-            return dict(cast("list[tuple[object, object]]", value))
+            args = get_args(inner_type)
+            pairs = cast("list[tuple[object, object]]", value)
+            if len(args) < 2:
+                return dict(pairs)
+            key_type, value_type = args[:2]
+            return {
+                cls._convert_value_for_deserialization(
+                    key, key_type, ipc_validation
+                ): cls._convert_value_for_deserialization(item, value_type, ipc_validation)
+                for key, item in pairs
+            }
 
         # Handle list with element type conversion
         origin = get_origin(inner_type)

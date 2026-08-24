@@ -601,9 +601,8 @@ def _run_stream_exchange_sync(
                 return resp_buf
 
         if is_producer:
-            # Producer continuation — multi-batch capable; the producer-turn
-            # helper buffers up to ``max_response_bytes`` before
-            # emitting a continuation token.
+            # Producer continuation — exactly one state transition and at
+            # most one data batch, followed by a token when unfinished.
             with _dispatch_telemetry(
                 app,
                 info=info,
@@ -869,14 +868,12 @@ def _run_http_producer_turn(
 
     A "turn" here means a single HTTP request/response cycle:
 
-    - ``state.process()`` is invoked one or more times against ``_TICK_BATCH``;
-      each call may emit a data batch, log batches, and/or call ``finish()``.
-    - All emitted batches are written to a single IPC stream that becomes the
-      HTTP response body.
-    - The loop exits when the stream finishes (no continuation token) or when
-      the wire body reaches ``app._max_response_bytes``, in which case a
-      continuation token is appended as a zero-row sentinel and the client
-      resumes via ``POST /{method}/exchange``.
+    - ``state.process()`` is invoked exactly once against the request's tick.
+    - That invocation may emit at most one data batch, any number of log
+      batches, and/or call ``finish()``.
+    - If the stream did not finish, a continuation token is appended as a
+      zero-row sentinel and the client resumes with a new logical turn via
+      ``POST /{method}/exchange``.
 
     HTTP-specific responsibilities — the reason this is its own helper rather
     than shared with the pipe transport:
@@ -915,22 +912,16 @@ def _run_http_producer_turn(
             only).  Continuation calls pass ``None``.
         tick_request_metadata: This turn's request ``custom_metadata``, with the
             cursor/cancel framework keys (``STATE_KEY`` / ``CALL_STATE_KEY`` /
-            ``CANCEL_KEY``) already stripped by the caller.  Delivered to the FIRST
-            ``process()`` call of this turn as the tick's ``custom_metadata``,
-            then reset to the empty tick.  Both turn kinds pass it: HTTP folds
+            ``CANCEL_KEY``) already stripped by the caller.  Delivered to the
+            single ``process()`` call as the tick's ``custom_metadata``. Both
+            turn kinds pass it: HTTP folds
             the first producer turn into ``/init`` (so the ``/init`` body's
             metadata is the first tick's), and each ``/exchange`` continuation
             carries the client's metadata for the tick that turn drives — which
             is how between-tick pushdown updates (``vgi_pushdown_filters``) and
             the result-cache validators (``vgi.cache.if_none_match``) reach a
             producer over HTTP, as they do on a real tick over the pipe.
-
-            Only the first ``process()`` of the turn sees it.  When
-            ``max_response_bytes`` is configured and one turn drives several
-            ticks, the later ticks see the empty ``_TICK_BATCH``: the client
-            has no opportunity to update its metadata mid-turn, so there is
-            nothing newer to deliver.  ``None`` when the request carried no
-            user metadata.
+            ``None`` when the request carried no user metadata.
         owns_response_body: True when this turn's output IS the whole HTTP
             body, which is what makes it safe to compress into the IPC
             stream (see the codec note below).  False for the init turn,
@@ -993,17 +984,9 @@ def _run_http_producer_turn(
     with new_ipc_stream(write_sink, schema) as writer:
         if sink is not None:
             sink.flush_contents(writer, schema)
-        cumulative_bytes = 0
-        # Bytes uploaded to external storage across this HTTP turn.  Tracked
-        # separately from the HTTP body cap (``max_response_bytes`` measures
-        # ``resp_buf.tell()`` only — externalised payloads do not occupy the
-        # wire body).  External payload size is governed by
-        # ``max_externalized_response_bytes``.
-        cumulative_external_bytes = 0
-        # The CallContext is hoisted out of the loop — its non-collector
-        # fields are constant for the whole turn.  ``emit_client_log`` is the
-        # only thing that needs to follow the current iteration's
-        # ``OutputCollector``; we route it through a mutable proxy.
+        # ``emit_client_log`` needs the collector created below; route the
+        # callback through a mutable one-element proxy while building the
+        # otherwise immutable call context.
         current_out: list[OutputCollector | None] = [None]
 
         def _emit_to_current(msg: Message) -> None:
@@ -1021,114 +1004,76 @@ def _run_http_producer_turn(
             kind=app._server.transport_kind,
             implementation=app._server.implementation,
         )
-        # The FIRST tick of this turn carries the request's user metadata — the
-        # /init body's on the init turn (HTTP folds the first producer turn into
-        # /init), the /exchange body's on a continuation turn. That is what lets a
-        # producer observe between-tick updates (DuckDB's vgi_pushdown_filters, the
-        # result-cache validators vgi.cache.if_none_match) exactly as it does on a
-        # real tick over the pipe transport. Later ticks within the same turn use
-        # the empty _TICK_BATCH — the client cannot revise its metadata mid-turn.
-        first_tick = (
+        # One HTTP request is one logical tick and therefore exactly one state
+        # transition.  ``max_response_bytes`` limits that turn's response; it
+        # never grants permission to advance the producer again.
+        tick = (
             AnnotatedBatch(batch=_TICK_BATCH.batch, custom_metadata=tick_request_metadata)
             if tick_request_metadata is not None
             else _TICK_BATCH
         )
         try:
-            while True:
-                # Snapshot the budgets remaining at the start of this iteration.
-                remaining_wire = None if max_bytes is None else max(0, max_bytes - resp_buf.tell())
-                remaining_external = (
-                    None
-                    if max_external_bytes is None or not externalization_enabled
-                    else max(0, max_external_bytes - cumulative_external_bytes)
-                )
-                out = OutputCollector(
-                    schema,
-                    prior_data_bytes=cumulative_bytes,
-                    server_id=server_id,
-                    producer_mode=True,
-                    remaining_response_bytes=remaining_wire,
-                    remaining_externalized_response_bytes=remaining_external,
-                    externalization_enabled=externalization_enabled,
-                )
-                current_out[0] = out
-                state.process(first_tick, out, produce_ctx)
-                first_tick = _TICK_BATCH  # only the first process() sees init metadata
+            remaining_wire = None if max_bytes is None else max(0, max_bytes - resp_buf.tell())
+            remaining_external = (
+                None if max_external_bytes is None or not externalization_enabled else max_external_bytes
+            )
+            out = OutputCollector(
+                schema,
+                server_id=server_id,
+                producer_mode=True,
+                remaining_response_bytes=remaining_wire,
+                remaining_externalized_response_bytes=remaining_external,
+                externalization_enabled=externalization_enabled,
+            )
+            current_out[0] = out
+            state.process(tick, out, produce_ctx)
+            if not out.finished:
+                out.validate()
+
+            # Pre-flight the external cap BEFORE flushing — predicting the
+            # upload size lets us refuse without paying for the upload. This
+            # also applies when the producer emits and finishes in one tick.
+            overshoot: RuntimeError | None = None
+            if max_external_bytes is not None and externalization_enabled:
+                ext_cfg = app._server.external_config
+                assert ext_cfg is not None
+                predicted = predict_externalize_bytes_for_collector(out, ext_cfg)
+                if predicted > max_external_bytes:
+                    overshoot = RuntimeError(
+                        f"Externalised payload exceeds max_externalized_response_bytes "
+                        f"({predicted} > {max_external_bytes}) for method {method_name!r}"
+                    )
+
+            if overshoot is not None:
+                outcome.status = "error"
+                outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                outcome.error_message = _truncate_error_message(overshoot)
+                _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
+                _write_error_batch(writer, schema, overshoot, server_id=server_id)
+            else:
+                _flush_collector(writer, out, app._server.external_config)
                 if not out.finished:
-                    out.validate()
-                # Pre-flight the external cap BEFORE flushing — predicting the
-                # upload size from the data batch's buffer size lets us refuse
-                # a violating upload without paying the storage round-trip.
-                # Deliberately *not* gated on ``out.finished``.  A producer may
-                # emit its data and finish in the same tick — the wire signals
-                # completion by the absence of a continuation sentinel, so
-                # "here is the data, and we are done" is a well-formed single
-                # turn, and one round trip cheaper than emitting now and
-                # finishing on the next tick.  ``_flush_collector`` below
-                # uploads that batch either way, so skipping the pre-flight
-                # when ``finished`` is set let a finishing turn's payload past
-                # the cap entirely — and the producer path has no post-flush
-                # backstop to catch it (``_enforce_response_budgets`` runs on
-                # the exchange path only).
-                if max_external_bytes is not None and externalization_enabled:
-                    ext_cfg = app._server.external_config
-                    assert ext_cfg is not None  # narrowed by externalization_enabled
-                    predicted = predict_externalize_bytes_for_collector(out, ext_cfg)
-                    if predicted and cumulative_external_bytes + predicted > max_external_bytes:
-                        projected = cumulative_external_bytes + predicted
-                        overshoot = RuntimeError(
-                            f"Externalised payload exceeds max_externalized_response_bytes "
-                            f"({projected} > {max_external_bytes}) for method {method_name!r}"
-                        )
-                        outcome.status = "error"
-                        outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
-                        outcome.error_message = _truncate_error_message(overshoot)
-                        # Hard cap (external channel has no escape valve) — signal
-                        # the resource layer to flip 200 → 200 + X-VGI-RPC-Error: true.
-                        _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
-                        _write_error_batch(writer, schema, overshoot, server_id=server_id)
-                        break
-                cumulative_external_bytes += _flush_collector(writer, out, app._server.external_config)
-                if out.finished:
-                    break
-                cumulative_bytes = out.total_data_bytes
-                # Decide whether to continue producing or break with a
-                # continuation token.  By default (no limit configured),
-                # break after every produce cycle so the client receives
-                # data incrementally.  When ``max_bytes`` is configured,
-                # buffer multiple batches until the HTTP body fills the cap.
-                should_continue = max_bytes is not None and resp_buf.tell() < max_bytes
-                if not should_continue:
-                    # Serialize the cursor into a continuation token.  Only the
-                    # cursor: the call token was minted at /init and either the
-                    # client already holds it (continuation turns) or it rides
-                    # this same sentinel batch (the init turn, below).
+                    # Serialize the cursor after exactly one transition. The
+                    # client must submit another request to advance again.
                     state_info = app._state_types.get(method_name)
                     if state_info is None:
                         raise _RpcHttpError(
                             RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
                             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
-                    token, state_bytes = _mint_cursor_token(
-                        state,
-                        state_info,
-                        call_id,
-                        app._token_key,
-                        auth,
-                    )
+                    token, state_bytes = _mint_cursor_token(state, state_info, call_id, app._token_key, auth)
                     outcome.response_state_bytes = state_bytes
                     token_md: dict[bytes, bytes] = {STATE_KEY: token}
                     if call_token is not None:
-                        # Init turn — hand the client its one and only copy of
-                        # the call token, alongside the first cursor.
                         token_md[CALL_STATE_KEY] = call_token
                         if call_state_bytes:
                             outcome.response_state_bytes = call_state_bytes + state_bytes
-                    state_metadata = pa.KeyValueMetadata(token_md)
                     continuation_batch = empty_batch(schema)
                     _record_output(continuation_batch)
-                    writer.write_batch(continuation_batch, custom_metadata=state_metadata)
-                    break
+                    writer.write_batch(
+                        continuation_batch,
+                        custom_metadata=pa.KeyValueMetadata(token_md),
+                    )
         except Exception as exc:
             outcome.status = "error"
             outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)

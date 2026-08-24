@@ -352,8 +352,8 @@ def _decode_resume_token(token: bytes) -> tuple[bytes, bytes | None]:
 class HttpStreamSession:
     """Client-side handle for a stream over HTTP (both producer and exchange patterns).
 
-    For producer streams, use ``__iter__()`` — yields batches from batched
-    responses and follows continuation tokens transparently.
+    For producer streams, use ``__iter__()`` — yields one batch per lock-step
+    response and follows continuation tokens transparently.
     For exchange streams, use ``exchange()`` — sends an input batch and
     receives an output batch.
 
@@ -599,19 +599,24 @@ class HttpStreamSession:
         _drain_stream(reader)
         return AnnotatedBatch(batch=ab.batch, custom_metadata=user_cm)
 
-    def _send_continuation(self, token: bytes) -> ValidatedReader:
+    def _send_continuation(
+        self,
+        token: bytes,
+        custom_metadata: pa.KeyValueMetadata | None = None,
+    ) -> ValidatedReader:
         """Send a continuation request and return the new response reader."""
         req_buf = BytesIO()
-        state_md = self._token_metadata(token)
+        state_md = merge_metadata(custom_metadata, self._token_metadata(token))
         with new_ipc_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
-        resp = _post_with_retry(
-            self._client,
+        # A continuation advances arbitrary user state. Replaying it after an
+        # intermediary has discarded a successful response can duplicate
+        # side effects, so RPC dispatches are deliberately single-attempt.
+        resp = self._client.post(
             f"{self._url_prefix}/{self._method}/exchange",
             content=self._prepare_body(req_buf.getvalue()),
             headers=self._build_headers(),
-            config=self._retry_config,
         )
         return _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
 
@@ -620,51 +625,87 @@ class HttpStreamSession:
 
         Yields pre-loaded batches from init, then follows continuation tokens.
         """
-        # Yield pre-loaded batches from init response
-        yield from self._pending_batches
-        self._pending_batches.clear()
+        while True:
+            # Pop before yielding so closing a partially-consumed iterator
+            # cannot replay a batch on the next iteration.
+            while self._pending_batches:
+                yield self._pending_batches.pop(0)
 
-        if self._finished:
-            return
+            if self._finished or self._state_bytes is None:
+                return
 
-        # Follow continuation tokens
-        if self._state_bytes is None:
-            return
-
-        reader: ValidatedReader | None = None
-        try:
             reader = self._send_continuation(self._state_bytes)
-            while True:
+            next_token: bytes | None = None
+            try:
+                # Buffer the entire turn and commit its cursor before yielding
+                # any data. Unconsumed batches remain in _pending_batches.
                 try:
-                    batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+                    while True:
+                        batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+
+                        if batch.num_rows == 0 and custom_metadata is not None:
+                            token = custom_metadata.get(STATE_KEY)
+                            if token is not None:
+                                if not isinstance(token, bytes):
+                                    raise TypeError(f"Expected bytes for state token, got {type(token).__name__}")
+                                next_token = token
+                                continue
+
+                        if _dispatch_log_or_error(batch, custom_metadata, self._on_log):
+                            continue
+
+                        resolved_batch, resolved_cm = resolve_external_location(
+                            batch, custom_metadata, self._external_config, self._on_log, reader.ipc_validation
+                        )
+                        if self._pending_batches:
+                            raise RuntimeError(
+                                "VGI-RPC lock-step violation: producer response contained multiple data batches"
+                            )
+                        self._pending_batches.append(AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm))
                 except StopIteration:
-                    break
-
-                # Check for continuation token (zero-row batch with STATE_KEY)
-                if batch.num_rows == 0 and custom_metadata is not None:
-                    token = custom_metadata.get(STATE_KEY)
-                    if token is not None:
-                        if not isinstance(token, bytes):
-                            raise TypeError(f"Expected bytes for state token, got {type(token).__name__}")
-                        _drain_stream(reader)
-                        reader = self._send_continuation(token)
-                        continue
-
-                # Dispatch log/error batches
-                if _dispatch_log_or_error(batch, custom_metadata, self._on_log):
-                    continue
-
-                resolved_batch, resolved_cm = resolve_external_location(
-                    batch, custom_metadata, self._external_config, self._on_log, reader.ipc_validation
-                )
-                yield AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm)
-        except RpcError:
-            if reader is not None:
+                    pass
+            except RpcError:
                 _drain_stream(reader)
-            raise
+                raise
+            _drain_stream(reader)
 
-    def next_with_token(self) -> tuple[AnnotatedBatch | None, bytes | None]:
+            self._state_bytes = next_token
+            if next_token is None:
+                self._finished = True
+
+    def tick(self, custom_metadata: pa.KeyValueMetadata | None = None) -> AnnotatedBatch:
+        """Read one producer batch, attaching metadata to its continuation tick.
+
+        Metadata is sent only when a continuation request is required. If an
+        init response already buffered a batch, consume that batch first.
+
+        Args:
+            custom_metadata: Optional application metadata to attach to the
+                continuation tick.
+
+        Returns:
+            The next producer batch.
+
+        Raises:
+            StopIteration: If the producer has finished.
+            ValueError: If metadata is supplied while an init batch remains
+                buffered.
+
+        """
+        batch, _token = self.next_with_token(custom_metadata)
+        if batch is None:
+            raise StopIteration
+        return batch
+
+    def next_with_token(
+        self,
+        custom_metadata: pa.KeyValueMetadata | None = None,
+    ) -> tuple[AnnotatedBatch | None, bytes | None]:
         """Read one producer batch and surface the worker's continuation token.
+
+        ``custom_metadata`` is attached to the tick request that produces the
+        returned batch. It cannot be attached while consuming a batch already
+        buffered by the init response.
 
         Reads exactly one data batch and returns it paired with the resume
         token that continues the stream AFTER that batch — the worker's own
@@ -678,22 +719,33 @@ class HttpStreamSession:
         :func:`_encode_resume_token`. Treat it as unstructured bytes; only
         :meth:`seek_to_token` needs to know its shape.
 
-        Returns ``(None, None)`` at end-of-stream. Requires per-batch
-        continuation tokens (the default server behaviour — i.e. the worker
-        is not configured with ``max_response_bytes``); raises
-        ``RuntimeError`` if a single response carries more than one data
-        batch (coarser-than-batch resume is not representable here).
+        Returns ``(None, None)`` at end-of-stream. VGI-RPC lock-step requires
+        each response to carry at most one data batch; a response containing
+        more is rejected as a protocol violation.
 
         Drives the same wire protocol as :meth:`__iter__` but yields one
         ``(batch, token)`` per call instead of auto-following the token. Do
         not interleave with ``__iter__``/``exchange`` on the same session.
+
+        Args:
+            custom_metadata: Optional application metadata to attach to the
+                continuation tick.
+
+        Returns:
+            The next batch and its opaque resume token, or ``(None, None)``
+            at end-of-stream.
+
+        Raises:
+            RuntimeError: If a response contains multiple data batches.
+            ValueError: If metadata is supplied while an init batch remains
+                buffered.
+
         """
-        _multi = (
-            "next_with_token requires one data batch per response; the upstream "
-            "worker buffered multiple (configured max_response_bytes?)"
-        )
+        _multi = "VGI-RPC lock-step violation: producer response contained multiple data batches"
         # Init may have preloaded one data batch; its resume point is _state_bytes.
         if self._pending_batches:
+            if custom_metadata is not None:
+                raise ValueError("custom_metadata cannot be sent while an init batch is buffered; consume it first")
             if len(self._pending_batches) > 1:
                 raise RuntimeError(_multi)
             return self._pending_batches.pop(0), self._resume_token()
@@ -702,7 +754,7 @@ class HttpStreamSession:
             self._finished = True
             return None, None
 
-        reader = self._send_continuation(self._state_bytes)
+        reader = self._send_continuation(self._state_bytes, custom_metadata)
         data_ab: AnnotatedBatch | None = None
         next_token: bytes | None = None
         try:
@@ -842,8 +894,11 @@ def http_connect[P](
         external_location: Optional ExternalLocationConfig for
             resolving and producing externalized batches.
         ipc_validation: Validation level for incoming IPC batches.
-        retry: Optional retry configuration for transient HTTP failures.
-            When ``None`` (the default), no retries are attempted.
+        retry: Optional retry configuration for replay-safe discovery and
+            control requests, such as capability lookup and upload-URL
+            allocation. RPC method dispatches and stream continuations are
+            always single-attempt because their implementations may have
+            side effects.
         compression_level: Zstandard compression level for request bodies.
             ``1`` (the default) compresses requests and adds
             ``Content-Encoding: zstd``.  ``None`` disables request
@@ -1032,6 +1087,10 @@ def _init_http_stream_session(
                 batch, custom_metadata, external_config, on_log, reader.ipc_validation
             )
             pending_batches.append(AnnotatedBatch(batch=resolved_batch, custom_metadata=resolved_cm))
+            if len(pending_batches) > 1:
+                raise RuntimeError(
+                    "VGI-RPC lock-step violation: producer init response contained multiple data batches"
+                )
     except RpcError:
         _drain_stream(reader)
         raise
@@ -1348,7 +1407,6 @@ class _HttpProxy:
         on_log = self._on_log
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
-        retry_cfg = self._retry_config
         build_headers = self._build_headers
         prepare_body = self._prepare_body
         refresh_supported = self._refresh_supported_encodings_from_response
@@ -1364,35 +1422,32 @@ class _HttpProxy:
             _send_request(req_buf, info, kwargs, protocol_version=protocol_version)
             body = maybe_externalize(req_buf.getvalue())
 
-            resp = _post_with_retry(
-                client,
+            # RPC implementations may have side effects. A gateway can lose
+            # a successful response and return 502/503, so replaying here is
+            # not safe without an application-level idempotency contract.
+            resp = client.post(
                 f"{url_prefix}/{info.name}",
                 content=prepare_body(body),
                 headers=build_headers(),
-                config=retry_cfg,
             )
             # 415 fallback: codec we picked isn't enabled on this server.
             # The response carries ``VGI-Supported-Encodings`` (stamped on
             # every response by ``_CapabilitiesMiddleware``); refresh caps
             # and retry once with a codec the server actually accepts.
             if resp.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE and refresh_supported(resp) is not None:
-                resp = _post_with_retry(
-                    client,
+                resp = client.post(
                     f"{url_prefix}/{info.name}",
                     content=prepare_body(body),
                     headers=build_headers(),
-                    config=retry_cfg,
                 )
             # 413 fallback: server raised its-cap-changed-since-discovery
             # error; externalize and retry once.
             if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
                 body = externalize(body)
-                resp = _post_with_retry(
-                    client,
+                resp = client.post(
                     f"{url_prefix}/{info.name}",
                     content=prepare_body(body),
                     headers=build_headers(),
-                    config=retry_cfg,
                 )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(
@@ -1431,29 +1486,23 @@ class _HttpProxy:
             _send_request(req_buf, info, kwargs, protocol_version=protocol_version)
             body = maybe_externalize(req_buf.getvalue())
 
-            resp = _post_with_retry(
-                client,
+            resp = client.post(
                 f"{url_prefix}/{info.name}/init",
                 content=prepare_body(body),
                 headers=build_headers(),
-                config=retry_cfg,
             )
             if resp.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE and refresh_supported(resp) is not None:
-                resp = _post_with_retry(
-                    client,
+                resp = client.post(
                     f"{url_prefix}/{info.name}/init",
                     content=prepare_body(body),
                     headers=build_headers(),
-                    config=retry_cfg,
                 )
             if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
                 body = externalize(body)
-                resp = _post_with_retry(
-                    client,
+                resp = client.post(
                     f"{url_prefix}/{info.name}/init",
                     content=prepare_body(body),
                     headers=build_headers(),
-                    config=retry_cfg,
                 )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(

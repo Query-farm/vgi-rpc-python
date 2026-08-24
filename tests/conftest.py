@@ -1097,10 +1097,6 @@ def conformance_subprocess() -> Iterator[SubprocessTransport]:
         "pipe",
         "subprocess",
         "http",
-        pytest.param(
-            "http_roundrobin",
-            marks=pytest.mark.skip(reason="flaky under full-suite load; tracked separately"),
-        ),
         pytest.param("http_externalize_always", marks=_SKIP_WIN_EXTERNALIZE),
         pytest.param("unix", marks=_SKIP_UNIX),
         pytest.param("unix_threaded", marks=_SKIP_UNIX),
@@ -1147,19 +1143,6 @@ def conformance_conn(
         if request.param == "tcp":
             host, tcp_port = request.getfixturevalue("conformance_tcp_addr")
             return tcp_connect(ConformanceService, host, tcp_port, on_log=on_log)
-        if request.param == "http_roundrobin":
-
-            @contextlib.contextmanager
-            def _roundrobin_conn() -> Iterator[Any]:
-                ports: tuple[int, int] = request.getfixturevalue("conformance_http_two_servers")
-                client = _make_roundrobin_client(ports)
-                try:
-                    with http_connect(ConformanceService, client=client, on_log=on_log) as proxy:
-                        yield proxy
-                finally:
-                    client.close()
-
-            return _roundrobin_conn()
         if request.param == "http_externalize_always":
             from vgi_rpc.external import ExternalLocationConfig
 
@@ -1182,6 +1165,54 @@ def conformance_conn(
 
             return _external_conn()
         return http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
+
+    return factory
+
+
+@pytest.fixture(
+    params=[
+        "pipe",
+        "subprocess",
+        pytest.param("unix", marks=_SKIP_UNIX),
+        pytest.param("unix_threaded", marks=_SKIP_UNIX),
+        pytest.param("unix_launcher", marks=_SKIP_UNIX),
+        "tcp",
+    ]
+)
+def conformance_raw_conn(
+    request: pytest.FixtureRequest,
+    conformance_subprocess: SubprocessTransport,
+) -> ConnFactory:
+    """Return only persistent byte-stream transports for raw-wire tests."""
+    from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+    from vgi_rpc.log import Message
+    from vgi_rpc.rpc import serve_pipe, tcp_connect, unix_connect
+
+    def factory(
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if request.param == "pipe":
+            return serve_pipe(ConformanceService, ConformanceServiceImpl(), on_log=on_log)
+        if request.param == "subprocess":
+
+            @contextlib.contextmanager
+            def _conn() -> Iterator[_RpcProxy]:
+                yield _RpcProxy(ConformanceService, conformance_subprocess, on_log)
+
+            return _conn()
+        if request.param in ("unix", "unix_threaded", "unix_launcher"):
+            path_fixture = {
+                "unix": "conformance_unix_path",
+                "unix_threaded": "conformance_unix_threaded_path",
+                "unix_launcher": "conformance_unix_launcher_path",
+            }[request.param]
+            return unix_connect(
+                ConformanceService,
+                request.getfixturevalue(path_fixture),
+                on_log=on_log,
+            )
+        host, port = request.getfixturevalue("conformance_tcp_addr")
+        return tcp_connect(ConformanceService, host, port, on_log=on_log)
 
     return factory
 

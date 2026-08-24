@@ -3,13 +3,11 @@
 
 """Dedicated assertions for HTTP streaming statelessness.
 
-The generic conformance suite is run against a round-robin client (see
-``conformance_conn`` in conftest), which already forces exchanges to
-land on different backends.  These tests add targeted assertions that
-*both* backends actually handled exchanges — guarding against a
-regression where an httpx2-level sticky pool or protocol quirk silently
-pins a stream to one server, which would make round-robin coverage a
-false positive.
+These focused tests use a round-robin client that forces successive turns onto
+different backends. Keeping this topology out of the generic transport matrix
+avoids repeating unrelated scalar/schema cases while still proving that an
+httpx2-level sticky pool or protocol quirk cannot silently pin a stream to one
+server.
 """
 
 from __future__ import annotations

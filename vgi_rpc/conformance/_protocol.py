@@ -3,7 +3,7 @@
 
 """ConformanceService Protocol definition.
 
-Defines ~45 RPC methods covering every framework capability:
+Defines the RPC methods covering every framework capability:
 scalar echo, void, complex types, optionals, dataclass round-trip,
 annotated types, multi-param, errors, logging, producer streams,
 exchange streams, headers, and introspection.
@@ -27,6 +27,7 @@ from ._types import (
     ContainerWideTypes,
     DeepNested,
     EmbeddedArrow,
+    NestedContainers,
     Point,
     RichHeader,
     Status,
@@ -43,7 +44,7 @@ class ConformanceService(Protocol):
     or removing methods; bump minor for additive parameter changes.
     """
 
-    protocol_version: ClassVar[str] = "1.0.0"
+    protocol_version: ClassVar[str] = "2.0.0"
 
     # ------------------------------------------------------------------
     # Unary: Scalar Echo
@@ -124,6 +125,24 @@ class ConformanceService(Protocol):
 
     def echo_optional_int(self, value: int | None) -> int | None:
         """Echo an optional int (may be None)."""
+        ...
+
+    def echo_optional_point(self, point: Point | None) -> Point | None:
+        """Echo an optional structured value, including ``None``."""
+        ...
+
+    def echo_annotated_optional_int(
+        self,
+        value: Annotated[int | None, ArrowType(pa.int32())],
+    ) -> Annotated[int | None, ArrowType(pa.int32())]:
+        """Echo an optional value whose ``Annotated`` wrapper is outermost."""
+        ...
+
+    def echo_outer_optional_non_null(
+        self,
+        value: Annotated[int, ArrowType(pa.int32(), nullable=False)] | None,
+    ) -> Annotated[int, ArrowType(pa.int32(), nullable=False)] | None:
+        """Echo a value whose explicit non-null override is inside Optional."""
         ...
 
     # ------------------------------------------------------------------
@@ -262,6 +281,19 @@ class ConformanceService(Protocol):
         """Round-trip multi-level nested containers and dictionary-encoded strings."""
         ...
 
+    def pack_nested_containers(
+        self,
+        statuses: list[Status],
+        points: list[Point],
+        status_by_name: dict[str, Status],
+    ) -> NestedContainers:
+        """Exercise recursive parameter conversion and nested reconstruction."""
+        ...
+
+    def echo_status_list(self, statuses: list[Status]) -> list[Status]:
+        """Echo enum members nested in a top-level list."""
+        ...
+
     def echo_dict_encoded_string(
         self,
         value: Annotated[str, ArrowType(pa.dictionary(pa.int16(), pa.string()))],
@@ -327,6 +359,10 @@ class ConformanceService(Protocol):
 
     def produce_n(self, count: int) -> Stream[StreamState]:
         """Produce count batches with {index, value}."""
+        ...
+
+    def produce_tick_metadata(self, count: int) -> Stream[StreamState]:
+        """Report application metadata received on each producer tick."""
         ...
 
     def produce_empty(self) -> Stream[StreamState]:
