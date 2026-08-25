@@ -816,12 +816,28 @@ class RpcServer:
                         extra={"server_id": self._server_id},
                     )
                     break
-                except pa.ArrowInvalid:
-                    _logger.warning(
-                        "serve loop ending due to ArrowInvalid",
-                        exc_info=True,
-                        extra={"server_id": self._server_id},
-                    )
+                except pa.ArrowInvalid as exc:
+                    # PyArrow reports a clean socket EOF while waiting for the
+                    # next concatenated request as ArrowInvalid. This happens
+                    # when any client closes a connection after its final RPC;
+                    # some clients use one RPC per connection, while others
+                    # reuse it. Logging a traceback for each disconnect can
+                    # serialize thousands of server threads behind the logging
+                    # lock. Preserve real malformed-IPC warnings and only
+                    # downgrade the exact empty-stream diagnostic at this
+                    # connection-loop boundary.
+                    message = str(exc)
+                    if "schema message" in message and "null or length 0" in message:
+                        _logger.debug(
+                            "serve loop ending at client EOF",
+                            extra={"server_id": self._server_id},
+                        )
+                    else:
+                        _logger.warning(
+                            "serve loop ending due to ArrowInvalid",
+                            exc_info=True,
+                            extra={"server_id": self._server_id},
+                        )
                     break
         finally:
             conn_shm.close()

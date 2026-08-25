@@ -146,6 +146,28 @@ class TestPipeTransport:
             thread.join(timeout=5)
             server_transport.close()
 
+    def test_clean_client_disconnect_is_not_logged_as_invalid_arrow(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Closing a reused connection is ordinary EOF, not corrupt IPC."""
+        client_transport, server_transport = make_unix_pair()
+        server = RpcServer(_KindService, _NoHookImpl())
+        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+
+        with caplog.at_level(logging.WARNING, logger="vgi_rpc.rpc"):
+            thread.start()
+            try:
+                from vgi_rpc.rpc._client import _RpcProxy
+
+                proxy = _RpcProxy(_KindService, client_transport, None)
+                assert proxy.report_kind() == "unix"
+                assert proxy.report_kind() == "unix"
+            finally:
+                client_transport.close()
+                thread.join(timeout=5)
+                server_transport.close()
+
+        assert not thread.is_alive()
+        assert not any("ArrowInvalid" in record.message for record in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Shared-memory pipe transport
