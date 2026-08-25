@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import socket
@@ -13,6 +14,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from enum import Enum
 from io import BufferedReader, IOBase, RawIOBase
@@ -40,6 +42,19 @@ def _stderr_open() -> bool:
 # gigabyte.
 _MAX_WRITE_CHUNK = 1 << 30  # 1 GiB
 _MAX_READ_CHUNK = _MAX_WRITE_CHUNK
+
+# ``accept(2)`` can fail temporarily when a burst of parallel scan/window
+# connections reaches the process or system fd budget. The listening socket is
+# still valid in that case; existing handlers closing their connections will
+# make room. Treating it like EBADF permanently shuts down and unlinks a Unix
+# listener, stranding every subsequent client.
+_TRANSIENT_ACCEPT_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM})
+_ACCEPT_RESOURCE_RETRY_DELAY = 0.05
+
+
+def _accept_resource_exhausted(exc: OSError) -> bool:
+    """Whether *exc* is temporary listener resource pressure."""
+    return exc.errno in _TRANSIENT_ACCEPT_ERRNOS
 
 
 class _ExactWriter(RawIOBase):
@@ -716,7 +731,10 @@ def _serve_socket_sequential(
     while True:
         try:
             conn, _ = sock.accept()
-        except OSError:
+        except OSError as exc:
+            if _accept_resource_exhausted(exc):
+                time.sleep(_ACCEPT_RESOURCE_RETRY_DELAY)
+                continue
             break
         transport = transport_factory(conn)
         try:
@@ -798,8 +816,6 @@ def _serve_socket_threaded(
 
     def _handle(conn: socket.socket) -> None:
         nonlocal conn_count
-        if semaphore is not None:
-            semaphore.acquire()
         transport = transport_factory(conn)
         try:
             server.serve(transport)
@@ -817,14 +833,27 @@ def _serve_socket_threaded(
 
     try:
         while True:
+            # Reserve a handler slot *before* accepting. Acquiring inside the
+            # handler still lets the accept loop open an unbounded number of
+            # sockets and threads that merely wait on the semaphore, defeating
+            # the fd/memory cap it is meant to provide.
+            if semaphore is not None:
+                semaphore.acquire()
             try:
                 conn, _ = sock.accept()
             except TimeoutError:
+                if semaphore is not None:
+                    semaphore.release()
                 with state_lock:
                     if shutdown_requested:
                         break
                 continue
-            except OSError:
+            except OSError as exc:
+                if semaphore is not None:
+                    semaphore.release()
+                if _accept_resource_exhausted(exc):
+                    time.sleep(_ACCEPT_RESOURCE_RETRY_DELAY)
+                    continue
                 break
             conn.settimeout(None)  # accepted connections must be blocking
             with state_lock:

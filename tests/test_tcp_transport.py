@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import threading
 from typing import Protocol
 
@@ -13,6 +14,7 @@ import pytest
 from vgi_rpc.rpc import (
     RpcServer,
     TcpTransport,
+    _transport,
     make_tcp_pair,
     serve_tcp,
     tcp_connect,
@@ -104,6 +106,110 @@ def test_idle_timeout_requires_threaded() -> None:
     server = RpcServer(_EchoService, _EchoImpl())
     with pytest.raises(ValueError, match="idle_timeout requires threaded=True"):
         serve_tcp(server, "127.0.0.1", 0, idle_timeout=1.0)
+
+
+def test_threaded_listener_survives_temporary_fd_exhaustion() -> None:
+    """EMFILE pauses accept instead of permanently killing the listener."""
+
+    class FakeConnection:
+        def settimeout(self, _timeout: float | None) -> None:
+            pass
+
+        def fileno(self) -> int:
+            return 42
+
+    class FakeListener:
+        calls = 0
+
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def accept(self) -> tuple[FakeConnection, None]:
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError(errno.EMFILE, "too many open files")
+            if self.calls == 2:
+                return FakeConnection(), None
+            raise OSError(errno.EBADF, "listener closed")
+
+    class FakeTransport:
+        def close(self) -> None:
+            pass
+
+    class FakeServer:
+        calls = 0
+
+        def serve(self, _transport: FakeTransport) -> None:
+            self.calls += 1
+
+    listener = FakeListener()
+    server = FakeServer()
+    _transport._serve_socket_threaded(
+        server,  # type: ignore[arg-type]
+        listener,  # type: ignore[arg-type]
+        None,
+        None,
+        lambda _conn: FakeTransport(),  # type: ignore[arg-type,return-value]
+        "test-listener",
+    )
+
+    assert listener.calls == 3
+    assert server.calls == 1
+
+
+def test_max_connections_limits_accepts_not_only_handlers() -> None:
+    """A saturated handler cap leaves excess sockets in the listen backlog."""
+
+    class FakeConnection:
+        def settimeout(self, _timeout: float | None) -> None:
+            pass
+
+        def fileno(self) -> int:
+            return 42
+
+    class FakeListener:
+        calls = 0
+
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def accept(self) -> tuple[FakeConnection, None]:
+            self.calls += 1
+            if self.calls <= 2:
+                return FakeConnection(), None
+            raise OSError(errno.EBADF, "listener closed")
+
+    class FakeTransport:
+        def close(self) -> None:
+            pass
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    class FakeServer:
+        calls = 0
+
+        def serve(self, _transport: FakeTransport) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                first_started.set()
+                assert release_first.wait(2)
+
+    listener = FakeListener()
+    server = FakeServer()
+    serving = threading.Thread(
+        target=_transport._serve_socket_threaded,
+        args=(server, listener, 1, None, lambda _conn: FakeTransport(), "test-listener"),
+    )
+    serving.start()
+    assert first_started.wait(2)
+    assert listener.calls == 1, "second connection was accepted while the only slot was occupied"
+    release_first.set()
+    serving.join(2)
+
+    assert not serving.is_alive()
+    assert listener.calls == 3
+    assert server.calls == 2
 
 
 def test_tcp_connect_host_port_parsing() -> None:

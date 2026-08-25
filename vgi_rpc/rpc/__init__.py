@@ -496,6 +496,15 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             "(only meaningful with --unix/--tcp; default True when either is set)."
         ),
     )
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_MAX_CONNECTIONS", "64")),
+        help=(
+            "Maximum concurrent --unix/--tcp connections; excess clients wait in the socket backlog. "
+            "Use 0 for unlimited. Env: VGI_RPC_MAX_CONNECTIONS (default 64)."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=0, help="HTTP port (default: auto-select)")
     parser.add_argument(
@@ -673,6 +682,7 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     elif args.unix is not None:
         threaded = True if args.threaded is None else args.threaded
         idle_timeout: float | None = args.idle_timeout if args.idle_timeout > 0 else None
+        max_connections: int | None = args.max_connections if args.max_connections > 0 else None
 
         if sys.platform == "win32":
             # CPython has no AF_UNIX on Windows; --unix carries a named-pipe name
@@ -688,6 +698,7 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
                 server,
                 pipe_name,
                 threaded=threaded,
+                max_connections=max_connections,
                 idle_timeout=idle_timeout,
                 on_bound=_emit_discovery_line,
             )
@@ -704,12 +715,14 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
                 server,
                 absolute_path,
                 threaded=threaded,
+                max_connections=max_connections,
                 idle_timeout=idle_timeout,
                 on_bound=_emit_discovery_line,
             )
     elif args.tcp is not None:
         threaded = True if args.threaded is None else args.threaded
         idle_timeout = args.idle_timeout if args.idle_timeout > 0 else None
+        max_connections = args.max_connections if args.max_connections > 0 else None
 
         if ":" in args.tcp:
             host_part, _, port_part = args.tcp.rpartition(":")
@@ -733,6 +746,7 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
             tcp_host,
             tcp_port,
             threaded=threaded,
+            max_connections=max_connections,
             idle_timeout=idle_timeout,
             on_bound=_emit_tcp_discovery_line,
         )
