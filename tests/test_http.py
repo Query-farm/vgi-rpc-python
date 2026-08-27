@@ -2110,6 +2110,23 @@ class TestRequestId:
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 
+def test_httpx2_runtime_decodes_zstd_responses() -> None:
+    """The HTTP extra must install the decoder used by httpx2 2.12+ on Python 3.13."""
+    import httpx2
+    import zstandard
+
+    payload = b"canonical-zstd-response" * 100
+    encoded = zstandard.ZstdCompressor().compress(payload)
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, headers={"Content-Encoding": "zstd"}, content=encoded)
+
+    with httpx2.Client(transport=httpx2.MockTransport(handler)) as client:
+        response = client.get("https://example.test/")
+
+    assert response.content == payload
+
+
 class TestZstdCompression:
     """Tests for transparent zstd compression on the HTTP transport."""
 
