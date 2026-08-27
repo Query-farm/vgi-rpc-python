@@ -45,11 +45,18 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import IO, Final
+from typing import IO, TYPE_CHECKING, Final
 
 from filelock import FileLock, Timeout
+
+from vgi_rpc.external import ExternalLocationConfig
+from vgi_rpc.log import Message
+from vgi_rpc.utils import IpcValidation
+
+if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
 
 _logger = logging.getLogger("vgi_rpc.launcher")
 
@@ -340,6 +347,86 @@ def launch(config: LaunchConfig) -> str:
         if hash_id is not None:
             with contextlib.suppress(Exception):
                 gc_state_dir(state_dir, limit=_DEFAULT_GC_LIMIT, exclude_hash=hash_id)
+
+
+# Errors that mean "the socket at this path is no longer a live worker" —
+# the retry case in `resolve_and_connect`, as opposed to a protocol-level
+# failure once connected (which propagates normally, no retry).
+_STALE_SOCKET_ERRORS = (ConnectionRefusedError, ConnectionResetError, FileNotFoundError, TimeoutError)
+
+
+@contextlib.contextmanager
+def resolve_and_connect[P](
+    protocol: type[P],
+    config: LaunchConfig,
+    *,
+    on_log: Callable[[Message], None] | None = None,
+    external_location: ExternalLocationConfig | None = None,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
+) -> Iterator[P]:
+    """Launch (or reuse) a worker and connect to it, tolerating a stale socket.
+
+    `launch()` returns a socket path it has just verified live via a connect
+    probe — but the worker can self-terminate (idle timeout) or otherwise die
+    in the window between that probe and this function's own connect; the
+    launcher's socket-path liveness is a point-in-time fact, not a guarantee
+    that survives to the next syscall. On a connect failure that looks like
+    "nothing is listening there anymore" (see `_STALE_SOCKET_ERRORS`), this
+    re-`launch()`s once — which notices the stale socket/lock and spawns a
+    fresh worker — and retries the connect exactly once more before giving
+    up. This mirrors the VGI DuckDB extension's own `ResolveAndConnect`
+    (`vgi_launcher_cache.hpp`), the reference implementation this is a
+    Python port of; `launch()` and `unix_connect()` alone (without this
+    wrapper) are each correct in isolation but don't compose safely across
+    that race.
+
+    Only the *connect* step is retried. Once connected, a failure during the
+    RPC session itself (a protocol error, the worker crashing mid-call, ...)
+    propagates normally through the yielded proxy — it is never silently
+    retried, since the caller may already have sent state-changing requests
+    on this session that a fresh connection can't safely replay.
+
+    Args:
+        protocol: The Protocol class defining the RPC interface.
+        config: Launch parameters — see `LaunchConfig`.
+        on_log: Optional callback for log messages from the server.
+        external_location: Optional `ExternalLocationConfig` for resolving
+            and producing externalized batches.
+        ipc_validation: Validation level for incoming IPC batches.
+
+    Yields:
+        A typed RPC proxy supporting all methods defined on *protocol*.
+
+    Raises:
+        RuntimeError: If the connect still fails after one re-launch retry.
+
+    """
+    from vgi_rpc.rpc import unix_connect
+
+    ctx: AbstractContextManager[P] | None = None
+    proxy: P | None = None
+    last_error: Exception | None = None
+    for attempt in range(2):
+        path = launch(config)
+        try:
+            ctx = unix_connect(
+                protocol, path, on_log=on_log, external_location=external_location, ipc_validation=ipc_validation
+            )
+            proxy = ctx.__enter__()
+            break
+        except _STALE_SOCKET_ERRORS as exc:
+            last_error = exc
+            ctx = None
+            if attempt == 0:
+                _logger.debug("connect to %s failed (%r) — re-launching and retrying once", path, exc)
+                continue
+            raise RuntimeError(f"failed to connect to launched worker at {path} after one retry") from last_error
+
+    assert ctx is not None and proxy is not None  # the loop above always breaks or raises
+    try:
+        yield proxy
+    finally:
+        ctx.__exit__(None, None, None)
 
 
 @dataclasses.dataclass(frozen=True)

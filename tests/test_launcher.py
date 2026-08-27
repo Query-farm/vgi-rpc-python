@@ -6,6 +6,9 @@
 Coverage:
 
 * Smoke: launch → discover ``UNIX:<path>`` → connect → introspect.
+* ``resolve_and_connect``: smoke (launch+connect+RPC call in one), retry-once
+  recovery from a stale-at-connect-time path, and a clear error once the
+  retry is exhausted too.
 * Single-instance: concurrent launchers serialise on the per-hash flock; only
   one worker is ever spawned for the same tuple.
 * Defensive bind: ``serve_unix`` refuses to clobber a path with an existing
@@ -45,6 +48,8 @@ from typing import Any, cast
 
 import pytest
 
+import vgi_rpc.launcher as launcher_module
+from tests._fixture_service import RpcFixtureService
 from vgi_rpc.launcher import (
     GcResult,
     LaunchConfig,
@@ -52,6 +57,7 @@ from vgi_rpc.launcher import (
     default_state_dir,
     gc_state_dir,
     launch,
+    resolve_and_connect,
     status_rows,
 )
 
@@ -144,6 +150,60 @@ def test_smoke_launch_and_connect(state_dir: Path) -> None:
     _connect_and_close(path)
     # Disconnected; idle timer should fire within idle_timeout + slack.
     assert _wait_for_path_gone(path, timeout=10.0), "worker did not idle-shutdown"
+
+
+@_SKIP_WIN
+def test_resolve_and_connect_smoke(state_dir: Path) -> None:
+    """Launch (via resolve_and_connect) and make one real RPC call through the proxy."""
+    config = LaunchConfig(
+        worker_argv=tuple(_worker_argv()),
+        idle_timeout=5.0,
+        connect_timeout=10.0,
+        worker_startup_timeout=15.0,
+        state_dir=str(state_dir),
+    )
+    with resolve_and_connect(RpcFixtureService, config) as proxy:
+        assert proxy.add(a=2, b=3) == 5
+
+
+@_SKIP_WIN
+def test_resolve_and_connect_retries_once_on_stale_first_path(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connect failure on the first resolved path triggers exactly one re-launch and retry.
+
+    `launch()` itself is monkeypatched (not the socket layer) to deterministically force
+    the race `resolve_and_connect` exists to cover — a path that resolved live a moment
+    ago but has nothing listening by the time the connect actually happens — without
+    depending on real timing.
+    """
+    config = LaunchConfig(
+        worker_argv=tuple(_worker_argv()),
+        idle_timeout=5.0,
+        connect_timeout=10.0,
+        worker_startup_timeout=15.0,
+        state_dir=str(state_dir),
+    )
+    real_launch = launcher_module.launch
+    dead_path = str(state_dir / "x1.sock")
+    calls: list[LaunchConfig] = []
+
+    def fake_launch(cfg: LaunchConfig) -> str:
+        calls.append(cfg)
+        return dead_path if len(calls) == 1 else real_launch(cfg)
+
+    monkeypatch.setattr(launcher_module, "launch", fake_launch)
+    with resolve_and_connect(RpcFixtureService, config) as proxy:
+        assert proxy.add(a=4, b=5) == 9
+    assert len(calls) == 2, "expected exactly one retry (two launch() calls total)"
+
+
+@_SKIP_WIN
+def test_resolve_and_connect_raises_after_exhausting_retry(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two consecutive dead paths surface a clear RuntimeError, not an infinite retry loop."""
+    config = LaunchConfig(worker_argv=tuple(_worker_argv()), state_dir=str(state_dir))
+    dead_path = str(state_dir / "x2.sock")
+    monkeypatch.setattr(launcher_module, "launch", lambda cfg: dead_path)
+    with pytest.raises(RuntimeError, match="after one retry"), resolve_and_connect(RpcFixtureService, config):
+        pass
 
 
 @_SKIP_WIN
