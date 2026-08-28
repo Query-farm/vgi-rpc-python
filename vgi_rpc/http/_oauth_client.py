@@ -286,17 +286,19 @@ class OAuthTokenSet:
 
 
 class OAuthTokenError(Exception):
-    """A token/device/refresh endpoint returned a structured OAuth error.
-
-    Attributes:
-        error_code: The endpoint's ``error`` field (e.g. ``"invalid_grant"``,
-            ``"authorization_pending"``, ``"access_denied"``), or "" if the
-            response wasn't a recognizable OAuth error body.
-        error_description: The endpoint's ``error_description`` field, if any.
-
-    """
+    """A token/device/refresh endpoint returned a structured OAuth error."""
 
     def __init__(self, message: str, *, error_code: str = "", error_description: str = "") -> None:
+        """Build the error, carrying the endpoint's structured error fields alongside the message.
+
+        Args:
+            message: Human-readable summary, as raised.
+            error_code: The endpoint's ``error`` field (e.g. ``"invalid_grant"``,
+                ``"authorization_pending"``, ``"access_denied"``), or "" if the
+                response wasn't a recognizable OAuth error body.
+            error_description: The endpoint's ``error_description`` field, if any.
+
+        """
         super().__init__(message)
         self.error_code = error_code
         self.error_description = error_description
@@ -368,6 +370,14 @@ def select_device_code_client(
     3. Else the challenge's ``client_id`` (+ ``client_secret`` -- note the
        secret still comes from resource metadata, never from the challenge,
        since the challenge never carries one).
+
+    Args:
+        device_client_id: Resource metadata's ``device_code_client_id``, or "".
+        device_client_secret: Resource metadata's ``device_code_client_secret``, or "".
+        client_id: Resource metadata's ordinary ``client_id``, or "".
+        client_secret: Resource metadata's ordinary ``client_secret``, or "".
+        challenge_client_id: The ``client_id`` parsed from the ``WWW-Authenticate``
+            challenge, or "" if it carried none.
 
     Returns:
         ``(client_id, client_secret)``.
@@ -467,6 +477,15 @@ def attempt_token_refresh(
 ) -> OAuthTokenSet:
     """Exchange a refresh_token for a fresh :class:`OAuthTokenSet`.
 
+    Args:
+        ctx: Where and as whom to make the refresh request.
+        refresh_token: The refresh token to exchange.
+        http_client: The (unauthenticated) client to send the request on.
+
+    Returns:
+        The freshly obtained token set, with ``refresh_token`` preserved
+        from the input if the response omitted one.
+
     Raises:
         OAuthTokenError: On any non-200 response, with ``.error_code`` set
             when the endpoint returned a structured OAuth error body.
@@ -517,6 +536,19 @@ def perform_device_code_flow(
     Blocks for as long as it takes a human to visit the verification URL and
     enter the user code, up to *timeout_seconds* (further capped by the
     server's own ``expires_in``).
+
+    Args:
+        challenge: The parsed ``WWW-Authenticate`` challenge that triggered this flow.
+        resource_meta: The fetched RFC 9728 resource metadata.
+        server_meta: The fetched RFC 8414 authorization-server metadata.
+        http_client: The (unauthenticated) client to send flow requests on.
+        timeout_seconds: How long to wait for the human to complete login.
+        on_prompt: Optional callback invoked with the "visit this URL, enter
+            this code" message, in addition to the default stderr/log output.
+
+    Returns:
+        The obtained token set, and the refresh context to use for future
+        silent refreshes of it.
 
     Raises:
         ValueError: If the server doesn't advertise a usable device flow.
