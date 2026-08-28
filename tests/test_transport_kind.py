@@ -146,6 +146,7 @@ class TestPipeTransport:
             thread.join(timeout=5)
             server_transport.close()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is unavailable on Windows")
     def test_clean_client_disconnect_is_not_logged_as_invalid_arrow(self, caplog: pytest.LogCaptureFixture) -> None:
         """Closing a reused connection is ordinary EOF, not corrupt IPC."""
         client_transport, server_transport = make_unix_pair()
