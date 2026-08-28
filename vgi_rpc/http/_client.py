@@ -12,7 +12,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import re
 import struct
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -2091,6 +2090,15 @@ class OAuthResourceMetadataResponse:
         device_code_client_secret: OAuth client_secret to use specifically
             for the device code grant flow.  Custom extension (not in
             RFC 9728).
+        token_endpoint: When set, the client should send its
+            ``authorization_code``/``refresh_token`` grant token-exchange
+            requests here instead of the authorization server's own
+            discovered ``token_endpoint`` -- a non-standard extension
+            pointing at the vgi-rpc server's own ``/_oauth/token`` proxy,
+            which injects a server-side ``client_secret`` before forwarding
+            to the IdP (what makes secret-less PKCE work for public
+            clients). Device-code requests are unaffected -- see
+            ``vgi_rpc.http._oauth_client``'s module docstring.
 
     """
 
@@ -2108,6 +2116,7 @@ class OAuthResourceMetadataResponse:
     use_id_token_as_bearer: bool = False
     device_code_client_id: str | None = None
     device_code_client_secret: str | None = None
+    token_endpoint: str | None = None
 
 
 def http_oauth_metadata(
@@ -2161,12 +2170,80 @@ def http_oauth_metadata(
             client.close()
 
 
-_RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"')
-_CLIENT_ID_RE = re.compile(r'client_id="([^"]+)"')
-_CLIENT_SECRET_RE = re.compile(r'client_secret="([^"]+)"')
-_USE_ID_TOKEN_RE = re.compile(r'use_id_token_as_bearer="([^"]+)"')
-_DEVICE_CODE_CLIENT_ID_RE = re.compile(r'device_code_client_id="([^"]+)"')
-_DEVICE_CODE_CLIENT_SECRET_RE = re.compile(r'device_code_client_secret="([^"]+)"')
+def parse_www_authenticate_params(www_authenticate: str) -> dict[str, str]:
+    """Parse every auth-param out of a ``WWW-Authenticate: Bearer ...`` header.
+
+    A real RFC 7235 auth-param parser, not a substring search. The earlier
+    implementation of the six ``parse_*`` functions below used
+    ``re.search(r'client_id="([^"]+)"', ...)`` per field — which also matches
+    *inside* ``device_code_client_id="..."``, so a header advertising both
+    would report the device-only client as the general-purpose one (this was
+    a real, live, untested bug — the C++ reference implementation's
+    ``ParseAuthParams`` documents fixing the identical issue). This parser
+    reads one param at a time and never substring-matches a longer name.
+
+    Handles quoted values (which may contain commas/equals signs and
+    backslash escapes), unquoted token values, and case-insensitive
+    parameter names. Later duplicate names overwrite earlier ones. The
+    leading scheme token (``Bearer``) has no following ``=`` and is silently
+    skipped as a bare token rather than being misattributed a value from the
+    next parameter.
+
+    Args:
+        www_authenticate: The full ``WWW-Authenticate`` header value,
+            including the leading ``Bearer`` scheme token.
+
+    Returns:
+        A dict of lowercased parameter name to value. Empty if the header
+        has no recognizable params.
+
+    """
+    out: dict[str, str] = {}
+    i = 0
+    n = len(www_authenticate)
+    while i < n:
+        # Skip separators: commas and whitespace.
+        while i < n and (www_authenticate[i] == "," or www_authenticate[i].isspace()):
+            i += 1
+        if i >= n:
+            break
+        # Read the parameter name (or bare scheme token).
+        name_start = i
+        while i < n and www_authenticate[i] not in "=, \t\r\n":
+            i += 1
+        if i == name_start:
+            break  # Nothing left to parse.
+        name = www_authenticate[name_start:i].lower()
+        while i < n and www_authenticate[i].isspace():
+            i += 1
+        if i >= n or www_authenticate[i] != "=":
+            # Bare token (e.g. the leading "Bearer") with no value -- leave
+            # `i` where it is so the next token is parsed as its own name,
+            # rather than treating it as this token's value.
+            continue
+        i += 1  # consume '='
+        while i < n and www_authenticate[i].isspace():
+            i += 1
+        if i < n and www_authenticate[i] == '"':
+            i += 1
+            value_chars: list[str] = []
+            while i < n and www_authenticate[i] != '"':
+                if www_authenticate[i] == "\\" and i + 1 < n:
+                    value_chars.append(www_authenticate[i + 1])
+                    i += 2
+                else:
+                    value_chars.append(www_authenticate[i])
+                    i += 1
+            value = "".join(value_chars)
+            if i < n:
+                i += 1  # consume closing '"'
+        else:
+            value_start = i
+            while i < n and www_authenticate[i] not in ", \t\r\n":
+                i += 1
+            value = www_authenticate[value_start:i]
+        out[name] = value
+    return out
 
 
 def parse_resource_metadata_url(www_authenticate: str) -> str | None:
@@ -2184,8 +2261,7 @@ def parse_resource_metadata_url(www_authenticate: str) -> str | None:
         contain a ``resource_metadata`` parameter.
 
     """
-    match = _RESOURCE_METADATA_RE.search(www_authenticate)
-    return match.group(1) if match else None
+    return parse_www_authenticate_params(www_authenticate).get("resource_metadata")
 
 
 def parse_client_id(www_authenticate: str) -> str | None:
@@ -2202,8 +2278,7 @@ def parse_client_id(www_authenticate: str) -> str | None:
         The client_id string, or ``None`` if not present.
 
     """
-    match = _CLIENT_ID_RE.search(www_authenticate)
-    return match.group(1) if match else None
+    return parse_www_authenticate_params(www_authenticate).get("client_id")
 
 
 def parse_client_secret(www_authenticate: str) -> str | None:
@@ -2220,8 +2295,7 @@ def parse_client_secret(www_authenticate: str) -> str | None:
         The client_secret string, or ``None`` if not present.
 
     """
-    match = _CLIENT_SECRET_RE.search(www_authenticate)
-    return match.group(1) if match else None
+    return parse_www_authenticate_params(www_authenticate).get("client_secret")
 
 
 def parse_use_id_token_as_bearer(www_authenticate: str) -> bool:
@@ -2239,8 +2313,7 @@ def parse_use_id_token_as_bearer(www_authenticate: str) -> bool:
         ``False`` otherwise.
 
     """
-    match = _USE_ID_TOKEN_RE.search(www_authenticate)
-    return match.group(1) == "true" if match else False
+    return parse_www_authenticate_params(www_authenticate).get("use_id_token_as_bearer") == "true"
 
 
 def parse_device_code_client_id(www_authenticate: str) -> str | None:
@@ -2257,8 +2330,7 @@ def parse_device_code_client_id(www_authenticate: str) -> str | None:
         The device_code_client_id string, or ``None`` if not present.
 
     """
-    match = _DEVICE_CODE_CLIENT_ID_RE.search(www_authenticate)
-    return match.group(1) if match else None
+    return parse_www_authenticate_params(www_authenticate).get("device_code_client_id")
 
 
 def parse_device_code_client_secret(www_authenticate: str) -> str | None:
@@ -2275,8 +2347,7 @@ def parse_device_code_client_secret(www_authenticate: str) -> str | None:
         The device_code_client_secret string, or ``None`` if not present.
 
     """
-    match = _DEVICE_CODE_CLIENT_SECRET_RE.search(www_authenticate)
-    return match.group(1) if match else None
+    return parse_www_authenticate_params(www_authenticate).get("device_code_client_secret")
 
 
 def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
@@ -2313,6 +2384,7 @@ def _parse_metadata_json(body: dict[str, Any]) -> OAuthResourceMetadataResponse:
         use_id_token_as_bearer=body.get("use_id_token_as_bearer", False),
         device_code_client_id=body.get("device_code_client_id"),
         device_code_client_secret=body.get("device_code_client_secret"),
+        token_endpoint=body.get("token_endpoint"),
     )
 
 
@@ -2351,6 +2423,109 @@ def fetch_oauth_metadata(
             raise ValueError(f"Failed to fetch OAuth metadata from {metadata_url}: HTTP {resp.status_code}")
         body: dict[str, Any] = json.loads(resp.content)
         return _parse_metadata_json(body)
+    finally:
+        if own_client:
+            client.close()
+
+
+# ---------------------------------------------------------------------------
+# OAuth Authorization Server Metadata discovery (RFC 8414 / OIDC discovery)
+# ---------------------------------------------------------------------------
+#
+# Distinct from the RFC 9728 *resource* metadata above: that document
+# describes the protected resource (this VGI worker) and points at an
+# authorization server by issuer URL; this section describes the
+# authorization server itself (where to send a device-code or
+# authorization-code request, and where to exchange one for a token).
+
+
+@dataclass(frozen=True)
+class OAuthServerMetadata:
+    """Parsed RFC 8414 / OIDC discovery metadata for an authorization server.
+
+    Returned by ``fetch_auth_server_metadata()``. Mirrors the C++ VGI
+    extension's ``OAuthServerMetadata`` (``vgi_oauth.hpp``).
+
+    Attributes:
+        authorization_endpoint: Where to send a browser for the PKCE
+            authorization-code flow. Empty if the server doesn't support it.
+        token_endpoint: Where to exchange a code, refresh token, or
+            device code for tokens.
+        device_authorization_endpoint: Where to start an RFC 8628 device-code
+            flow. Empty if the server doesn't support it.
+        grant_types_supported: Grant types the server advertises support
+            for. An empty tuple means "unspecified" -- ``supports_grant_type``
+            treats that as unrestricted rather than as "supports nothing".
+
+    """
+
+    authorization_endpoint: str = ""
+    token_endpoint: str = ""
+    device_authorization_endpoint: str = ""
+    grant_types_supported: tuple[str, ...] = ()
+
+    def supports_grant_type(self, grant_type: str) -> bool:
+        """Whether the server advertises support for *grant_type*.
+
+        An empty ``grant_types_supported`` means the server didn't say --
+        treated as unrestricted (``True``) rather than as "supports
+        nothing", matching the C++ reference's
+        ``OAuthServerMetadata::SupportsGrantType``.
+        """
+        if not self.grant_types_supported:
+            return True
+        return grant_type in self.grant_types_supported
+
+
+def fetch_auth_server_metadata(
+    issuer_url: str,
+    *,
+    client: httpx2.Client | _SyncTestClient | None = None,
+) -> OAuthServerMetadata:
+    """Discover an authorization server's OIDC/OAuth metadata (RFC 8414).
+
+    Sends ``GET {issuer_url with one trailing slash stripped}/.well-known/openid-configuration``.
+
+    Args:
+        issuer_url: The authorization server's issuer URL (typically an
+            ``OAuthResourceMetadataResponse.authorization_servers[0]`` entry).
+        client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
+
+    Returns:
+        The parsed ``OAuthServerMetadata``.
+
+    Raises:
+        ValueError: If the server returns a non-200 status code, the body
+            isn't valid JSON, ``token_endpoint`` is missing, or the server
+            advertises neither ``authorization_endpoint`` nor
+            ``device_authorization_endpoint`` (nothing this flow could use).
+
+    """
+    own_client = client is None
+    if client is None:
+        client = httpx2.Client(follow_redirects=True)
+
+    try:
+        url = issuer_url[:-1] if issuer_url.endswith("/") else issuer_url
+        url = f"{url}/.well-known/openid-configuration"
+        resp: httpx2.Response | _SyncTestResponse = client.get(url)
+        if resp.status_code != HTTPStatus.OK:
+            raise ValueError(f"Failed to fetch authorization server metadata from {url}: HTTP {resp.status_code}")
+        body: dict[str, Any] = json.loads(resp.content)
+        token_endpoint = body.get("token_endpoint", "")
+        if not token_endpoint:
+            raise ValueError(f"OpenID configuration at {url} missing token_endpoint")
+        metadata = OAuthServerMetadata(
+            authorization_endpoint=body.get("authorization_endpoint", ""),
+            token_endpoint=token_endpoint,
+            device_authorization_endpoint=body.get("device_authorization_endpoint", ""),
+            grant_types_supported=tuple(body.get("grant_types_supported", ())),
+        )
+        if not metadata.authorization_endpoint and not metadata.device_authorization_endpoint:
+            raise ValueError(
+                f"OpenID configuration at {url} has neither authorization_endpoint nor device_authorization_endpoint"
+            )
+        return metadata
     finally:
         if own_client:
             client.close()

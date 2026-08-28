@@ -385,6 +385,38 @@ class TestOAuthResourceMetadata:
         assert parse_client_id('Bearer resource_metadata="https://example.com"') is None
         assert parse_client_id("") is None
 
+    def test_parse_client_id_does_not_match_inside_device_code_client_id(self) -> None:
+        """A header carrying only device_code_client_id never leaks into parse_client_id().
+
+        Regression test: an earlier implementation used
+        ``re.search(r'client_id="([^"]+)"', ...)``, which also matches
+        *inside* ``device_code_client_id="..."`` -- so a header advertising
+        only the device client would be misreported as the ordinary one.
+        """
+        header = 'Bearer resource_metadata="https://example.com", device_code_client_id="device-only"'
+        assert parse_client_id(header) is None
+        assert parse_device_code_client_id(header) == "device-only"
+
+    def test_parse_client_id_and_device_code_client_id_both_present_resolve_correctly(self) -> None:
+        """A header carrying both client_id and device_code_client_id resolves each correctly."""
+        header = (
+            'Bearer resource_metadata="https://example.com"'
+            ', client_id="ordinary-client", client_secret="ordinary-secret"'
+            ', device_code_client_id="device-client", device_code_client_secret="device-secret"'
+        )
+        assert parse_client_id(header) == "ordinary-client"
+        assert parse_client_secret(header) == "ordinary-secret"
+        assert parse_device_code_client_id(header) == "device-client"
+        assert parse_device_code_client_secret(header) == "device-secret"
+
+    def test_parse_www_authenticate_params_quoted_escapes_and_case(self) -> None:
+        """The auth-param parser handles quoted commas/escapes and case-insensitive names."""
+        from vgi_rpc.http._client import parse_www_authenticate_params
+
+        header = r'Bearer CLIENT_ID="has a comma, and a \"quote\""'
+        params = parse_www_authenticate_params(header)
+        assert params["client_id"] == 'has a comma, and a "quote"'
+
     def test_client_discovery_round_trip_with_client_id(self) -> None:
         """Client discovers client_id set on server."""
         server = RpcServer(_EchoService, _EchoImpl())

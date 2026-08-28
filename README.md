@@ -1331,6 +1331,41 @@ Clients can also discover auth requirements from a 401 response's `WWW-Authentic
 
 **`jwt_authenticate()`** creates a ready-to-use `authenticate` callback that validates Bearer JWTs against a JWKS endpoint (with automatic key refresh on unknown `kid`). If `jwks_uri` is not provided, it is discovered from the issuer's `/.well-known/openid-configuration`. Requires `pip install vgi-rpc[oauth]`.
 
+### Client-driven OAuth login (`VgiOAuthAuth`)
+
+Everything above is either server config or *discovery* — figuring out what a
+server wants. `VgiOAuthAuth` is the other half: an `httpx2.Auth` a client
+attaches to actually **obtain** a token, transparently, the first time a
+request hits a 401 carrying an RFC 9728 challenge.
+
+```python
+import httpx2
+from vgi_rpc.http import VgiOAuthAuth
+
+auth = VgiOAuthAuth(base_url="https://api.example.com", flow="auto")
+client = httpx2.Client(base_url="https://api.example.com", auth=auth)
+
+# First call: prints "Visit: ... Enter code: ..." (RFC 8628 device-code
+# flow) and blocks until login completes. Later calls reuse the cached
+# token and refresh it silently as it approaches expiry.
+resp = client.get("/vgi/catalogs")
+```
+
+Currently implemented: RFC 8628 device-code polling, RFC 8414 authorization-server
+discovery, silent token refresh, and the secret-less-proxy `token_endpoint`
+override (an IdP that requires a `client_secret` even for PKCE — this lets a
+`VgiOAuthAuth` route through the *server's* own `/_oauth/token` proxy for
+`authorization_code`/`refresh_token` grants without holding that secret
+locally; device-code requests always go straight to the authorization
+server, since that proxy doesn't forward `device_code` grants). PKCE
+(browser-driven authorization-code flow with a local loopback callback
+server) is not yet implemented — `flow="pkce"`, or `flow="auto"` against a
+server that offers only PKCE, raises a clear `NotImplementedError`.
+
+`vgi.client.Client` (vgi-python) wraps this behind `oauth=True` /
+`oauth_refresh_token=...` constructor kwargs — see its own docs for the
+end-user-facing surface.
+
 ### Transport metadata
 
 `ctx.transport_metadata` provides transport-level information (e.g. `remote_addr`, `user_agent` for HTTP). This is a read-only mapping populated by the transport layer.

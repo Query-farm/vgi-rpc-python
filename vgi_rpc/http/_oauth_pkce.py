@@ -23,7 +23,6 @@ import hashlib
 import hmac
 import json
 import logging
-import secrets
 import struct
 import threading
 import time
@@ -37,6 +36,12 @@ import httpx2
 from vgi_rpc.rpc import AuthContext
 
 from ._common import _ERROR_PAGE_STYLE, _FONT_IMPORTS, _VGI_LOGO_HTML
+from ._pkce_math import (
+    decode_jwt_payload_unverified,
+    generate_code_challenge,
+    generate_code_verifier,
+    generate_state_nonce,
+)
 from ._unauthorized import AuthFailure, AuthReason
 
 logger = logging.getLogger(__name__)
@@ -56,17 +61,10 @@ _IDENTITY_COOKIE_NAME = "_vgi_identity"
 _IDENTITY_CLAIMS = ("sub", "email", "preferred_username", "name", "picture")
 
 
-def _decode_jwt_payload(token: str) -> dict[str, object] | None:
-    """Best-effort decode of a JWT payload (no signature verification)."""
-    try:
-        parts = token.split(".")
-        if len(parts) < 2:
-            return None
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        decoded = json.loads(base64.urlsafe_b64decode(payload))
-        return decoded if isinstance(decoded, dict) else None
-    except Exception:
-        return None
+# Unverified JWT payload decode now lives in _pkce_math.py (shared with the
+# client-driven flow in _oauth_client.py). Local alias so existing call
+# sites in this file need no further changes.
+_decode_jwt_payload = decode_jwt_payload_unverified
 
 
 def _identity_cookie_value(id_token: str | None) -> str | None:
@@ -94,20 +92,13 @@ _HMAC_LEN = 32
 # ---------------------------------------------------------------------------
 
 
-def _generate_code_verifier() -> str:
-    """Generate a 43-character URL-safe random code verifier (RFC 7636 S4.1)."""
-    return secrets.token_urlsafe(32)
-
-
-def _generate_code_challenge(code_verifier: str) -> str:
-    """Compute S256 code challenge from a code verifier (RFC 7636 S4.2)."""
-    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-
-
-def _generate_state_nonce() -> str:
-    """Generate a random state nonce for CSRF protection."""
-    return secrets.token_urlsafe(24)
+# RFC 7636 math itself now lives in _pkce_math.py (shared with the
+# client-driven flow in _oauth_client.py). Kept as module-local aliases so
+# every existing call site in this file (``_generate_code_verifier()`` etc.)
+# needs no further changes.
+_generate_code_verifier = generate_code_verifier
+_generate_code_challenge = generate_code_challenge
+_generate_state_nonce = generate_state_nonce
 
 
 def _is_jwt_expired(token: str) -> bool:
