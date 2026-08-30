@@ -280,10 +280,11 @@ class _AuthMiddleware:
         paths still get transport metadata populated.
         """
         transport_metadata = _build_transport_metadata(req)
+        path = req.path
         exempt = (
             req.method == "OPTIONS"
-            or req.path.startswith("/.well-known/")
-            or any(req.path.startswith(pfx) for pfx in self._exempt_prefixes)
+            or path.startswith("/.well-known/")
+            or any(path == pfx or path.startswith(pfx + "/") for pfx in self._exempt_prefixes)
         )
         if self._authenticate is None or exempt:
             tc = _TransportContext(auth=_ANONYMOUS, transport_metadata=transport_metadata)

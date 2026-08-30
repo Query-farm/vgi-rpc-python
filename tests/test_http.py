@@ -3139,6 +3139,29 @@ class TestHealthEndpoint:
         assert body["status"] == "ok"
         c.close()
 
+    def test_auth_not_bypassed_by_health_prefixed_method_name(self) -> None:
+        """A method name merely *starting with* "health" must still require auth.
+
+        Regression test: the exempt-path check previously used an unanchored
+        ``path.startswith(pfx)`` against the bare ``{prefix}/health`` prefix, so
+        any RPC method whose name started with "health" (e.g. "healthbogus")
+        fell through to the wildcard ``{prefix}/{method}`` route without ever
+        hitting the ``authenticate`` callback. Only the exact ``/health``
+        segment (or a path nested *under* it, ``/health/...``) should be
+        exempt.
+        """
+        server = RpcServer(_AuthService, _AuthServiceImpl())
+        c = make_sync_client(
+            server,
+            token_key=b"health-test-key",
+            authenticate=_test_authenticate,
+        )
+        # No Authorization header, and a method name that merely starts with
+        # "health" — must NOT be treated as the exempt /health endpoint.
+        resp = c._client.simulate_post("/healthbogus")
+        assert resp.status_code == 401
+        c.close()
+
     def test_health_disabled(self) -> None:
         """When enable_health_endpoint=False, GET /health is not served."""
         c = make_sync_client(

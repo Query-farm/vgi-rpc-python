@@ -1176,9 +1176,12 @@ def serve_named_pipe(
             _arm_timer_locked(max(idle_timeout, 60.0))
 
     def _handle(handle: object) -> None:
+        # The semaphore slot for this connection was already reserved by the
+        # accept loop *before* the pipe instance was created (see the loop
+        # below) — acquiring here instead would let the loop create an
+        # unbounded number of pipe instances and threads that merely wait on
+        # the semaphore, defeating the connection cap it is meant to provide.
         nonlocal conn_count
-        if semaphore is not None:
-            semaphore.acquire()
         transport = NamedPipeTransport(handle)
         try:
             server.serve(transport)
@@ -1197,6 +1200,13 @@ def serve_named_pipe(
     bound = False
     try:
         while True:
+            # Reserve a handler slot *before* creating the next pipe instance,
+            # mirroring _serve_socket_threaded: acquiring inside the handler
+            # would let this loop open an unbounded number of pipe instances
+            # and threads that merely wait on the semaphore, defeating the
+            # cap max_connections is meant to provide.
+            if semaphore is not None:
+                semaphore.acquire()
             handle = win32pipe.CreateNamedPipe(
                 pipe_name,
                 win32pipe.PIPE_ACCESS_DUPLEX,
@@ -1217,10 +1227,14 @@ def serve_named_pipe(
                 # ERROR_PIPE_CONNECTED: a client connected between Create and Connect.
                 if exc.winerror != winerror.ERROR_PIPE_CONNECTED:
                     win32file.CloseHandle(handle)
+                    if semaphore is not None:
+                        semaphore.release()
                     break
             with state_lock:
                 if shutdown_requested:
                     win32file.CloseHandle(handle)  # this was the self-connect probe
+                    if semaphore is not None:
+                        semaphore.release()
                     break
                 conn_count += 1
                 _cancel_timer_locked()
