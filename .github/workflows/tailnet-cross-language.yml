@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  go-rust:
-    name: Go and Rust bidirectional qualification
+  go-rust-typescript:
+    name: Go, Rust, and TypeScript bidirectional qualification
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: tailnet-integration
@@ -44,10 +44,15 @@ jobs:
         run: |
           go_revision="$(jq -r .go tests/tailnet/revisions.json)"
           rust_revision="$(jq -r .rust tests/tailnet/revisions.json)"
+          typescript_revision="$(jq -r .typescript tests/tailnet/revisions.json)"
           [[ "$go_revision" =~ ^[0-9a-f]{40}$ ]]
           [[ "$rust_revision" =~ ^[0-9a-f]{40}$ ]]
-          echo "go=$go_revision" >> "$GITHUB_OUTPUT"
-          echo "rust=$rust_revision" >> "$GITHUB_OUTPUT"
+          [[ "$typescript_revision" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "go=$go_revision"
+            echo "rust=$rust_revision"
+            echo "typescript=$typescript_revision"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
         with:
@@ -61,13 +66,21 @@ jobs:
           path: vgi-rpc-rust
           ref: ${{ steps.revisions.outputs.rust }}
 
+      - uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-rpc-typescript
+          path: vgi-rpc-typescript
+          ref: ${{ steps.revisions.outputs.typescript }}
+
       - name: Report resolved implementation revisions
         shell: bash
         run: |
           go_revision="$(git -C vgi-rpc-go rev-parse HEAD)"
           rust_revision="$(git -C vgi-rpc-rust rev-parse HEAD)"
+          typescript_revision="$(git -C vgi-rpc-typescript rev-parse HEAD)"
           test "$go_revision" = "${{ steps.revisions.outputs.go }}"
           test "$rust_revision" = "${{ steps.revisions.outputs.rust }}"
+          test "$typescript_revision" = "${{ steps.revisions.outputs.typescript }}"
           {
             echo "### Cross-language implementation revisions"
             echo
@@ -75,6 +88,7 @@ jobs:
             echo "| --- | --- |"
             echo "| Go | \`$go_revision\` |"
             echo "| Rust | \`$rust_revision\` |"
+            echo "| TypeScript | \`$typescript_revision\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check kernel networking support
@@ -87,4 +101,5 @@ jobs:
         env:
           TAILNET_GO_SOURCE: ${{ github.workspace }}/vgi-rpc-go
           TAILNET_RUST_SOURCE: ${{ github.workspace }}/vgi-rpc-rust
+          TAILNET_TYPESCRIPT_SOURCE: ${{ github.workspace }}/vgi-rpc-typescript
         run: tests/tailnet/run_cross_language.sh

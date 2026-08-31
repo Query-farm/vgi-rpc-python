@@ -25,13 +25,15 @@ for name in \
   TAILNET_EXPECTED_CAPABILITY \
   TAILNET_EXPECTED_CLIENT_TAG \
   TAILNET_GO_SOURCE \
-  TAILNET_RUST_SOURCE; do
+  TAILNET_RUST_SOURCE \
+  TAILNET_TYPESCRIPT_SOURCE; do
   require_variable "$name"
 done
 
 TAILNET_GO_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["go"])' "$REVISION_MANIFEST")"
 TAILNET_RUST_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rust"])' "$REVISION_MANIFEST")"
-for revision in "$TAILNET_GO_REVISION" "$TAILNET_RUST_REVISION"; do
+TAILNET_TYPESCRIPT_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["typescript"])' "$REVISION_MANIFEST")"
+for revision in "$TAILNET_GO_REVISION" "$TAILNET_RUST_REVISION" "$TAILNET_TYPESCRIPT_REVISION"; do
   if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
     echo "cross-language revision manifest contains an unresolved revision: $revision" >&2
     exit 2
@@ -39,6 +41,7 @@ for revision in "$TAILNET_GO_REVISION" "$TAILNET_RUST_REVISION"; do
 done
 GO_RESOLVED_REVISION="$(git -C "$TAILNET_GO_SOURCE" rev-parse HEAD)"
 RUST_RESOLVED_REVISION="$(git -C "$TAILNET_RUST_SOURCE" rev-parse HEAD)"
+TYPESCRIPT_RESOLVED_REVISION="$(git -C "$TAILNET_TYPESCRIPT_SOURCE" rev-parse HEAD)"
 if [[ "$GO_RESOLVED_REVISION" != "$TAILNET_GO_REVISION" ]]; then
   echo "Go source revision $GO_RESOLVED_REVISION does not match pinned $TAILNET_GO_REVISION" >&2
   exit 2
@@ -47,7 +50,11 @@ if [[ "$RUST_RESOLVED_REVISION" != "$TAILNET_RUST_REVISION" ]]; then
   echo "Rust source revision $RUST_RESOLVED_REVISION does not match pinned $TAILNET_RUST_REVISION" >&2
   exit 2
 fi
-echo "cross-language revisions: go=$GO_RESOLVED_REVISION rust=$RUST_RESOLVED_REVISION"
+if [[ "$TYPESCRIPT_RESOLVED_REVISION" != "$TAILNET_TYPESCRIPT_REVISION" ]]; then
+  echo "TypeScript source revision $TYPESCRIPT_RESOLVED_REVISION does not match pinned $TAILNET_TYPESCRIPT_REVISION" >&2
+  exit 2
+fi
+echo "cross-language revisions: go=$GO_RESOLVED_REVISION rust=$RUST_RESOLVED_REVISION typescript=$TYPESCRIPT_RESOLVED_REVISION"
 
 export TAILNET_SERVER_HOSTNAME="${TAILNET_SERVER_HOSTNAME:-vgi-interop-server-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 export TAILNET_CLIENT_HOSTNAME="${TAILNET_CLIENT_HOSTNAME:-vgi-interop-client-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
@@ -60,7 +67,8 @@ cleanup() {
     "${COMPOSE[@]}" logs --no-color --tail=200 \
       tailscale-server tailscale-client tailscale-socks \
       worker-direct worker-http \
-      go-worker-direct go-worker-http rust-worker-direct rust-worker-http >&2 || true
+      go-worker-direct go-worker-http rust-worker-direct rust-worker-http \
+      typescript-worker-http >&2 || true
   fi
   "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   exit "$status"
@@ -73,6 +81,8 @@ docker build --tag "${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}" \
   --file "$TAILNET_GO_SOURCE/conformance/tailnet.Dockerfile" "$TAILNET_GO_SOURCE"
 docker build --tag "${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}" \
   --file "$TAILNET_RUST_SOURCE/tailnet-integration/Dockerfile" "$TAILNET_RUST_SOURCE"
+docker build --tag "${VGI_TAILNET_TYPESCRIPT_IMAGE:-vgi-rpc-tailnet-typescript:local}" \
+  --file "$TAILNET_TYPESCRIPT_SOURCE/conformance/tailnet.Dockerfile" "$TAILNET_TYPESCRIPT_SOURCE"
 
 "${COMPOSE[@]}" up --detach --wait --wait-timeout 120 \
   tailscale-server tailscale-client tailscale-socks worker-direct worker-http
@@ -145,6 +155,26 @@ fi
   --spoof-login attacker@example.invalid \
   "${common_http_expectations[@]}"
 
+"${COMPOSE[@]}" run --rm typescript-client-direct client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm typescript-client-socks client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  --proxy "socks5h://$SOCKS_BRIDGE_IP:1055" \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm typescript-client-direct client-http \
+  --url "https://$SERVER_DNS" \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm typescript-client-socks client-http \
+  --url "https://$SERVER_DNS" \
+  --proxy "socks5h://tailscale-socks:1055" \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
 wait_for_server_port() {
   local port="$1"
   "${COMPOSE[@]}" run --rm server-tool python -c \
@@ -182,4 +212,9 @@ for implementation in go rust; do
   "${COMPOSE[@]}" stop "${implementation}-worker-http"
 done
 
-echo "cross-language real Tailnet integration passed for Go and Rust"
+"${COMPOSE[@]}" up --detach typescript-worker-http
+wait_for_server_port 18080
+probe_foreign_http
+"${COMPOSE[@]}" stop typescript-worker-http
+
+echo "cross-language real Tailnet integration passed for Go, Rust, and TypeScript"
