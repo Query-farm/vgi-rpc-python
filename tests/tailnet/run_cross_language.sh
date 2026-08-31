@@ -80,9 +80,14 @@ echo "cross-language revisions: cpp=$CPP_RESOLVED_REVISION csharp=$CSHARP_RESOLV
 export TAILNET_SERVER_HOSTNAME="${TAILNET_SERVER_HOSTNAME:-vgi-interop-server-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 export TAILNET_CLIENT_HOSTNAME="${TAILNET_CLIENT_HOSTNAME:-vgi-interop-client-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 export TAILNET_SOCKS_HOSTNAME="${TAILNET_SOCKS_HOSTNAME:-vgi-interop-socks-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
+CPP_BUILD_PID=""
 
 cleanup() {
   local status="$?"
+  if [[ -n "$CPP_BUILD_PID" ]] && kill -0 "$CPP_BUILD_PID" 2>/dev/null; then
+    kill "$CPP_BUILD_PID" 2>/dev/null || true
+    wait "$CPP_BUILD_PID" 2>/dev/null || true
+  fi
   if [[ "$status" -ne 0 ]]; then
     "${COMPOSE[@]}" ps >&2 || true
     "${COMPOSE[@]}" logs --no-color --tail=200 \
@@ -98,10 +103,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+docker build --tag "${VGI_TAILNET_CPP_IMAGE:-vgi-rpc-tailnet-cpp:local}" \
+  --file "$TAILNET_CPP_SOURCE/tailnet-integration/Dockerfile" "$TAILNET_CPP_SOURCE" &
+CPP_BUILD_PID="$!"
+
 docker build --tag "${VGI_TAILNET_IMAGE:-vgi-rpc-tailnet:local}" \
   --file "$TAILNET_ROOT/tests/tailnet/Dockerfile" "$TAILNET_ROOT"
-docker build --tag "${VGI_TAILNET_CPP_IMAGE:-vgi-rpc-tailnet-cpp:local}" \
-  --file "$TAILNET_CPP_SOURCE/tailnet-integration/Dockerfile" "$TAILNET_CPP_SOURCE"
 docker build --tag "${VGI_TAILNET_CSHARP_IMAGE:-vgi-rpc-tailnet-csharp:local}" \
   --file "$TAILNET_CSHARP_SOURCE/conformance/tailnet.Dockerfile" "$TAILNET_CSHARP_SOURCE"
 docker build --tag "${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}" \
@@ -112,6 +119,13 @@ docker build --tag "${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}" \
   --file "$TAILNET_RUST_SOURCE/tailnet-integration/Dockerfile" "$TAILNET_RUST_SOURCE"
 docker build --tag "${VGI_TAILNET_TYPESCRIPT_IMAGE:-vgi-rpc-tailnet-typescript:local}" \
   --file "$TAILNET_TYPESCRIPT_SOURCE/conformance/tailnet.Dockerfile" "$TAILNET_TYPESCRIPT_SOURCE"
+if wait "$CPP_BUILD_PID"; then
+  CPP_BUILD_PID=""
+else
+  CPP_BUILD_PID=""
+  echo "C++ Tailnet adapter image build failed" >&2
+  exit 1
+fi
 
 "${COMPOSE[@]}" up --detach --wait --wait-timeout 120 \
   tailscale-server tailscale-client tailscale-socks worker-direct worker-http
