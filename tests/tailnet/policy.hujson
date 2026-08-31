@@ -1,0 +1,46 @@
+// Minimal policy fragment for a dedicated VGI integration-test Tailnet.
+// Replace the example user before applying this policy.
+{
+  "groups": {
+    "group:vgi-ci-users": ["vgi-ci-user@example.com"],
+  },
+
+  "tagOwners": {
+    "tag:vgi-ci-server": ["autogroup:admin"],
+    "tag:vgi-ci-client": ["autogroup:admin"],
+  },
+
+  "grants": [
+    {
+      "src": ["tag:vgi-ci-client", "group:vgi-ci-users"],
+      "dst": ["tag:vgi-ci-server"],
+      "ip": ["tcp:443", "tcp:19400"],
+      "app": {
+        "query.farm/cap/vgi-test": [
+          {"role": "caller"},
+        ],
+      },
+    },
+    {
+      "src": ["tag:vgi-ci-client"],
+      "dst": ["svc:vgi-ci"],
+      "ip": ["tcp:19400"],
+      "app": {
+        "query.farm/cap/vgi-test": [
+          {"role": "caller"},
+        ],
+      },
+    },
+  ],
+
+  "tests": [
+    {
+      "src": "tag:vgi-ci-client",
+      "accept": [
+        "tag:vgi-ci-server:443",
+        "tag:vgi-ci-server:19400",
+        "svc:vgi-ci:19400",
+      ],
+    },
+  ],
+}

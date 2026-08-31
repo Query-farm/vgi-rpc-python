@@ -1,0 +1,214 @@
+name: vgi-rpc-tailnet
+
+x-tailscale-kernel: &tailscale-kernel
+  image: ${TAILSCALE_IMAGE:-tailscale/tailscale:stable}
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  restart: "no"
+
+x-worker: &worker
+  image: ${VGI_TAILNET_IMAGE:-vgi-rpc-tailnet:local}
+  restart: "no"
+
+services:
+  tailscale-server:
+    <<: *tailscale-kernel
+    hostname: ${TAILNET_SERVER_HOSTNAME:-vgi-ci-server}
+    environment:
+      TS_AUTHKEY: ${TAILNET_SERVER_AUTHKEY:-}
+      TS_HOSTNAME: ${TAILNET_SERVER_HOSTNAME:-vgi-ci-server}
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: --accept-dns=true
+    volumes:
+      - server-state:/var/lib/tailscale
+      - server-socket:/var/run/tailscale
+    healthcheck:
+      test: ["CMD", "tailscale", "--socket=/var/run/tailscale/tailscaled.sock", "status", "--json"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  tailscale-client:
+    <<: *tailscale-kernel
+    hostname: ${TAILNET_CLIENT_HOSTNAME:-vgi-ci-client}
+    environment:
+      TS_AUTHKEY: ${TAILNET_CLIENT_AUTHKEY:-}
+      TS_HOSTNAME: ${TAILNET_CLIENT_HOSTNAME:-vgi-ci-client}
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: --accept-dns=true
+    volumes:
+      - client-state:/var/lib/tailscale
+      - client-socket:/var/run/tailscale
+    healthcheck:
+      test: ["CMD", "tailscale", "--socket=/var/run/tailscale/tailscaled.sock", "status", "--json"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  tailscale-socks:
+    image: ${TAILSCALE_IMAGE:-tailscale/tailscale:stable}
+    hostname: ${TAILNET_SOCKS_HOSTNAME:-vgi-ci-socks}
+    environment:
+      TS_AUTHKEY: ${TAILNET_CLIENT_AUTHKEY:-}
+      TS_HOSTNAME: ${TAILNET_SOCKS_HOSTNAME:-vgi-ci-socks}
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_SOCKS5_SERVER: :1055
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+    volumes:
+      - socks-state:/var/lib/tailscale
+      - socks-socket:/var/run/tailscale
+    healthcheck:
+      test: ["CMD", "tailscale", "--socket=/var/run/tailscale/tailscaled.sock", "status", "--json"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  tailscale-user:
+    <<: *tailscale-kernel
+    profiles: ["full"]
+    hostname: ${TAILNET_USER_HOSTNAME:-vgi-ci-user}
+    environment:
+      TS_AUTHKEY: ${TAILNET_USER_AUTHKEY:-}
+      TS_HOSTNAME: ${TAILNET_USER_HOSTNAME:-vgi-ci-user}
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: --accept-dns=true
+    volumes:
+      - user-state:/var/lib/tailscale
+      - user-socket:/var/run/tailscale
+    healthcheck:
+      test: ["CMD", "tailscale", "--socket=/var/run/tailscale/tailscaled.sock", "status", "--json"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  worker-direct:
+    <<: *worker
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - python
+      - -m
+      - tests.tailnet.worker
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - tcp
+      - --host
+      - 0.0.0.0
+      - --port
+      - "19400"
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 19400), 1).close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  worker-http:
+    <<: *worker
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    command:
+      - python
+      - -m
+      - tests.tailnet.worker
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - http
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18080"
+      - --trusted-proxy-address
+      - 127.0.0.1
+      - --trusted-proxy-address
+      - ::1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 18080), 1).close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  worker-service:
+    <<: *worker
+    profiles: ["full"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - python
+      - -m
+      - tests.tailnet.worker
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - tcp
+      - --host
+      - 127.0.0.1
+      - --port
+      - "19401"
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+      - --service-name
+      - ${TAILNET_SERVICE_NAME:-svc:vgi-ci}
+      - --proxy-protocol
+      - required
+      - --trusted-proxy-address
+      - 127.0.0.1
+      - --trusted-proxy-address
+      - ::1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 19401), 1).close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  probe-direct:
+    <<: *worker
+    profiles: ["tools"]
+    network_mode: service:tailscale-client
+    depends_on:
+      tailscale-client:
+        condition: service_healthy
+
+  probe-socks:
+    <<: *worker
+    profiles: ["tools"]
+    depends_on:
+      tailscale-socks:
+        condition: service_healthy
+
+  probe-user:
+    <<: *worker
+    profiles: ["full"]
+    network_mode: service:tailscale-user
+    depends_on:
+      tailscale-user:
+        condition: service_healthy
+
+volumes:
+  server-state:
+  server-socket:
+  client-state:
+  client-socket:
+  socks-state:
+  socks-socket:
+  user-state:
+  user-socket:

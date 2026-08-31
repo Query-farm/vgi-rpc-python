@@ -1,0 +1,56 @@
+name: Real Tailnet integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Test depth (full also requires an untagged user key and an approved Service)
+        required: true
+        default: core
+        type: choice
+        options:
+          - core
+          - full
+      tailscale_channel:
+        description: Official Tailscale container channel
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - unstable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vgi-rpc-real-tailnet
+  cancel-in-progress: false
+
+jobs:
+  tailnet:
+    name: ${{ inputs.profile }} / ${{ inputs.tailscale_channel }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: tailnet-integration
+    env:
+      TAILSCALE_IMAGE: tailscale/tailscale:${{ inputs.tailscale_channel }}
+      TAILNET_PROFILE: ${{ inputs.profile }}
+      TAILNET_SERVER_AUTHKEY: ${{ secrets.TAILNET_SERVER_AUTHKEY }}
+      TAILNET_CLIENT_AUTHKEY: ${{ secrets.TAILNET_CLIENT_AUTHKEY }}
+      TAILNET_USER_AUTHKEY: ${{ secrets.TAILNET_USER_AUTHKEY }}
+      TAILNET_ISSUER: ${{ vars.TAILNET_ISSUER }}
+      TAILNET_EXPECTED_CAPABILITY: ${{ vars.TAILNET_EXPECTED_CAPABILITY }}
+      TAILNET_EXPECTED_CLIENT_TAG: ${{ vars.TAILNET_EXPECTED_CLIENT_TAG }}
+      TAILNET_SERVICE_NAME: ${{ vars.TAILNET_SERVICE_NAME }}
+      TAILNET_SERVICE_HOST: ${{ vars.TAILNET_SERVICE_HOST }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check kernel networking support
+        run: |
+          test -c /dev/net/tun
+          docker compose version
+
+      - name: Run real Tailnet matrix
+        run: tests/tailnet/run.sh "$TAILNET_PROFILE"

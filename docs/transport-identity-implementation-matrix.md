@@ -35,6 +35,7 @@ implementation; an em dash means no implementation yet.
 | Trusted Envoy/nginx/AWS/GCP/Azure HTTP SPIFFE evidence | done | done | done | done | done | done | library only; host integration required |
 | Direct TLS X.509-SVID verification | done (manual SVID rotation) | done (server) | done (server) | — | — | — | — |
 | Explicit SOCKS5h client dialing | done | done | done | done | done (raw only) | done | done |
+| Real Tailnet data-plane/identity gate | done (Linux reference, opt-in) | — | — | — | — | — | — |
 | Optional Iroh stateful transport | N/A | N/A | done | N/A | N/A | N/A | N/A |
 
 High-level `vgi-python` consumes the Python SOCKS5h option. DuckDB VGI consumes
@@ -58,11 +59,13 @@ catalog/secret code.
 - Extend the shared adapter vectors beyond the current SPIFFE ID, Envoy XFCC,
   GCP, and Tailscale Serve cases to cover all duplicate-header, downgrade,
   timeout, PROXY truncation, SOCKS, and stream-snapshot adversarial cases.
-- Extend `vgi mesh doctor` beyond its TCP/VGI/SOCKS/LocalAPI checks and add a
-  real Tailnet/cloud integration suite. Deployment profiles and Python's
-  redacted identity outcome/source access logs and OpenTelemetry labels are
-  present; equivalent identity metrics remain a coordinated release gate for
-  Go, Rust, TypeScript, Java, C#, and C++.
+- Extend `vgi mesh doctor` beyond its TCP/VGI/SOCKS/LocalAPI checks. The
+  opt-in Python reference suite now covers real MagicDNS TCP, userspace
+  SOCKS5h, Tailscale Serve, user/tagged-node evidence, app capabilities, and
+  Tailscale Services with PROXY v2; native client/server replacement gates
+  remain open for Go, Rust, TypeScript, Java, C#, and C++. Deployment profiles
+  and Python's redacted identity outcome/source access logs and OpenTelemetry
+  labels are present; equivalent identity metrics remain coordinated gates.
 - Validate Windows named pipes and both supported macOS Tailscale variants on
   real runners. Cross-compilation proves API/build coverage, not runtime
   behavior.
