@@ -17,12 +17,13 @@ services:
     <<: *tailscale-kernel
     hostname: ${TAILNET_SERVER_HOSTNAME:-vgi-ci-server}
     environment:
-      TS_AUTHKEY: ${TAILNET_SERVER_AUTHKEY:-}
+      TS_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
+      TS_CLIENT_SECRET: ${TS_OAUTH_SECRET:-}?preauthorized=true
       TS_HOSTNAME: ${TAILNET_SERVER_HOSTNAME:-vgi-ci-server}
       TS_SOCKET: /var/run/tailscale/tailscaled.sock
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: --accept-dns=true
+      TS_EXTRA_ARGS: --accept-dns=true --advertise-tags=tag:vgi-ci-server
     volumes:
       - server-state:/var/lib/tailscale
       - server-socket:/var/run/tailscale
@@ -36,12 +37,13 @@ services:
     <<: *tailscale-kernel
     hostname: ${TAILNET_CLIENT_HOSTNAME:-vgi-ci-client}
     environment:
-      TS_AUTHKEY: ${TAILNET_CLIENT_AUTHKEY:-}
+      TS_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
+      TS_CLIENT_SECRET: ${TS_OAUTH_SECRET:-}?preauthorized=true
       TS_HOSTNAME: ${TAILNET_CLIENT_HOSTNAME:-vgi-ci-client}
       TS_SOCKET: /var/run/tailscale/tailscaled.sock
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: --accept-dns=true
+      TS_EXTRA_ARGS: --accept-dns=true --advertise-tags=${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
     volumes:
       - client-state:/var/lib/tailscale
       - client-socket:/var/run/tailscale
@@ -55,12 +57,14 @@ services:
     image: ${TAILSCALE_IMAGE:-tailscale/tailscale:stable}
     hostname: ${TAILNET_SOCKS_HOSTNAME:-vgi-ci-socks}
     environment:
-      TS_AUTHKEY: ${TAILNET_CLIENT_AUTHKEY:-}
+      TS_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
+      TS_CLIENT_SECRET: ${TS_OAUTH_SECRET:-}?preauthorized=true
       TS_HOSTNAME: ${TAILNET_SOCKS_HOSTNAME:-vgi-ci-socks}
       TS_SOCKET: /var/run/tailscale/tailscaled.sock
       TS_SOCKS5_SERVER: :1055
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "true"
+      TS_EXTRA_ARGS: --advertise-tags=${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
     volumes:
       - socks-state:/var/lib/tailscale
       - socks-socket:/var/run/tailscale
