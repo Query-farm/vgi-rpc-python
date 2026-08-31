@@ -17,8 +17,8 @@ services:
     <<: *tailscale-kernel
     hostname: ${TAILNET_SERVER_HOSTNAME:-vgi-ci-server}
     environment:
-      TS_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
-      TS_CLIENT_SECRET: ${TS_OAUTH_SECRET:-}?preauthorized=true
+      TS_CLIENT_ID: ${TS_SERVER_OAUTH_CLIENT_ID:-}
+      TS_CLIENT_SECRET: ${TS_SERVER_OAUTH_SECRET:-}?preauthorized=true
       TS_HOSTNAME: ${TAILNET_SERVER_HOSTNAME:-vgi-ci-server}
       TS_SOCKET: /var/run/tailscale/tailscaled.sock
       TS_STATE_DIR: /var/lib/tailscale
