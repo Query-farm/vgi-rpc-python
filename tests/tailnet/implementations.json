@@ -17,7 +17,7 @@
         "iroh": false
       },
       "live_qualified": {
-        "gate": "go-rust-typescript",
+        "gate": "cross-language",
         "client": {
           "http": true,
           "http_socks5h": true,
@@ -48,7 +48,7 @@
         "iroh": true
       },
       "live_qualified": {
-        "gate": "go-rust-typescript",
+        "gate": "cross-language",
         "client": {
           "http": true,
           "http_socks5h": false,
@@ -63,9 +63,99 @@
         "iroh": false
       }
     },
-    "cpp": {"implemented": {}, "live_qualified": null},
-    "csharp": {"implemented": {}, "live_qualified": null},
-    "java": {"implemented": {}, "live_qualified": null},
+    "cpp": {
+      "implemented": {
+        "client": {
+          "http": true,
+          "http_socks5h": false,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": false,
+          "tcp_localapi_identity": true,
+          "tcp_proxy_v2_identity": true
+        },
+        "iroh": false
+      },
+      "live_qualified": {
+        "gate": "cross-language",
+        "client": {
+          "http": true,
+          "http_socks5h": false,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": false,
+          "tcp_localapi_identity": true,
+          "tcp_proxy_v2_identity": false
+        },
+        "iroh": false
+      }
+    },
+    "csharp": {
+      "implemented": {
+        "client": {
+          "http": true,
+          "http_socks5h": true,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": false,
+          "tcp_proxy_v2_identity": false
+        },
+        "iroh": false
+      },
+      "live_qualified": {
+        "gate": "cross-language",
+        "client": {
+          "http": true,
+          "http_socks5h": true,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": false,
+          "tcp_proxy_v2_identity": false
+        },
+        "iroh": false
+      }
+    },
+    "java": {
+      "implemented": {
+        "client": {
+          "http": true,
+          "http_socks5h": false,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": false,
+          "tcp_proxy_v2_identity": false
+        },
+        "iroh": false
+      },
+      "live_qualified": {
+        "gate": "cross-language",
+        "client": {
+          "http": true,
+          "http_socks5h": false,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": false,
+          "tcp_proxy_v2_identity": false
+        },
+        "iroh": false
+      }
+    },
     "typescript": {
       "implemented": {
         "client": {
@@ -82,7 +172,7 @@
         "iroh": false
       },
       "live_qualified": {
-        "gate": "go-rust-typescript",
+        "gate": "cross-language",
         "client": {
           "http": true,
           "http_socks5h": true,

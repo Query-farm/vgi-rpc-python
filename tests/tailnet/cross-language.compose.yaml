@@ -7,6 +7,78 @@ services:
       tailscale-server:
         condition: service_healthy
 
+  cpp-client-direct:
+    image: ${VGI_TAILNET_CPP_IMAGE:-vgi-rpc-tailnet-cpp:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-client
+    depends_on:
+      tailscale-client:
+        condition: service_healthy
+
+  cpp-client-socks:
+    image: ${VGI_TAILNET_CPP_IMAGE:-vgi-rpc-tailnet-cpp:local}
+    profiles: ["interop"]
+    depends_on:
+      tailscale-socks:
+        condition: service_healthy
+
+  cpp-worker-direct:
+    image: ${VGI_TAILNET_CPP_IMAGE:-vgi-rpc-tailnet-cpp:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - server-tcp
+      - --host
+      - 0.0.0.0
+      - --port
+      - "19400"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+      - --expected-tag
+      - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+
+  csharp-client-direct:
+    image: ${VGI_TAILNET_CSHARP_IMAGE:-vgi-rpc-tailnet-csharp:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-client
+    depends_on:
+      tailscale-client:
+        condition: service_healthy
+
+  csharp-client-socks:
+    image: ${VGI_TAILNET_CSHARP_IMAGE:-vgi-rpc-tailnet-csharp:local}
+    profiles: ["interop"]
+    depends_on:
+      tailscale-socks:
+        condition: service_healthy
+
+  csharp-worker-http:
+    image: ${VGI_TAILNET_CSHARP_IMAGE:-vgi-rpc-tailnet-csharp:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    command:
+      - server-http
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18080"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+
   go-client-direct:
     image: ${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}
     profiles: ["interop"]
@@ -48,6 +120,39 @@ services:
 
   go-worker-http:
     image: ${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    command:
+      - server-http
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18080"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+
+  java-client-direct:
+    image: ${VGI_TAILNET_JAVA_IMAGE:-vgi-rpc-tailnet-java:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-client
+    depends_on:
+      tailscale-client:
+        condition: service_healthy
+
+  java-client-socks:
+    image: ${VGI_TAILNET_JAVA_IMAGE:-vgi-rpc-tailnet-java:local}
+    profiles: ["interop"]
+    depends_on:
+      tailscale-socks:
+        condition: service_healthy
+
+  java-worker-http:
+    image: ${VGI_TAILNET_JAVA_IMAGE:-vgi-rpc-tailnet-java:local}
     profiles: ["interop"]
     network_mode: service:tailscale-server
     depends_on:

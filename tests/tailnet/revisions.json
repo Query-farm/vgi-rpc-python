@@ -1,6 +1,9 @@
 {
   "schema_version": 1,
+  "cpp": "ee54f784cc92c057191b3777d7709803e7ba794f",
+  "csharp": "19cdbaa47e08496f3b9d0a38e0eef1ef576e1938",
   "go": "e13bed390c93514d7615d9ebe3f647ca71825e9d",
+  "java": "3b6f0e4fd903e866672c0ba885987e9601ada80b",
   "rust": "67ff24f0268f0c381edd7618bf9001aa2f040c1f",
   "typescript": "8ef8e910663df789ab8304fb312a1fcaaf341ffc"
 }

@@ -24,26 +24,47 @@ for name in \
   TAILNET_ISSUER \
   TAILNET_EXPECTED_CAPABILITY \
   TAILNET_EXPECTED_CLIENT_TAG \
+  TAILNET_CPP_SOURCE \
+  TAILNET_CSHARP_SOURCE \
   TAILNET_GO_SOURCE \
+  TAILNET_JAVA_SOURCE \
   TAILNET_RUST_SOURCE \
   TAILNET_TYPESCRIPT_SOURCE; do
   require_variable "$name"
 done
 
+TAILNET_CPP_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["cpp"])' "$REVISION_MANIFEST")"
+TAILNET_CSHARP_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["csharp"])' "$REVISION_MANIFEST")"
 TAILNET_GO_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["go"])' "$REVISION_MANIFEST")"
+TAILNET_JAVA_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["java"])' "$REVISION_MANIFEST")"
 TAILNET_RUST_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rust"])' "$REVISION_MANIFEST")"
 TAILNET_TYPESCRIPT_REVISION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["typescript"])' "$REVISION_MANIFEST")"
-for revision in "$TAILNET_GO_REVISION" "$TAILNET_RUST_REVISION" "$TAILNET_TYPESCRIPT_REVISION"; do
+for revision in "$TAILNET_CPP_REVISION" "$TAILNET_CSHARP_REVISION" "$TAILNET_GO_REVISION" "$TAILNET_JAVA_REVISION" "$TAILNET_RUST_REVISION" "$TAILNET_TYPESCRIPT_REVISION"; do
   if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
     echo "cross-language revision manifest contains an unresolved revision: $revision" >&2
     exit 2
   fi
 done
+CPP_RESOLVED_REVISION="$(git -C "$TAILNET_CPP_SOURCE" rev-parse HEAD)"
+CSHARP_RESOLVED_REVISION="$(git -C "$TAILNET_CSHARP_SOURCE" rev-parse HEAD)"
 GO_RESOLVED_REVISION="$(git -C "$TAILNET_GO_SOURCE" rev-parse HEAD)"
+JAVA_RESOLVED_REVISION="$(git -C "$TAILNET_JAVA_SOURCE" rev-parse HEAD)"
 RUST_RESOLVED_REVISION="$(git -C "$TAILNET_RUST_SOURCE" rev-parse HEAD)"
 TYPESCRIPT_RESOLVED_REVISION="$(git -C "$TAILNET_TYPESCRIPT_SOURCE" rev-parse HEAD)"
+if [[ "$CPP_RESOLVED_REVISION" != "$TAILNET_CPP_REVISION" ]]; then
+  echo "C++ source revision $CPP_RESOLVED_REVISION does not match pinned $TAILNET_CPP_REVISION" >&2
+  exit 2
+fi
+if [[ "$CSHARP_RESOLVED_REVISION" != "$TAILNET_CSHARP_REVISION" ]]; then
+  echo "C# source revision $CSHARP_RESOLVED_REVISION does not match pinned $TAILNET_CSHARP_REVISION" >&2
+  exit 2
+fi
 if [[ "$GO_RESOLVED_REVISION" != "$TAILNET_GO_REVISION" ]]; then
   echo "Go source revision $GO_RESOLVED_REVISION does not match pinned $TAILNET_GO_REVISION" >&2
+  exit 2
+fi
+if [[ "$JAVA_RESOLVED_REVISION" != "$TAILNET_JAVA_REVISION" ]]; then
+  echo "Java source revision $JAVA_RESOLVED_REVISION does not match pinned $TAILNET_JAVA_REVISION" >&2
   exit 2
 fi
 if [[ "$RUST_RESOLVED_REVISION" != "$TAILNET_RUST_REVISION" ]]; then
@@ -54,7 +75,7 @@ if [[ "$TYPESCRIPT_RESOLVED_REVISION" != "$TAILNET_TYPESCRIPT_REVISION" ]]; then
   echo "TypeScript source revision $TYPESCRIPT_RESOLVED_REVISION does not match pinned $TAILNET_TYPESCRIPT_REVISION" >&2
   exit 2
 fi
-echo "cross-language revisions: go=$GO_RESOLVED_REVISION rust=$RUST_RESOLVED_REVISION typescript=$TYPESCRIPT_RESOLVED_REVISION"
+echo "cross-language revisions: cpp=$CPP_RESOLVED_REVISION csharp=$CSHARP_RESOLVED_REVISION go=$GO_RESOLVED_REVISION java=$JAVA_RESOLVED_REVISION rust=$RUST_RESOLVED_REVISION typescript=$TYPESCRIPT_RESOLVED_REVISION"
 
 export TAILNET_SERVER_HOSTNAME="${TAILNET_SERVER_HOSTNAME:-vgi-interop-server-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 export TAILNET_CLIENT_HOSTNAME="${TAILNET_CLIENT_HOSTNAME:-vgi-interop-client-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
@@ -67,8 +88,10 @@ cleanup() {
     "${COMPOSE[@]}" logs --no-color --tail=200 \
       tailscale-server tailscale-client tailscale-socks \
       worker-direct worker-http \
+      cpp-worker-direct \
+      csharp-worker-http \
       go-worker-direct go-worker-http rust-worker-direct rust-worker-http \
-      typescript-worker-http >&2 || true
+      typescript-worker-http java-worker-http >&2 || true
   fi
   "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   exit "$status"
@@ -77,8 +100,14 @@ trap cleanup EXIT
 
 docker build --tag "${VGI_TAILNET_IMAGE:-vgi-rpc-tailnet:local}" \
   --file "$TAILNET_ROOT/tests/tailnet/Dockerfile" "$TAILNET_ROOT"
+docker build --tag "${VGI_TAILNET_CPP_IMAGE:-vgi-rpc-tailnet-cpp:local}" \
+  --file "$TAILNET_CPP_SOURCE/tailnet-integration/Dockerfile" "$TAILNET_CPP_SOURCE"
+docker build --tag "${VGI_TAILNET_CSHARP_IMAGE:-vgi-rpc-tailnet-csharp:local}" \
+  --file "$TAILNET_CSHARP_SOURCE/conformance/tailnet.Dockerfile" "$TAILNET_CSHARP_SOURCE"
 docker build --tag "${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}" \
   --file "$TAILNET_GO_SOURCE/conformance/tailnet.Dockerfile" "$TAILNET_GO_SOURCE"
+docker build --tag "${VGI_TAILNET_JAVA_IMAGE:-vgi-rpc-tailnet-java:local}" \
+  --file "$TAILNET_JAVA_SOURCE/tailnet-integration/Dockerfile" "$TAILNET_JAVA_SOURCE"
 docker build --tag "${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}" \
   --file "$TAILNET_RUST_SOURCE/tailnet-integration/Dockerfile" "$TAILNET_RUST_SOURCE"
 docker build --tag "${VGI_TAILNET_TYPESCRIPT_IMAGE:-vgi-rpc-tailnet-typescript:local}" \
@@ -124,6 +153,46 @@ common_tcp_expectations=(
   --expect-authenticated
 )
 
+"${COMPOSE[@]}" run --rm cpp-client-direct client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm csharp-client-direct client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  "${common_tcp_expectations[@]}"
+
+SOCKS_CONTAINER_ID="$("${COMPOSE[@]}" ps -q tailscale-socks)"
+SOCKS_BRIDGE_IP="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SOCKS_CONTAINER_ID")"
+if [[ -z "$SOCKS_BRIDGE_IP" ]]; then
+  echo "could not resolve the userspace SOCKS container bridge address" >&2
+  exit 1
+fi
+"${COMPOSE[@]}" run --rm cpp-client-socks client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  --proxy "socks5h://$SOCKS_BRIDGE_IP:1055" \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm csharp-client-socks client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  --proxy "socks5h://$SOCKS_BRIDGE_IP:1055" \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm csharp-client-direct client-http \
+  --url "https://$SERVER_DNS" \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm csharp-client-socks client-http \
+  --url "https://$SERVER_DNS" \
+  --proxy socks5h://tailscale-socks:1055 \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm cpp-client-direct client-http \
+  --url "https://$SERVER_DNS" \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
 "${COMPOSE[@]}" run --rm go-client-direct client-http \
   --url "https://$SERVER_DNS" \
   --spoof-login attacker@example.invalid \
@@ -139,18 +208,26 @@ common_tcp_expectations=(
   --host "$SERVER_DNS" --port 19400 \
   "${common_tcp_expectations[@]}"
 
-SOCKS_CONTAINER_ID="$("${COMPOSE[@]}" ps -q tailscale-socks)"
-SOCKS_BRIDGE_IP="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SOCKS_CONTAINER_ID")"
-if [[ -z "$SOCKS_BRIDGE_IP" ]]; then
-  echo "could not resolve the userspace SOCKS container bridge address" >&2
-  exit 1
-fi
 "${COMPOSE[@]}" run --rm rust-client-socks client-tcp \
   --host "$SERVER_DNS" --port 19400 \
   --proxy "socks5h://$SOCKS_BRIDGE_IP:1055" \
   "${common_tcp_expectations[@]}"
 
 "${COMPOSE[@]}" run --rm rust-client-direct client-http \
+  --url "https://$SERVER_DNS" \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm java-client-direct client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm java-client-socks client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  --proxy "socks5h://$SOCKS_BRIDGE_IP:1055" \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm java-client-direct client-http \
   --url "https://$SERVER_DNS" \
   --spoof-login attacker@example.invalid \
   "${common_http_expectations[@]}"
@@ -212,9 +289,24 @@ for implementation in go rust; do
   "${COMPOSE[@]}" stop "${implementation}-worker-http"
 done
 
+"${COMPOSE[@]}" up --detach cpp-worker-direct
+wait_for_server_port 19400
+probe_foreign_tcp
+"${COMPOSE[@]}" stop cpp-worker-direct
+
 "${COMPOSE[@]}" up --detach typescript-worker-http
 wait_for_server_port 18080
 probe_foreign_http
 "${COMPOSE[@]}" stop typescript-worker-http
 
-echo "cross-language real Tailnet integration passed for Go, Rust, and TypeScript"
+"${COMPOSE[@]}" up --detach java-worker-http
+wait_for_server_port 18080
+probe_foreign_http
+"${COMPOSE[@]}" stop java-worker-http
+
+"${COMPOSE[@]}" up --detach csharp-worker-http
+wait_for_server_port 18080
+probe_foreign_http
+"${COMPOSE[@]}" stop csharp-worker-http
+
+echo "cross-language real Tailnet integration passed for Go, Rust, TypeScript, Java, C#, and C++"

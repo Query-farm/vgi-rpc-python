@@ -20,10 +20,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  go-rust-typescript:
-    name: Go, Rust, and TypeScript bidirectional qualification
+  cross-language:
+    name: Go, Rust, TypeScript, Java, C#, and C++ bidirectional qualification
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     environment: tailnet-integration
     env:
       TAILSCALE_IMAGE: tailscale/tailscale:${{ inputs.tailscale_channel }}
@@ -42,23 +42,50 @@ jobs:
         working-directory: vgi-rpc-python
         shell: bash
         run: |
+          cpp_revision="$(jq -r .cpp tests/tailnet/revisions.json)"
+          csharp_revision="$(jq -r .csharp tests/tailnet/revisions.json)"
           go_revision="$(jq -r .go tests/tailnet/revisions.json)"
+          java_revision="$(jq -r .java tests/tailnet/revisions.json)"
           rust_revision="$(jq -r .rust tests/tailnet/revisions.json)"
           typescript_revision="$(jq -r .typescript tests/tailnet/revisions.json)"
+          [[ "$cpp_revision" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$csharp_revision" =~ ^[0-9a-f]{40}$ ]]
           [[ "$go_revision" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$java_revision" =~ ^[0-9a-f]{40}$ ]]
           [[ "$rust_revision" =~ ^[0-9a-f]{40}$ ]]
           [[ "$typescript_revision" =~ ^[0-9a-f]{40}$ ]]
           {
+            echo "cpp=$cpp_revision"
+            echo "csharp=$csharp_revision"
             echo "go=$go_revision"
+            echo "java=$java_revision"
             echo "rust=$rust_revision"
             echo "typescript=$typescript_revision"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
         with:
+          repository: Query-farm/vgi-rpc-cpp
+          path: vgi-rpc-cpp
+          ref: ${{ steps.revisions.outputs.cpp }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-rpc-csharp
+          path: vgi-rpc-csharp
+          ref: ${{ steps.revisions.outputs.csharp }}
+
+      - uses: actions/checkout@v7
+        with:
           repository: Query-farm/vgi-rpc-go
           path: vgi-rpc-go
           ref: ${{ steps.revisions.outputs.go }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-rpc-java
+          path: vgi-rpc-java
+          ref: ${{ steps.revisions.outputs.java }}
 
       - uses: actions/checkout@v7
         with:
@@ -75,10 +102,16 @@ jobs:
       - name: Report resolved implementation revisions
         shell: bash
         run: |
+          cpp_revision="$(git -C vgi-rpc-cpp rev-parse HEAD)"
+          csharp_revision="$(git -C vgi-rpc-csharp rev-parse HEAD)"
           go_revision="$(git -C vgi-rpc-go rev-parse HEAD)"
+          java_revision="$(git -C vgi-rpc-java rev-parse HEAD)"
           rust_revision="$(git -C vgi-rpc-rust rev-parse HEAD)"
           typescript_revision="$(git -C vgi-rpc-typescript rev-parse HEAD)"
+          test "$cpp_revision" = "${{ steps.revisions.outputs.cpp }}"
+          test "$csharp_revision" = "${{ steps.revisions.outputs.csharp }}"
           test "$go_revision" = "${{ steps.revisions.outputs.go }}"
+          test "$java_revision" = "${{ steps.revisions.outputs.java }}"
           test "$rust_revision" = "${{ steps.revisions.outputs.rust }}"
           test "$typescript_revision" = "${{ steps.revisions.outputs.typescript }}"
           {
@@ -86,7 +119,10 @@ jobs:
             echo
             echo "| Implementation | Revision |"
             echo "| --- | --- |"
+            echo "| C++ | \`$cpp_revision\` |"
+            echo "| C# | \`$csharp_revision\` |"
             echo "| Go | \`$go_revision\` |"
+            echo "| Java | \`$java_revision\` |"
             echo "| Rust | \`$rust_revision\` |"
             echo "| TypeScript | \`$typescript_revision\` |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -99,7 +135,10 @@ jobs:
       - name: Run bidirectional real-Tailnet matrix
         working-directory: vgi-rpc-python
         env:
+          TAILNET_CPP_SOURCE: ${{ github.workspace }}/vgi-rpc-cpp
+          TAILNET_CSHARP_SOURCE: ${{ github.workspace }}/vgi-rpc-csharp
           TAILNET_GO_SOURCE: ${{ github.workspace }}/vgi-rpc-go
+          TAILNET_JAVA_SOURCE: ${{ github.workspace }}/vgi-rpc-java
           TAILNET_RUST_SOURCE: ${{ github.workspace }}/vgi-rpc-rust
           TAILNET_TYPESCRIPT_SOURCE: ${{ github.workspace }}/vgi-rpc-typescript
         run: tests/tailnet/run_cross_language.sh
