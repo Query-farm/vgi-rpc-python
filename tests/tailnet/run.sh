@@ -48,7 +48,9 @@ cleanup() {
   local status="$?"
   if [[ "$status" -ne 0 ]]; then
     "${COMPOSE[@]}" ps >&2 || true
-    "${COMPOSE[@]}" logs --no-color --tail=200 worker-direct worker-http worker-service >&2 || true
+    "${COMPOSE[@]}" logs --no-color --tail=200 \
+      tailscale-server tailscale-client tailscale-socks tailscale-user \
+      worker-direct worker-http worker-service >&2 || true
   fi
   "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   exit "$status"
