@@ -33,10 +33,8 @@ rules are recommended because the workflow joins a real Tailnet. Configure:
 
 | Kind | Name | Required by | Value |
 | --- | --- | --- | --- |
-| Secret | `TS_SERVER_OAUTH_CLIENT_ID` | all | OAuth client ID with writable `auth_keys` scope, restricted to `tag:vgi-ci-server` |
-| Secret | `TS_SERVER_OAUTH_SECRET` | all | OAuth client secret restricted to `tag:vgi-ci-server` |
-| Secret | `TS_OAUTH_CLIENT_ID` | all | OAuth client ID with writable `auth_keys` scope, restricted to `tag:vgi-ci-client` |
-| Secret | `TS_OAUTH_SECRET` | all | OAuth client secret restricted to `tag:vgi-ci-client` |
+| Secret | `TS_OAUTH_CLIENT_ID` | all | OAuth client ID with writable `auth_keys` scope |
+| Secret | `TS_OAUTH_SECRET` | all | OAuth client secret permitted to advertise both VGI CI tags |
 | Secret | `TAILNET_USER_AUTHKEY` | `full` | reusable, ephemeral, pre-approved key owned by a dedicated untagged test user |
 | Variable | `TAILNET_ISSUER` | all | stable namespace such as `tailnet:vgi-integration` |
 | Variable | `TAILNET_EXPECTED_CAPABILITY` | all | `query.farm/cap/vgi-test` for the supplied policy |

@@ -26,8 +26,6 @@ require_variable() {
 }
 
 for name in \
-  TS_SERVER_OAUTH_CLIENT_ID \
-  TS_SERVER_OAUTH_SECRET \
   TS_OAUTH_CLIENT_ID \
   TS_OAUTH_SECRET \
   TAILNET_ISSUER \
@@ -35,11 +33,6 @@ for name in \
   TAILNET_EXPECTED_CLIENT_TAG; do
   require_variable "$name"
 done
-
-if [[ "$TS_SERVER_OAUTH_CLIENT_ID" == "$TS_OAUTH_CLIENT_ID" ]]; then
-  echo "server and client Tailnet roles must use different OAuth clients" >&2
-  exit 2
-fi
 if [[ "$TAILNET_PROFILE" == "full" ]]; then
   for name in TAILNET_USER_AUTHKEY TAILNET_SERVICE_NAME TAILNET_SERVICE_HOST; do
     require_variable "$name"
