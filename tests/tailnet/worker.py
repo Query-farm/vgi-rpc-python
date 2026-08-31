@@ -39,7 +39,10 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     """Start the configured raw-TCP or HTTP integration worker."""
     args = _parser().parse_args(argv)
-    server = RpcServer(TailnetEvidenceService, TailnetEvidenceImpl())
+    # TypeScript's native TCP client discovers schemas through the standard
+    # introspection method before its first call, so the shared worker must
+    # expose the same public contract that production clients expect.
+    server = RpcServer(TailnetEvidenceService, TailnetEvidenceImpl(), enable_describe=True)
     if args.transport == "tcp":
         provider = tailscale_localapi_provider(issuer=args.issuer, unix_socket=args.localapi_socket)
         serve_tcp(
