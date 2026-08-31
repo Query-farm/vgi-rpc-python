@@ -93,12 +93,15 @@ fi
   --port 19400 \
   --expected-evidence-source localapi \
   --expected-assurance local_daemon \
+  --expected-issuer "$TAILNET_ISSUER" \
   --expected-subject-kind tagged_node \
   --expected-subject-stability stable \
   --expected-capability "$TAILNET_EXPECTED_CAPABILITY" \
   --expected-tag "$TAILNET_EXPECTED_CLIENT_TAG" \
   --expected-target-kind destination_ip \
-  --expect-authenticated
+  --expect-authenticated \
+  --expect-principal-match \
+  --expect-evidence-binding
 
 "${COMPOSE[@]}" run --rm probe-socks python -m tests.tailnet.probe tcp \
   --host "$SERVER_DNS" \
@@ -107,22 +110,27 @@ fi
   --require-local-dns-failure \
   --expected-evidence-source localapi \
   --expected-assurance local_daemon \
+  --expected-issuer "$TAILNET_ISSUER" \
   --expected-subject-kind tagged_node \
   --expected-subject-stability stable \
   --expected-capability "$TAILNET_EXPECTED_CAPABILITY" \
   --expected-tag "$TAILNET_EXPECTED_CLIENT_TAG" \
   --expected-target-kind destination_ip \
-  --expect-authenticated
+  --expect-authenticated \
+  --expect-principal-match \
+  --expect-evidence-binding
 
 "${COMPOSE[@]}" run --rm probe-direct python -m tests.tailnet.probe http \
   --url "https://$SERVER_DNS" \
   --spoof-login attacker@example.invalid \
   --expected-evidence-source serve_proxy \
   --expected-assurance configured_proxy \
+  --expected-issuer "$TAILNET_ISSUER" \
   --expected-subject-kind unknown \
   --expected-subject-stability none \
   --expected-capability "$TAILNET_EXPECTED_CAPABILITY" \
-  --expect-proxy
+  --expect-proxy \
+  --expect-evidence-binding
 
 if [[ "$TAILNET_PROFILE" == "full" ]]; then
   "${COMPOSE[@]}" run --rm probe-user python -m tests.tailnet.probe tcp \
@@ -130,21 +138,26 @@ if [[ "$TAILNET_PROFILE" == "full" ]]; then
     --port 19400 \
     --expected-evidence-source localapi \
     --expected-assurance local_daemon \
+    --expected-issuer "$TAILNET_ISSUER" \
     --expected-subject-kind user \
     --expected-subject-stability stable \
     --expected-capability "$TAILNET_EXPECTED_CAPABILITY" \
     --expected-target-kind destination_ip \
-    --expect-authenticated
+    --expect-authenticated \
+    --expect-principal-match \
+    --expect-evidence-binding
 
   "${COMPOSE[@]}" run --rm probe-user python -m tests.tailnet.probe http \
     --url "https://$SERVER_DNS" \
     --spoof-login attacker@example.invalid \
     --expected-evidence-source serve_proxy \
     --expected-assurance configured_proxy \
+    --expected-issuer "$TAILNET_ISSUER" \
     --expected-subject-kind user \
     --expected-subject-stability login \
     --expected-capability "$TAILNET_EXPECTED_CAPABILITY" \
-    --expect-proxy
+    --expect-proxy \
+    --expect-evidence-binding
 
   "${COMPOSE[@]}" exec -T tailscale-server tailscale --socket=/var/run/tailscale/tailscaled.sock serve \
     --yes \
@@ -159,13 +172,16 @@ if [[ "$TAILNET_PROFILE" == "full" ]]; then
     --port 19400 \
     --expected-evidence-source localapi \
     --expected-assurance local_daemon \
+    --expected-issuer "$TAILNET_ISSUER" \
     --expected-subject-kind tagged_node \
     --expected-subject-stability stable \
     --expected-capability "$TAILNET_EXPECTED_CAPABILITY" \
     --expected-tag "$TAILNET_EXPECTED_CLIENT_TAG" \
     --expected-target-kind service \
     --expected-target-value "$TAILNET_SERVICE_NAME" \
-    --expect-authenticated
+    --expect-authenticated \
+    --expect-principal-match \
+    --expect-evidence-binding
 fi
 
 echo "real Tailnet integration profile '$TAILNET_PROFILE' passed"

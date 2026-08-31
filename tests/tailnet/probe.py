@@ -34,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     for child in (tcp, http):
         child.add_argument("--expected-evidence-source", required=True)
         child.add_argument("--expected-assurance", required=True)
+        child.add_argument("--expected-issuer", required=True)
         child.add_argument("--expected-subject-kind", required=True)
         child.add_argument("--expected-subject-stability", required=True)
         child.add_argument("--expected-capability", required=True)
@@ -42,6 +43,8 @@ def _parser() -> argparse.ArgumentParser:
         child.add_argument("--expected-target-value")
         child.add_argument("--expect-proxy", action="store_true")
         child.add_argument("--expect-authenticated", action="store_true")
+        child.add_argument("--expect-principal-match", action="store_true")
+        child.add_argument("--expect-evidence-binding", action="store_true")
     return parser
 
 
@@ -53,6 +56,7 @@ def _assert_snapshot(raw: str, args: argparse.Namespace) -> dict[str, Any]:
     assert identity["provider"] == "tailscale", identity
     assert identity["evidence_source"] == args.expected_evidence_source, identity
     assert identity["assurance"] == args.expected_assurance, identity
+    assert identity["issuer"] == args.expected_issuer, identity
     assert identity["subject_kind"] == args.expected_subject_kind, identity
     assert identity["subject_stability"] == args.expected_subject_stability, identity
     assert identity["subject_verified"] is (args.expected_subject_stability != "none"), identity
@@ -71,6 +75,9 @@ def _assert_snapshot(raw: str, args: argparse.Namespace) -> dict[str, Any]:
         spoofed = hashlib.sha256(f"login:{args.spoof_login}".encode()).hexdigest()
         assert identity["subject_fingerprint"] != spoofed, "Serve trusted a client-supplied identity header"
     assert payload["auth"]["authenticated"] is args.expect_authenticated, payload["auth"]
+    assert payload["auth"]["principal_matches_identity"] is args.expect_principal_match, payload["auth"]
+    assert payload["auth"]["peer_evidence_binding_present"] is args.expect_evidence_binding, payload["auth"]
+    assert payload["auth"]["domain"] == ("tailscale" if args.expect_authenticated else None), payload["auth"]
     return payload
 
 

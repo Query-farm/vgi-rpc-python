@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "implementations": {
+    "go": {
+      "implemented": {
+        "client": {
+          "http": true,
+          "http_socks5h": true,
+          "tcp": false,
+          "tcp_socks5h": false
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": true,
+          "tcp_proxy_v2_identity": true
+        },
+        "iroh": false
+      },
+      "live_qualified": {
+        "gate": "go-rust",
+        "client": {
+          "http": true,
+          "http_socks5h": true,
+          "tcp": false,
+          "tcp_socks5h": false
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": true,
+          "tcp_proxy_v2_identity": false
+        },
+        "iroh": false
+      }
+    },
+    "rust": {
+      "implemented": {
+        "client": {
+          "http": true,
+          "http_socks5h": false,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": true,
+          "tcp_proxy_v2_identity": true
+        },
+        "iroh": true
+      },
+      "live_qualified": {
+        "gate": "go-rust",
+        "client": {
+          "http": true,
+          "http_socks5h": false,
+          "tcp": true,
+          "tcp_socks5h": true
+        },
+        "server": {
+          "http_serve_identity": true,
+          "tcp_localapi_identity": true,
+          "tcp_proxy_v2_identity": false
+        },
+        "iroh": false
+      }
+    },
+    "cpp": {"implemented": {}, "live_qualified": null},
+    "csharp": {"implemented": {}, "live_qualified": null},
+    "java": {"implemented": {}, "live_qualified": null},
+    "typescript": {"implemented": {}, "live_qualified": null}
+  }
+}

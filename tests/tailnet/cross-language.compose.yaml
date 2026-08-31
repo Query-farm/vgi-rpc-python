@@ -1,0 +1,122 @@
+services:
+  server-tool:
+    image: ${VGI_TAILNET_IMAGE:-vgi-rpc-tailnet:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+
+  go-client-direct:
+    image: ${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-client
+    depends_on:
+      tailscale-client:
+        condition: service_healthy
+
+  go-client-socks:
+    image: ${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}
+    profiles: ["interop"]
+    depends_on:
+      tailscale-socks:
+        condition: service_healthy
+
+  go-worker-direct:
+    image: ${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - server-tcp
+      - --host
+      - 0.0.0.0
+      - --port
+      - "19400"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+      - --expected-tag
+      - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+
+  go-worker-http:
+    image: ${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    command:
+      - server-http
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18080"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+
+  rust-client-direct:
+    image: ${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-client
+    depends_on:
+      tailscale-client:
+        condition: service_healthy
+
+  rust-client-socks:
+    image: ${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}
+    profiles: ["interop"]
+    depends_on:
+      tailscale-socks:
+        condition: service_healthy
+
+  rust-worker-direct:
+    image: ${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - server-tcp
+      - --host
+      - 0.0.0.0
+      - --port
+      - "19400"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+      - --expected-tag
+      - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+
+  rust-worker-http:
+    image: ${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    command:
+      - server-http
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18080"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}

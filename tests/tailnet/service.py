@@ -43,6 +43,7 @@ class TailnetEvidenceImpl:
                     "provider": identity.provider,
                     "evidence_source": identity.evidence_source,
                     "assurance": identity.assurance.value,
+                    "issuer": identity.issuer,
                     "transport": identity.transport,
                     "subject_kind": identity.subject_kind.value,
                     "subject_stability": identity.subject_stability.value,
@@ -65,6 +66,10 @@ class TailnetEvidenceImpl:
                 "authenticated": ctx.auth.authenticated,
                 "domain": ctx.auth.domain,
                 "principal_fingerprint": _fingerprint(ctx.auth.principal),
+                "principal_matches_identity": len(ctx.peer_evidence.identities) == 1
+                and ctx.peer_evidence.identities[0].subject_key is not None
+                and ctx.auth.principal == ctx.peer_evidence.identities[0].canonical_principal,
+                "peer_evidence_binding_present": bool(ctx.auth.claims.get("peer_evidence_binding")),
             },
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
