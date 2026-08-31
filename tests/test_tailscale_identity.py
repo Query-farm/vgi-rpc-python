@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -44,11 +44,6 @@ class _CallbackServer(Protocol):
 
 
 class _FakeHTTPServer(ThreadingHTTPServer):
-    callback: _Callback
-    daemon_threads = True
-
-
-class _FakeUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     callback: _Callback
     daemon_threads = True
 
@@ -87,7 +82,15 @@ def _http_server(callback: _Callback) -> Iterator[str]:
 
 @contextlib.contextmanager
 def _unix_server(path: Path, callback: _Callback) -> Iterator[str]:
-    server = _FakeUnixServer(str(path), _Handler)
+    unix_stream_server = getattr(socketserver, "UnixStreamServer", None)
+    if unix_stream_server is None:
+        pytest.skip("Unix-domain LocalAPI transport is not available on this platform")
+    fake_server_type = type(
+        "_FakeUnixServer",
+        (socketserver.ThreadingMixIn, unix_stream_server),
+        {"daemon_threads": True},
+    )
+    server: Any = fake_server_type(str(path), _Handler)
     server.callback = callback
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
