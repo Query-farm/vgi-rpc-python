@@ -100,7 +100,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     else:
         headers = {"Tailscale-User-Login": args.spoof_login} if args.spoof_login else None
         with (
-            httpx2.Client(base_url=args.url, headers=headers, follow_redirects=True, trust_env=False) as http_client,
+            httpx2.Client(
+                base_url=args.url,
+                headers=headers,
+                follow_redirects=True,
+                timeout=15,
+                trust_env=False,
+            ) as http_client,
             http_connect(TailnetEvidenceService, client=http_client) as client,
         ):
             first = _assert_snapshot(client.snapshot(), args)

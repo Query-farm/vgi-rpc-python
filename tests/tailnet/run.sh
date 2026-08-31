@@ -80,6 +80,14 @@ fi
   --https=443 \
   http://127.0.0.1:18080
 
+# `tailscale serve` returns before its first ACME certificate is necessarily
+# available. Force the certificate fetch to complete so the HTTPS assertion
+# tests Serve rather than racing certificate issuance.
+"${COMPOSE[@]}" exec -T tailscale-server tailscale --socket=/var/run/tailscale/tailscaled.sock cert \
+  --cert-file=/tmp/vgi-tailnet-cert.pem \
+  --key-file=/tmp/vgi-tailnet-key.pem \
+  "$SERVER_DNS"
+
 "${COMPOSE[@]}" run --rm probe-direct python -m tests.tailnet.probe tcp \
   --host "$SERVER_DNS" \
   --port 19400 \
