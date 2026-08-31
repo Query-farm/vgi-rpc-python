@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 import falcon
 
 from vgi_rpc.external import UploadUrlProvider
-from vgi_rpc.rpc import AuthContext, RpcServer
+from vgi_rpc.rpc import AuthContext, PeerAuthenticationPolicy, PeerIdentityProvider, RpcServer
 
 from .._common import (
     _SESSION_ENDPOINT,
@@ -98,6 +98,11 @@ def make_wsgi_app(
     max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    peer_identity_providers: Sequence[PeerIdentityProvider] = (),
+    peer_authentication_policy: PeerAuthenticationPolicy | None = None,
+    peer_service_name: str | None = None,
+    peer_resolution_timeout: float = 5.0,
+    peer_provider_concurrency: int = 64,
     proxy_proof_required: bool = False,
     proxy_auth_headers: Sequence[str] | None = None,
     cors_origins: str | Iterable[str] | None = None,
@@ -167,6 +172,17 @@ def make_wsgi_app(
             ``ValueError`` (bad credentials) or ``PermissionError``
             (forbidden) on failure — these are mapped to HTTP 401.
             Other exceptions propagate as 500.
+        peer_identity_providers: Evidence providers evaluated independently
+            from application authentication. Their immutable results are
+            exposed as ``CallContext.peer_evidence``.
+        peer_authentication_policy: Optional policy composing resolved peer
+            evidence with the existing authentication result.
+        peer_service_name: Destination service identifier supplied to peer
+            evidence providers for destination-scoped authorization evidence.
+        peer_resolution_timeout: Total monotonic deadline, in seconds, for all
+            peer evidence providers on one request.
+        peer_provider_concurrency: Maximum active provider callbacks per app.
+            This hard bound also covers callbacks that ignore cancellation.
         proxy_proof_required: Advertise ``VGI-Proxy-Proof-Required: true`` so a
             proxy can tell it is minting proofs for a worker that is actually
             checking them.  The gate itself is installed through
@@ -643,7 +659,10 @@ def make_wsgi_app(
             if _validated_oauth_metadata.scopes_supported
             else "openid email"
         )
-        _exempt_prefixes_list.append(f"{prefix}/_oauth/")
+        # _AuthMiddleware matches exemptions on a segment boundary. Store the
+        # route root without a trailing slash so /_oauth/callback is included
+        # while lookalikes such as /_oauth-evil remain authenticated.
+        _exempt_prefixes_list.append(f"{prefix}/_oauth")
         _pkce_active = True
         _pkce_user_info_html = build_user_info_html(prefix)
 
@@ -660,6 +679,11 @@ def make_wsgi_app(
             www_authenticate=www_authenticate,
             on_auth_failure=on_auth_failure,
             exempt_prefixes=tuple(_exempt_prefixes_list),
+            peer_identity_providers=tuple(peer_identity_providers),
+            peer_authentication_policy=peer_authentication_policy,
+            service_name=peer_service_name,
+            peer_resolution_timeout=peer_resolution_timeout,
+            peer_provider_concurrency=peer_provider_concurrency,
         )
     )
     # Sticky middleware runs AFTER auth so AAD binding sees the authenticated

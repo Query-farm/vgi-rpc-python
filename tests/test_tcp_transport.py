@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import errno
+import logging
+import socket
 import threading
+import time
 from typing import Protocol
 
 import pytest
 
+from vgi_rpc import AuthContext, PeerEvidenceSet
 from vgi_rpc.rpc import (
     RpcServer,
     TcpTransport,
@@ -210,6 +214,43 @@ def test_max_connections_limits_accepts_not_only_handlers() -> None:
     assert not serving.is_alive()
     assert listener.calls == 3
     assert server.calls == 2
+
+
+def test_peer_authentication_policy_error_is_redacted(caplog: pytest.LogCaptureFixture) -> None:
+    """A custom raw-TCP policy cannot put capability text in server logs."""
+    secret = "raw-policy-capability-secret"
+    ready = threading.Event()
+    bound: list[tuple[str, int]] = []
+
+    def policy(_evidence: PeerEvidenceSet, _auth: AuthContext) -> AuthContext:
+        raise PermissionError(secret)
+
+    def on_bound(host: str, port: int) -> None:
+        bound.append((host, port))
+        ready.set()
+
+    thread = threading.Thread(
+        target=lambda: serve_tcp(
+            RpcServer(_EchoService, _EchoImpl()),
+            "127.0.0.1",
+            0,
+            threaded=True,
+            on_bound=on_bound,
+            peer_authentication_policy=policy,
+        ),
+        daemon=True,
+    )
+    with caplog.at_level(logging.DEBUG, logger="vgi_rpc.rpc"):
+        thread.start()
+        assert ready.wait(5)
+        with socket.create_connection(bound[0], timeout=1):
+            pass
+        for _ in range(100):
+            if "Error serving socket connection" in caplog.text:
+                break
+            time.sleep(0.01)
+    assert "Error serving socket connection" in caplog.text
+    assert secret not in caplog.text
 
 
 def test_tcp_connect_host_port_parsing() -> None:

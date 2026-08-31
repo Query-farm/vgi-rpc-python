@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "spiffe_id_cases": [
+    {"name": "canonical", "value": "spiffe://example.org/ns/default/sa/worker", "expected": "valid"},
+    {"name": "wrong_domain", "value": "spiffe://other.org/workload", "expected": "invalid"},
+    {"name": "userinfo", "value": "spiffe://user@example.org/workload", "expected": "invalid"},
+    {"name": "port", "value": "spiffe://example.org:443/workload", "expected": "invalid"},
+    {"name": "query", "value": "spiffe://example.org/workload?role=admin", "expected": "invalid"},
+    {"name": "percent_escape", "value": "spiffe://example.org/a%2Fb", "expected": "invalid"},
+    {"name": "dot_segment", "value": "spiffe://example.org/a/../b", "expected": "invalid"},
+    {"name": "empty_path", "value": "spiffe://example.org", "expected": "invalid"}
+  ],
+  "envoy_xfcc_cases": [
+    {
+      "name": "sanitize_set",
+      "value": "By=spiffe%3A%2F%2Fmesh.example%2Fproxy;Hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;URI=spiffe%3A%2F%2Fexample.org%2Fworkload",
+      "expected": "available"
+    },
+    {
+      "name": "forwarded_chain",
+      "value": "Hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;URI=spiffe%3A%2F%2Fexample.org%2Fa,Hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;URI=spiffe%3A%2F%2Fexample.org%2Fb",
+      "expected": "invalid"
+    },
+    {
+      "name": "missing_hash",
+      "value": "URI=spiffe%3A%2F%2Fexample.org%2Fworkload",
+      "expected": "invalid"
+    },
+    {
+      "name": "unknown_field",
+      "value": "Hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;URI=spiffe%3A%2F%2Fexample.org%2Fworkload;Role=admin",
+      "expected": "invalid"
+    },
+    {
+      "name": "bad_escape",
+      "value": "Hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;URI=spiffe%3A%2F%2Fexample.org%2Gworkload",
+      "expected": "invalid"
+    }
+  ],
+  "gcp_cases": [
+    {
+      "name": "verified",
+      "headers": {
+        "X-Client-Cert-Present": "true",
+        "X-Client-Cert-Chain-Verified": "true",
+        "X-Client-Cert-Spiffe-Id": "spiffe://example.org/workload",
+        "X-Client-Cert-Error": ""
+      },
+      "expected": "available"
+    },
+    {
+      "name": "absent",
+      "headers": {
+        "X-Client-Cert-Present": "false",
+        "X-Client-Cert-Chain-Verified": "false"
+      },
+      "expected": "no_match"
+    },
+    {
+      "name": "validation_error",
+      "headers": {
+        "X-Client-Cert-Present": "true",
+        "X-Client-Cert-Chain-Verified": "false",
+        "X-Client-Cert-Spiffe-Id": "spiffe://example.org/workload",
+        "X-Client-Cert-Error": "CERTIFICATE_VERIFY_FAILED"
+      },
+      "expected": "invalid"
+    }
+  ],
+  "tailscale_serve_cases": [
+    {
+      "name": "login",
+      "headers": {"Tailscale-User-Login": "alice@example.com", "Tailscale-User-Name": "Alice"},
+      "expected": "available",
+      "subject_stability": "login"
+    },
+    {
+      "name": "capability_only",
+      "headers": {"Tailscale-App-Capabilities": "{\"query.farm/can-run\":[{\"worker\":\"analytics\"}]}"},
+      "expected": "available",
+      "subject_stability": "none"
+    },
+    {
+      "name": "funnel",
+      "headers": {"Tailscale-Funnel-Request": "?1", "Tailscale-User-Login": "spoof@example.com"},
+      "expected": "not_applicable"
+    },
+    {
+      "name": "malformed_capability",
+      "headers": {"Tailscale-App-Capabilities": "{\"query.farm/can-run\":{}}"},
+      "expected": "invalid"
+    },
+    {
+      "name": "profile_without_login",
+      "headers": {"Tailscale-User-Name": "Alice"},
+      "expected": "invalid"
+    }
+  ]
+}

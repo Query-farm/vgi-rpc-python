@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from io import BytesIO
+from types import MappingProxyType
 from typing import Any, Literal, cast
 
 import pyarrow as pa
@@ -33,6 +34,7 @@ from vgi_rpc.metadata import (
     parse_version,
 )
 from vgi_rpc.rpc._common import (
+    _ANONYMOUS,
     _EMPTY_SCHEMA,
     AuthContext,
     CallContext,
@@ -54,14 +56,17 @@ from vgi_rpc.rpc._common import (
     _current_session_id,
     _current_sticky_action,
     _current_stream_id,
+    _current_transport,
     _DispatchHook,
     _generate_request_id,
     _get_auth_and_metadata,
     _logger,
     _record_input,
     _record_output,
+    _TransportContext,
 )
 from vgi_rpc.rpc._debug import wire_stream_logger
+from vgi_rpc.rpc._identity import PeerEvidenceSet
 from vgi_rpc.rpc._transport import PipeTransport, RpcTransport, ShmPipeTransport, TcpTransport, UnixTransport
 from vgi_rpc.rpc._types import (
     AnnotatedBatch,
@@ -263,6 +268,10 @@ def _emit_access_log(
         }
         if cancelled:
             extra["cancelled"] = True
+        if peer_identity_status := transport_metadata.get("peer_identity_status"):
+            extra["peer_identity_status"] = peer_identity_status
+        if peer_identity_sources := transport_metadata.get("peer_identity_sources"):
+            extra["peer_identity_sources"] = peer_identity_sources
         if error_message:
             extra["error_message"] = error_message
         if server_version:
@@ -784,8 +793,22 @@ class RpcServer:
             self._transport_kind = kind
             self._transport_capabilities = capabilities
 
-    def serve(self, transport: RpcTransport) -> None:
-        """Serve RPC requests in a loop until the transport is closed."""
+    def serve(
+        self,
+        transport: RpcTransport,
+        *,
+        auth: AuthContext | None = None,
+        peer_evidence: PeerEvidenceSet | None = None,
+        transport_metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Serve requests until close, optionally under one connection identity.
+
+        HTTP installs request-scoped identity in middleware and therefore uses
+        the defaults. Stateful raw transports resolve once after accept and
+        pass an immutable connection snapshot here; every unary call, stream
+        turn, and cancellation hook on that connection then sees the same
+        ``AuthContext`` and ``PeerEvidenceSet``.
+        """
         capabilities: frozenset[str] = frozenset()
         if isinstance(transport, ShmPipeTransport):
             kind = TransportKind.PIPE
@@ -799,6 +822,24 @@ class RpcServer:
         else:
             kind = TransportKind.PIPE
         self._notify_transport(kind, capabilities)
+        transport_token = None
+        if auth is not None or peer_evidence is not None or transport_metadata is not None:
+            source_auth = auth or _ANONYMOUS
+            auth_snapshot = AuthContext(
+                domain=source_auth.domain,
+                authenticated=source_auth.authenticated,
+                principal=source_auth.principal,
+                claims=MappingProxyType(dict(source_auth.claims)),
+            )
+            metadata_snapshot = MappingProxyType(dict(transport_metadata or {}))
+            transport_token = _current_transport.set(
+                _TransportContext(
+                    auth=auth_snapshot,
+                    transport_metadata=metadata_snapshot,
+                    peer_evidence=peer_evidence,
+                )
+            )
+
         # Cache the client's dynamically-advertised SHM segment for the life of
         # the connection so later offset-only request/data batches resolve
         # against it (see _ConnectionShm).
@@ -841,6 +882,8 @@ class RpcServer:
                     break
         finally:
             conn_shm.close()
+            if transport_token is not None:
+                _current_transport.reset(transport_token)
 
     def serve_one(self, transport: RpcTransport, *, shm_cache: _ConnectionShm | None = None) -> None:
         """Handle a single RPC call (any method type) over the given transport.

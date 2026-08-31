@@ -106,10 +106,17 @@ These fields appear on HTTP transports only.
 |---|---|---|
 | `server_version` | string | Present when the implementation knows its server *build* version (e.g. set from a build constant). |
 | `claims` | object | Present and non-empty when `authenticated == true` and the auth provider produced claims. JSON-serializable; nested values follow JSON conventions. **Emitters MUST redact sensitive claim values** — see below. |
+| `peer_identity_status` | string | Present when peer providers ran. Sorted comma-separated `provider:status` values; contains no subject/profile/capability data. |
+| `peer_identity_sources` | string | Present when evidence is available. Sorted comma-separated `provider:evidence_source:assurance` values; contains no subject keys, certificates, or capabilities. |
 
 An access log outlives the token it describes by months or years, and is shipped to systems chosen for searchability rather than for holding personal data. Standard OIDC claims (`email`, `phone_number`, `given_name`, …) and credential-shaped ones (`*_token`, `*_key`, `password`) MUST NOT reach it verbatim.
 
 Redaction is **key-based**: match on the name a value arrived under, never on its content. A claim called `context` holding an email address is not caught, and cannot be without guessing at free text — a boundary worth stating rather than pretending to exceed.
+
+Peer evidence logging is allowlist-based rather than key-redacted. Emit only
+provider outcome, evidence source, and assurance. Raw capabilities, LocalAPI
+tokens, user profile fields, certificate bodies, stable subject keys, and proxy
+credentials MUST NOT appear in these fields.
 
 Replace values, do not drop keys. *Which* claims a credential carried is a question an audit log exists to answer; what they contained is not. The Python reference substitutes `"[redacted]"`, exposes the policy as `vgi_rpc.logging_utils.redact_claims`, and allows replacement via `set_claim_redactor` (with `no_redaction` for services that own their logs end to end). A redactor that raises MUST fail **closed** — drop the claims entirely rather than emit them unredacted.
 

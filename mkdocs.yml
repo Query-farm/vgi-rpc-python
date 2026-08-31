@@ -132,6 +132,11 @@ nav:
   - Guides:
     - Examples: examples.md
     - Hosting: hosting.md
+    - Transport Identity Contract: transport-identity-spec.md
+    - Transport Identity Matrix: transport-identity-implementation-matrix.md
+    - Tailscale Identity: tailscale-identity.md
+    - Cloud and Proxy Identity: cloud-and-proxy-identity.md
+    - Mesh Deployment Profiles: mesh-deployment-profiles.md
     - Access Log: access-log.md
     - Access Log Specification: access-log-spec.md
     - Sticky Sessions Specification: sticky-sessions-spec.md

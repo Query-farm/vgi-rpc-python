@@ -482,8 +482,11 @@ class _StickyMiddleware:
         """
         auth, _ = _get_auth_and_metadata()
         if auth is None or not auth.authenticated:
-            return "\x00anonymous"
-        return f"{auth.domain or ''}\x00{auth.principal or ''}"
+            binding = auth.claims.get("peer_evidence_binding") if auth is not None else None
+            return f"\x00anonymous\x00{binding}" if isinstance(binding, str) and binding else "\x00anonymous"
+        binding = auth.claims.get("peer_evidence_binding")
+        key = f"{auth.domain or ''}\x00{auth.principal or ''}"
+        return f"{key}\x00{binding}" if isinstance(binding, str) and binding else key
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Resolve the session header (if any) and install the sticky contextvars."""

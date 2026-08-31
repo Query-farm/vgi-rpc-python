@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import queue
+import threading
+import time
 import types as _types
 from collections.abc import Callable, Iterable
 from io import BytesIO, IOBase
@@ -32,6 +35,13 @@ import pyarrow as pa
 from vgi_rpc.external import _current_externalized_bytes
 from vgi_rpc.rpc import (
     AuthContext,
+    PeerAuthenticationPolicy,
+    PeerEvidenceSet,
+    PeerIdentityProvider,
+    PeerIdentityResult,
+    PeerIdentityStatus,
+    PeerIdentityUnavailableError,
+    PeerResolutionContext,
     RpcServer,
     _current_request_id,
     _current_transport,
@@ -60,7 +70,7 @@ from .._common import (
 from .._common import (
     decompress as _decompress_with_encoding,
 )
-from .._unauthorized import AuthUnavailableError, classify_auth_failure
+from .._unauthorized import AuthFailure, AuthReason, AuthUnavailableError, classify_auth_failure
 
 _logger = logging.getLogger("vgi_rpc.http")
 
@@ -229,6 +239,26 @@ def _build_transport_metadata(req: falcon.Request) -> dict[str, Any]:
     return md
 
 
+def _request_source_endpoint(req: falcon.Request) -> str | None:
+    """Return the immediate HTTP socket endpoint without changing trust input.
+
+    Reverse-proxy allowlists compare ``req.remote_addr`` as a normalized IP,
+    while Tailscale LocalAPI WhoIs requires the source port as well. WSGI
+    exposes that port separately in ``REMOTE_PORT``.
+    """
+    host = req.remote_addr
+    raw_port = req.env.get("REMOTE_PORT")
+    if not host or not isinstance(raw_port, str):
+        return None
+    try:
+        port = int(raw_port)
+    except ValueError:
+        return None
+    if not 1 <= port <= 65_535:
+        return None
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
 class _AuthMiddleware:
     """Falcon middleware: populates transport metadata and optionally authenticates.
 
@@ -251,7 +281,17 @@ class _AuthMiddleware:
     guessed at from its message text.
     """
 
-    __slots__ = ("_authenticate", "_exempt_prefixes", "_on_auth_failure", "_www_authenticate")
+    __slots__ = (
+        "_authenticate",
+        "_exempt_prefixes",
+        "_on_auth_failure",
+        "_peer_authentication_policy",
+        "_peer_identity_providers",
+        "_peer_provider_slots",
+        "_peer_resolution_timeout",
+        "_service_name",
+        "_www_authenticate",
+    )
 
     def __init__(
         self,
@@ -259,11 +299,110 @@ class _AuthMiddleware:
         www_authenticate: str | None = None,
         on_auth_failure: Callable[[str | None, str], None] | None = None,
         exempt_prefixes: tuple[str, ...] = (),
+        peer_identity_providers: tuple[PeerIdentityProvider, ...] = (),
+        peer_authentication_policy: PeerAuthenticationPolicy | None = None,
+        service_name: str | None = None,
+        peer_resolution_timeout: float = 5.0,
+        peer_provider_concurrency: int = 64,
     ) -> None:
         self._authenticate = authenticate
         self._www_authenticate = www_authenticate
         self._on_auth_failure = on_auth_failure
         self._exempt_prefixes = exempt_prefixes
+        self._peer_identity_providers = peer_identity_providers
+        self._peer_authentication_policy = peer_authentication_policy
+        self._service_name = service_name
+        if peer_resolution_timeout <= 0:
+            raise ValueError("peer_resolution_timeout must be positive")
+        if peer_provider_concurrency < len(peer_identity_providers):
+            raise ValueError("peer_provider_concurrency must accommodate every configured provider")
+        provider_names = tuple(provider.provider for provider in peer_identity_providers)
+        if any(not name for name in provider_names) or len(set(provider_names)) != len(provider_names):
+            raise ValueError("peer identity providers must have unique non-empty names")
+        self._peer_resolution_timeout = peer_resolution_timeout
+        self._peer_provider_slots = threading.BoundedSemaphore(peer_provider_concurrency)
+
+    def _resolve_peer_evidence(self, context: PeerResolutionContext) -> PeerEvidenceSet:
+        """Resolve all providers concurrently within one hard request deadline.
+
+        Provider callbacks are trusted extension code and Python cannot stop a
+        running callback.  Daemon threads plus a bounded semaphore ensure that
+        a callback which ignores its deadline cannot block process shutdown or
+        cause unbounded thread creation.  Its request still returns at the
+        configured deadline; the occupied slot is released only when the
+        callback actually exits.
+        """
+        providers = self._peer_identity_providers
+        if not providers:
+            return PeerEvidenceSet.empty()
+
+        outcomes: queue.Queue[tuple[int, object]] = queue.Queue(maxsize=len(providers))
+        resolved: list[object | None] = [None] * len(providers)
+        started = 0
+        for index, provider in enumerate(providers):
+            if not self._peer_provider_slots.acquire(blocking=False):
+                resolved[index] = PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE)
+                continue
+
+            def invoke(position: int = index, resolver: PeerIdentityProvider = provider) -> None:
+                try:
+                    outcome: object = resolver(context)
+                except Exception as exc:  # delivered to the request thread
+                    outcome = exc
+                finally:
+                    self._peer_provider_slots.release()
+                outcomes.put((position, outcome))
+
+            threading.Thread(
+                target=invoke,
+                name=f"vgi-peer-identity-{index}",
+                daemon=True,
+            ).start()
+            started += 1
+
+        def record_outcome(index: int, outcome: object) -> None:
+            if isinstance(outcome, Exception):
+                # Providers are application extension points. Preserve only
+                # the failure class; provider-controlled text must not reach
+                # responses, logs, or telemetry.
+                if isinstance(outcome, PeerIdentityUnavailableError):
+                    resolved[index] = PeerIdentityResult(providers[index].provider, PeerIdentityStatus.UNAVAILABLE)
+                    return
+                if isinstance(outcome, (ValueError, PermissionError)):
+                    raise PermissionError("peer identity evidence rejected") from outcome
+                raise RuntimeError("peer identity provider failed") from None
+            provider = providers[index]
+            if not isinstance(outcome, PeerIdentityResult) or outcome.provider != provider.provider:
+                raise RuntimeError("peer identity provider result mismatch")
+            resolved[index] = outcome
+
+        for _ in range(started):
+            remaining = (context.deadline or 0.0) - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                index, outcome = outcomes.get(timeout=remaining)
+            except queue.Empty:
+                break
+            record_outcome(index, outcome)
+
+        # Do not downgrade a rejection that completed on the deadline edge.
+        # Harvest every already-queued outcome before marking only genuinely
+        # incomplete providers unavailable.
+        while True:
+            try:
+                index, outcome = outcomes.get_nowait()
+            except queue.Empty:
+                break
+            record_outcome(index, outcome)
+
+        results = []
+        for index, outcome in enumerate(resolved):
+            if outcome is None:
+                outcome = PeerIdentityResult(providers[index].provider, PeerIdentityStatus.UNAVAILABLE)
+            assert isinstance(outcome, PeerIdentityResult)
+            results.append(outcome)
+        return PeerEvidenceSet.from_results(tuple(results))
 
     def process_request(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Authenticate (if configured) and populate the transport contextvar.
@@ -286,23 +425,66 @@ class _AuthMiddleware:
             or path.startswith("/.well-known/")
             or any(path == pfx or path.startswith(pfx + "/") for pfx in self._exempt_prefixes)
         )
-        if self._authenticate is None or exempt:
-            tc = _TransportContext(auth=_ANONYMOUS, transport_metadata=transport_metadata)
+        if exempt:
+            tc = _TransportContext(
+                auth=_ANONYMOUS,
+                transport_metadata=transport_metadata,
+                peer_evidence=PeerEvidenceSet.empty(),
+            )
             req.context.transport_token = _current_transport.set(tc)
             return
         try:
-            auth = self._authenticate(req)
+            missing_credential: AuthFailure | None = None
+            try:
+                auth = self._authenticate(req) if self._authenticate is not None else _ANONYMOUS
+            except AuthFailure as exc:
+                reason = classify_auth_failure(exc)
+                if self._peer_authentication_policy is None or reason is not AuthReason.MISSING_CREDENTIAL:
+                    raise
+                missing_credential = exc
+                auth = _ANONYMOUS
+            resolution_context = PeerResolutionContext(
+                transport="http",
+                immediate_peer=req.remote_addr,
+                source_endpoint=_request_source_endpoint(req),
+                authority=req.host,
+                service_name=self._service_name,
+                headers={name: (value,) for name, value in req.headers.items()},
+                metadata=transport_metadata,
+                deadline=time.monotonic() + self._peer_resolution_timeout,
+            )
+            evidence = self._resolve_peer_evidence(resolution_context)
+            transport_metadata["peer_identity_status"] = ",".join(
+                f"{provider}:{status.value}" for provider, status in sorted(evidence.provider_status.items())
+            )
+            transport_metadata["peer_identity_sources"] = ",".join(
+                sorted(
+                    {
+                        f"{identity.provider}:{identity.evidence_source}:{identity.assurance.value}"
+                        for identity in evidence.identities
+                    }
+                )
+            )
+            if self._peer_authentication_policy is not None:
+                auth = self._peer_authentication_policy(evidence, auth)
+            if missing_credential is not None and not auth.authenticated:
+                raise missing_credential
+        except PeerIdentityUnavailableError as exc:
+            _logger.warning(
+                "Peer identity unavailable",
+                extra={"remote_addr": req.remote_addr or "", "error_type": type(exc).__name__},
+            )
+            raise falcon.HTTPServiceUnavailable(description="peer identity unavailable", retry_after=5) from exc
         except AuthUnavailableError as exc:
             # Not a rejection: the authority could not be reached. A 401 here
             # tells every caller to re-authenticate against a service that is
             # simply down, and invites them to negative-cache an outage.
             _logger.warning(
-                "Authentication unavailable: %s",
-                exc,
+                "Authentication unavailable",
                 extra={"remote_addr": req.remote_addr or "", "error_type": type(exc).__name__},
             )
             raise falcon.HTTPServiceUnavailable(
-                description=str(exc),
+                description="authentication authority unavailable",
                 retry_after=exc.retry_after,
             ) from exc
         except (ValueError, PermissionError) as exc:
@@ -312,21 +494,20 @@ class _AuthMiddleware:
             reason = classify_auth_failure(exc)
             req.context.vgi_auth_reason = reason
             _logger.warning(
-                "Auth failure from %s: %s",
+                "Auth failure from %s",
                 req.remote_addr,
-                exc,
                 extra={
                     "remote_addr": req.remote_addr or "",
                     "error_type": type(exc).__name__,
-                    "auth_error": str(exc),
+                    "auth_error": "authentication rejected",
                     "auth_reason": reason.value,
                 },
             )
             if self._on_auth_failure is not None:
                 self._on_auth_failure(req.remote_addr, type(exc).__name__)
             challenges = [self._www_authenticate] if self._www_authenticate else None
-            raise falcon.HTTPUnauthorized(description=str(exc), challenges=challenges) from exc
-        tc = _TransportContext(auth=auth, transport_metadata=transport_metadata)
+            raise falcon.HTTPUnauthorized(description="authentication rejected", challenges=challenges) from exc
+        tc = _TransportContext(auth=auth, transport_metadata=transport_metadata, peer_evidence=evidence)
         req.context.transport_token = _current_transport.set(tc)
 
     def process_response(

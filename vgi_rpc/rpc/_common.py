@@ -20,6 +20,7 @@ import pyarrow as pa
 from vgi_rpc.log import Level, Message
 
 if TYPE_CHECKING:
+    from vgi_rpc.rpc._identity import PeerEvidenceSet
     from vgi_rpc.rpc._types import RpcMethodInfo
 
 # ---------------------------------------------------------------------------
@@ -177,6 +178,7 @@ class CallContext:
         "emit_client_log",
         "implementation",
         "kind",
+        "peer_evidence",
         "transport_metadata",
     )
 
@@ -191,6 +193,7 @@ class CallContext:
         protocol_name: str = "",
         kind: TransportKind | None = None,
         implementation: Any = None,
+        peer_evidence: PeerEvidenceSet | None = None,
     ) -> None:
         """Initialize with auth context, client-log callback, and optional server context fields.
 
@@ -209,6 +212,8 @@ class CallContext:
                 instance) can dispatch helper calls back through the
                 public protocol surface — including any meta-worker
                 dispatching the top-level RpcServer is fronting.
+            peer_evidence: Immutable transport peer evidence. When omitted,
+                it is inherited from the active transport context.
 
         """
         self.auth = auth
@@ -216,6 +221,15 @@ class CallContext:
         self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
         self.kind: TransportKind | None = kind
         self.implementation: Any = implementation
+        if peer_evidence is None:
+            transport_context = _current_transport.get()
+            if transport_context is not None and transport_context.peer_evidence is not None:
+                peer_evidence = transport_context.peer_evidence
+            else:
+                from vgi_rpc.rpc._identity import PeerEvidenceSet
+
+                peer_evidence = PeerEvidenceSet.empty()
+        self.peer_evidence: PeerEvidenceSet = peer_evidence
         self._server_id = server_id
         self._method_name = method_name
         self._protocol_name = protocol_name
@@ -471,6 +485,7 @@ class _TransportContext:
 
     auth: AuthContext
     transport_metadata: Mapping[str, Any] = field(default_factory=dict)
+    peer_evidence: PeerEvidenceSet | None = None
 
 
 _current_transport: ContextVar[_TransportContext | None] = ContextVar("vgi_rpc_transport", default=None)

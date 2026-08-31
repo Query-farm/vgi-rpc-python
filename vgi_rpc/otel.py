@@ -192,6 +192,8 @@ class _OtelHookToken:
     method_type: str
     service: str
     auth_domain: str | None
+    peer_identity_status: str | None
+    peer_identity_sources: str | None
 
 
 class _OtelDispatchHook:
@@ -249,6 +251,10 @@ class _OtelDispatchHook:
         start_time = time.monotonic()
         span: trace.Span | None = None
         otel_token: Token[Context] | None = None
+        status_value = transport_metadata.get("peer_identity_status")
+        peer_identity_status = status_value if isinstance(status_value, str) and status_value else None
+        sources_value = transport_metadata.get("peer_identity_sources")
+        peer_identity_sources = sources_value if isinstance(sources_value, str) and sources_value else None
 
         if self._config.enable_tracing:
             # Check for pipe-transport trace context in contextvar
@@ -282,6 +288,10 @@ class _OtelDispatchHook:
             user_agent = transport_metadata.get("user_agent")
             if user_agent:
                 attrs["user_agent.original"] = str(user_agent)
+            if peer_identity_status:
+                attrs["rpc.vgi_rpc.peer_identity.status"] = peer_identity_status
+            if peer_identity_sources:
+                attrs["rpc.vgi_rpc.peer_identity.sources"] = peer_identity_sources
             # Custom attributes
             attrs.update(self._config.custom_attributes)
 
@@ -308,6 +318,8 @@ class _OtelDispatchHook:
             method_type=info.method_type.value,
             service=self._protocol_name,
             auth_domain=auth.domain,
+            peer_identity_status=peer_identity_status,
+            peer_identity_sources=peer_identity_sources,
         )
 
     def on_dispatch_end(
@@ -362,6 +374,10 @@ class _OtelDispatchHook:
             }
             if token.auth_domain:
                 metric_attrs["rpc.vgi_rpc.auth.domain"] = token.auth_domain
+            if token.peer_identity_status:
+                metric_attrs["rpc.vgi_rpc.peer_identity.status"] = token.peer_identity_status
+            if token.peer_identity_sources:
+                metric_attrs["rpc.vgi_rpc.peer_identity.sources"] = token.peer_identity_sources
             self._counter.add(1, metric_attrs)
             self._histogram.record(duration, metric_attrs)
 

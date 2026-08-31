@@ -17,7 +17,7 @@ import falcon
 import falcon.testing
 
 from vgi_rpc.external import UploadUrlProvider
-from vgi_rpc.rpc import AuthContext, RpcServer
+from vgi_rpc.rpc import AuthContext, PeerAuthenticationPolicy, PeerIdentityProvider, RpcServer
 
 from .server import make_wsgi_app
 from .server._introspect import TokenResolver
@@ -131,6 +131,11 @@ def make_sync_client(
     max_request_bytes: int | None = None,
     max_stream_response_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
+    peer_identity_providers: Sequence[PeerIdentityProvider] = (),
+    peer_authentication_policy: PeerAuthenticationPolicy | None = None,
+    peer_service_name: str | None = None,
+    peer_resolution_timeout: float = 5.0,
+    peer_provider_concurrency: int = 64,
     proxy_proof_required: bool = False,
     proxy_auth_headers: Sequence[str] | None = None,
     default_headers: dict[str, str] | None = None,
@@ -169,6 +174,11 @@ def make_sync_client(
         max_stream_response_bytes: **Deprecated** alias for
             ``max_response_bytes``.
         authenticate: See ``make_wsgi_app``.
+        peer_identity_providers: See ``make_wsgi_app``.
+        peer_authentication_policy: See ``make_wsgi_app``.
+        peer_service_name: See ``make_wsgi_app``.
+        peer_resolution_timeout: See ``make_wsgi_app``.
+        peer_provider_concurrency: See ``make_wsgi_app``.
         proxy_proof_required: See ``make_wsgi_app``.
         proxy_auth_headers: See ``make_wsgi_app``.
         default_headers: Headers merged into every request (e.g. auth tokens).
@@ -206,6 +216,11 @@ def make_sync_client(
         max_stream_response_bytes=max_stream_response_bytes,
         max_request_bytes=max_request_bytes,
         authenticate=authenticate,
+        peer_identity_providers=peer_identity_providers,
+        peer_authentication_policy=peer_authentication_policy,
+        peer_service_name=peer_service_name,
+        peer_resolution_timeout=peer_resolution_timeout,
+        peer_provider_concurrency=peer_provider_concurrency,
         proxy_proof_required=proxy_proof_required,
         proxy_auth_headers=proxy_auth_headers,
         upload_url_provider=upload_url_provider,

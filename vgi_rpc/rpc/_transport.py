@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import ipaddress
 import logging
 import os
+import queue
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -20,12 +23,27 @@ from enum import Enum
 from io import BufferedReader, IOBase, RawIOBase
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast, runtime_checkable
 
-from vgi_rpc.rpc._common import _logger
+from vgi_rpc.rpc._common import _ANONYMOUS, AuthContext, _logger
 from vgi_rpc.rpc._debug import wire_transport_logger
+from vgi_rpc.rpc._identity import (
+    IdentityAssurance,
+    PeerAuthenticationPolicy,
+    PeerEvidenceSet,
+    PeerIdentityProvider,
+    PeerIdentityResult,
+    PeerIdentityStatus,
+    PeerIdentityUnavailableError,
+    PeerResolutionContext,
+)
+from vgi_rpc.rpc._proxy_protocol_v2 import ProxyProtocolV2Error, read_proxy_protocol_v2
 from vgi_rpc.shm import ShmSegment
 
 if TYPE_CHECKING:
     from vgi_rpc.rpc._server import RpcServer
+
+
+_ConnectionIdentity = tuple[AuthContext, PeerEvidenceSet, dict[str, Any]]
+_ConnectionIdentityResolver = Callable[[socket.socket], tuple[socket.socket, _ConnectionIdentity]]
 
 
 def _stderr_open() -> bool:
@@ -674,6 +692,8 @@ def serve_unix(
     """
     if idle_timeout is not None and not threaded:
         raise ValueError("idle_timeout requires threaded=True")
+    if threaded and max_connections is not None and max_connections <= 0:
+        raise ValueError("max_connections must be positive")
     _check_no_existing_listener(path)
     _unlink_stale_unix_socket(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -718,6 +738,7 @@ def _serve_socket_sequential(
     server: RpcServer,
     sock: socket.socket,
     transport_factory: Callable[[socket.socket], RpcTransport],
+    connection_identity_resolver: _ConnectionIdentityResolver | None = None,
 ) -> None:
     """Accept and serve connections one at a time.
 
@@ -726,6 +747,8 @@ def _serve_socket_sequential(
         sock: A bound, listening stream socket (AF_UNIX or AF_INET).
         transport_factory: Builds a transport from an accepted connection
             socket — :class:`UnixTransport` or :class:`TcpTransport`.
+        connection_identity_resolver: Optional pre-transport resolver that
+            snapshots authentication and peer evidence for the connection.
 
     """
     while True:
@@ -736,13 +759,28 @@ def _serve_socket_sequential(
                 time.sleep(_ACCEPT_RESOURCE_RETRY_DELAY)
                 continue
             break
-        transport = transport_factory(conn)
+        transport: RpcTransport | None = None
+        active_conn = conn
         try:
-            server.serve(transport)
-        except Exception:
-            _logger.debug("Error serving socket connection", exc_info=True)
+            identity: _ConnectionIdentity | None = None
+            if connection_identity_resolver is not None:
+                active_conn, identity = connection_identity_resolver(conn)
+            transport = transport_factory(active_conn)
+            if identity is None:
+                server.serve(transport)
+            else:
+                auth, evidence, metadata = identity
+                server.serve(transport, auth=auth, peer_evidence=evidence, transport_metadata=metadata)
+        except Exception as exc:
+            _logger.debug(
+                "Error serving socket connection",
+                extra={"error_type": type(exc).__name__},
+            )
         finally:
-            transport.close()
+            if transport is not None:
+                transport.close()
+            else:
+                active_conn.close()
 
 
 def _serve_socket_threaded(
@@ -752,6 +790,7 @@ def _serve_socket_threaded(
     idle_timeout: float | None,
     transport_factory: Callable[[socket.socket], RpcTransport],
     thread_name_prefix: str,
+    connection_identity_resolver: _ConnectionIdentityResolver | None = None,
 ) -> None:
     """Accept connections in daemon threads, optionally idle-shutdown.
 
@@ -772,6 +811,8 @@ def _serve_socket_threaded(
         transport_factory: Builds a transport from an accepted connection
             socket — :class:`UnixTransport` or :class:`TcpTransport`.
         thread_name_prefix: Prefix for the per-connection daemon thread names.
+        connection_identity_resolver: Optional pre-transport resolver that
+            snapshots authentication and peer evidence for the connection.
 
     """
     semaphore: threading.Semaphore | None = None
@@ -816,13 +857,28 @@ def _serve_socket_threaded(
 
     def _handle(conn: socket.socket) -> None:
         nonlocal conn_count
-        transport = transport_factory(conn)
+        transport: RpcTransport | None = None
+        active_conn = conn
         try:
-            server.serve(transport)
-        except Exception:
-            _logger.debug("Error serving socket connection", exc_info=True)
+            identity: _ConnectionIdentity | None = None
+            if connection_identity_resolver is not None:
+                active_conn, identity = connection_identity_resolver(conn)
+            transport = transport_factory(active_conn)
+            if identity is None:
+                server.serve(transport)
+            else:
+                auth, evidence, metadata = identity
+                server.serve(transport, auth=auth, peer_evidence=evidence, transport_metadata=metadata)
+        except Exception as exc:
+            _logger.debug(
+                "Error serving socket connection",
+                extra={"error_type": type(exc).__name__},
+            )
         finally:
-            transport.close()
+            if transport is not None:
+                transport.close()
+            else:
+                active_conn.close()
             if semaphore is not None:
                 semaphore.release()
             with state_lock:
@@ -867,7 +923,16 @@ def _serve_socket_threaded(
             )
             with state_lock:
                 active.add(t)
-            t.start()
+            try:
+                t.start()
+            except Exception:
+                with state_lock:
+                    active.discard(t)
+                    conn_count -= 1
+                if semaphore is not None:
+                    semaphore.release()
+                conn.close()
+                raise
     finally:
         with state_lock:
             _cancel_timer_locked()
@@ -959,6 +1024,272 @@ def make_tcp_pair() -> tuple[TcpTransport, TcpTransport]:
     return TcpTransport(client), TcpTransport(server_conn)
 
 
+def _socket_endpoint(address: object) -> str:
+    """Render an accepted IPv4/IPv6 socket address without ambiguity."""
+    if not isinstance(address, tuple) or len(address) < 2:
+        return ""
+    host, port = address[0], address[1]
+    if not isinstance(host, str) or not isinstance(port, int):
+        return ""
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return ""
+    normalized = parsed.ipv4_mapped if isinstance(parsed, ipaddress.IPv6Address) else None
+    text = str(normalized or parsed)
+    return f"[{text}]:{port}" if ":" in text else f"{text}:{port}"
+
+
+def _trusted_proxy_ips(values: tuple[str, ...]) -> frozenset[str]:
+    """Validate exact proxy IP literals and normalize mapped IPv4."""
+    normalized: set[str] = set()
+    for value in values:
+        try:
+            parsed = ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise ValueError("trusted_proxy_addresses must contain exact IP literals") from exc
+        mapped = parsed.ipv4_mapped if isinstance(parsed, ipaddress.IPv6Address) else None
+        normalized.add(str(mapped or parsed))
+    return frozenset(normalized)
+
+
+def _peer_ip(sock: socket.socket) -> str:
+    address = sock.getpeername()
+    if not isinstance(address, tuple) or not address or not isinstance(address[0], str):
+        return ""
+    try:
+        parsed = ipaddress.ip_address(address[0])
+    except ValueError:
+        return ""
+    mapped = parsed.ipv4_mapped if isinstance(parsed, ipaddress.IPv6Address) else None
+    return str(mapped or parsed)
+
+
+def _resolve_raw_peer_evidence(
+    providers: tuple[PeerIdentityProvider, ...],
+    context: PeerResolutionContext,
+    slots: threading.BoundedSemaphore,
+) -> PeerEvidenceSet:
+    """Resolve providers concurrently while retaining slots for hung calls."""
+    if not providers:
+        return PeerEvidenceSet.empty()
+    outcomes: queue.Queue[tuple[int, object]] = queue.Queue(maxsize=len(providers))
+    resolved: list[PeerIdentityResult | None] = [None] * len(providers)
+    started = 0
+    for index, provider in enumerate(providers):
+        if not slots.acquire(blocking=False):
+            resolved[index] = PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE)
+            continue
+
+        def invoke(position: int = index, resolver: PeerIdentityProvider = provider) -> None:
+            try:
+                outcome: object = resolver(context)
+            except Exception as exc:
+                outcome = exc
+            finally:
+                slots.release()
+            outcomes.put((position, outcome))
+
+        threading.Thread(target=invoke, name=f"vgi-tcp-peer-identity-{index}", daemon=True).start()
+        started += 1
+
+    def record_outcome(index: int, outcome: object) -> None:
+        if isinstance(outcome, Exception):
+            if isinstance(outcome, PeerIdentityUnavailableError):
+                resolved[index] = PeerIdentityResult(providers[index].provider, PeerIdentityStatus.UNAVAILABLE)
+                return
+            if isinstance(outcome, (ValueError, PermissionError)):
+                raise PermissionError("peer identity evidence rejected") from None
+            raise RuntimeError("peer identity provider failed") from None
+        provider = providers[index]
+        if not isinstance(outcome, PeerIdentityResult) or outcome.provider != provider.provider:
+            raise RuntimeError("peer identity provider result mismatch")
+        resolved[index] = outcome
+
+    for _ in range(started):
+        remaining = (context.deadline or 0.0) - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            index, outcome = outcomes.get(timeout=remaining)
+        except queue.Empty:
+            break
+        record_outcome(index, outcome)
+    while True:
+        try:
+            index, outcome = outcomes.get_nowait()
+        except queue.Empty:
+            break
+        record_outcome(index, outcome)
+    return PeerEvidenceSet.from_results(
+        tuple(
+            result
+            if result is not None
+            else PeerIdentityResult(providers[index].provider, PeerIdentityStatus.UNAVAILABLE)
+            for index, result in enumerate(resolved)
+        )
+    )
+
+
+def _tcp_identity_resolver(
+    *,
+    proxy_protocol: str,
+    trusted_proxy_addresses: tuple[str, ...],
+    proxy_preamble_timeout: float,
+    maximum_proxy_preamble_bytes: int,
+    service_name: str | None,
+    peer_identity_providers: tuple[PeerIdentityProvider, ...],
+    peer_authentication_policy: PeerAuthenticationPolicy | None,
+    peer_resolution_timeout: float,
+    peer_provider_concurrency: int,
+    tls_context: ssl.SSLContext | None = None,
+    tls_handshake_timeout: float = 5.0,
+    spiffe_trust_domains: tuple[str, ...] = (),
+) -> _ConnectionIdentityResolver | None:
+    """Validate listener identity configuration and build its resolver."""
+    if proxy_protocol not in ("off", "required"):
+        raise ValueError("proxy_protocol must be 'off' or 'required'")
+    if (
+        proxy_preamble_timeout <= 0
+        or maximum_proxy_preamble_bytes < 16
+        or peer_resolution_timeout <= 0
+        or tls_handshake_timeout <= 0
+    ):
+        raise ValueError("TCP proxy and identity limits must be positive")
+    provider_names = tuple(provider.provider for provider in peer_identity_providers)
+    if any(not name for name in provider_names) or len(set(provider_names)) != len(provider_names):
+        raise ValueError("peer identity providers must have unique non-empty names")
+    if peer_provider_concurrency < len(peer_identity_providers) or peer_provider_concurrency <= 0:
+        raise ValueError("peer_provider_concurrency must accommodate every configured provider")
+    trusted = _trusted_proxy_ips(trusted_proxy_addresses)
+    if proxy_protocol == "required" and not trusted:
+        raise ValueError("required PROXY v2 needs explicit trusted_proxy_addresses")
+    if proxy_protocol == "off" and trusted:
+        raise ValueError("trusted_proxy_addresses require proxy_protocol='required'")
+    domains = frozenset(spiffe_trust_domains)
+    if domains and tls_context is None:
+        raise ValueError("spiffe_trust_domains require tls_context")
+    if domains and tls_context is not None and tls_context.verify_mode != ssl.CERT_REQUIRED:
+        raise ValueError("direct SPIFFE identity requires tls_context.verify_mode=CERT_REQUIRED")
+    if domains and "spiffe" in provider_names:
+        raise ValueError("direct TLS SPIFFE and another 'spiffe' provider cannot share one listener")
+    if (
+        proxy_protocol == "off"
+        and not peer_identity_providers
+        and peer_authentication_policy is None
+        and tls_context is None
+    ):
+        return None
+    slots = threading.BoundedSemaphore(peer_provider_concurrency)
+
+    def resolve(sock: socket.socket) -> tuple[socket.socket, _ConnectionIdentity]:
+        immediate_peer = _socket_endpoint(sock.getpeername())
+        immediate_ip = _peer_ip(sock)
+        destination = _socket_endpoint(sock.getsockname())
+        asserted_peer: str | None = None
+        if proxy_protocol == "required":
+            if not immediate_ip or immediate_ip not in trusted:
+                raise ProxyProtocolV2Error("immediate peer is not a trusted PROXY v2 sender")
+            asserted = read_proxy_protocol_v2(
+                sock,
+                timeout=proxy_preamble_timeout,
+                maximum_bytes=maximum_proxy_preamble_bytes,
+            )
+            asserted_peer = (
+                f"[{asserted.source_address}]:{asserted.source_port}"
+                if ":" in asserted.source_address
+                else f"{asserted.source_address}:{asserted.source_port}"
+            )
+            destination = (
+                f"[{asserted.destination_address}]:{asserted.destination_port}"
+                if ":" in asserted.destination_address
+                else f"{asserted.destination_address}:{asserted.destination_port}"
+            )
+        active_sock = sock
+        direct_spiffe_identity = None
+        if tls_context is not None:
+            deadline = time.monotonic() + tls_handshake_timeout
+            wrapped = tls_context.wrap_socket(sock, server_side=True, do_handshake_on_connect=False)
+            try:
+                wrapped.settimeout(max(0.001, deadline - time.monotonic()))
+                wrapped.do_handshake()
+                wrapped.settimeout(None)
+                if domains:
+                    from cryptography import x509
+
+                    from vgi_rpc.http._spiffe import _identity_from_verified_x509_svid
+
+                    certificate = wrapped.getpeercert(binary_form=True)
+                    if not certificate:
+                        raise ssl.SSLError("TLS peer did not provide a certificate")
+                    direct_spiffe_identity = _identity_from_verified_x509_svid(
+                        x509.load_der_x509_certificate(certificate),
+                        trust_domains=domains,
+                        source_address=asserted_peer or immediate_peer,
+                        proxy_address=immediate_peer if asserted_peer is not None else None,
+                        evidence_source="direct_tls",
+                        assurance=IdentityAssurance.CRYPTOGRAPHIC_PEER,
+                        transport="tcp",
+                    )
+            except Exception:
+                wrapped.close()
+                raise
+            active_sock = wrapped
+        try:
+            context = PeerResolutionContext(
+                transport="tcp",
+                immediate_peer=immediate_ip,
+                source_endpoint=immediate_peer,
+                asserted_peer=asserted_peer,
+                destination_address=destination,
+                service_name=service_name,
+                metadata={"proxy_protocol": proxy_protocol, "tls": tls_context is not None},
+                deadline=time.monotonic() + peer_resolution_timeout,
+            )
+            evidence = _resolve_raw_peer_evidence(peer_identity_providers, context, slots)
+            if direct_spiffe_identity is not None:
+                evidence = PeerEvidenceSet(
+                    (direct_spiffe_identity, *evidence.identities),
+                    {"spiffe": PeerIdentityStatus.AVAILABLE, **evidence.provider_status},
+                )
+            auth = _ANONYMOUS
+            if peer_authentication_policy is not None:
+                try:
+                    auth = peer_authentication_policy(evidence, auth)
+                    if not isinstance(auth, AuthContext):
+                        raise TypeError("peer authentication policy must return AuthContext")
+                except PeerIdentityUnavailableError:
+                    raise PeerIdentityUnavailableError("peer identity authentication unavailable") from None
+                except Exception:
+                    raise PermissionError("peer identity authentication rejected") from None
+            metadata = {
+                "remote_addr": asserted_peer or immediate_peer,
+                "immediate_peer": immediate_peer,
+                "destination_address": destination,
+                "service_name": service_name or "",
+                "proxy_protocol": proxy_protocol,
+                "tls": tls_context is not None,
+                "peer_identity_status": ",".join(
+                    f"{provider}:{status.value}" for provider, status in sorted(evidence.provider_status.items())
+                ),
+                "peer_identity_sources": ",".join(
+                    sorted(
+                        {
+                            f"{identity.provider}:{identity.evidence_source}:{identity.assurance.value}"
+                            for identity in evidence.identities
+                        }
+                    )
+                ),
+            }
+        except Exception:
+            if active_sock is not sock:
+                active_sock.close()
+            raise
+        return active_sock, (auth, evidence, metadata)
+
+    return resolve
+
+
 def serve_tcp(
     server: RpcServer,
     host: str = "127.0.0.1",
@@ -968,6 +1299,18 @@ def serve_tcp(
     max_connections: int | None = None,
     idle_timeout: float | None = None,
     on_bound: Callable[[str, int], None] | None = None,
+    proxy_protocol: str = "off",
+    trusted_proxy_addresses: tuple[str, ...] = (),
+    proxy_preamble_timeout: float = 1.0,
+    maximum_proxy_preamble_bytes: int = 4096,
+    service_name: str | None = None,
+    peer_identity_providers: tuple[PeerIdentityProvider, ...] = (),
+    peer_authentication_policy: PeerAuthenticationPolicy | None = None,
+    peer_resolution_timeout: float = 5.0,
+    peer_provider_concurrency: int = 64,
+    tls_context: ssl.SSLContext | None = None,
+    tls_handshake_timeout: float = 5.0,
+    spiffe_trust_domains: tuple[str, ...] = (),
 ) -> None:
     """Serve RPC on a TCP socket, accepting connections in a loop.
 
@@ -977,9 +1320,9 @@ def serve_tcp(
     thread, allowing multiple clients to use the same socket concurrently.
 
     The default *host* is loopback-only (``127.0.0.1``).  Binding a routable
-    address (e.g. ``0.0.0.0``) is explicit opt-in and exposes the **unauthenticated,
-    unencrypted** raw framing protocol on the network — only do so on a trusted
-    network; use the HTTP transport otherwise.
+    address (e.g. ``0.0.0.0``) is explicit opt-in. Without ``tls_context`` it
+    exposes the **unauthenticated, unencrypted** raw framing protocol on the
+    network and must be limited to a trusted network.
 
     .. note::
 
@@ -1010,6 +1353,28 @@ def serve_tcp(
             by ``run_server`` to emit the ``TCP:<host>:<port>`` discovery line
             on stdout only after bind has succeeded.  Exceptions raised by the
             callback propagate and abort the serve.
+        proxy_protocol: ``"required"`` accepts PROXY protocol v2 only after
+            the immediate socket peer matches *trusted_proxy_addresses*.
+        trusted_proxy_addresses: Exact IPv4/IPv6 literals allowed to assert a
+            PROXY v2 source. No loopback or CIDR is trusted implicitly.
+        proxy_preamble_timeout: Independent total monotonic preamble budget.
+        maximum_proxy_preamble_bytes: Allocation bound for address data and
+            ignored-but-validated TLVs.
+        service_name: Operator-configured logical destination supplied to
+            identity providers (for example a Tailscale ``svc:`` name).
+        peer_identity_providers: Evidence providers resolved once per accepted
+            connection, after trusted PROXY parsing when enabled.
+        peer_authentication_policy: Converts the immutable evidence snapshot
+            to connection authentication or rejects the connection.
+        peer_resolution_timeout: One total monotonic provider deadline.
+        peer_provider_concurrency: Process-local bound for provider callbacks;
+            a callback that ignores cancellation retains its slot until exit.
+        tls_context: Optional server-side TLS context. Direct SPIFFE identity
+            requires certificate verification with ``CERT_REQUIRED``.
+        tls_handshake_timeout: Independent monotonic TLS handshake budget.
+        spiffe_trust_domains: Allowed direct client X.509-SVID trust domains.
+            The verified leaf becomes connection-scoped ``cryptographic_peer``
+            evidence; empty leaves TLS available without creating evidence.
 
     Raises:
         ValueError: If *idle_timeout* is set but *threaded* is ``False``.
@@ -1017,6 +1382,22 @@ def serve_tcp(
     """
     if idle_timeout is not None and not threaded:
         raise ValueError("idle_timeout requires threaded=True")
+    if threaded and max_connections is not None and max_connections <= 0:
+        raise ValueError("max_connections must be positive")
+    identity_resolver = _tcp_identity_resolver(
+        proxy_protocol=proxy_protocol,
+        trusted_proxy_addresses=trusted_proxy_addresses,
+        proxy_preamble_timeout=proxy_preamble_timeout,
+        maximum_proxy_preamble_bytes=maximum_proxy_preamble_bytes,
+        service_name=service_name,
+        peer_identity_providers=peer_identity_providers,
+        peer_authentication_policy=peer_authentication_policy,
+        peer_resolution_timeout=peer_resolution_timeout,
+        peer_provider_concurrency=peer_provider_concurrency,
+        tls_context=tls_context,
+        tls_handshake_timeout=tls_handshake_timeout,
+        spiffe_trust_domains=spiffe_trust_domains,
+    )
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
@@ -1036,9 +1417,17 @@ def serve_tcp(
         on_bound(host, bound_port)
     try:
         if threaded:
-            _serve_socket_threaded(server, sock, max_connections, idle_timeout, TcpTransport, "vgi-tcp")
+            _serve_socket_threaded(
+                server,
+                sock,
+                max_connections,
+                idle_timeout,
+                TcpTransport,
+                "vgi-tcp",
+                identity_resolver,
+            )
         else:
-            _serve_socket_sequential(server, sock, TcpTransport)
+            _serve_socket_sequential(server, sock, TcpTransport, identity_resolver)
     finally:
         sock.close()
 

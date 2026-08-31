@@ -195,12 +195,19 @@ def _compute_call_aad(auth: AuthContext | None) -> bytes:
         Associated-data bytes for the AEAD seal/open call.
 
     """
-    prefix = b"vgi_rpc.call.v1\x00"
+    binding = auth.claims.get("peer_evidence_binding") if auth is not None else None
+    prefix = b"vgi_rpc.call.v2\x00" if isinstance(binding, str) and binding else b"vgi_rpc.call.v1\x00"
     if auth is None or not auth.authenticated:
-        return prefix + b"\x00anonymous"
+        aad = prefix + b"\x00anonymous"
+        if isinstance(binding, str) and binding:
+            aad += b"\x00" + binding.encode()
+        return aad
     domain = (auth.domain or "").encode()
     principal = (auth.principal or "").encode()
-    return prefix + b"\x01" + domain + b"\x00" + principal
+    aad = prefix + b"\x01" + domain + b"\x00" + principal
+    if isinstance(binding, str) and binding:
+        aad += b"\x00" + binding.encode()
+    return aad
 
 
 def _compute_aad(auth: AuthContext | None) -> bytes:
@@ -209,6 +216,10 @@ def _compute_aad(auth: AuthContext | None) -> bytes:
     Wire format::
 
         b"vgi_rpc.state.v4\x00" || domain_bytes || b"\x00" || principal_bytes
+
+    When peer authentication contributes a binding digest, the prefix is
+    ``vgi_rpc.state.v5`` and the digest is appended after another NUL. Tokens
+    without peer evidence retain the v4 AAD for backward compatibility.
 
     For anonymous requests, the identity tail is the literal
     ``b"\x00anonymous"`` — matching the convention used elsewhere in the
@@ -224,12 +235,19 @@ def _compute_aad(auth: AuthContext | None) -> bytes:
         Associated-data bytes for the AEAD seal/open call.
 
     """
-    prefix = b"vgi_rpc.state.v4\x00"
+    binding = auth.claims.get("peer_evidence_binding") if auth is not None else None
+    prefix = b"vgi_rpc.state.v5\x00" if isinstance(binding, str) and binding else b"vgi_rpc.state.v4\x00"
     if auth is None or not auth.authenticated:
-        return prefix + b"\x00anonymous"
+        aad = prefix + b"\x00anonymous"
+        if isinstance(binding, str) and binding:
+            aad += b"\x00" + binding.encode()
+        return aad
     domain = (auth.domain or "").encode()
     principal = (auth.principal or "").encode()
-    return prefix + b"\x01" + domain + b"\x00" + principal
+    aad = prefix + b"\x01" + domain + b"\x00" + principal
+    if isinstance(binding, str) and binding:
+        aad += b"\x00" + binding.encode()
+    return aad
 
 
 # ---------------------------------------------------------------------------

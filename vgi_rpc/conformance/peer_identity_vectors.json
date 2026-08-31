@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "identity": {
+    "provider": "spiffe",
+    "evidence_source": "test",
+    "assurance": "cryptographic_peer",
+    "issuer": "spiffe://example.org",
+    "transport": "tcp",
+    "subject_kind": "workload",
+    "subject_key": "spiffe://example.org/workload",
+    "subject_stability": "stable",
+    "subject_verified": true,
+    "attributes": {},
+    "capabilities": {},
+    "capabilities_verified": false,
+    "source_address": null,
+    "proxy_address": null
+  },
+  "expected": {
+    "canonical_principal": "peer/spiffe/spiffe%3A%2F%2Fexample.org/spiffe%3A%2F%2Fexample.org%2Fworkload",
+    "binding_digest": "948ce118ddd5f212e7bfd62e13ffdba0675397c56a43060e98656965389e5367"
+  },
+  "policy_cases": [
+    {
+      "name": "unavailable_then_stable",
+      "providers": ["first", "second"],
+      "statuses": {"first": "unavailable", "second": "available"},
+      "expected_provider": "second"
+    },
+    {
+      "name": "subjectless_then_stable",
+      "providers": ["first", "second"],
+      "statuses": {"first": "available", "second": "available"},
+      "first_subject_eligible": false,
+      "expected_provider": "second"
+    },
+    {
+      "name": "ambiguous_rejects_application_fallback",
+      "providers": ["spiffe"],
+      "statuses": {"spiffe": "available"},
+      "eligible_subject_count": 2,
+      "application_authenticated": true,
+      "expected": "invalid"
+    }
+  ],
+  "invalid_cases": [
+    {"name": "unknown_status", "status": "invald", "expected": "invalid"},
+    {"name": "unpaired_high_surrogate", "subject_key": "\ud800", "expected": "invalid"},
+    {"name": "json_depth_17", "limit": 16, "expected": "invalid"},
+    {"name": "json_values_4097", "limit": 4096, "expected": "invalid"},
+    {"name": "json_bytes_65537", "limit": 65536, "expected": "invalid"}
+  ]
+}

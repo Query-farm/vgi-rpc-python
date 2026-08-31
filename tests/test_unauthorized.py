@@ -172,7 +172,7 @@ class TestChainComposition:
         client = _client(authenticate=chained)
         resp = client.post("/echo_int", content=b"", headers={})
         detail = _body(resp)["detail"]
-        assert "nope" in detail and "Missing Authorization header" in detail
+        assert detail == "authentication rejected"
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +254,11 @@ class TestResponseShape:
         client = _client(authenticate=_reject)
         resp = client.post("/echo_int", content=b"", headers={})
         assert resp.headers["content-type"].startswith("application/json")
-        assert _body(resp) == {"error": "unauthorized", "reason": "unauthorized", "detail": "nope"}
+        assert _body(resp) == {
+            "error": "unauthorized",
+            "reason": "unauthorized",
+            "detail": "authentication rejected",
+        }
 
     def test_wildcard_accept_is_not_html(self) -> None:
         """``*/*`` is what httpx2 sends by default and must not select the page."""
@@ -285,7 +289,7 @@ class TestResponseShape:
         client = _client(authenticate=reject)
         resp = client.post("/echo_int", content=b"", headers={"Accept": "text/html"})
         assert "<script>alert(1)</script>" not in _text(resp)
-        assert "&lt;script&gt;" in _text(resp)
+        assert "authentication rejected" in _text(resp)
 
     def test_not_cached(self) -> None:
         """The next attempt with a credential is a 200 — no shared cache may hold this."""
@@ -334,7 +338,7 @@ class TestResponseShape:
             client.post("/echo_int", content=b"", headers={})
         # Distinct details keep rendering correctly even past the cache bound.
         resp = client.post("/echo_int", content=b"", headers={})
-        assert _body(resp)["detail"] == f"attempt {counter['n']}"
+        assert _body(resp)["detail"] == "authentication rejected"
 
 
 # ---------------------------------------------------------------------------

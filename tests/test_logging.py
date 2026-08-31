@@ -701,6 +701,29 @@ class TestEmitAccessLog:
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
         assert not hasattr(record, "http_status")
 
+    def test_peer_evidence_logging_is_status_only_and_redacted(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Log provider outcomes and assurance without capability or subject values."""
+        metadata = {
+            "peer_identity_status": "tailscale:available",
+            "peer_identity_sources": "tailscale:localapi:local_daemon",
+            "raw_capabilities": {"query.farm/admin": [{"secret": "must-not-log"}]},
+        }
+        with caplog.at_level(logging.DEBUG, logger="vgi_rpc.access"):
+            _emit_access_log(
+                protocol_name="TestService",
+                method_name="do_thing",
+                method_type="unary",
+                server_id="srv1",
+                auth=AuthContext.anonymous(),
+                transport_metadata=metadata,
+                duration_ms=10.0,
+                status="ok",
+            )
+        record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
+        assert _extra(record, "peer_identity_status") == "tailscale:available"
+        assert _extra(record, "peer_identity_sources") == "tailscale:localapi:local_daemon"
+        assert "must-not-log" not in repr(record.__dict__)
+
 
 # ---------------------------------------------------------------------------
 # RpcServer.protocol_name tests
@@ -785,7 +808,8 @@ class TestHttpAccessLog:
         assert len(warning_records) >= 1
         record = warning_records[0]
         assert _extra(record, "error_type") == "ValueError"
-        assert _extra(record, "auth_error") == "bad token"
+        assert _extra(record, "auth_error") == "authentication rejected"
+        assert "bad token" not in record.getMessage()
 
 
 # ---------------------------------------------------------------------------

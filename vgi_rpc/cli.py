@@ -146,6 +146,50 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+mesh_app = typer.Typer(help="Diagnose VGI mesh connectivity and identity evidence.", no_args_is_help=True)
+app.add_typer(mesh_app, name="mesh")
+
+
+@mesh_app.command("doctor")
+def mesh_doctor(
+    endpoint: Annotated[str, typer.Argument(help="Worker endpoint, for example tcp://worker:9400")],
+    proxy: Annotated[str | None, typer.Option("--proxy", help="Explicit socks5h://IP:PORT proxy")] = None,
+    timeout: Annotated[float, typer.Option("--timeout", help="Per-stage deadline in seconds")] = 5.0,
+    tailscale_issuer: Annotated[str | None, typer.Option("--tailscale-issuer")] = None,
+    tailscale_source: Annotated[
+        str | None, typer.Option("--tailscale-source", help="Source IP:port to query with LocalAPI WhoIs")
+    ] = None,
+    tailscale_localapi: Annotated[
+        str | None, typer.Option("--tailscale-localapi", help="Unix socket path or HTTP LocalAPI origin")
+    ] = None,
+    tailscale_password: Annotated[str | None, typer.Option("--tailscale-password", hidden=True)] = None,
+    service_name: Annotated[str | None, typer.Option("--service-name", help="Destination svc: name")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON results")] = False,
+) -> None:
+    """Check TCP/SOCKS, the VGI describe handshake, and optional WhoIs."""
+    from vgi_rpc.mesh_doctor import diagnose_tcp
+
+    diagnostics = diagnose_tcp(
+        endpoint,
+        proxy=proxy,
+        timeout=timeout,
+        tailscale_issuer=tailscale_issuer,
+        tailscale_source=tailscale_source,
+        tailscale_localapi=tailscale_localapi,
+        tailscale_password=tailscale_password,
+        service_name=service_name,
+    )
+    if json_output:
+        typer.echo(json.dumps([diagnostic.json_value() for diagnostic in diagnostics], sort_keys=True))
+    else:
+        for diagnostic in diagnostics:
+            typer.echo(
+                f"{diagnostic.status.upper():>14}  {diagnostic.check:<18} "
+                f"{diagnostic.detail} ({diagnostic.elapsed_ms} ms)"
+            )
+    if any(diagnostic.status == "fail" for diagnostic in diagnostics):
+        raise typer.Exit(1)
+
 
 # ---------------------------------------------------------------------------
 # Logging configuration

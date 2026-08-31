@@ -77,6 +77,7 @@ import atexit
 import contextlib
 import logging
 import os
+import ssl
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -127,6 +128,26 @@ from vgi_rpc.rpc._common import (
     _StickySinkProtocol,
     _TransportContext,
     current_auth,
+)
+from vgi_rpc.rpc._identity import (
+    IdentityAssurance,
+    PeerAuthenticationPolicy,
+    PeerEvidenceSet,
+    PeerIdentity,
+    PeerIdentityLinker,
+    PeerIdentityProvider,
+    PeerIdentityRejectedError,
+    PeerIdentityResult,
+    PeerIdentityStatus,
+    PeerIdentityUnavailableError,
+    PeerResolutionContext,
+    SubjectKind,
+    SubjectStability,
+    all_of_peer_identities,
+    any_of_peer_identities,
+    observe_peer_identity,
+    peer_identity_primary,
+    require_peer_identity,
 )
 from vgi_rpc.rpc._server import (
     RpcServer,
@@ -203,6 +224,24 @@ __all__ = [
     "AnnotatedBatch",
     "AuthContext",
     "CallContext",
+    "IdentityAssurance",
+    "PeerAuthenticationPolicy",
+    "PeerEvidenceSet",
+    "PeerIdentity",
+    "PeerIdentityLinker",
+    "PeerIdentityProvider",
+    "PeerIdentityRejectedError",
+    "PeerIdentityResult",
+    "PeerIdentityStatus",
+    "PeerIdentityUnavailableError",
+    "PeerResolutionContext",
+    "SubjectKind",
+    "SubjectStability",
+    "all_of_peer_identities",
+    "any_of_peer_identities",
+    "observe_peer_identity",
+    "peer_identity_primary",
+    "require_peer_identity",
     "CallStatistics",
     "ClientLog",
     "ExchangeState",
@@ -790,8 +829,8 @@ def connect[P](
     try:
         with RpcConnection(
             protocol, transport, on_log=on_log, external_location=external_location, ipc_validation=ipc_validation
-        ) as proxy:
-            yield proxy
+        ) as rpc_proxy:
+            yield rpc_proxy
     finally:
         transport.close()
 
@@ -895,19 +934,38 @@ def tcp_connect[P](
     host: str,
     port: int,
     *,
+    proxy: str | None = None,
+    connect_timeout: float | None = 5.0,
+    tls_context: ssl.SSLContext | None = None,
+    server_hostname: str | None = None,
+    server_spiffe_trust_domains: tuple[str, ...] = (),
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> Iterator[P]:
     """Connect to a TCP RPC server and yield a typed proxy.
 
-    The raw framing protocol carries no authentication or encryption; only
-    connect to trusted endpoints (use HTTP for untrusted networks).
+    Without ``tls_context`` the raw framing protocol carries no authentication
+    or encryption and must be limited to trusted endpoints.
 
     Args:
         protocol: The Protocol class defining the RPC interface.
         host: Hostname or IP address of the TCP server.
         port: TCP port of the server.
+        proxy: Explicit credential-free ``socks5h://HOST:PORT`` URI. The
+            target hostname is resolved by the proxy. Proxy failure never
+            falls back to a direct connection.
+        connect_timeout: Connection-setup timeout in seconds. With ``proxy``,
+            one monotonic budget covers proxy resolution elapsed time, every
+            address attempt, and SOCKS negotiation; blocking system DNS itself
+            cannot be preempted. Direct dialing follows ``socket.create_connection``
+            timeout semantics. Pass ``None`` for no setup deadline.
+        tls_context: Optional client TLS context. Its client certificate is
+            presented when configured, enabling direct worker mTLS.
+        server_hostname: TLS SNI/hostname override. Defaults to *host* when
+            TLS hostname checking is enabled.
+        server_spiffe_trust_domains: Additionally require the chain-verified
+            server leaf to be a valid X.509-SVID in one of these domains.
         on_log: Optional callback for log messages from the server.
         external_location: Optional ExternalLocation configuration for
             resolving and producing externalized batches.
@@ -918,14 +976,68 @@ def tcp_connect[P](
 
     """
     import socket as _socket
+    import time as _time
 
-    sock = _socket.create_connection((host, port))
+    if connect_timeout is not None and connect_timeout <= 0:
+        raise ValueError("connect_timeout must be positive or None")
+    if server_spiffe_trust_domains and tls_context is None:
+        raise ValueError("server_spiffe_trust_domains require tls_context")
+    if server_spiffe_trust_domains and tls_context is not None and tls_context.verify_mode != ssl.CERT_REQUIRED:
+        raise ValueError("server SPIFFE verification requires tls_context.verify_mode=CERT_REQUIRED")
+    deadline = None if connect_timeout is None else _time.monotonic() + connect_timeout
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        value = deadline - _time.monotonic()
+        if value <= 0:
+            raise TimeoutError("TCP/TLS connection deadline elapsed")
+        return value
+
+    if proxy is None:
+        sock = _socket.create_connection((host, port), timeout=remaining())
+        sock.settimeout(None)
+    else:
+        from vgi_rpc.rpc._socks import connect_socks5h
+
+        sock = connect_socks5h(host, port, proxy, timeout=remaining())
+    if tls_context is not None:
+        tls_socket = tls_context.wrap_socket(
+            sock,
+            server_hostname=server_hostname or (host if tls_context.check_hostname else None),
+            do_handshake_on_connect=False,
+        )
+        try:
+            tls_socket.settimeout(remaining())
+            tls_socket.do_handshake()
+            if server_spiffe_trust_domains:
+                from cryptography import x509
+
+                from vgi_rpc.http._spiffe import _identity_from_verified_x509_svid
+
+                certificate = tls_socket.getpeercert(binary_form=True)
+                if not certificate:
+                    raise ssl.SSLError("TLS server did not provide a certificate")
+                _identity_from_verified_x509_svid(
+                    x509.load_der_x509_certificate(certificate),
+                    trust_domains=frozenset(server_spiffe_trust_domains),
+                    source_address=None,
+                    proxy_address=None,
+                    evidence_source="direct_tls_server",
+                    assurance=IdentityAssurance.CRYPTOGRAPHIC_PEER,
+                    transport="tcp",
+                )
+            tls_socket.settimeout(None)
+        except Exception:
+            tls_socket.close()
+            raise
+        sock = tls_socket
     transport = TcpTransport(sock)
     try:
         with RpcConnection(
             protocol, transport, on_log=on_log, external_location=external_location, ipc_validation=ipc_validation
-        ) as proxy:
-            yield proxy
+        ) as rpc_proxy:
+            yield rpc_proxy
     finally:
         transport.close()
 

@@ -391,6 +391,57 @@ class TestPipeOtel:
                             assert dp.count == 1  # type: ignore[union-attr]
         assert histogram_found, "rpc.server.duration histogram not found"
 
+    def test_peer_identity_outcome_is_exported_without_identity_payload(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+    ) -> None:
+        """Traces and metrics expose only bounded provider status/source labels."""
+        from vgi_rpc.otel import _OtelDispatchHook
+
+        tracer_provider, meter_provider, exporter, metric_reader = otel_providers
+        hook = _OtelDispatchHook(
+            OtelConfig(
+                tracer_provider=tracer_provider,
+                meter_provider=cast("MeterProvider", meter_provider),
+            ),
+            protocol_name="OtelTestService",
+            server_id="identity-test",
+        )
+        info = RpcServer(OtelTestService, OtelTestServiceImpl()).methods["add"]
+        token = hook.on_dispatch_start(
+            info,
+            AuthContext(domain="tailscale", authenticated=True, principal="secret-user"),
+            transport_metadata={
+                "peer_identity_status": "tailscale:available",
+                "peer_identity_sources": "tailscale:localapi:local_daemon",
+                "capabilities": "must-not-be-exported",
+            },
+            kwargs={},
+        )
+        hook.on_dispatch_end(token, info, error=None, stats=None)
+
+        attrs = dict(exporter.get_finished_spans()[0].attributes or {})
+        assert attrs["rpc.vgi_rpc.peer_identity.status"] == "tailscale:available"
+        assert attrs["rpc.vgi_rpc.peer_identity.sources"] == "tailscale:localapi:local_daemon"
+        assert "capabilities" not in attrs
+
+        metrics_data = metric_reader.get_metrics_data()
+        assert metrics_data is not None
+        request_points = [
+            point
+            for resource_metric in metrics_data.resource_metrics
+            for scope_metric in resource_metric.scope_metrics
+            for metric in scope_metric.metrics
+            if metric.name == "rpc.server.requests"
+            for point in metric.data.data_points
+        ]
+        assert len(request_points) == 1
+        point_attrs = request_points[0].attributes
+        assert point_attrs is not None
+        assert point_attrs["rpc.vgi_rpc.peer_identity.status"] == "tailscale:available"
+        assert point_attrs["rpc.vgi_rpc.peer_identity.sources"] == "tailscale:localapi:local_daemon"
+        assert "capabilities" not in point_attrs
+
     def test_tracing_disabled(
         self,
         otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
@@ -911,7 +962,7 @@ class TestAuthFailureCounter:
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
         client = make_sync_client(server, token_key=b"test-key", otel_config=config, authenticate=_bad_auth)
         with (
-            pytest.raises(RpcError, match="bad token"),
+            pytest.raises(RpcError, match="authentication rejected"),
             http_connect(OtelTestService, "http://test", client=client) as proxy,
         ):
             proxy.add(a=1, b=2)
@@ -989,7 +1040,7 @@ class TestAuthFailureCounter:
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
         client = make_sync_client(server, token_key=b"test-key", authenticate=_bad_auth)
         with (
-            pytest.raises(RpcError, match="bad token"),
+            pytest.raises(RpcError, match="authentication rejected"),
             http_connect(OtelTestService, "http://test", client=client) as proxy,
         ):
             proxy.add(a=1, b=2)
@@ -1013,7 +1064,7 @@ class TestAuthFailureCounter:
         server = RpcServer(OtelTestService, OtelTestServiceImpl())
         client = make_sync_client(server, token_key=b"test-key", otel_config=config, authenticate=_bad_auth)
         with (
-            pytest.raises(RpcError, match="bad token"),
+            pytest.raises(RpcError, match="authentication rejected"),
             http_connect(OtelTestService, "http://test", client=client) as proxy,
         ):
             proxy.add(a=1, b=2)

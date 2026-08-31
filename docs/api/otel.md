@@ -36,6 +36,8 @@ Each span carries the following attributes:
 | `rpc.vgi_rpc.auth.authenticated` | `str` | `"true"` or `"false"` |
 | `client.address` | `str` | Client IP address (HTTP only) |
 | `user_agent.original` | `str` | User agent string (HTTP only) |
+| `rpc.vgi_rpc.peer_identity.status` | `str` | Sorted `provider:status` outcomes when peer evidence providers ran |
+| `rpc.vgi_rpc.peer_identity.sources` | `str` | Sorted `provider:evidence_source:assurance` values for available evidence |
 | `rpc.vgi_rpc.input_batches` | `int` | Number of input batches read by the server |
 | `rpc.vgi_rpc.output_batches` | `int` | Number of output batches written by the server |
 | `rpc.vgi_rpc.input_rows` | `int` | Total rows across all input batches |
@@ -45,6 +47,11 @@ Each span carries the following attributes:
 | `rpc.vgi_rpc.error_type` | `str` | Exception class name (error spans only) |
 
 The I/O statistics attributes (`input_batches` through `output_bytes`) are populated from `CallStatistics` — see [CallStatistics](core.md#callstatistics) for counting semantics.
+
+The two peer-identity attributes are also attached to request counter and
+duration histogram points. They are an explicit low-cardinality allowlist:
+subject keys, certificates, capabilities, user profile fields, LocalAPI
+tokens, and proxy credentials are never copied from peer evidence.
 
 > **Note:** Byte counts use `pa.RecordBatch.get_total_buffer_size()` — logical Arrow buffer sizes without IPC framing overhead.
 

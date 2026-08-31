@@ -105,6 +105,7 @@ from vgi_rpc.http._proof import (
     verify_proof,
 )
 from vgi_rpc.http._retry import HttpRetryConfig, HttpTransientError
+from vgi_rpc.http._tailscale import tailscale_localapi_provider, tailscale_serve_header_provider
 from vgi_rpc.http._testing import (
     _SyncTestClient,
     _SyncTestResponse,
@@ -131,6 +132,16 @@ with contextlib.suppress(ImportError):
         mtls_authenticate,
         mtls_authenticate_fingerprint,
         mtls_authenticate_subject,
+    )
+with contextlib.suppress(ImportError):
+    from vgi_rpc.http._spiffe import (  # noqa: F401
+        aws_alb_spiffe_provider,
+        azure_application_gateway_spiffe_provider,
+        envoy_xfcc_spiffe_provider,
+        gcp_load_balancer_spiffe_provider,
+        nginx_spiffe_provider,
+        spiffe_x509_header_provider,
+        validate_spiffe_id,
     )
 
 __all__ = [
@@ -216,6 +227,8 @@ __all__ = [
     "request_upload_urls",
     "XfccElement",
     "mtls_authenticate_xfcc",
+    "tailscale_localapi_provider",
+    "tailscale_serve_header_provider",
 ]
 
 if "jwt_authenticate" in dir():
@@ -224,3 +237,15 @@ if "make_cookie_authenticate" in dir():
     __all__.append("make_cookie_authenticate")
 if "mtls_authenticate" in dir():
     __all__.extend(["mtls_authenticate", "mtls_authenticate_fingerprint", "mtls_authenticate_subject"])
+if "spiffe_x509_header_provider" in dir():
+    __all__.extend(
+        [
+            "aws_alb_spiffe_provider",
+            "azure_application_gateway_spiffe_provider",
+            "envoy_xfcc_spiffe_provider",
+            "gcp_load_balancer_spiffe_provider",
+            "nginx_spiffe_provider",
+            "spiffe_x509_header_provider",
+            "validate_spiffe_id",
+        ]
+    )

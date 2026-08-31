@@ -70,7 +70,13 @@ Each session token is an AEAD-sealed envelope binding the session ID to its issu
 - **Master key.** The same `token_key` that `make_wsgi_app(token_key=...)` consumes for stream tokens. Generated per-process by default; MUST be shared across workers for multi-process deployments (otherwise tokens minted on worker A are unreadable on worker B even if the LB routes correctly).
 - **Envelope layout.** `version:u8 | nonce:bytes(24) | ciphertext+tag`. Version is currently `1`. The version byte is NOT authenticated as AAD — a tampered version byte still fails decryption because the recipient supplies the matching algorithm constant.
 - **Plaintext frame** (inside the ciphertext): `created_at:u64 LE | server_id_len:u8 | server_id_bytes | session_id:bytes(12) | expires_at:u64 LE`.
-- **AAD.** Same shape as the stream token's AAD — `b"vgi_rpc.state.v4\x00"` + principal-binding tail (`b"\x01" + domain + b"\x00" + principal` for authenticated requests, `b"\x00anonymous"` for unauthenticated). This makes cross-principal replay fail decryption at the crypto layer.
+- **AAD.** Unbound tokens use `b"vgi_rpc.state.v4\x00"`; tokens carrying a
+  verified peer-evidence digest use `b"vgi_rpc.state.v5\x00"`. Both append a
+  principal tail (`b"\x01" + domain + b"\x00" + principal` when authenticated,
+  `b"\x00anonymous"` otherwise). The v5 form then appends `b"\x00" +
+  peer_evidence_binding`. Stream call tokens use the same rule with distinct
+  `vgi_rpc.call.v1` / `vgi_rpc.call.v2` prefixes. This makes cross-principal
+  and cross-evidence replay fail at AEAD verification.
 - **Encoding.** Base64url, no padding (`.rstrip("=")` on encode, re-pad on decode). Header-safe.
 
 A session token forged by a third party will fail decryption (no key). A session token presented by a different principal than the one who opened it will fail AAD verification (cross-principal replay protection). A session token presented to a different worker will pass decryption but fail `server_id` comparison (no shared registry — that's a deliberate design choice for v1).
@@ -81,17 +87,30 @@ A session token forged by a third party will fail decryption (no key). A session
 
 This is not a new rule — it is the same binding stream-state tokens have carried since the v4 AAD, and the session token reuses it verbatim. It is stated normatively here because the property is invisible in the happy path: an implementation that dropped the identity tail passes every lifecycle test and leaks sessions across users. `TestSticky::test_cross_principal_replay_rejected` exists to make that failure visible; see §9.1.
 
-**What is bound, and what deliberately is not.** Only `domain` and `principal` feed the AAD. Claims do not. A JWT may refresh, `exp` / `jti` / `scope` may churn, and the bearer credential may rotate entirely without disturbing a live session, because only the stable identity (`sub`, a certificate CN, or whatever the deployment's auth hook resolves) is bound. Implementations MUST NOT extend the AAD with volatile per-request material.
+**What is bound, and what deliberately is not.** `domain`, `principal`, and the
+framework-generated `peer_evidence_binding` digest feed the AAD. No other
+claim does. The digest covers authorization-relevant peer provider outcomes
+and evidence, so a capability-only anonymous session cannot replay under
+different capabilities. A JWT may refresh, `exp` / `jti` / `scope` may churn,
+and the bearer credential may rotate without disturbing a live session.
+Implementations MUST NOT add other volatile per-request material.
 
 **Consequences implementers should expect.** Because identity is bound for the session's lifetime, a session does not survive a change of identity:
 
-- A session opened anonymously cannot be resumed once the caller authenticates, and vice versa.
+- A session opened anonymously cannot be resumed once the caller authenticates,
+  and vice versa. Anonymous sessions bound to different peer evidence also do
+  not interoperate.
 - A session does not cross a `domain` change — relevant to deployments that carry tenant context there.
 - Deployments that chain authenticators should keep `domain` / `principal` stable across the fallthrough, or callers whose credential type changes mid-session will see `session_lost`.
 
 Every one of these surfaces as a typed `session_lost` error, never as a silent bind to the wrong state, so the worst outcome is a forced reopen (§1, "always-raise on session loss"). Auth-hook implementations should therefore derive `principal` from stable identity material and never from the credential itself.
 
-**Binding is worth exactly as much as the authentication behind it.** On a server with no authentication configured, every request is anonymous, every session shares one `principal_key` bucket, and the AAD tail is identical for all callers — token secrecy is then the only control. That is a reason to configure authentication on sticky deployments, not a reason to weaken the binding.
+**Binding is worth exactly as much as the authentication behind it.** On a
+server with neither application authentication nor verified peer evidence,
+every request is anonymous, every session shares one `principal_key` bucket,
+and token secrecy is the only control. Verified capability/peer evidence gives
+anonymous requests distinct binding buckets, but does not create a unique
+principal. Configure authentication for principal-owned sticky deployments.
 
 ## 4. Runtime API contract
 
