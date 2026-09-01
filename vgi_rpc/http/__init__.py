@@ -75,6 +75,7 @@ from vgi_rpc.http._common import (
 from vgi_rpc.http._common import (
     _UPLOAD_URL_SCHEMA as UPLOAD_URL_RESPONSE_SCHEMA,
 )
+from vgi_rpc.http._iroh import IROH_ENDPOINT_HEADER, iroh_forwarded_header_provider
 from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc
 from vgi_rpc.http._oauth import OAuthResourceMetadata
 from vgi_rpc.http._oauth_client import (
@@ -174,6 +175,7 @@ __all__ = [
     "HttpServerCapabilities",
     "HttpStreamSession",
     "HttpTransientError",
+    "IROH_ENDPOINT_HEADER",
     "MAX_REQUEST_BYTES_HEADER",
     "MAX_UPLOAD_BYTES_HEADER",
     "MAX_UPLOAD_URL_COUNT",
@@ -229,6 +231,7 @@ __all__ = [
     "mtls_authenticate_xfcc",
     "tailscale_localapi_provider",
     "tailscale_serve_header_provider",
+    "iroh_forwarded_header_provider",
 ]
 
 if "jwt_authenticate" in dir():

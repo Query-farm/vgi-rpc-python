@@ -29,11 +29,14 @@ from vgi_rpc.rpc._identity import (
     IdentityAssurance,
     PeerAuthenticationPolicy,
     PeerEvidenceSet,
+    PeerIdentity,
     PeerIdentityProvider,
     PeerIdentityResult,
     PeerIdentityStatus,
     PeerIdentityUnavailableError,
     PeerResolutionContext,
+    SubjectKind,
+    SubjectStability,
 )
 from vgi_rpc.rpc._proxy_protocol_v2 import ProxyProtocolV2Error, read_proxy_protocol_v2
 from vgi_rpc.shm import ShmSegment
@@ -1145,6 +1148,7 @@ def _tcp_identity_resolver(
     tls_context: ssl.SSLContext | None = None,
     tls_handshake_timeout: float = 5.0,
     spiffe_trust_domains: tuple[str, ...] = (),
+    iroh_proxy_issuer: str | None = None,
 ) -> _ConnectionIdentityResolver | None:
     """Validate listener identity configuration and build its resolver."""
     if proxy_protocol not in ("off", "required"):
@@ -1173,6 +1177,13 @@ def _tcp_identity_resolver(
         raise ValueError("direct SPIFFE identity requires tls_context.verify_mode=CERT_REQUIRED")
     if domains and "spiffe" in provider_names:
         raise ValueError("direct TLS SPIFFE and another 'spiffe' provider cannot share one listener")
+    if iroh_proxy_issuer is not None:
+        if not iroh_proxy_issuer:
+            raise ValueError("iroh_proxy_issuer must be non-empty")
+        if proxy_protocol != "required":
+            raise ValueError("iroh_proxy_issuer requires proxy_protocol='required'")
+        if "iroh" in provider_names:
+            raise ValueError("forwarded Iroh identity and another 'iroh' provider cannot share one listener")
     if (
         proxy_protocol == "off"
         and not peer_identity_providers
@@ -1187,6 +1198,7 @@ def _tcp_identity_resolver(
         immediate_ip = _peer_ip(sock)
         destination = _socket_endpoint(sock.getsockname())
         asserted_peer: str | None = None
+        forwarded_iroh_identity: PeerIdentity | None = None
         if proxy_protocol == "required":
             if not immediate_ip or immediate_ip not in trusted:
                 raise ProxyProtocolV2Error("immediate peer is not a trusted PROXY v2 sender")
@@ -1194,17 +1206,40 @@ def _tcp_identity_resolver(
                 sock,
                 timeout=proxy_preamble_timeout,
                 maximum_bytes=maximum_proxy_preamble_bytes,
+                allow_iroh_identity=iroh_proxy_issuer is not None,
             )
-            asserted_peer = (
-                f"[{asserted.source_address}]:{asserted.source_port}"
-                if ":" in asserted.source_address
-                else f"{asserted.source_address}:{asserted.source_port}"
-            )
-            destination = (
-                f"[{asserted.destination_address}]:{asserted.destination_port}"
-                if ":" in asserted.destination_address
-                else f"{asserted.destination_address}:{asserted.destination_port}"
-            )
+            if asserted.iroh_endpoint_id is not None:
+                assert iroh_proxy_issuer is not None
+                endpoint_key = asserted.iroh_endpoint_id.hex()
+                forwarded_iroh_identity = PeerIdentity(
+                    provider="iroh",
+                    evidence_source="proxy_protocol_v2",
+                    assurance=IdentityAssurance.CONFIGURED_PROXY,
+                    issuer=iroh_proxy_issuer,
+                    transport="tcp",
+                    subject_kind=SubjectKind.ENDPOINT,
+                    subject_key=endpoint_key,
+                    subject_stability=SubjectStability.STABLE,
+                    subject_verified=True,
+                    attributes={"original_assurance": IdentityAssurance.CRYPTOGRAPHIC_PEER.value},
+                    source_address=endpoint_key,
+                    proxy_address=immediate_peer,
+                )
+            else:
+                assert asserted.source_address is not None
+                assert asserted.source_port is not None
+                assert asserted.destination_address is not None
+                assert asserted.destination_port is not None
+                asserted_peer = (
+                    f"[{asserted.source_address}]:{asserted.source_port}"
+                    if ":" in asserted.source_address
+                    else f"{asserted.source_address}:{asserted.source_port}"
+                )
+                destination = (
+                    f"[{asserted.destination_address}]:{asserted.destination_port}"
+                    if ":" in asserted.destination_address
+                    else f"{asserted.destination_address}:{asserted.destination_port}"
+                )
         active_sock = sock
         direct_spiffe_identity = None
         if tls_context is not None:
@@ -1243,7 +1278,13 @@ def _tcp_identity_resolver(
                 asserted_peer=asserted_peer,
                 destination_address=destination,
                 service_name=service_name,
-                metadata={"proxy_protocol": proxy_protocol, "tls": tls_context is not None},
+                metadata={
+                    "proxy_protocol": proxy_protocol,
+                    "tls": tls_context is not None,
+                    "iroh_endpoint_id": (
+                        forwarded_iroh_identity.subject_key if forwarded_iroh_identity is not None else ""
+                    ),
+                },
                 deadline=time.monotonic() + peer_resolution_timeout,
             )
             evidence = _resolve_raw_peer_evidence(peer_identity_providers, context, slots)
@@ -1251,6 +1292,11 @@ def _tcp_identity_resolver(
                 evidence = PeerEvidenceSet(
                     (direct_spiffe_identity, *evidence.identities),
                     {"spiffe": PeerIdentityStatus.AVAILABLE, **evidence.provider_status},
+                )
+            if forwarded_iroh_identity is not None:
+                evidence = PeerEvidenceSet(
+                    (forwarded_iroh_identity, *evidence.identities),
+                    {"iroh": PeerIdentityStatus.AVAILABLE, **evidence.provider_status},
                 )
             auth = _ANONYMOUS
             if peer_authentication_policy is not None:
@@ -1311,6 +1357,7 @@ def serve_tcp(
     tls_context: ssl.SSLContext | None = None,
     tls_handshake_timeout: float = 5.0,
     spiffe_trust_domains: tuple[str, ...] = (),
+    iroh_proxy_issuer: str | None = None,
 ) -> None:
     """Serve RPC on a TCP socket, accepting connections in a loop.
 
@@ -1375,6 +1422,10 @@ def serve_tcp(
         spiffe_trust_domains: Allowed direct client X.509-SVID trust domains.
             The verified leaf becomes connection-scoped ``cryptographic_peer``
             evidence; empty leaves TLS available without creating evidence.
+        iroh_proxy_issuer: Operator-controlled namespace for an Iroh EndpointId
+            carried by the fixed VGI PROXY v2 TLV. This opt-in permits
+            PROXY/UNSPEC only from the configured exact trusted proxy and
+            exposes connection-scoped ``configured_proxy`` evidence.
 
     Raises:
         ValueError: If *idle_timeout* is set but *threaded* is ``False``.
@@ -1397,6 +1448,7 @@ def serve_tcp(
         tls_context=tls_context,
         tls_handshake_timeout=tls_handshake_timeout,
         spiffe_trust_domains=spiffe_trust_domains,
+        iroh_proxy_issuer=iroh_proxy_issuer,
     )
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

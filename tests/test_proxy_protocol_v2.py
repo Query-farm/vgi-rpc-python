@@ -37,6 +37,7 @@ from vgi_rpc.rpc import TcpTransport, make_tcp_pair, serve_tcp, tcp_connect
 from vgi_rpc.rpc._client import _RpcProxy
 from vgi_rpc.rpc._identity import peer_identity_primary
 from vgi_rpc.rpc._proxy_protocol_v2 import (
+    VGI_IROH_ENDPOINT_TLV,
     ProxyProtocolV2Error,
     parse_proxy_protocol_v2,
     read_proxy_protocol_v2,
@@ -160,6 +161,12 @@ def _preamble(
     return _SIGNATURE + bytes((0x21, family)) + len(body).to_bytes(2, "big") + body
 
 
+def _iroh_preamble(endpoint_id: bytes = bytes(range(32)), *, tlvs: bytes = b"") -> bytes:
+    identity = bytes((VGI_IROH_ENDPOINT_TLV,)) + (33).to_bytes(2, "big") + b"\x01" + endpoint_id
+    body = identity + tlvs
+    return _SIGNATURE + b"\x21\x00" + len(body).to_bytes(2, "big") + body
+
+
 @pytest.mark.parametrize(
     ("source", "destination", "expected_source"),
     [
@@ -176,6 +183,39 @@ def test_proxy_v2_parses_tcp_addresses_and_bounded_unknown_tlvs(
     assert parsed.source_address == expected_source
     assert parsed.source_port == 4242
     assert parsed.destination_port == 9400
+
+
+def test_proxy_v2_iroh_identity_requires_explicit_unspec_opt_in() -> None:
+    """A non-IP Iroh subject is accepted only on the dedicated trusted path."""
+    preamble = _iroh_preamble()
+    with pytest.raises(ProxyProtocolV2Error, match="IPv4 or IPv6"):
+        parse_proxy_protocol_v2(preamble)
+
+    parsed = parse_proxy_protocol_v2(preamble, allow_iroh_identity=True)
+    assert parsed.source_address is None
+    assert parsed.destination_address is None
+    assert parsed.iroh_endpoint_id == bytes(range(32))
+
+
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        _iroh_preamble(tlvs=bytes((VGI_IROH_ENDPOINT_TLV, 0, 33)) + b"\x01" + bytes(range(32))),
+        _SIGNATURE + b"\x21\x00\x00\x00",
+        _SIGNATURE + b"\x21\x00\x00\x04" + bytes((VGI_IROH_ENDPOINT_TLV, 0, 1, 2)),
+    ],
+)
+def test_proxy_v2_rejects_ambiguous_or_invalid_iroh_identity(preamble: bytes) -> None:
+    """Missing, duplicate, wrong-sized, or wrong-version identity fails closed."""
+    with pytest.raises(ProxyProtocolV2Error):
+        parse_proxy_protocol_v2(preamble, allow_iroh_identity=True)
+
+
+def test_proxy_v2_rejects_iroh_identity_on_ip_family_when_enabled() -> None:
+    """A bridge cannot combine an asserted IP source with an Iroh subject."""
+    tlv = bytes((VGI_IROH_ENDPOINT_TLV, 0, 33)) + b"\x01" + bytes(range(32))
+    with pytest.raises(ProxyProtocolV2Error, match="requires PROXY/UNSPEC"):
+        parse_proxy_protocol_v2(_preamble(tlvs=tlv), allow_iroh_identity=True)
 
 
 @pytest.mark.parametrize(
@@ -297,6 +337,41 @@ def test_tcp_resolver_trusts_immediate_peer_before_parsing_and_snapshots_scope()
     client.close()
     server.close()
 
+
+def test_tcp_resolver_promotes_forwarded_iroh_identity() -> None:
+    """The trusted bridge supplies only the subject; issuer remains local."""
+    resolver = _tcp_identity_resolver(
+        proxy_protocol="required",
+        trusted_proxy_addresses=("127.0.0.1",),
+        proxy_preamble_timeout=0.5,
+        maximum_proxy_preamble_bytes=256,
+        service_name=None,
+        peer_identity_providers=(),
+        peer_authentication_policy=peer_identity_primary("iroh"),
+        peer_resolution_timeout=0.5,
+        peer_provider_concurrency=1,
+        iroh_proxy_issuer="production-mesh",
+    )
+    assert resolver is not None
+    client, server = _connected_tcp_pair()
+    client.sendall(_iroh_preamble() + b"VGI")
+    resolved_server, (auth, evidence, metadata) = resolver(server)
+    identity = evidence.identities[0]
+    assert resolved_server is server
+    assert auth.authenticated
+    assert identity.provider == "iroh"
+    assert identity.issuer == "production-mesh"
+    assert identity.subject_key == bytes(range(32)).hex()
+    assert identity.assurance is IdentityAssurance.CONFIGURED_PROXY
+    assert identity.attributes["original_assurance"] == "cryptographic_peer"
+    assert metadata["remote_addr"].startswith("127.0.0.1:")
+    assert server.recv(3) == b"VGI"
+    client.close()
+    server.close()
+
+
+def test_tcp_resolver_rejects_untrusted_proxy_before_reading() -> None:
+    """An untrusted immediate peer cannot make the server parse a preamble."""
     untrusted = _tcp_identity_resolver(
         proxy_protocol="required",
         trusted_proxy_addresses=("192.0.2.1",),

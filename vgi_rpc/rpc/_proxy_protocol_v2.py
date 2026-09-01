@@ -14,8 +14,16 @@ _SIGNATURE = b"\r\n\r\n\0\r\nQUIT\n"
 _FIXED_BYTES = 16
 _VERSION_2 = 0x20
 _PROXY_COMMAND = 0x01
+_UNSPEC = 0x00
 _TCP_IPV4 = 0x11
 _TCP_IPV6 = 0x21
+
+# 0xE0 is in the PROXY v2 experimental range.  The VGI bridge uses it only
+# across an explicitly configured trusted-proxy boundary.  Its deliberately
+# fixed payload is one version byte followed by the 32-byte Iroh EndpointId.
+VGI_IROH_ENDPOINT_TLV = 0xE0
+_VGI_IROH_ENDPOINT_VERSION = 1
+_VGI_IROH_ENDPOINT_BYTES = 33
 
 
 class ProxyProtocolV2Error(ValueError):
@@ -26,10 +34,11 @@ class ProxyProtocolV2Error(ValueError):
 class ProxyProtocolV2Address:
     """Source and destination asserted by one validated TCP preamble."""
 
-    source_address: str
-    source_port: int
-    destination_address: str
-    destination_port: int
+    source_address: str | None
+    source_port: int | None
+    destination_address: str | None
+    destination_port: int | None
+    iroh_endpoint_id: bytes | None = None
 
 
 def proxy_protocol_v2_size(prefix: bytes, *, maximum_bytes: int = 4096) -> int:
@@ -46,8 +55,18 @@ def proxy_protocol_v2_size(prefix: bytes, *, maximum_bytes: int = 4096) -> int:
     return total
 
 
-def parse_proxy_protocol_v2(preamble: bytes, *, maximum_bytes: int = 4096) -> ProxyProtocolV2Address:
-    """Parse one exact v2 TCP/IPv4 or TCP/IPv6 preamble."""
+def parse_proxy_protocol_v2(
+    preamble: bytes,
+    *,
+    maximum_bytes: int = 4096,
+    allow_iroh_identity: bool = False,
+) -> ProxyProtocolV2Address:
+    """Parse one exact trusted v2 preamble.
+
+    Ordinary listeners accept only TCP over IPv4 or IPv6.  An Iroh bridge may
+    explicitly opt into PROXY/UNSPEC carrying the fixed VGI Iroh identity TLV;
+    no synthetic source address is invented for a non-IP Iroh peer.
+    """
     if len(preamble) < _FIXED_BYTES:
         raise ProxyProtocolV2Error("truncated PROXY v2 fixed preamble")
     expected = proxy_protocol_v2_size(preamble[:_FIXED_BYTES], maximum_bytes=maximum_bytes)
@@ -58,7 +77,13 @@ def parse_proxy_protocol_v2(preamble: bytes, *, maximum_bytes: int = 4096) -> Pr
 
     body = memoryview(preamble)[_FIXED_BYTES:]
     family_protocol = preamble[13]
-    if family_protocol == _TCP_IPV4:
+    if family_protocol == _UNSPEC and allow_iroh_identity:
+        address_bytes = 0
+        source = None
+        destination = None
+        source_port = None
+        destination_port = None
+    elif family_protocol == _TCP_IPV4:
         address_bytes = 12
         if len(body) < address_bytes:
             raise ProxyProtocolV2Error("truncated PROXY v2 TCP/IPv4 address block")
@@ -80,15 +105,33 @@ def parse_proxy_protocol_v2(preamble: bytes, *, maximum_bytes: int = 4096) -> Pr
         raise ProxyProtocolV2Error("PROXY v2 requires TCP over IPv4 or IPv6")
 
     offset = address_bytes
+    iroh_endpoint_id: bytes | None = None
     while offset < len(body):
         if len(body) - offset < 3:
             raise ProxyProtocolV2Error("PROXY v2 contains a truncated TLV header")
+        tlv_type = body[offset]
         length = int.from_bytes(body[offset + 1 : offset + 3], "big")
         offset += 3
         if length > len(body) - offset:
             raise ProxyProtocolV2Error("PROXY v2 contains a truncated TLV value")
+        value = bytes(body[offset : offset + length])
+        if tlv_type == VGI_IROH_ENDPOINT_TLV:
+            if not allow_iroh_identity:
+                # Unknown TLVs remain ignorable on ordinary listeners.  They
+                # become identity-bearing only under explicit configuration.
+                pass
+            elif iroh_endpoint_id is not None:
+                raise ProxyProtocolV2Error("PROXY v2 contains duplicate VGI Iroh identity TLVs")
+            elif length != _VGI_IROH_ENDPOINT_BYTES or value[0] != _VGI_IROH_ENDPOINT_VERSION:
+                raise ProxyProtocolV2Error("PROXY v2 contains an invalid VGI Iroh identity TLV")
+            else:
+                iroh_endpoint_id = value[1:]
         offset += length
-    return ProxyProtocolV2Address(source, source_port, destination, destination_port)
+    if family_protocol == _UNSPEC and iroh_endpoint_id is None:
+        raise ProxyProtocolV2Error("PROXY/UNSPEC requires one VGI Iroh identity TLV")
+    if iroh_endpoint_id is not None and family_protocol != _UNSPEC:
+        raise ProxyProtocolV2Error("VGI Iroh identity requires PROXY/UNSPEC")
+    return ProxyProtocolV2Address(source, source_port, destination, destination_port, iroh_endpoint_id)
 
 
 def read_proxy_protocol_v2(
@@ -96,6 +139,7 @@ def read_proxy_protocol_v2(
     *,
     timeout: float = 1.0,
     maximum_bytes: int = 4096,
+    allow_iroh_identity: bool = False,
 ) -> ProxyProtocolV2Address:
     """Read exactly one preamble under an independent monotonic deadline."""
     if timeout <= 0:
@@ -104,7 +148,11 @@ def read_proxy_protocol_v2(
     prefix = _recv_exact(sock, _FIXED_BYTES, deadline)
     total = proxy_protocol_v2_size(prefix, maximum_bytes=maximum_bytes)
     remainder = _recv_exact(sock, total - _FIXED_BYTES, deadline)
-    return parse_proxy_protocol_v2(prefix + remainder, maximum_bytes=maximum_bytes)
+    return parse_proxy_protocol_v2(
+        prefix + remainder,
+        maximum_bytes=maximum_bytes,
+        allow_iroh_identity=allow_iroh_identity,
+    )
 
 
 def _recv_exact(sock: socket.socket, size: int, deadline: float) -> bytes:

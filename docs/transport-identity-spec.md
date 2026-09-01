@@ -123,3 +123,25 @@ portable scalar/object subset used by the shared digest test.
 
 Adapters provide evidence. Worker/application policy alone decides
 authorization.
+
+### Iroh bridge forwarding
+
+A bridge forwarding an authenticated Iroh connection to a raw VGI TCP worker
+uses PROXY protocol v2 with command `PROXY`, family/protocol `UNSPEC` (`0x00`),
+and exactly one VGI Iroh TLV (`0xE0`). The TLV payload is version byte `1`
+followed by the 32-byte EndpointId. The stable subject encoding is the
+lowercase hexadecimal encoding of those bytes. No issuer, capability, address,
+or credential is accepted from this TLV.
+
+`PROXY/UNSPEC` remains invalid on ordinary listeners. A worker accepts it only
+when Iroh proxy identity is explicitly enabled and the immediate sender is in
+the existing exact trusted-proxy boundary. It obtains the issuer locally,
+marks delivery assurance as `configured_proxy`, and records that the bridge
+cryptographically verified the original Iroh peer. Missing, duplicate,
+wrong-version, wrong-sized, or IP-family Iroh TLVs fail closed.
+
+For HTTP forwarding, the bridge removes any client-supplied
+`VGI-Forwarded-Iroh-Endpoint` field and sets exactly one lowercase 64-digit
+hexadecimal EndpointId. The worker accepts it only from the same explicit
+trusted-proxy boundary, obtains the issuer locally, and otherwise applies the
+same identity and assurance rules as the raw TLV.
