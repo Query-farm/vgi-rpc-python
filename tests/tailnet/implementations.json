@@ -105,7 +105,7 @@
         "server": {
           "http_serve_identity": true,
           "tcp_localapi_identity": true,
-          "tcp_proxy_v2_identity": false
+          "tcp_proxy_v2_identity": true
         },
         "iroh": false
       },
@@ -136,7 +136,7 @@
         "server": {
           "http_serve_identity": true,
           "tcp_localapi_identity": true,
-          "tcp_proxy_v2_identity": false
+          "tcp_proxy_v2_identity": true
         },
         "iroh": false
       },
@@ -167,7 +167,7 @@
         "server": {
           "http_serve_identity": true,
           "tcp_localapi_identity": true,
-          "tcp_proxy_v2_identity": false
+          "tcp_proxy_v2_identity": true
         },
         "iroh": false
       },

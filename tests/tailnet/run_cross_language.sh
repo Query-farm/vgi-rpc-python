@@ -94,12 +94,12 @@ cleanup() {
       tailscale-server tailscale-client tailscale-socks \
       worker-direct worker-http \
       cpp-worker-direct cpp-worker-http cpp-worker-proxy-v2 \
-      csharp-worker-direct csharp-worker-http \
+      csharp-worker-direct csharp-worker-http csharp-worker-proxy-v2 \
       go-worker-direct go-worker-http go-worker-proxy-v2 \
-      java-worker-direct java-worker-http \
+      java-worker-direct java-worker-http java-worker-proxy-v2 \
       rust-worker-direct rust-worker-http rust-worker-proxy-v2 rust-proxy-v2-relay \
       rust-iroh-server rust-iroh-client \
-      typescript-worker-direct typescript-worker-http >&2 || true
+      typescript-worker-direct typescript-worker-http typescript-worker-proxy-v2 >&2 || true
   fi
   "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   exit "$status"
@@ -379,7 +379,7 @@ wait_for_server_port 18080
 probe_foreign_http
 "${COMPOSE[@]}" stop csharp-worker-http
 
-for implementation in rust go cpp; do
+for implementation in rust go cpp typescript java csharp; do
   "${COMPOSE[@]}" up --detach "${implementation}-worker-proxy-v2"
   wait_for_server_port 19401
   "${COMPOSE[@]}" up --detach rust-proxy-v2-relay

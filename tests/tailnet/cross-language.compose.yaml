@@ -148,6 +148,33 @@ services:
       - --expected-tag
       - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
 
+  csharp-worker-proxy-v2:
+    image: ${VGI_TAILNET_CSHARP_IMAGE:-vgi-rpc-tailnet-csharp:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - server-tcp
+      - --host
+      - 127.0.0.1
+      - --port
+      - "19401"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+      - --expected-tag
+      - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+      - --proxy-protocol-v2
+      - --trusted-proxy-address
+      - 127.0.0.1
+
   go-client-direct:
     image: ${VGI_TAILNET_GO_IMAGE:-vgi-rpc-tailnet-go:local}
     profiles: ["interop"]
@@ -288,6 +315,33 @@ services:
       - ${TAILNET_EXPECTED_CAPABILITY:-}
       - --expected-tag
       - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+
+  java-worker-proxy-v2:
+    image: ${VGI_TAILNET_JAVA_IMAGE:-vgi-rpc-tailnet-java:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - server-tcp
+      - --host
+      - 127.0.0.1
+      - --port
+      - "19401"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+      - --expected-tag
+      - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+      - --proxy-protocol-v2
+      - --trusted-proxy-address
+      - 127.0.0.1
 
   rust-client-direct:
     image: ${VGI_TAILNET_RUST_IMAGE:-vgi-rpc-tailnet-rust:local}
@@ -472,6 +526,33 @@ services:
       - ${TAILNET_EXPECTED_CAPABILITY:-}
       - --expected-tag
       - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+
+  typescript-worker-proxy-v2:
+    image: ${VGI_TAILNET_TYPESCRIPT_IMAGE:-vgi-rpc-tailnet-typescript:local}
+    profiles: ["interop"]
+    network_mode: service:tailscale-server
+    depends_on:
+      tailscale-server:
+        condition: service_healthy
+    volumes:
+      - server-socket:/var/run/tailscale:ro
+    command:
+      - server-tcp
+      - --host
+      - 127.0.0.1
+      - --port
+      - "19401"
+      - --issuer
+      - ${TAILNET_ISSUER:-tailnet:vgi-ci}
+      - --localapi-socket
+      - /var/run/tailscale/tailscaled.sock
+      - --expected-capability
+      - ${TAILNET_EXPECTED_CAPABILITY:-}
+      - --expected-tag
+      - ${TAILNET_EXPECTED_CLIENT_TAG:-tag:vgi-ci-client}
+      - --proxy-protocol-v2
+      - --trusted-proxy-address
+      - 127.0.0.1
 
 volumes:
   iroh-address:
