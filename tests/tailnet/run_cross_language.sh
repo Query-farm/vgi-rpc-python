@@ -93,10 +93,13 @@ cleanup() {
     "${COMPOSE[@]}" logs --no-color --tail=200 \
       tailscale-server tailscale-client tailscale-socks \
       worker-direct worker-http \
-      cpp-worker-direct \
-      csharp-worker-http \
-      go-worker-direct go-worker-http rust-worker-direct rust-worker-http \
-      typescript-worker-http java-worker-http >&2 || true
+      cpp-worker-direct cpp-worker-http cpp-worker-proxy-v2 \
+      csharp-worker-direct csharp-worker-http \
+      go-worker-direct go-worker-http go-worker-proxy-v2 \
+      java-worker-direct java-worker-http \
+      rust-worker-direct rust-worker-http rust-worker-proxy-v2 rust-proxy-v2-relay \
+      rust-iroh-server rust-iroh-client \
+      typescript-worker-direct typescript-worker-http >&2 || true
   fi
   "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   exit "$status"
@@ -207,6 +210,21 @@ fi
   --spoof-login attacker@example.invalid \
   "${common_http_expectations[@]}"
 
+"${COMPOSE[@]}" run --rm cpp-client-socks client-http \
+  --url "https://$SERVER_DNS" \
+  --proxy socks5h://tailscale-socks:1055 \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm go-client-direct client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  "${common_tcp_expectations[@]}"
+
+"${COMPOSE[@]}" run --rm go-client-socks client-tcp \
+  --host "$SERVER_DNS" --port 19400 \
+  --proxy "socks5h://$SOCKS_BRIDGE_IP:1055" \
+  "${common_tcp_expectations[@]}"
+
 "${COMPOSE[@]}" run --rm go-client-direct client-http \
   --url "https://$SERVER_DNS" \
   --spoof-login attacker@example.invalid \
@@ -246,6 +264,12 @@ fi
   --spoof-login attacker@example.invalid \
   "${common_http_expectations[@]}"
 
+"${COMPOSE[@]}" run --rm java-client-socks client-http \
+  --url "https://$SERVER_DNS" \
+  --proxy socks5h://tailscale-socks:1055 \
+  --spoof-login attacker@example.invalid \
+  "${common_http_expectations[@]}"
+
 "${COMPOSE[@]}" run --rm typescript-client-direct client-tcp \
   --host "$SERVER_DNS" --port 19400 \
   "${common_tcp_expectations[@]}"
@@ -278,6 +302,26 @@ while time.monotonic()<deadline:
 raise SystemExit(f'port $port did not become ready: {last}')"
 }
 
+wait_for_service_file() {
+  local service="$1"
+  local path="$2"
+  local container_id
+  container_id="$("${COMPOSE[@]}" ps -q "$service")"
+  if [[ -z "$container_id" ]]; then
+    echo "service $service has no running container" >&2
+    return 1
+  fi
+  local _
+  for _ in {1..120}; do
+    if docker exec "$container_id" test -s "$path"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "service $service did not publish $path" >&2
+  return 1
+}
+
 probe_foreign_tcp() {
   "${COMPOSE[@]}" run --rm probe-direct python -m tests.tailnet.interop_probe tcp \
     --host "$SERVER_DNS" --port 19400
@@ -308,6 +352,18 @@ wait_for_server_port 19400
 probe_foreign_tcp
 "${COMPOSE[@]}" stop cpp-worker-direct
 
+"${COMPOSE[@]}" up --detach cpp-worker-http
+wait_for_server_port 18080
+probe_foreign_http
+"${COMPOSE[@]}" stop cpp-worker-http
+
+for implementation in typescript java csharp; do
+  "${COMPOSE[@]}" up --detach "${implementation}-worker-direct"
+  wait_for_server_port 19400
+  probe_foreign_tcp
+  "${COMPOSE[@]}" stop "${implementation}-worker-direct"
+done
+
 "${COMPOSE[@]}" up --detach typescript-worker-http
 wait_for_server_port 18080
 probe_foreign_http
@@ -322,5 +378,19 @@ probe_foreign_http
 wait_for_server_port 18080
 probe_foreign_http
 "${COMPOSE[@]}" stop csharp-worker-http
+
+for implementation in rust go cpp; do
+  "${COMPOSE[@]}" up --detach "${implementation}-worker-proxy-v2"
+  wait_for_server_port 19401
+  "${COMPOSE[@]}" up --detach rust-proxy-v2-relay
+  wait_for_server_port 19400
+  probe_foreign_tcp
+  "${COMPOSE[@]}" stop rust-proxy-v2-relay "${implementation}-worker-proxy-v2"
+done
+
+"${COMPOSE[@]}" up --detach rust-iroh-server
+wait_for_service_file rust-iroh-server /interop/server.json
+"${COMPOSE[@]}" run --rm rust-iroh-client
+"${COMPOSE[@]}" stop rust-iroh-server
 
 echo "cross-language real Tailnet integration passed for Go, Rust, TypeScript, Java, C#, and C++"

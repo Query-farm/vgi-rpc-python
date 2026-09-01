@@ -6,8 +6,8 @@
         "client": {
           "http": true,
           "http_socks5h": true,
-          "tcp": false,
-          "tcp_socks5h": false
+          "tcp": true,
+          "tcp_socks5h": true
         },
         "server": {
           "http_serve_identity": true,
@@ -67,12 +67,12 @@
       "implemented": {
         "client": {
           "http": true,
-          "http_socks5h": false,
+          "http_socks5h": true,
           "tcp": true,
           "tcp_socks5h": true
         },
         "server": {
-          "http_serve_identity": false,
+          "http_serve_identity": true,
           "tcp_localapi_identity": true,
           "tcp_proxy_v2_identity": true
         },
@@ -104,7 +104,7 @@
         },
         "server": {
           "http_serve_identity": true,
-          "tcp_localapi_identity": false,
+          "tcp_localapi_identity": true,
           "tcp_proxy_v2_identity": false
         },
         "iroh": false
@@ -119,7 +119,7 @@
         },
         "server": {
           "http_serve_identity": true,
-          "tcp_localapi_identity": false,
+          "tcp_localapi_identity": true,
           "tcp_proxy_v2_identity": false
         },
         "iroh": false
@@ -129,13 +129,13 @@
       "implemented": {
         "client": {
           "http": true,
-          "http_socks5h": false,
+          "http_socks5h": true,
           "tcp": true,
           "tcp_socks5h": true
         },
         "server": {
           "http_serve_identity": true,
-          "tcp_localapi_identity": false,
+          "tcp_localapi_identity": true,
           "tcp_proxy_v2_identity": false
         },
         "iroh": false
@@ -166,7 +166,7 @@
         },
         "server": {
           "http_serve_identity": true,
-          "tcp_localapi_identity": false,
+          "tcp_localapi_identity": true,
           "tcp_proxy_v2_identity": false
         },
         "iroh": false
