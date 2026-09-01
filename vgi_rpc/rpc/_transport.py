@@ -1178,8 +1178,14 @@ def _tcp_identity_resolver(
     if domains and "spiffe" in provider_names:
         raise ValueError("direct TLS SPIFFE and another 'spiffe' provider cannot share one listener")
     if iroh_proxy_issuer is not None:
-        if not iroh_proxy_issuer:
-            raise ValueError("iroh_proxy_issuer must be non-empty")
+        if not iroh_proxy_issuer or any(
+            ord(character) <= 0x1F or ord(character) == 0x7F for character in iroh_proxy_issuer
+        ):
+            raise ValueError("iroh_proxy_issuer must be non-empty text without controls")
+        try:
+            iroh_proxy_issuer.encode()
+        except UnicodeEncodeError as exc:
+            raise ValueError("iroh_proxy_issuer must contain Unicode scalar values") from exc
         if proxy_protocol != "required":
             raise ValueError("iroh_proxy_issuer requires proxy_protocol='required'")
         if "iroh" in provider_names:

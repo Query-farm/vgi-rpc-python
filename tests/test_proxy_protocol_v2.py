@@ -195,6 +195,11 @@ def test_proxy_v2_iroh_identity_requires_explicit_unspec_opt_in() -> None:
     assert parsed.source_address is None
     assert parsed.destination_address is None
     assert parsed.iroh_endpoint_id == bytes(range(32))
+    extended = parse_proxy_protocol_v2(
+        _iroh_preamble(tlvs=b"\xee\x00\x01\x07"),
+        allow_iroh_identity=True,
+    )
+    assert extended.iroh_endpoint_id == bytes(range(32))
 
 
 @pytest.mark.parametrize(
@@ -368,6 +373,23 @@ def test_tcp_resolver_promotes_forwarded_iroh_identity() -> None:
     assert server.recv(3) == b"VGI"
     client.close()
     server.close()
+
+
+def test_tcp_resolver_rejects_control_bearing_iroh_issuer() -> None:
+    """The worker-local namespace is validated before accepting connections."""
+    with pytest.raises(ValueError, match="without controls"):
+        _tcp_identity_resolver(
+            proxy_protocol="required",
+            trusted_proxy_addresses=("127.0.0.1",),
+            proxy_preamble_timeout=0.5,
+            maximum_proxy_preamble_bytes=256,
+            service_name=None,
+            peer_identity_providers=(),
+            peer_authentication_policy=peer_identity_primary("iroh"),
+            peer_resolution_timeout=0.5,
+            peer_provider_concurrency=1,
+            iroh_proxy_issuer="production\tmesh",
+        )
 
 
 def test_tcp_resolver_rejects_untrusted_proxy_before_reading() -> None:

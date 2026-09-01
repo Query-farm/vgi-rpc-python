@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -33,7 +34,8 @@ class _IrohForwardedHeaderProvider:
     provider: str = _PROVIDER
 
     def __call__(self, context: PeerResolutionContext) -> PeerIdentityResult:
-        if context.immediate_peer not in self.trusted_proxy_addresses:
+        immediate = _normalize_exact_ip(context.immediate_peer)
+        if immediate is None or immediate not in self.trusted_proxy_addresses:
             return PeerIdentityResult(self.provider, PeerIdentityStatus.UNTRUSTED_PROXY)
         try:
             endpoint_id = context.header(IROH_ENDPOINT_HEADER)
@@ -55,7 +57,7 @@ class _IrohForwardedHeaderProvider:
             subject_verified=True,
             attributes={"original_assurance": IdentityAssurance.CRYPTOGRAPHIC_PEER.value},
             source_address=endpoint_id,
-            proxy_address=context.immediate_peer,
+            proxy_address=immediate,
         )
         return PeerIdentityResult.available(identity)
 
@@ -66,18 +68,35 @@ def iroh_forwarded_header_provider(
     trusted_proxy_addresses: Iterable[str],
 ) -> PeerIdentityProvider:
     """Resolve a sanitized Iroh EndpointId from an exact trusted HTTP proxy."""
-    proxies = frozenset(trusted_proxy_addresses)
-    if not isinstance(issuer, str) or not issuer or not proxies:
-        raise ValueError("issuer and trusted_proxy_addresses are required")
-    if any(
-        not isinstance(address, str) or not address or any(character in address for character in "\r\n\x00")
-        for address in proxies
-    ):
-        raise ValueError("trusted proxy addresses must be exact non-empty values")
+    if not isinstance(issuer, str) or not issuer or _contains_control(issuer):
+        raise ValueError("issuer must be non-empty text without controls")
     try:
         issuer.encode()
-        for address in proxies:
-            address.encode()
     except UnicodeEncodeError as exc:
-        raise ValueError("issuer and trusted proxy addresses must contain Unicode scalar values") from exc
-    return _IrohForwardedHeaderProvider(issuer, proxies)
+        raise ValueError("issuer must contain Unicode scalar values") from exc
+    proxies: set[str] = set()
+    for configured in trusted_proxy_addresses:
+        normalized = _normalize_exact_ip(configured)
+        if normalized is None:
+            raise ValueError("trusted proxy addresses must be exact IP literals")
+        if normalized in proxies:
+            raise ValueError("duplicate normalized trusted proxy address")
+        proxies.add(normalized)
+    if not proxies:
+        raise ValueError("issuer and trusted_proxy_addresses are required")
+    return _IrohForwardedHeaderProvider(issuer, frozenset(proxies))
+
+
+def _normalize_exact_ip(value: object) -> str | None:
+    if not isinstance(value, str) or not value or "%" in value:
+        return None
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError:
+        return None
+    mapped = parsed.ipv4_mapped if isinstance(parsed, ipaddress.IPv6Address) else None
+    return str(mapped or parsed)
+
+
+def _contains_control(value: str) -> bool:
+    return any(ord(character) <= 0x1F or ord(character) == 0x7F for character in value)
