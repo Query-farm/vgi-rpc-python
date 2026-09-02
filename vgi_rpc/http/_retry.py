@@ -23,11 +23,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx2
 
 from vgi_rpc.rpc import RpcError
+
+from ._common import ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -38,6 +40,76 @@ _logger = logging.getLogger("vgi_rpc.http.retry")
 
 # Default status codes handled by replay-safe requests.
 _DEFAULT_RETRYABLE: frozenset[int] = frozenset({429, 502, 503, 504})
+
+
+@dataclass(frozen=True, slots=True)
+class _BufferedResponse:
+    """Closed streaming response with only the fields consumed by the RPC client."""
+
+    status_code: int
+    content: bytes
+    headers: httpx2.Headers
+
+
+def _response_too_large(actual: int, limit: int) -> RpcError:
+    """Build the canonical client-side decoded-response overflow error."""
+    return RpcError(
+        "ResponseTooLargeError",
+        f"Decoded HTTP response exceeds accepted_max_response_bytes ({actual} > {limit})",
+        "",
+    )
+
+
+def _require_response_budget_support_header(headers: object) -> None:
+    """Require one exact response-budget support field with value ``true``."""
+    get_list = getattr(headers, "get_list", None)
+    if callable(get_list):
+        values = list(get_list(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER))
+    else:
+        get = getattr(headers, "get", None)
+        raw = None if get is None else get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER)
+        if raw is None and get is not None:
+            raw = get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER.lower())
+        values = [] if raw is None else [raw]
+    if values != ["true"]:
+        raise RpcError(
+            "ProtocolError",
+            "Every capped RPC response must contain exactly one "
+            f"{ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER}: true field",
+            "",
+        )
+
+
+def _post_bounded(
+    client: httpx2.Client | _SyncTestClient,
+    url: str,
+    *,
+    content: bytes,
+    headers: dict[str, str],
+    response_limit_bytes: int | None,
+) -> httpx2.Response | _SyncTestResponse | _BufferedResponse:
+    """POST while bounding decoded response buffering to ``limit + 1`` bytes."""
+    stream_request = getattr(client, "stream", None)
+    supports_streaming = getattr(client, "_supports_bounded_stream", True)
+    if response_limit_bytes is None or not callable(stream_request) or not supports_streaming:
+        response = client.post(url, content=content, headers=headers)
+        if response_limit_bytes is not None:
+            _require_response_budget_support_header(response.headers)
+            if len(response.content) > response_limit_bytes:
+                raise _response_too_large(len(response.content), response_limit_bytes)
+        return response
+
+    buffered = bytearray()
+    with stream_request("POST", url, content=content, headers=headers) as response:
+        _require_response_budget_support_header(response.headers)
+        for chunk in response.iter_bytes(chunk_size=64 * 1024):
+            remaining = response_limit_bytes + 1 - len(buffered)
+            if remaining <= 0:
+                raise _response_too_large(len(buffered), response_limit_bytes)
+            buffered.extend(chunk[:remaining])
+            if len(buffered) > response_limit_bytes:
+                raise _response_too_large(len(buffered), response_limit_bytes)
+        return _BufferedResponse(response.status_code, bytes(buffered), response.headers)
 
 
 @dataclass(frozen=True)
@@ -198,13 +270,13 @@ def _body_preview(content: bytes) -> str:
 
 
 def _request_with_retry(
-    make_request: Callable[[], httpx2.Response | _SyncTestResponse],
+    make_request: Callable[[], httpx2.Response | _SyncTestResponse | _BufferedResponse],
     *,
     config: HttpRetryConfig,
     method_label: str,
     url: str,
     _sleep: Callable[[float], object] = time.sleep,
-) -> httpx2.Response | _SyncTestResponse:
+) -> httpx2.Response | _SyncTestResponse | _BufferedResponse:
     """Execute an HTTP request with retry on transient failures.
 
     This is the core retry loop shared by ``_post_with_retry`` and
@@ -227,7 +299,7 @@ def _request_with_retry(
         httpx2.TimeoutException: If timeouts exhaust retries.
 
     """
-    last_resp: httpx2.Response | _SyncTestResponse | None = None
+    last_resp: httpx2.Response | _SyncTestResponse | _BufferedResponse | None = None
     last_retry_after: float | None = None
 
     for attempt in range(config.max_retries + 1):
@@ -313,8 +385,9 @@ def _post_with_retry(
     content: bytes,
     headers: dict[str, str],
     config: HttpRetryConfig | None,
+    response_limit_bytes: int | None = None,
     _sleep: Callable[[float], object] = time.sleep,
-) -> httpx2.Response | _SyncTestResponse:
+) -> httpx2.Response | _SyncTestResponse | _BufferedResponse:
     """Execute ``client.post()`` with optional retry on transient failures.
 
     Args:
@@ -323,6 +396,8 @@ def _post_with_retry(
         content: Request body bytes.
         headers: Request headers.
         config: Retry config, or ``None`` to disable retry.
+        response_limit_bytes: Optional decoded response cap. Real HTTP clients
+            stream into a buffer bounded to this value plus one byte.
         _sleep: Sleep function (injectable for tests).
 
     Returns:
@@ -336,10 +411,22 @@ def _post_with_retry(
 
     """
     if config is None:
-        return client.post(url, content=content, headers=headers)
+        return _post_bounded(
+            client,
+            url,
+            content=content,
+            headers=headers,
+            response_limit_bytes=response_limit_bytes,
+        )
 
     return _request_with_retry(
-        lambda: client.post(url, content=content, headers=headers),
+        lambda: _post_bounded(
+            client,
+            url,
+            content=content,
+            headers=headers,
+            response_limit_bytes=response_limit_bytes,
+        ),
         config=config,
         method_label="POST",
         url=url,
@@ -351,6 +438,7 @@ def _options_with_retry(
     client: httpx2.Client | _SyncTestClient,
     url: str,
     *,
+    headers: dict[str, str] | None = None,
     config: HttpRetryConfig | None,
     _sleep: Callable[[float], object] = time.sleep,
 ) -> httpx2.Response | _SyncTestResponse:
@@ -359,6 +447,7 @@ def _options_with_retry(
     Args:
         client: HTTP client (httpx2 or test client).
         url: Request URL.
+        headers: Optional request headers sent on every attempt.
         config: Retry config, or ``None`` to disable retry.
         _sleep: Sleep function (injectable for tests).
 
@@ -373,12 +462,15 @@ def _options_with_retry(
 
     """
     if config is None:
-        return client.options(url)
+        return client.options(url, headers=headers)
 
-    return _request_with_retry(
-        lambda: client.options(url),
-        config=config,
-        method_label="OPTIONS",
-        url=url,
-        _sleep=_sleep,
+    return cast(
+        "httpx2.Response | _SyncTestResponse",
+        _request_with_retry(
+            lambda: client.options(url, headers=headers),
+            config=config,
+            method_label="OPTIONS",
+            url=url,
+            _sleep=_sleep,
+        ),
     )

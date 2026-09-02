@@ -70,7 +70,7 @@ from .._common import _RpcHttpError
 # payload framing that lives inside the ciphertext.
 _HEADER_LEN = 4  # uint32 LE prefix for each plaintext segment
 _CURSOR_TOKEN_VERSION = 5  # v5: cursor-only token, call state moved to its own token
-_CALL_TOKEN_VERSION = 1  # call token format (independent version line)
+_CALL_TOKEN_VERSION = 2  # v2 seals the init response hard limit
 _TIMESTAMP_LEN = 8  # uint64 LE, seconds since epoch (inside ciphertext)
 _CALL_ID_LEN = 16  # random per-stream id, minted at /init, echoed by the cursor
 _MIN_CURSOR_PLAINTEXT_LEN = _TIMESTAMP_LEN + _CALL_ID_LEN + _HEADER_LEN
@@ -265,6 +265,7 @@ def _seal_call_token(
     token_key: bytes,
     aad: bytes,
     created_at: int,
+    response_limit_bytes: int | None = None,
 ) -> bytes:
     """Seal the immutable half of a stream's state into a call token.
 
@@ -277,6 +278,7 @@ def _seal_call_token(
         [ 4 bytes : schema_len  (uint32 LE)] [schema_bytes]
         [ 4 bytes : input_len   (uint32 LE)] [input_schema_bytes]
         [ 4 bytes : sid_len     (uint32 LE)] [stream_id_bytes (UTF-8)]
+        [ 8 bytes : response_limit_bytes (uint64 LE; 0 means unbounded)]
 
     The type name is carried because a stream method may return a *union*
     of state classes whose members declare different call-state types (VGI's
@@ -296,6 +298,7 @@ def _seal_call_token(
         token_key: 32-byte master AEAD key.
         aad: Associated data from :func:`_compute_call_aad`.
         created_at: Token creation time as seconds since epoch.
+        response_limit_bytes: Effective hard response limit at stream init.
 
     Returns:
         The opaque sealed token, base64-encoded for UTF-8 safe metadata.
@@ -316,6 +319,7 @@ def _seal_call_token(
         + input_schema_bytes
         + struct.pack("<I", len(stream_id_bytes))
         + stream_id_bytes
+        + struct.pack("<Q", response_limit_bytes or 0)
     )
     sealed = crypto.seal_bytes(_pack_plaintext(plaintext), token_key, aad=aad, version=_CALL_TOKEN_VERSION)
     return base64.b64encode(sealed)
@@ -326,7 +330,7 @@ def _open_call_token(
     token_key: bytes,
     aad: bytes,
     token_ttl: int = 0,
-) -> tuple[bytes, str, bytes, bytes, bytes, str]:
+) -> tuple[bytes, str, bytes, bytes, bytes, str, int | None]:
     """Open and verify a call token.
 
     Args:
@@ -337,7 +341,7 @@ def _open_call_token(
 
     Returns:
         ``(call_state_bytes, call_state_type, schema_bytes, input_schema_bytes,
-        call_id, stream_id)``
+        call_id, stream_id, response_limit_bytes)``
 
     Raises:
         _RpcHttpError: On malformed, tampered, expired, or cross-principal
@@ -362,7 +366,7 @@ def _open_call_token(
         ) from exc
     plaintext = _unpack_plaintext(sealed_plaintext)
 
-    if len(plaintext) < _TIMESTAMP_LEN + _CALL_ID_LEN + _HEADER_LEN * 5:
+    if len(plaintext) < _TIMESTAMP_LEN + _CALL_ID_LEN + _HEADER_LEN * 5 + 8:
         raise _RpcHttpError(RuntimeError("Malformed call token"), status_code=HTTPStatus.BAD_REQUEST)
 
     call_id = plaintext[_TIMESTAMP_LEN : _TIMESTAMP_LEN + _CALL_ID_LEN]
@@ -373,8 +377,10 @@ def _open_call_token(
     input_schema_bytes, pos = _read_segment(plaintext, pos, "Malformed call token")
     stream_id_bytes, payload_end = _read_segment(plaintext, pos, "Malformed call token")
 
-    if payload_end != len(plaintext):
+    if payload_end + 8 != len(plaintext):
         raise _RpcHttpError(RuntimeError("Malformed call token"), status_code=HTTPStatus.BAD_REQUEST)
+    response_limit_raw = struct.unpack_from("<Q", plaintext, payload_end)[0]
+    response_limit_bytes = response_limit_raw or None
 
     if token_ttl > 0:
         created_at = struct.unpack_from("<Q", plaintext, 0)[0]
@@ -388,6 +394,7 @@ def _open_call_token(
         input_schema_bytes,
         call_id,
         stream_id_bytes.decode(),
+        response_limit_bytes,
     )
 
 
@@ -412,7 +419,7 @@ class _ResolvedCall:
     :meth:`StreamState.bind_call_state` documents.
     """
 
-    __slots__ = ("call_state", "input_schema", "output_schema", "stream_id")
+    __slots__ = ("call_state", "input_schema", "output_schema", "response_limit_bytes", "stream_id")
 
     def __init__(
         self,
@@ -420,11 +427,13 @@ class _ResolvedCall:
         output_schema: pa.Schema,
         input_schema: pa.Schema,
         stream_id: str,
+        response_limit_bytes: int | None = None,
     ) -> None:
         self.call_state = call_state
         self.output_schema = output_schema
         self.input_schema = input_schema
         self.stream_id = stream_id
+        self.response_limit_bytes = response_limit_bytes
 
 
 class _CallStateCache:
@@ -493,6 +502,7 @@ def _mint_call_token(
     token_key: bytes,
     auth: AuthContext | None,
     stream_id: str,
+    response_limit_bytes: int | None = None,
     *,
     now: int | None = None,
 ) -> tuple[bytes, bytes, bytes]:
@@ -505,6 +515,7 @@ def _mint_call_token(
         token_key: Master AEAD key from the server config.
         auth: Authenticated identity for AAD binding.
         stream_id: Chain-correlation id.
+        response_limit_bytes: Effective hard response limit sealed at init.
         now: Override for the baked-in timestamp; default ``time.time()``.
 
     Returns:
@@ -525,6 +536,7 @@ def _mint_call_token(
         token_key,
         _compute_call_aad(auth),
         int(time.time()) if now is None else now,
+        response_limit_bytes,
     )
     return token, call_id, call_state_bytes
 

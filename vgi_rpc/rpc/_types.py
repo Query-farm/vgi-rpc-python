@@ -91,10 +91,12 @@ class OutputCollector:
         "_externalization_enabled",
         "_finished",
         "_output_schema",
+        "_preferred_response_bytes",
         "_prior_data_bytes",
         "_producer_mode",
         "_remaining_externalized_response_bytes",
         "_remaining_response_bytes",
+        "_response_limit_bytes",
         "_server_id",
     )
 
@@ -106,6 +108,8 @@ class OutputCollector:
         server_id: str | None = None,
         producer_mode: bool = True,
         remaining_response_bytes: int | None = None,
+        response_limit_bytes: int | None = None,
+        preferred_response_bytes: int | None = None,
         remaining_externalized_response_bytes: int | None = None,
         externalization_enabled: bool = False,
     ) -> None:
@@ -119,8 +123,7 @@ class OutputCollector:
                 Set to ``False`` for exchange streams where ``finish()`` is
                 not permitted.
             remaining_response_bytes: HTTP body bytes the framework will
-                accept from this iteration before triggering a continuation
-                token (producer) or strict-fail (unary/exchange).  ``None``
+                accept from this iteration before strict failure. ``None``
                 for transports that have no body cap (pipe, subprocess,
                 unix, shm) or when the operator has not configured one.
                 Surfaced to worker code as ``out.remaining_response_bytes``
@@ -131,6 +134,11 @@ class OutputCollector:
                 worker emits exactly one data batch plus a handful of tiny
                 log batches; a fluctuating live counter would be more
                 confusing than helpful.
+            response_limit_bytes: Canonical effective hard response limit.
+                ``remaining_response_bytes`` is retained as the current-turn
+                remainder and can be smaller when framing was already written.
+            preferred_response_bytes: Server-preferred response target,
+                already clamped to the effective hard limit.
             remaining_externalized_response_bytes: External-channel bytes
                 the framework will accept from this iteration before strict-
                 fail.  ``None`` when no external cap is configured *or*
@@ -143,9 +151,10 @@ class OutputCollector:
                 whether to expect externalisation as an escape valve for
                 large emissions.
 
-        Note on wire-vs-payload semantics: ``remaining_response_bytes`` is
-        wire bytes (HTTP body including IPC framing), while a worker
-        typically computes payload bytes from its own data structures.
+        Note on body-vs-payload semantics: ``remaining_response_bytes`` is
+        decoded HTTP body bytes (Arrow IPC including framing, before HTTP
+        content coding), while a worker typically computes payload bytes
+        from its own data structures.
         The framework's value is therefore slightly conservative — worker
         comparisons like ``estimated_payload <= remaining_response_bytes``
         leave a small margin for IPC framing overhead.  This is the safe
@@ -159,7 +168,13 @@ class OutputCollector:
         self._prior_data_bytes = prior_data_bytes
         self._producer_mode = producer_mode
         self._server_id = server_id
-        self._remaining_response_bytes = remaining_response_bytes
+        self._response_limit_bytes = (
+            response_limit_bytes if response_limit_bytes is not None else remaining_response_bytes
+        )
+        self._remaining_response_bytes = (
+            remaining_response_bytes if remaining_response_bytes is not None else self._response_limit_bytes
+        )
+        self._preferred_response_bytes = preferred_response_bytes
         self._remaining_externalized_response_bytes = remaining_externalized_response_bytes
         self._externalization_enabled = externalization_enabled
 
@@ -201,6 +216,16 @@ class OutputCollector:
         worker computing payload size from its own data structures.
         """
         return self._remaining_response_bytes
+
+    @property
+    def response_limit_bytes(self) -> int | None:
+        """Effective hard response limit for this iteration."""
+        return self._response_limit_bytes
+
+    @property
+    def preferred_response_bytes(self) -> int | None:
+        """Server-preferred response target, clamped to the hard limit."""
+        return self._preferred_response_bytes
 
     @property
     def remaining_externalized_response_bytes(self) -> int | None:

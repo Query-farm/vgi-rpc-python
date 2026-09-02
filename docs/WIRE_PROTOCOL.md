@@ -581,7 +581,8 @@ carry the same headers). There is no Arrow IPC body on any of them.
 | Header | Type | Emitted | Description |
 |--------|------|---------|-------------|
 | `VGI-Max-Request-Bytes` | Integer | when configured | Maximum request body size the server accepts inline. Exceeding it is `413` (see [Section 13](#http-status-code-mapping)). |
-| `VGI-Max-Response-Bytes` | Integer | when configured | HTTP body cap. *Soft* for producer streams (covered by continuation tokens), *hard* elsewhere. |
+| `VGI-Max-Response-Bytes` | Integer | when configured | Decoded Arrow IPC body cap, before HTTP content coding. Hard for every response shape. |
+| `VGI-Accept-Max-Response-Bytes-Support` | `"true"` | always | Server honors the strict client response-limit request header. |
 | `VGI-Max-Externalized-Response-Bytes` | Integer | when configured | Cap on total bytes uploaded to external storage during one response. Always *hard*. |
 | `VGI-Externalization-Enabled` | `"true"` / `"false"` | always | Whether a storage backend is wired up, i.e. whether the client should expect pointer batches at all. |
 | `VGI-Supported-Encodings` | Comma-separated codec tokens | always | Content codings this server will *produce*. See [Content-encoding negotiation](#content-encoding-negotiation). |
@@ -592,6 +593,15 @@ carry the same headers). There is no Arrow IPC body on any of them.
 | `VGI-Sticky-Default-TTL` | Integer seconds | when sticky enabled | TTL applied when a method opens a session without specifying one. |
 | `VGI-Sticky-Echo-Headers` | Comma-separated header names | when configured | Headers the client must replay for the life of a session. |
 | `VGI-Token-Introspection` | `"true"` | when enabled | The token-introspection route is live. |
+
+Clients request a per-response hard limit with
+`VGI-Accept-Max-Response-Bytes`. Its normalized field value is one ASCII
+positive decimal integer from `65536` through `2^53-1`; combined duplicates,
+commas, signs, leading zeroes, non-ASCII digits, smaller values, and larger values are a
+400 invalid request before method dispatch. The effective limit is the minimum
+of that value and the configured application and hosting response caps. See
+[HTTP response budgets](http-response-budgets.md) for worker-visible fields and
+the error envelope.
 
 A capability header that is **absent** means "not configured / not supported",
 with one deliberate exception: an absent `VGI-Supported-Encodings` means a
@@ -754,12 +764,12 @@ If the invocation does not finish the producer, the server appends a
 its custom metadata. The client then follows up with an `/exchange` request
 carrying that token, which drives exactly one more turn.
 
-`max_response_bytes` is the operator-configured per-turn sizing budget exposed
-to the producer. It does not change the number of invocations in the response.
-For producer streams the wire cap is *soft*: a single emitted batch may
-overshoot it. The companion cap `max_externalized_response_bytes` governs
-external-channel uploads independently and is *hard*: a producer that would
-exceed it surfaces an `RpcError` rather than continuing.
+The effective response limit and server-preferred target are exposed to the
+producer. They do not change the number of invocations in the response. A
+single emitted batch that remains oversize after ordinary externalization is
+replaced by a cursor-free `ResponseTooLargeError`. The companion cap
+`max_externalized_response_bytes` governs external-channel uploads
+independently and is also hard.
 
 #### Exchange stream init response
 
@@ -857,8 +867,9 @@ channel to reach the producer. A server that builds every continuation tick
 from a constant empty batch strands those updates silently: the stream still
 completes, the rows are still correct, and the worker simply keeps filtering
 on the `/init` snapshot for the life of the stream. `VGI-Max-Response-Bytes`
-is only a per-turn sizing budget; it never permits a server to consume more
-than one tick or invoke `process()` more than once in a request.
+is a hard per-turn limit; it never permits a server to consume more than one
+tick or invoke `process()` more than once in a request. An oversize producer
+response is replaced with a cursor-free `ResponseTooLargeError` envelope.
 
 For **exchange**, the input carries real data plus the state token. The
 response data batch carries an updated state token for the next exchange.

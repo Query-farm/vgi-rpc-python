@@ -475,11 +475,11 @@ class TestHttpStats:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_StatsService, _StatsServiceImpl())
-        # Small max to force continuation
+        # Bounded response large enough for each lockstep turn.
         client = make_sync_client(
             server,
             token_key=b"testtesttesttesttesttesttesttest",
-            max_response_bytes=1,
+            max_response_bytes=64 * 1024,
         )
 
         with (

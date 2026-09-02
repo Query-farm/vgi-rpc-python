@@ -63,7 +63,12 @@ from vgi_rpc.rpc._common import (
 from vgi_rpc.utils import ArrowSerializableDataclass, ValidatedReader, empty_batch, new_ipc_stream
 
 from .._common import _RpcHttpError
-from ._responses import _current_response_status, _enforce_response_budgets
+from ._responses import (
+    _current_response_budget,
+    _current_response_status,
+    _enforce_response_budgets,
+    _tighten_response_budget,
+)
 from ._state_token import (
     _compute_aad,
     _compute_call_aad,
@@ -267,6 +272,8 @@ def _run_stream_init_sync(
                 protocol_name=protocol_name,
                 kind=app._server.transport_kind,
                 implementation=app._server.implementation,
+                response_limit_bytes=_current_response_budget.get().response_limit_bytes,
+                preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
             )
 
         # The chain-correlation id for all HTTP turns of this stream.  Carried
@@ -311,6 +318,7 @@ def _run_stream_init_sync(
                 app._token_key,
                 auth,
                 stream_id,
+                _current_response_budget.get().response_limit_bytes,
             )
             # Warm the cache with the objects we already hold, so this stream's
             # first continuation does not have to open the token it was just
@@ -318,7 +326,13 @@ def _run_stream_init_sync(
             app._call_state_cache.put(
                 call_id,
                 auth,
-                _ResolvedCall(result.call_state, result.output_schema, result.input_schema, stream_id),
+                _ResolvedCall(
+                    result.call_state,
+                    result.output_schema,
+                    result.input_schema,
+                    stream_id,
+                    _current_response_budget.get().response_limit_bytes,
+                ),
                 time.time(),
             )
 
@@ -542,6 +556,7 @@ def _run_stream_exchange_sync(
         output_schema = resolved_call.output_schema
         input_schema = resolved_call.input_schema
         stream_id = resolved_call.stream_id
+        _tighten_response_budget(resolved_call.response_limit_bytes)
 
         is_producer = input_schema == _EMPTY_SCHEMA
 
@@ -589,6 +604,8 @@ def _run_stream_exchange_sync(
                     protocol_name=protocol_name,
                     kind=app._server.transport_kind,
                     implementation=app._server.implementation,
+                    response_limit_bytes=_current_response_budget.get().response_limit_bytes,
+                    preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
                 )
                 try:
                     state_obj.on_cancel(cancel_ctx)
@@ -744,7 +761,8 @@ def _run_http_exchange_turn(
             output_schema,
             server_id=server_id,
             producer_mode=False,
-            remaining_response_bytes=app._max_response_bytes,
+            response_limit_bytes=_current_response_budget.get().response_limit_bytes,
+            preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
             remaining_externalized_response_bytes=(app._max_externalized_response_bytes if ext_enabled else None),
             externalization_enabled=ext_enabled,
         )
@@ -758,6 +776,8 @@ def _run_http_exchange_turn(
             protocol_name=protocol_name,
             kind=app._server.transport_kind,
             implementation=app._server.implementation,
+            response_limit_bytes=_current_response_budget.get().response_limit_bytes,
+            preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
         )
         state.process(ab_in, out, process_ctx)
         if not out.finished:
@@ -802,7 +822,7 @@ def _run_http_exchange_turn(
                 method_name=method_name,
                 wire_bytes=resp_buf.tell(),
                 external_bytes=exchange_external_bytes,
-                wire_cap=app._max_response_bytes,
+                wire_cap=_current_response_budget.get().response_limit_bytes,
                 external_cap=app._max_externalized_response_bytes,
             )
         except RuntimeError as overshoot:
@@ -964,7 +984,14 @@ def _run_http_producer_turn(
     # output is spliced into a response that already carries a plaintext header
     # (see the caller), so compressing here would yield a plaintext header
     # followed by a compressed body — not a decodable frame.
-    codec = _current_response_codec.get() if owns_response_body else None
+    # Response budgets are defined over decoded Arrow IPC bytes. When a hard
+    # limit is active, keep this turn plaintext until the resource has measured
+    # it; Falcon's response middleware applies content coding afterward. The
+    # zero-copy precompression fast path remains available for unbounded
+    # continuation responses.
+    response_budget = _current_response_budget.get()
+    max_bytes = response_budget.response_limit_bytes
+    codec = _current_response_codec.get() if owns_response_body and max_bytes is None else None
     write_sink: Any = resp_buf
     if codec is not None:
         try:
@@ -976,7 +1003,6 @@ def _run_http_producer_turn(
             _current_body_precompressed.set(True)
         except Exception:
             write_sink = resp_buf
-    max_bytes = app._max_response_bytes
     max_external_bytes = app._max_externalized_response_bytes
     externalization_enabled = (
         app._server.external_config is not None and app._server.external_config.storage is not None
@@ -1003,6 +1029,8 @@ def _run_http_producer_turn(
             protocol_name=protocol_name,
             kind=app._server.transport_kind,
             implementation=app._server.implementation,
+            response_limit_bytes=response_budget.response_limit_bytes,
+            preferred_response_bytes=response_budget.preferred_response_bytes,
         )
         # One HTTP request is one logical tick and therefore exactly one state
         # transition.  ``max_response_bytes`` limits that turn's response; it
@@ -1022,6 +1050,8 @@ def _run_http_producer_turn(
                 server_id=server_id,
                 producer_mode=True,
                 remaining_response_bytes=remaining_wire,
+                response_limit_bytes=response_budget.response_limit_bytes,
+                preferred_response_bytes=response_budget.preferred_response_bytes,
                 remaining_externalized_response_bytes=remaining_external,
                 externalization_enabled=externalization_enabled,
             )
@@ -1230,6 +1260,7 @@ def _resolve_call_from_token(
         input_schema_bytes,
         token_call_id,
         stream_id,
+        response_limit_bytes,
     ) = _open_call_token(call_token, app._token_key, _compute_call_aad(auth), app._token_ttl)
     # Constant-time compare: the ids are both server-minted and already
     # authenticated, so this is belt-and-braces against a client pairing two
@@ -1272,4 +1303,4 @@ def _resolve_call_from_token(
                 status_code=HTTPStatus.BAD_REQUEST,
             ) from exc
 
-    return _ResolvedCall(call_state, output_schema, input_schema, stream_id)
+    return _ResolvedCall(call_state, output_schema, input_schema, stream_id, response_limit_bytes)

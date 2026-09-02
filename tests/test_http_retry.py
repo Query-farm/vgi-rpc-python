@@ -612,6 +612,7 @@ class TestOptionsWithRetry:
         resp = _options_with_retry(
             wrapper,  # type: ignore[arg-type]
             "/__capabilities__",
+            headers={"VGI-Accept-Max-Response-Bytes": "65536"},
             config=HttpRetryConfig(max_retries=3, backoff_base=0.001),
             _sleep=lambda _: None,
         )
@@ -625,6 +626,7 @@ class TestOptionsWithRetry:
             _options_with_retry(
                 wrapper,  # type: ignore[arg-type]
                 "/__capabilities__",
+                headers={"VGI-Accept-Max-Response-Bytes": "65536"},
                 config=HttpRetryConfig(max_retries=1, backoff_base=0.001),
                 _sleep=lambda _: None,
             )
@@ -647,6 +649,7 @@ class TestHttpConnectWithRetry:
                 RpcFixtureService,
                 client=wrapper,  # type: ignore[arg-type]
                 retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+                accepted_max_response_bytes=None,
             ) as proxy,
             pytest.raises(RpcError, match="HttpError"),
         ):
@@ -661,6 +664,7 @@ class TestHttpConnectWithRetry:
                 RpcFixtureService,
                 client=wrapper,  # type: ignore[arg-type]
                 retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+                accepted_max_response_bytes=None,
             ) as proxy,
             pytest.raises(RpcError, match="HttpError"),
         ):
@@ -692,6 +696,7 @@ class TestHttpConnectWithRetry:
             RpcFixtureService,
             client=wrapper,  # type: ignore[arg-type]
             retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+            accepted_max_response_bytes=None,
         ) as proxy:
             session = proxy.transform(factor=2.0)
             input_batch = pa.record_batch({"value": [1.0, 2.0, 3.0]})
@@ -707,6 +712,7 @@ class TestHttpConnectWithRetry:
                 RpcFixtureService,
                 client=wrapper,  # type: ignore[arg-type]
                 retry=HttpRetryConfig(max_retries=2, backoff_base=0.001),
+                accepted_max_response_bytes=None,
             ) as proxy,
             pytest.raises(RpcError) as exc_info,
         ):
@@ -721,6 +727,7 @@ class TestHttpConnectWithRetry:
             http_connect(
                 RpcFixtureService,
                 client=wrapper,  # type: ignore[arg-type]
+                accepted_max_response_bytes=None,
             ) as proxy,
             pytest.raises(RpcError) as exc_info,
         ):
@@ -736,6 +743,7 @@ class TestHttpConnectWithRetry:
                 RpcFixtureService,
                 client=wrapper,  # type: ignore[arg-type]
                 retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+                accepted_max_response_bytes=None,
             ) as proxy,
             pytest.raises(RpcError, match="HttpError"),
         ):
@@ -752,6 +760,7 @@ class TestHttpIntrospectWithRetry:
         desc = http_introspect(
             client=wrapper,  # type: ignore[arg-type]
             retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+            accepted_max_response_bytes=None,
         )
         assert "add" in desc.methods
         assert wrapper.call_count == 2
@@ -782,6 +791,7 @@ class TestRequestUploadUrlsWithRetry:
             request_upload_urls(
                 client=wrapper,  # type: ignore[arg-type]
                 retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
+                accepted_max_response_bytes=None,
             )
         # Verify retry happened: 1 failure + 1 success (which returns 404)
         assert wrapper.call_count == 2

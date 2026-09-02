@@ -45,7 +45,7 @@ from vgi_rpc.rpc._common import (
 from vgi_rpc.utils import new_ipc_stream
 
 from .._common import _RpcHttpError
-from ._responses import _enforce_response_budgets
+from ._responses import _current_response_budget, _enforce_response_budgets
 
 if TYPE_CHECKING:
     from ._app import _HttpRpcApp
@@ -147,6 +147,7 @@ def _run_unary_sync(
         protocol_name = app._server.protocol_name
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
+        response_budget = _current_response_budget.get()
         if method_name in app._server.ctx_methods:
             kwargs["ctx"] = CallContext(
                 auth=auth,
@@ -157,6 +158,8 @@ def _run_unary_sync(
                 protocol_name=protocol_name,
                 kind=app._server.transport_kind,
                 implementation=app._server.implementation,
+                response_limit_bytes=response_budget.response_limit_bytes,
+                preferred_response_bytes=response_budget.preferred_response_bytes,
             )
 
         schema = info.result_schema
@@ -238,7 +241,7 @@ def _run_unary_sync(
                         method_name=method_name,
                         wire_bytes=resp_buf.tell(),
                         external_bytes=external_bytes_written,
-                        wire_cap=app._max_response_bytes,
+                        wire_cap=response_budget.response_limit_bytes,
                         external_cap=app._max_externalized_response_bytes,
                     )
                 except RuntimeError as overshoot:

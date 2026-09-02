@@ -206,6 +206,7 @@ Some conformance tests target opt-in HTTP features. They run only when the serve
 | Capability header | Test group | Spec |
 |---|---|---|
 | `VGI-Sticky-Enabled: true` | `Sticky::*` | [sticky-sessions-spec.md](sticky-sessions-spec.md) |
+| `VGI-Accept-Max-Response-Bytes-Support: true` | `TestHttpResponseCap*` | [http-response-budgets.md](http-response-budgets.md) |
 
 ### Fixture-gated tests
 
@@ -216,6 +217,7 @@ Some tests can't run against one already-running server, because the state under
 | `proof_worker_factory` | `TestProxyProof` | skip — the feature is wholly optional | [proxy-proof-spec.md](proxy-proof-spec.md) |
 | `conformance_http_no_compression_port` | `test_empty_advertisement_means_never_compressed` | skip | — |
 | `conformance_http_small_request_cap_port` | `TestCompressedHttpRequestCap` | skip — requires a worker advertising a deliberately small `max_request_bytes` cap | [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#content-encoding-negotiation) |
+| `conformance_http_strict_cap_port` | `TestHttpResponseCap`, `TestHttpResponseCapProducer` | skip — requires a worker with a deliberately small decoded response cap | [http-response-budgets.md](http-response-budgets.md) |
 | `conformance_http_external_security_port` | `TestExternalFetchSecurity` | skip — requires a server wired to the fake-storage redirect routes and small encoded/decoded caps | [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#fetch-safety) |
 | `conformance_http_sticky_short_ttl_port`<br>`conformance_http_sticky_peer_ports`<br>`conformance_http_sticky_auth_port` | the three `TestSticky` failure paths | **fail**, if the server advertises `VGI-Sticky-Enabled` — skip otherwise | [sticky-sessions-spec.md](sticky-sessions-spec.md) §9.1 |
 | `conformance_resource_soak_target` | `TestResourceSoak` | skip — requires a dedicated process PID and connection factory | Resource soak contract below |
@@ -232,6 +234,11 @@ the cap independently on the encoded HTTP body and the decoded Arrow body,
 then reuses the same HTTP client after each rejection. The separate
 `conformance_http_no_compression_port` fixture remains valid: it exercises an
 explicitly compression-disabled deployment, not the primary CI worker profile.
+
+Every port also consumes
+`vgi_rpc/conformance/http_response_budget_vectors.json`. It freezes the ASCII
+numeric grammar, the `2^53-1` portable maximum, minimum-based precedence, and
+the cursor-free `ResponseTooLargeError` envelope.
 
 The sticky row is the one to note: a port may decline sticky entirely, but a port that *claims* it cannot quietly omit the tests that prove sessions are refused when they should be. Everything else on this page skips silently when unsupplied, which is why the sticky fixtures name themselves in the failure message.
 

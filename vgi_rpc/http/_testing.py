@@ -127,8 +127,11 @@ def make_sync_client(
     prefix: str = "",
     token_key: bytes | None = None,
     max_response_bytes: int | None = None,
+    hosting_max_response_bytes: int | None = None,
+    preferred_response_bytes: int | None = None,
     max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
+    hosting_max_request_bytes: int | None = None,
     max_stream_response_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     peer_identity_providers: Sequence[PeerIdentityProvider] = (),
@@ -169,8 +172,11 @@ def make_sync_client(
         token_key: AEAD key for sealing stream state tokens (see
             ``make_wsgi_app`` for details).
         max_response_bytes: See ``make_wsgi_app``.
+        hosting_max_response_bytes: See ``make_wsgi_app``.
+        preferred_response_bytes: See ``make_wsgi_app``.
         max_externalized_response_bytes: See ``make_wsgi_app``.
         max_request_bytes: See ``make_wsgi_app``.
+        hosting_max_request_bytes: See ``make_wsgi_app``.
         max_stream_response_bytes: **Deprecated** alias for
             ``max_response_bytes``.
         authenticate: See ``make_wsgi_app``.
@@ -212,9 +218,12 @@ def make_sync_client(
         prefix=prefix,
         token_key=token_key,
         max_response_bytes=max_response_bytes,
+        hosting_max_response_bytes=hosting_max_response_bytes,
+        preferred_response_bytes=preferred_response_bytes,
         max_externalized_response_bytes=max_externalized_response_bytes,
         max_stream_response_bytes=max_stream_response_bytes,
         max_request_bytes=max_request_bytes,
+        hosting_max_request_bytes=hosting_max_request_bytes,
         authenticate=authenticate,
         peer_identity_providers=peer_identity_providers,
         peer_authentication_policy=peer_authentication_policy,

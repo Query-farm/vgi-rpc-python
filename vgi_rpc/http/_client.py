@@ -61,6 +61,8 @@ from ._common import (
     _SESSION_ENDPOINT,
     _UPLOAD_URL_METHOD,
     _UPLOAD_URL_PARAMS_SCHEMA,
+    ACCEPT_MAX_RESPONSE_BYTES_HEADER,
+    ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
     ECHO_HEADER_PREFIX,
     EXTERNALIZATION_ENABLED_HEADER,
     MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER,
@@ -82,7 +84,7 @@ from ._common import (
 from ._common import (
     compress as _compress_with_encoding,
 )
-from ._retry import HttpRetryConfig, _options_with_retry, _post_with_retry
+from ._retry import HttpRetryConfig, _BufferedResponse, _options_with_retry, _post_bounded, _post_with_retry
 from ._unauthorized import AuthenticationError, AuthReason
 
 # An unrecognised reason code means the server is newer than this client, not
@@ -92,6 +94,56 @@ _AUTH_REASONS = frozenset(reason.value for reason in AuthReason)
 # A non-JSON 401 body is someone else's error page. Keep enough to identify
 # the intermediary, not so much that it drowns the traceback.
 _MAX_UNAUTHORIZED_DETAIL = 500
+_MIN_ACCEPTED_MAX_RESPONSE_BYTES = 65536
+_DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES = 256 * 1024 * 1024
+
+
+def _validate_accepted_max_response_bytes(value: int | None) -> int | None:
+    if value is not None and (type(value) is not int or not _MIN_ACCEPTED_MAX_RESPONSE_BYTES <= value <= (1 << 53) - 1):
+        raise ValueError(
+            "accepted_max_response_bytes must be an integer from "
+            f"{_MIN_ACCEPTED_MAX_RESPONSE_BYTES} through {(1 << 53) - 1}"
+        )
+    return value
+
+
+def _enforce_accepted_response_bytes(content: bytes, accepted_max_response_bytes: int | None) -> bytes:
+    """Reject a decoded HTTP body larger than the limit advertised by this client."""
+    if accepted_max_response_bytes is not None and len(content) > accepted_max_response_bytes:
+        raise RpcError(
+            "ResponseTooLargeError",
+            "Decoded HTTP response exceeds accepted_max_response_bytes "
+            f"({len(content)} > {accepted_max_response_bytes})",
+            "",
+        )
+    return content
+
+
+def _require_response_budget_support(
+    *,
+    client: httpx2.Client | _SyncTestClient,
+    prefix: str,
+    retry: HttpRetryConfig | None,
+    accepted_max_response_bytes: int | None,
+    capabilities: HttpServerCapabilities | None = None,
+) -> HttpServerCapabilities | None:
+    """Discover and require response-budget support before advertising a cap."""
+    if accepted_max_response_bytes is None:
+        return capabilities
+    caps = capabilities or http_capabilities(
+        client=client,
+        prefix=prefix,
+        retry=retry,
+        accepted_max_response_bytes=accepted_max_response_bytes,
+    )
+    if not caps.accept_max_response_bytes_support:
+        raise RpcError(
+            "ProtocolError",
+            "Server does not advertise VGI-Accept-Max-Response-Bytes support",
+            "",
+        )
+    return caps
+
 
 if TYPE_CHECKING:
     from vgi_rpc.introspect import ServiceDescription
@@ -360,6 +412,7 @@ class HttpStreamSession:
     """
 
     __slots__ = (
+        "_accepted_max_response_bytes",
         "_call_state_bytes",
         "_capabilities",
         "_client",
@@ -394,6 +447,8 @@ class HttpStreamSession:
         header: object | None = None,
         retry_config: HttpRetryConfig | None = None,
         compression_level: int | None = None,
+        accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
+        capabilities: HttpServerCapabilities | None = None,
     ) -> None:
         """Initialize with HTTP client, method details, and initial state."""
         self._client = client
@@ -414,7 +469,8 @@ class HttpStreamSession:
         self._header = header
         self._retry_config = retry_config
         self._compression_level = compression_level
-        self._capabilities: HttpServerCapabilities | None = None
+        self._accepted_max_response_bytes = _validate_accepted_max_response_bytes(accepted_max_response_bytes)
+        self._capabilities = capabilities
 
     def _maybe_externalize_request(self, body: bytes) -> bytes:
         """Pre-emptively externalize *body* if cached caps say it's too large.
@@ -434,7 +490,10 @@ class HttpStreamSession:
         """Externalize *body* via server-vended URL; warm the caps cache."""
         if self._capabilities is None:
             self._capabilities = http_capabilities(
-                client=self._client, prefix=self._url_prefix, retry=self._retry_config
+                client=self._client,
+                prefix=self._url_prefix,
+                retry=self._retry_config,
+                accepted_max_response_bytes=self._accepted_max_response_bytes,
             )
         validator = self._external_config.url_validator if self._external_config is not None else None
         return _externalize_via_upload_url(
@@ -479,6 +538,13 @@ class HttpStreamSession:
         (Python evaluates ``kwargs`` left-to-right, so ``prepare_body``
         may run before ``build_headers`` in some call sites).
         """
+        self._capabilities = _require_response_budget_support(
+            client=self._client,
+            prefix=self._url_prefix,
+            retry=self._retry_config,
+            accepted_max_response_bytes=self._accepted_max_response_bytes,
+            capabilities=self._capabilities,
+        )
         if self._compression_level is None:
             return None
         client_set = _client_offered_encodings()
@@ -490,6 +556,8 @@ class HttpStreamSession:
         """Build HTTP headers, advertising codecs and selecting one for the body when compression is enabled."""
         encoding = self._resolve_request_encoding()
         headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
+        if self._accepted_max_response_bytes is not None:
+            headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = str(self._accepted_max_response_bytes)
         if encoding is not None:
             headers["Content-Encoding"] = encoding.value
             headers["Accept-Encoding"] = ", ".join(e.value for e in _client_offered_encodings())
@@ -558,17 +626,21 @@ class HttpStreamSession:
         # Exchange calls are NOT retried: the server's process() method may
         # have side effects, and a proxy 502 after server processing would
         # cause duplicate execution.  Only init/unary/continuation are retried.
-        resp = self._client.post(
+        resp = _post_bounded(
+            self._client,
             f"{self._url_prefix}/{self._method}/exchange",
             content=self._prepare_body(body),
             headers=self._build_headers(),
+            response_limit_bytes=self._accepted_max_response_bytes,
         )
         if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
             body = self._externalize_request_body(body)
-            resp = self._client.post(
+            resp = _post_bounded(
+                self._client,
                 f"{self._url_prefix}/{self._method}/exchange",
                 content=self._prepare_body(body),
                 headers=self._build_headers(),
+                response_limit_bytes=self._accepted_max_response_bytes,
             )
         if wire_http_logger.isEnabledFor(logging.DEBUG):
             wire_http_logger.debug(
@@ -579,7 +651,8 @@ class HttpStreamSession:
             )
 
         # Read response — log batches + data batch with state
-        reader = _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
+        content = _enforce_accepted_response_bytes(resp.content, self._accepted_max_response_bytes)
+        reader = _open_response_stream(content, resp.status_code, self._ipc_validation)
         try:
             ab = _read_batch_with_log_check(reader, self._on_log, self._external_config)
         except RpcError:
@@ -612,12 +685,15 @@ class HttpStreamSession:
         # A continuation advances arbitrary user state. Replaying it after an
         # intermediary has discarded a successful response can duplicate
         # side effects, so RPC dispatches are deliberately single-attempt.
-        resp = self._client.post(
+        resp = _post_bounded(
+            self._client,
             f"{self._url_prefix}/{self._method}/exchange",
             content=self._prepare_body(req_buf.getvalue()),
             headers=self._build_headers(),
+            response_limit_bytes=self._accepted_max_response_bytes,
         )
-        return _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
+        content = _enforce_accepted_response_bytes(resp.content, self._accepted_max_response_bytes)
+        return _open_response_stream(content, resp.status_code, self._ipc_validation)
 
     def __iter__(self) -> Iterator[AnnotatedBatch]:
         """Iterate over output batches from a producer stream.
@@ -838,15 +914,18 @@ class HttpStreamSession:
         with new_ipc_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=cancel_md)
         try:
-            resp = self._client.post(
+            resp = _post_bounded(
+                self._client,
                 f"{self._url_prefix}/{self._method}/exchange",
                 content=self._prepare_body(req_buf.getvalue()),
                 headers=self._build_headers(),
+                response_limit_bytes=self._accepted_max_response_bytes,
             )
         except Exception:
             return
         with contextlib.suppress(Exception):
-            reader = _open_response_stream(resp.content, resp.status_code, self._ipc_validation)
+            content = _enforce_accepted_response_bytes(resp.content, self._accepted_max_response_bytes)
+            reader = _open_response_stream(content, resp.status_code, self._ipc_validation)
             _drain_stream(reader)
 
     def __enter__(self) -> HttpStreamSession:
@@ -875,6 +954,7 @@ def http_connect[P](
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
     compression_level: int | None = 1,
+    accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
 ) -> Iterator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -902,6 +982,9 @@ def http_connect[P](
             ``1`` (the default) compresses requests and adds
             ``Content-Encoding: zstd``.  ``None`` disables request
             compression (httpx2 still auto-decompresses server responses).
+        accepted_max_response_bytes: Hard response-body limit advertised on
+            every RPC request. The native Python default is 256 MiB. Pass
+            ``None`` to omit the header for legacy unbounded behavior.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -930,6 +1013,7 @@ def http_connect[P](
                 ipc_validation=ipc_validation,
                 retry_config=retry,
                 compression_level=compression_level,
+                accepted_max_response_bytes=accepted_max_response_bytes,
             ),
         )
     finally:
@@ -944,6 +1028,7 @@ def http_introspect(
     client: httpx2.Client | _SyncTestClient | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
+    accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
 ) -> ServiceDescription:
     """Send a ``__describe__`` request over HTTP and return a ``ServiceDescription``.
 
@@ -955,6 +1040,7 @@ def http_introspect(
         client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
         ipc_validation: Validation level for incoming IPC batches.
         retry: Optional retry configuration for transient HTTP failures.
+        accepted_max_response_bytes: Hard response limit sent with the request.
 
     Returns:
         A ``ServiceDescription`` with all method metadata.
@@ -990,15 +1076,27 @@ def http_introspect(
                 custom_metadata=request_metadata,
             )
 
+        accepted_max_response_bytes = _validate_accepted_max_response_bytes(accepted_max_response_bytes)
+        _require_response_budget_support(
+            client=client,
+            prefix=prefix,
+            retry=retry,
+            accepted_max_response_bytes=accepted_max_response_bytes,
+        )
+        headers = {"Content-Type": _ARROW_CONTENT_TYPE}
+        if accepted_max_response_bytes is not None:
+            headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = str(accepted_max_response_bytes)
         resp = _post_with_retry(
             client,
             f"{prefix}/{DESCRIBE_METHOD_NAME}",
             content=req_buf.getvalue(),
-            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            headers=headers,
             config=retry,
+            response_limit_bytes=accepted_max_response_bytes,
         )
 
-        reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
+        content = _enforce_accepted_response_bytes(resp.content, accepted_max_response_bytes)
+        reader = _open_response_stream(content, resp.status_code, ipc_validation)
         # Skip log batches
         while True:
             batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
@@ -1024,6 +1122,8 @@ def _init_http_stream_session(
     header: object | None = None,
     retry_config: HttpRetryConfig | None = None,
     compression_level: int | None = None,
+    accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
+    capabilities: HttpServerCapabilities | None = None,
 ) -> HttpStreamSession:
     """Parse an init response and return an ``HttpStreamSession``.
 
@@ -1042,6 +1142,10 @@ def _init_http_stream_session(
         header: Optional pre-read stream header.
         retry_config: Optional retry configuration for transient failures.
         compression_level: Zstandard compression level for exchange requests.
+        accepted_max_response_bytes: Hard response limit emitted on later
+            stream requests.
+        capabilities: Already-discovered capabilities inherited from the
+            initiating proxy, avoiding a second mandatory preflight.
 
     Returns:
         A configured ``HttpStreamSession`` ready for iteration or exchange.
@@ -1111,6 +1215,8 @@ def _init_http_stream_session(
         header=header,
         retry_config=retry_config,
         compression_level=compression_level,
+        accepted_max_response_bytes=accepted_max_response_bytes,
+        capabilities=capabilities,
     )
 
 
@@ -1128,6 +1234,7 @@ class _HttpProxy:
         ipc_validation: IpcValidation = IpcValidation.FULL,
         retry_config: HttpRetryConfig | None = None,
         compression_level: int | None = None,
+        accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
     ) -> None:
         self._protocol = protocol
         self._client = client
@@ -1138,6 +1245,7 @@ class _HttpProxy:
         self._ipc_validation = ipc_validation
         self._retry_config = retry_config
         self._compression_level = compression_level
+        self._accepted_max_response_bytes = _validate_accepted_max_response_bytes(accepted_max_response_bytes)
         # Application protocol surface version. Same opt-in semantics as the
         # pipe client (vgi_rpc.rpc._client._RpcProxy): vars(), not getattr —
         # subclasses that don't redeclare get None. Threaded into every
@@ -1170,7 +1278,12 @@ class _HttpProxy:
         caps = self._capabilities
         if caps is not None and (caps.cache_expires_at is None or _time.monotonic() < caps.cache_expires_at):
             return caps
-        self._capabilities = http_capabilities(client=self._client, prefix=self._url_prefix, retry=self._retry_config)
+        self._capabilities = http_capabilities(
+            client=self._client,
+            prefix=self._url_prefix,
+            retry=self._retry_config,
+            accepted_max_response_bytes=self._accepted_max_response_bytes,
+        )
         return self._capabilities
 
     def _maybe_externalize_request(self, body: bytes) -> bytes:
@@ -1216,6 +1329,13 @@ class _HttpProxy:
         (Python evaluates ``kwargs`` left-to-right, so ``prepare_body``
         may run before ``build_headers`` in some call sites).
         """
+        self._capabilities = _require_response_budget_support(
+            client=self._client,
+            prefix=self._url_prefix,
+            retry=self._retry_config,
+            accepted_max_response_bytes=self._accepted_max_response_bytes,
+            capabilities=self._capabilities,
+        )
         if self._compression_level is None:
             return None
         client_set = _client_offered_encodings()
@@ -1227,6 +1347,8 @@ class _HttpProxy:
         """Build HTTP headers, advertising codecs and selecting one for the body when compression is enabled."""
         encoding = self._resolve_request_encoding()
         headers: dict[str, str] = {"Content-Type": _ARROW_CONTENT_TYPE}
+        if self._accepted_max_response_bytes is not None:
+            headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = str(self._accepted_max_response_bytes)
         if encoding is not None:
             headers["Content-Encoding"] = encoding.value
             headers["Accept-Encoding"] = ", ".join(e.value for e in _client_offered_encodings())
@@ -1242,7 +1364,7 @@ class _HttpProxy:
         )
 
     def _refresh_supported_encodings_from_response(
-        self, resp: httpx2.Response | _SyncTestResponse
+        self, resp: httpx2.Response | _SyncTestResponse | _BufferedResponse
     ) -> tuple[Encoding, ...] | None:
         """Harvest ``VGI-Supported-Encodings`` from a response and cache it.
 
@@ -1316,6 +1438,8 @@ class _HttpProxy:
             header=None,
             retry_config=self._retry_config,
             compression_level=self._compression_level,
+            accepted_max_response_bytes=self._accepted_max_response_bytes,
+            capabilities=self._capabilities,
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -1424,29 +1548,35 @@ class _HttpProxy:
             # RPC implementations may have side effects. A gateway can lose
             # a successful response and return 502/503, so replaying here is
             # not safe without an application-level idempotency contract.
-            resp = client.post(
+            resp = _post_bounded(
+                client,
                 f"{url_prefix}/{info.name}",
                 content=prepare_body(body),
                 headers=build_headers(),
+                response_limit_bytes=self._accepted_max_response_bytes,
             )
             # 415 fallback: codec we picked isn't enabled on this server.
             # The response carries ``VGI-Supported-Encodings`` (stamped on
             # every response by ``_CapabilitiesMiddleware``); refresh caps
             # and retry once with a codec the server actually accepts.
             if resp.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE and refresh_supported(resp) is not None:
-                resp = client.post(
+                resp = _post_bounded(
+                    client,
                     f"{url_prefix}/{info.name}",
                     content=prepare_body(body),
                     headers=build_headers(),
+                    response_limit_bytes=self._accepted_max_response_bytes,
                 )
             # 413 fallback: server raised its-cap-changed-since-discovery
             # error; externalize and retry once.
             if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
                 body = externalize(body)
-                resp = client.post(
+                resp = _post_bounded(
+                    client,
                     f"{url_prefix}/{info.name}",
                     content=prepare_body(body),
                     headers=build_headers(),
+                    response_limit_bytes=self._accepted_max_response_bytes,
                 )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(
@@ -1456,7 +1586,8 @@ class _HttpProxy:
                     len(resp.content),
                 )
 
-            reader = _open_response_stream(resp.content, resp.status_code, ipc_validation)
+            content = _enforce_accepted_response_bytes(resp.content, self._accepted_max_response_bytes)
+            reader = _open_response_stream(content, resp.status_code, ipc_validation)
             return _read_unary_response(reader, info, on_log, ext_cfg)
 
         return caller
@@ -1485,23 +1616,29 @@ class _HttpProxy:
             _send_request(req_buf, info, kwargs, protocol_version=protocol_version)
             body = maybe_externalize(req_buf.getvalue())
 
-            resp = client.post(
+            resp = _post_bounded(
+                client,
                 f"{url_prefix}/{info.name}/init",
                 content=prepare_body(body),
                 headers=build_headers(),
+                response_limit_bytes=self._accepted_max_response_bytes,
             )
             if resp.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE and refresh_supported(resp) is not None:
-                resp = client.post(
+                resp = _post_bounded(
+                    client,
                     f"{url_prefix}/{info.name}/init",
                     content=prepare_body(body),
                     headers=build_headers(),
+                    response_limit_bytes=self._accepted_max_response_bytes,
                 )
             if resp.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
                 body = externalize(body)
-                resp = client.post(
+                resp = _post_bounded(
+                    client,
                     f"{url_prefix}/{info.name}/init",
                     content=prepare_body(body),
                     headers=build_headers(),
+                    response_limit_bytes=self._accepted_max_response_bytes,
                 )
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug(
@@ -1516,11 +1653,12 @@ class _HttpProxy:
             # because _set_error_response writes a proper IPC error stream with error
             # metadata, which _read_stream_header detects via _dispatch_log_or_error.
             header = None
-            resp_stream = BytesIO(resp.content)
+            content = _enforce_accepted_response_bytes(resp.content, self._accepted_max_response_bytes)
+            resp_stream = BytesIO(content)
             if info.header_type is not None:
                 # Check for auth errors first (JSON envelope, not Arrow IPC)
                 if resp.status_code == 401:
-                    _open_response_stream(resp.content, resp.status_code, ipc_validation)
+                    _open_response_stream(content, resp.status_code, ipc_validation)
                 header = _read_stream_header(resp_stream, info.header_type, ipc_validation, on_log, ext_cfg)
 
             reader = _open_response_stream(resp_stream.read(), resp.status_code, ipc_validation)
@@ -1535,6 +1673,8 @@ class _HttpProxy:
                 header=header,
                 retry_config=retry_cfg,
                 compression_level=compression_level,
+                accepted_max_response_bytes=self._accepted_max_response_bytes,
+                capabilities=self._capabilities,
             )
 
         return caller
@@ -1568,6 +1708,11 @@ class _SessionTrackingClient:
     def __getattr__(self, name: str) -> Any:
         """Delegate unknown attributes (e.g. ``base_url``, ``headers``) to the inner client."""
         return getattr(self._inner, name)
+
+    @property
+    def _supports_bounded_stream(self) -> bool:
+        """Whether the wrapped client can expose decoded response chunks."""
+        return callable(getattr(self._inner, "stream", None))
 
     def _merge_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
         """Add session opt-in + token + replayed echo headers to a per-request header dict."""
@@ -1615,6 +1760,14 @@ class _SessionTrackingClient:
         resp = self._inner.post(url, **kwargs)
         self._capture(resp)
         return resp
+
+    @contextlib.contextmanager
+    def stream(self, method: str, url: str, **kwargs: Any) -> Iterator[Any]:
+        """Forward a streaming request while preserving session header handling."""
+        kwargs["headers"] = self._merge_headers(kwargs.get("headers"))
+        with self._inner.stream(method, url, **kwargs) as resp:  # type: ignore[union-attr]  # ty: ignore[unresolved-attribute]
+            self._capture(resp)
+            yield resp
 
     def get(self, url: str, **kwargs: Any) -> Any:
         """Forward GET, merging session headers and capturing the response."""
@@ -1810,6 +1963,8 @@ class HttpServerCapabilities:
             session-opening response; this field exposes the *names* for
             introspection (LB configuration, cross-language client
             implementations).
+        accept_max_response_bytes_support: Whether the server honors the
+            ``VGI-Accept-Max-Response-Bytes`` request header.
 
     """
 
@@ -1824,6 +1979,7 @@ class HttpServerCapabilities:
     sticky_enabled: bool = False
     sticky_default_ttl: int | None = None
     sticky_echo_headers: tuple[str, ...] = ()
+    accept_max_response_bytes_support: bool = False
 
 
 def http_capabilities(
@@ -1832,11 +1988,12 @@ def http_capabilities(
     prefix: str | None = None,
     client: httpx2.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
+    accepted_max_response_bytes: int | None = None,
 ) -> HttpServerCapabilities:
     """Discover server capabilities via ``OPTIONS {prefix}/health``.
 
-    The capability headers (``VGI-Max-Request-Bytes``,
-    ``VGI-Upload-URL-Support``, ``VGI-Max-Upload-Bytes``) are emitted on
+    The capability headers (including ``VGI-Max-Request-Bytes`` and
+    ``VGI-Accept-Max-Response-Bytes-Support``) are emitted on
     every response, but the dedicated discovery target is ``/health``
     because it is mandatory in every implementation and exempt from
     auth.  The server may include ``Cache-Control: max-age=N`` on the
@@ -1850,6 +2007,9 @@ def http_capabilities(
             auto-detects from ``_SyncTestClient``.
         client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
         retry: Optional retry configuration for transient HTTP failures.
+        accepted_max_response_bytes: Optional decoded response cap to advertise
+            on the discovery request. Values must be between 65536 and
+            9007199254740991 inclusive.
 
     Returns:
         An ``HttpServerCapabilities`` with discovered values.
@@ -1869,8 +2029,20 @@ def http_capabilities(
         prefix = getattr(client, "prefix", "")
 
     try:
+        accepted_max_response_bytes = _validate_accepted_max_response_bytes(accepted_max_response_bytes)
+        request_headers = (
+            {ACCEPT_MAX_RESPONSE_BYTES_HEADER: str(accepted_max_response_bytes)}
+            if accepted_max_response_bytes is not None
+            else None
+        )
         url = f"{prefix}/health"
-        resp = _options_with_retry(client, url, config=retry)
+        resp = _options_with_retry(client, url, headers=request_headers, config=retry)
+        if not 200 <= resp.status_code < 300:
+            raise RpcError(
+                "ProtocolError",
+                f"Capability discovery failed with HTTP {resp.status_code}",
+                "",
+            )
         headers = resp.headers
 
         max_req: int | None = None
@@ -1952,6 +2124,11 @@ def http_capabilities(
         else:
             sticky_echo = ()
 
+        accept_response_raw = headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER) or headers.get(
+            ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER.lower()
+        )
+        accept_response_support = accept_response_raw == "true" if accept_response_raw is not None else False
+
         return HttpServerCapabilities(
             max_request_bytes=max_req,
             max_response_bytes=max_resp,
@@ -1964,6 +2141,7 @@ def http_capabilities(
             sticky_enabled=sticky_enabled,
             sticky_default_ttl=sticky_ttl,
             sticky_echo_headers=sticky_echo,
+            accept_max_response_bytes_support=accept_response_support,
         )
     finally:
         if own_client:
@@ -1977,6 +2155,7 @@ def request_upload_urls(
     prefix: str | None = None,
     client: httpx2.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
+    accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
 ) -> list[UploadUrl]:
     """Request pre-signed upload URLs from the server's ``__upload_url__`` endpoint.
 
@@ -1991,6 +2170,8 @@ def request_upload_urls(
             auto-detects from ``_SyncTestClient``.
         client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
         retry: Optional retry configuration for transient HTTP failures.
+        accepted_max_response_bytes: Hard decoded response limit advertised
+            after mandatory server capability discovery.
 
     Returns:
         A list of ``UploadUrl`` objects with pre-signed PUT and GET URLs.
@@ -2010,16 +2191,27 @@ def request_upload_urls(
         prefix = getattr(client, "prefix", "")
 
     try:
+        accepted_max_response_bytes = _validate_accepted_max_response_bytes(accepted_max_response_bytes)
+        _require_response_budget_support(
+            client=client,
+            prefix=prefix,
+            retry=retry,
+            accepted_max_response_bytes=accepted_max_response_bytes,
+        )
         # Build request IPC with standard wire protocol metadata
         req_buf = BytesIO()
         _write_request(req_buf, _UPLOAD_URL_METHOD, _UPLOAD_URL_PARAMS_SCHEMA, {"count": count})
 
+        headers = {"Content-Type": _ARROW_CONTENT_TYPE}
+        if accepted_max_response_bytes is not None:
+            headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = str(accepted_max_response_bytes)
         resp = _post_with_retry(
             client,
             f"{prefix}/__upload_url__/init",
             content=req_buf.getvalue(),
-            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            headers=headers,
             config=retry,
+            response_limit_bytes=accepted_max_response_bytes,
         )
 
         # Without an upload_url_provider the route doesn't exist and the
@@ -2027,7 +2219,8 @@ def request_upload_urls(
         if resp.status_code == HTTPStatus.NOT_FOUND:
             raise RpcError("NotSupported", "Server does not support upload URLs", "")
 
-        reader = _open_response_stream(resp.content, resp.status_code)
+        content = _enforce_accepted_response_bytes(resp.content, accepted_max_response_bytes)
+        reader = _open_response_stream(content, resp.status_code)
         urls: list[UploadUrl] = []
         try:
             while True:

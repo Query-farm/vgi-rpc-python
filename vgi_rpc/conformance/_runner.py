@@ -1192,12 +1192,7 @@ def _http_capabilities_or_skip(logs: LogCollector) -> Any:
 
 
 def _skip_if_no_wire_cap(caps: Any) -> None:
-    """Skip-helper for wire-strict-fail tests on lockstep paths (unary/exchange).
-
-    Producer streams have a *soft* wire cap (continuation tokens handle
-    overshoots), so the wire-strict-fail tests are limited to method
-    types that genuinely have no escape valve.
-    """
+    """Skip-helper for strict wire-cap tests."""
     if caps.max_response_bytes is None:
         raise _ConformanceSkip("server has no max_response_bytes configured")
     if caps.externalization_enabled:
@@ -1262,12 +1257,29 @@ def _test_http_response_cap_producer_lockstep(proxy: ConformanceService, logs: L
         session.close()
 
 
+@_conformance_test(category="http_response_cap", name="producer_strict_fail", transports=("http",))
+def _test_http_response_cap_producer_strict(proxy: ConformanceService, logs: LogCollector) -> None:
+    """Verify an oversize producer response is a cursor-free structured error."""
+    caps = _http_capabilities_or_skip(logs)
+    _skip_if_no_wire_cap(caps)
+    target_rows = max(1024, (caps.max_response_bytes * 4) // 16)
+    try:
+        list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
+    except RpcError as e:
+        assert e.error_type == "ResponseTooLargeError", f"unexpected RpcError shape: {e}"
+        assert "max_response_bytes" in str(e), f"unexpected RpcError shape: {e}"
+        return
+    raise AssertionError(
+        f"expected RpcError but produce_oversized_batch(rows_per_batch={target_rows}) drained without error"
+    )
+
+
 @_conformance_test(category="http_response_cap", name="producer_external_strict_fail", transports=("http",))
 def _test_http_response_cap_producer_external(proxy: ConformanceService, logs: LogCollector) -> None:
     """Verify that an oversize externalised producer payload surfaces RpcError.
 
-    Producer streams have a soft wire cap (continuation tokens cover
-    wire overshoots).  The external-channel cap, by contrast, is hard:
+    The wire and external-channel caps are both hard. In addition, externalised
+    uploads have no escape valve:
     externalised uploads have no escape valve, so a producer that
     pushes more bytes than ``max_externalized_response_bytes`` allows
     must surface ``RpcError`` on iteration.

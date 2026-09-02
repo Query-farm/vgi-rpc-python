@@ -482,7 +482,7 @@ def test_response_cap_preserves_one_transition_per_producer_request() -> None:
     """A response cap must not coalesce multiple producer transitions."""
     import httpx2
 
-    with _running_worker("--prefix", "/vgi", "--producer-turn-bytes", "16384") as (base_url, _ca):
+    with _running_worker("--prefix", "/vgi", "--producer-turn-bytes", "65536") as (base_url, _ca):
         _wait_ready(base_url, prefix="/vgi")
         response = httpx2.post(
             f"{base_url}/vgi/producer_sequence/init",

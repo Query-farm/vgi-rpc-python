@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "request_header": "VGI-Accept-Max-Response-Bytes",
+  "support_header": "VGI-Accept-Max-Response-Bytes-Support",
+  "maximum": 9007199254740991,
+  "valid_values": [
+    {"raw": "65536", "value": 65536},
+    {"raw": "268435456", "value": 268435456},
+    {"raw": "9007199254740991", "value": 9007199254740991}
+  ],
+  "invalid_values": [
+    "",
+    "0",
+    "1",
+    "65535",
+    "01",
+    "+1",
+    "-1",
+    "1.0",
+    "1, 2",
+    "9007199254740992",
+    "١"
+  ],
+  "precedence": [
+    {
+      "application": null,
+      "hosting": null,
+      "client": null,
+      "preferred": null,
+      "effective": null,
+      "effective_preferred": null
+    },
+    {
+      "application": 100000,
+      "hosting": 80000,
+      "client": 70000,
+      "preferred": 90000,
+      "effective": 70000,
+      "effective_preferred": 70000
+    },
+    {
+      "application": 70000,
+      "hosting": 80000,
+      "client": 90000,
+      "preferred": 66000,
+      "effective": 70000,
+      "effective_preferred": 66000
+    }
+  ],
+  "oversize_error": {
+    "type": "ResponseTooLargeError",
+    "message_fragment": "max_response_bytes (actual > limit)",
+    "http_status": 200,
+    "rpc_error_header": "X-VGI-RPC-Error: true",
+    "continuation_cursor": false
+  }
+}

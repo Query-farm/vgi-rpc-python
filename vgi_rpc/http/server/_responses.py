@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import importlib.metadata
+import re
 from contextvars import ContextVar
 from http import HTTPStatus
 from io import BytesIO, IOBase
+from typing import NamedTuple
 
 import falcon
 import pyarrow as pa
@@ -17,7 +19,7 @@ from vgi_rpc.rpc import _EMPTY_SCHEMA, _write_error_batch
 from vgi_rpc.rpc._common import _current_request_batch
 from vgi_rpc.utils import new_ipc_stream
 
-from .._common import _ARROW_CONTENT_TYPE, RPC_ERROR_HEADER, _RpcHttpError
+from .._common import _ARROW_CONTENT_TYPE, ACCEPT_MAX_RESPONSE_BYTES_HEADER, RPC_ERROR_HEADER, _RpcHttpError
 
 # Set by stream-dispatch paths that emit an in-band EXCEPTION batch instead
 # of raising ``_RpcHttpError`` (cap-overshoot for stream-exchange and the
@@ -25,6 +27,82 @@ from .._common import _ARROW_CONTENT_TYPE, RPC_ERROR_HEADER, _RpcHttpError
 # request to translate a 500 into 200 + ``X-VGI-RPC-Error: true`` so the
 # response shape matches the documented contract for hard caps.
 _current_response_status: ContextVar[HTTPStatus] = ContextVar("vgi_rpc_response_status", default=HTTPStatus.OK)
+
+_POSITIVE_DECIMAL = re.compile(r"[1-9][0-9]*\Z", re.ASCII)
+_MIN_BUDGET_BYTES = 65536
+_MAX_BUDGET_BYTES = (1 << 53) - 1
+
+
+class _ResponseBudget(NamedTuple):
+    """Hard and preferred byte budgets for the active HTTP response."""
+
+    response_limit_bytes: int | None
+    preferred_response_bytes: int | None
+
+
+_current_response_budget: ContextVar[_ResponseBudget] = ContextVar(
+    "vgi_rpc_response_budget",
+    default=_ResponseBudget(None, None),  # noqa: B039 - NamedTuple is immutable
+)
+
+
+class ResponseTooLargeError(RuntimeError):
+    """A successful RPC result could not fit the negotiated HTTP limit."""
+
+
+def _minimum_present(*values: int | None) -> int | None:
+    """Return the minimum configured value, or ``None`` when all are absent."""
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
+
+
+def _parse_accepted_response_bytes(req: falcon.Request) -> int | None:
+    """Parse the client's strict positive-decimal response limit."""
+    raw = req.get_header(ACCEPT_MAX_RESPONSE_BYTES_HEADER)
+    if raw is None:
+        return None
+    # WSGI combines duplicates with a comma, which intentionally fails this
+    # grammar along with signs, whitespace, and leading zeroes.
+    if _POSITIVE_DECIMAL.fullmatch(raw) is None:
+        raise _RpcHttpError(
+            ValueError(f"{ACCEPT_MAX_RESPONSE_BYTES_HEADER} must be one canonical positive decimal integer"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    value = int(raw)
+    if value < _MIN_BUDGET_BYTES:
+        raise _RpcHttpError(
+            ValueError(f"{ACCEPT_MAX_RESPONSE_BYTES_HEADER} must be at least {_MIN_BUDGET_BYTES}"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    if value > _MAX_BUDGET_BYTES:
+        raise _RpcHttpError(
+            ValueError(f"{ACCEPT_MAX_RESPONSE_BYTES_HEADER} exceeds {_MAX_BUDGET_BYTES}"),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    return value
+
+
+def _resolve_response_budget(
+    req: falcon.Request,
+    *,
+    server_limit_bytes: int | None,
+    server_preferred_bytes: int | None,
+) -> _ResponseBudget:
+    """Resolve one request's hard response limit and preferred target."""
+    client_limit = _parse_accepted_response_bytes(req)
+    effective = _minimum_present(server_limit_bytes, client_limit)
+    preferred = _minimum_present(server_preferred_bytes, effective)
+    return _ResponseBudget(effective, preferred)
+
+
+def _tighten_response_budget(sealed_limit_bytes: int | None) -> _ResponseBudget:
+    """Tighten the active request budget by a stream's sealed init limit."""
+    current = _current_response_budget.get()
+    effective = _minimum_present(current.response_limit_bytes, sealed_limit_bytes)
+    preferred = _minimum_present(current.preferred_response_bytes, effective)
+    tightened = _ResponseBudget(effective, preferred)
+    _current_response_budget.set(tightened)
+    return tightened
 
 
 def _vgi_version() -> str:
@@ -47,7 +125,8 @@ def _enforce_response_budgets(
 
     Called *after* a response has been flushed.  Both caps are independent:
 
-    - ``wire_cap`` (``max_response_bytes``) governs the HTTP body size.
+    - ``wire_cap`` (``max_response_bytes``) governs decoded Arrow IPC body
+      bytes before HTTP content coding.
       Externalised payloads do not count toward this — they leave only
       tiny pointer batches on the wire.
     - ``external_cap`` (``max_externalized_response_bytes``) governs the
@@ -57,8 +136,8 @@ def _enforce_response_budgets(
 
     The transport layer surfaces the failure as 200 + EXCEPTION-batch via
     the existing ``_set_http_status`` (unary: 500 → 200 + ``X-VGI-RPC-Error``)
-    or by appending a zero-row error batch to the in-progress IPC stream
-    (producer/exchange).  The RPC client sees a normal ``RpcError``.
+    or by replacing a stream response with an error envelope. The RPC client
+    sees a normal ``RpcError``.
 
     Args:
         method_name: For diagnostic messages.
@@ -73,7 +152,7 @@ def _enforce_response_budgets(
 
     """
     if wire_cap is not None and wire_bytes > wire_cap:
-        raise RuntimeError(
+        raise ResponseTooLargeError(
             f"HTTP body exceeds max_response_bytes ({wire_bytes} > {wire_cap}) for method {method_name!r}"
         )
     if external_cap is not None and external_bytes > external_cap:

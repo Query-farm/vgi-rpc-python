@@ -58,9 +58,12 @@ def serve_http(
     host: str = "127.0.0.1",
     port: int = 0,
     max_response_bytes: int | None = None,
+    hosting_max_response_bytes: int | None = None,
+    preferred_response_bytes: int | None = None,
     max_externalized_response_bytes: int | None = None,
     max_stream_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
+    hosting_max_request_bytes: int | None = None,
     compression_level: int | None = 1,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     proxy_proof_required: bool = False,
@@ -108,6 +111,8 @@ def serve_http(
         port: TCP port.  ``0`` (the default) auto-selects a free port.
         max_response_bytes: HTTP body cap; applies to every method.  See
             :func:`make_wsgi_app` for full semantics.
+        hosting_max_response_bytes: See :func:`make_wsgi_app`.
+        preferred_response_bytes: See :func:`make_wsgi_app`.
         max_externalized_response_bytes: Cap on bytes uploaded to external
             storage per HTTP response.  See :func:`make_wsgi_app`.
         max_stream_response_bytes: **Deprecated** alias for
@@ -117,6 +122,7 @@ def serve_http(
             in-memory body buffers.  When ``None``, buffers default to
             64 MiB — large enough that Arrow bodies never spill to a
             temp file, which is waitress's behaviour above 512 KiB.
+        hosting_max_request_bytes: See :func:`make_wsgi_app`.
         compression_level: zstd level for request/response bodies, or
             ``None`` to disable compression entirely.  See
             :func:`make_wsgi_app`.
@@ -189,7 +195,10 @@ def serve_http(
     app = make_wsgi_app(
         server,
         max_response_bytes=max_response_bytes,
+        hosting_max_response_bytes=hosting_max_response_bytes,
+        preferred_response_bytes=preferred_response_bytes,
         max_request_bytes=max_request_bytes,
+        hosting_max_request_bytes=hosting_max_request_bytes,
         compression_level=compression_level,
         max_externalized_response_bytes=max_externalized_response_bytes,
         authenticate=authenticate,
@@ -220,7 +229,11 @@ def serve_http(
         port=port,
         _quiet=True,
         threads=_resolve_threads(threads),
-        **waitress_arrow_tuning(max_request_bytes),
+        **waitress_arrow_tuning(
+            min(value for value in (max_request_bytes, hosting_max_request_bytes) if value is not None)
+            if max_request_bytes is not None or hosting_max_request_bytes is not None
+            else None
+        ),
     )
 
 

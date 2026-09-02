@@ -26,7 +26,7 @@ from vgi_rpc.rpc import (
     _truncate_error_message,
     _write_error_batch,
 )
-from vgi_rpc.rpc._common import CookieSpec, _current_response_cookies
+from vgi_rpc.rpc._common import CookieSpec, _current_body_precompressed, _current_response_cookies
 from vgi_rpc.utils import new_ipc_stream
 
 from .._common import (
@@ -37,15 +37,40 @@ from .._common import (
     _RpcHttpError,
 )
 from ._responses import (
+    ResponseTooLargeError,
     _check_content_type,
+    _current_response_budget,
     _current_response_status,
+    _error_response_stream,
     _get_request_stream,
+    _resolve_response_budget,
     _set_error_response,
     _set_http_status,
 )
 
 if TYPE_CHECKING:
     from ._app import _HttpRpcApp
+
+
+def _strict_response_stream(
+    stream: BytesIO | pa.NativeFile,
+    *,
+    method: str,
+    limit: int | None,
+    server_id: str,
+) -> tuple[BytesIO, bool]:
+    """Materialize and strict-cap one successful resource response."""
+    body = stream.read()
+    if limit is not None and len(body) > limit:
+        exc = ResponseTooLargeError(
+            f"HTTP body exceeds max_response_bytes ({len(body)} > {limit}) for method {method!r}"
+        )
+        # A producer continuation may have encoded its successful body into
+        # the negotiated codec before this final strict check. The replacement
+        # error is plaintext, so let response middleware encode it normally.
+        _current_body_precompressed.set(False)
+        return _error_response_stream(exc, server_id=server_id), True
+    return BytesIO(body), False
 
 
 class _HealthResource:
@@ -115,6 +140,19 @@ class _RpcResource:
         cookies: list[CookieSpec] = []
         cookie_token = _current_response_cookies.set(cookies)
         try:
+            budget = _resolve_response_budget(
+                req,
+                server_limit_bytes=self._app._max_response_bytes,
+                server_preferred_bytes=self._app._preferred_response_bytes,
+            )
+        except _RpcHttpError as e:
+            _set_error_response(
+                resp, e.cause, status_code=e.status_code, schema=e.schema, server_id=self._app._server.server_id
+            )
+            _current_response_cookies.reset(cookie_token)
+            return
+        budget_token = _current_response_budget.set(budget)
+        try:
             try:
                 info = self._app._resolve_method(req, method)
                 if info.method_type == MethodType.STREAM:
@@ -124,6 +162,15 @@ class _RpcResource:
                     )
 
                 result_stream, http_status = self._app._unary_sync(method, info, _get_request_stream(req))
+                if http_status == HTTPStatus.OK:
+                    result_stream, oversized = _strict_response_stream(
+                        result_stream,
+                        method=method,
+                        limit=_current_response_budget.get().response_limit_bytes,
+                        server_id=self._app._server.server_id,
+                    )
+                    if oversized:
+                        http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                 resp.content_type = _ARROW_CONTENT_TYPE
                 resp.stream = result_stream
                 _set_http_status(resp, http_status)
@@ -137,6 +184,7 @@ class _RpcResource:
                 )
             _apply_cookies_to_response(resp, cookies)
         finally:
+            _current_response_budget.reset(budget_token)
             _current_response_cookies.reset(cookie_token)
 
 
@@ -148,6 +196,18 @@ class _StreamInitResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle stream initialization (both producer and exchange)."""
+        try:
+            budget = _resolve_response_budget(
+                req,
+                server_limit_bytes=self._app._max_response_bytes,
+                server_preferred_bytes=self._app._preferred_response_bytes,
+            )
+        except _RpcHttpError as e:
+            _set_error_response(
+                resp, e.cause, status_code=e.status_code, schema=e.schema, server_id=self._app._server.server_id
+            )
+            return
+        budget_token = _current_response_budget.set(budget)
         status_token = _current_response_status.set(HTTPStatus.OK)
         try:
             try:
@@ -158,6 +218,15 @@ class _StreamInitResource:
                         status_code=HTTPStatus.BAD_REQUEST,
                     )
                 result_stream = self._app._stream_init_sync(method, info, _get_request_stream(req))
+                if _current_response_status.get() == HTTPStatus.OK:
+                    result_stream, oversized = _strict_response_stream(
+                        result_stream,
+                        method=method,
+                        limit=budget.response_limit_bytes,
+                        server_id=self._app._server.server_id,
+                    )
+                    if oversized:
+                        _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
             except _RpcHttpError as e:
                 _set_error_response(
                     resp,
@@ -174,6 +243,7 @@ class _StreamInitResource:
             _set_http_status(resp, _current_response_status.get())
         finally:
             _current_response_status.reset(status_token)
+            _current_response_budget.reset(budget_token)
 
 
 class _ExchangeResource:
@@ -184,6 +254,18 @@ class _ExchangeResource:
 
     def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
         """Handle stream exchange or producer continuation."""
+        try:
+            budget = _resolve_response_budget(
+                req,
+                server_limit_bytes=self._app._max_response_bytes,
+                server_preferred_bytes=self._app._preferred_response_bytes,
+            )
+        except _RpcHttpError as e:
+            _set_error_response(
+                resp, e.cause, status_code=e.status_code, schema=e.schema, server_id=self._app._server.server_id
+            )
+            return
+        budget_token = _current_response_budget.set(budget)
         status_token = _current_response_status.set(HTTPStatus.OK)
         try:
             try:
@@ -194,6 +276,15 @@ class _ExchangeResource:
                         status_code=HTTPStatus.BAD_REQUEST,
                     )
                 result_stream = self._app._stream_exchange_sync(method, _get_request_stream(req))
+                if _current_response_status.get() == HTTPStatus.OK:
+                    result_stream, oversized = _strict_response_stream(
+                        result_stream,
+                        method=method,
+                        limit=_current_response_budget.get().response_limit_bytes,
+                        server_id=self._app._server.server_id,
+                    )
+                    if oversized:
+                        _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
             except _RpcHttpError as e:
                 _set_error_response(
                     resp,
@@ -210,6 +301,7 @@ class _ExchangeResource:
             _set_http_status(resp, _current_response_status.get())
         finally:
             _current_response_status.reset(status_token)
+            _current_response_budget.reset(budget_token)
 
 
 class _UploadUrlResource:
@@ -221,6 +313,11 @@ class _UploadUrlResource:
     def on_post(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Handle upload URL generation requests."""
         try:
+            budget = _resolve_response_budget(
+                req,
+                server_limit_bytes=self._app._max_response_bytes,
+                server_preferred_bytes=self._app._preferred_response_bytes,
+            )
             _check_content_type(req)
             # Route is only registered when upload_url_provider is set.
             provider = self._app._upload_url_provider
@@ -299,6 +396,15 @@ class _UploadUrlResource:
             )
 
         resp_buf.seek(0)
+        if http_status == HTTPStatus.OK:
+            resp_buf, oversized = _strict_response_stream(
+                resp_buf,
+                method=_UPLOAD_URL_METHOD,
+                limit=budget.response_limit_bytes,
+                server_id=server_id,
+            )
+            if oversized:
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         resp.content_type = _ARROW_CONTENT_TYPE
         resp.stream = resp_buf
         _set_http_status(resp, http_status)

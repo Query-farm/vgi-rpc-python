@@ -621,10 +621,9 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         type=int,
         default=int(os.environ.get("VGI_RPC_MAX_RESPONSE_BYTES", "0")) or None,
         help=(
-            "HTTP-only.  Cap the outgoing HTTP body of every method response "
-            "at this many bytes (including IPC framing).  For producer streams, "
-            "controls when the framework mints a continuation token to split "
-            "the response across HTTP turns.  Default: no body cap.  "
+            "HTTP-only. Cap decoded Arrow IPC bytes for every method response "
+            "(including framing, before HTTP content coding). Overshoot is a "
+            "structured error for unary and stream responses. Default: no body cap. "
             "Env: VGI_RPC_MAX_RESPONSE_BYTES."
         ),
     )

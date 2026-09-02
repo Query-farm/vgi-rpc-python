@@ -130,7 +130,8 @@ no externalisation escape valve.
 ### Two operator knobs
 
 - **`max_response_bytes`** — caps the HTTP body size (the bytes that
-  literally land on the wire).  Externalised payloads do not count
+  decoded Arrow IPC body bytes, including framing but before HTTP content
+  coding). Externalised payloads do not count
   against this; their pointer batches are tiny.
 - **`max_externalized_response_bytes`** — caps the total bytes
   uploaded to external storage during one HTTP response.  Bounds how
@@ -152,6 +153,7 @@ conformance tests can probe without a separate handshake:
 | `VGI-Max-Response-Bytes` | integer body cap |
 | `VGI-Max-Externalized-Response-Bytes` | integer external cap |
 | `VGI-Externalization-Enabled` | `true` or `false` (always present) |
+| `VGI-Accept-Max-Response-Bytes-Support` | `true` (always present) |
 
 Cross-language ports must emit these headers on every response when
 the corresponding knob is configured.
@@ -162,12 +164,13 @@ the corresponding knob is configured.
 |---|---|---|
 | Unary | hard — strict-fail | hard — strict-fail |
 | Stream-exchange | hard — strict-fail | hard — strict-fail |
-| Stream-producer | **soft** — continuation tokens cover overshoot | hard — strict-fail |
+| Stream-producer | hard — strict-fail, no continuation cursor | hard — strict-fail |
 
 Strict-fail surfaces as the existing 200 + EXCEPTION-batch shape
 (`_set_http_status` rewrites 500 → 200 with `X-VGI-RPC-Error: true`
-for unary; producer/exchange append a zero-row EXCEPTION batch to the
-in-progress IPC stream).  The client sees a normal `RpcError`.
+for unary; stream paths replace the oversize response with an EXCEPTION
+envelope). The client sees a normal `RpcError` whose type is
+`ResponseTooLargeError` for a wire-cap overshoot.
 
 The error message is one of:
 
@@ -268,11 +271,11 @@ Two further points the tests pin:
 
 ## The externalized-response cap must be enforced, not just advertised
 
-`max_externalized_response_bytes` is the cap with **no escape valve**. `max_response_bytes` governs what lands on the wire and is *soft* for producer streams, because a continuation token carries the overshoot to the next turn. Bytes already uploaded to external storage cannot be un-uploaded, so this cap is hard on every method type — and it is the one whose absence costs real egress before anyone notices.
+`max_externalized_response_bytes` is the cap with **no escape valve**. `max_response_bytes` governs the decoded Arrow IPC HTTP body and is also hard for every response shape. Bytes already uploaded to external storage cannot be un-uploaded, so the external cap is checked before upload where possible — and it is the one whose absence costs real egress before anyone notices.
 
 One port shipped it advertised and unenforced: the configured value was read only to emit `VGI-Max-Externalized-Response-Bytes` and add it to the CORS expose list, and was never compared against anything. A worker capped at 512 bytes uploaded 200,336 bytes and answered success. A client sizing its requests against that header was reading a promise the server did not keep.
 
-`TestExternalizedResponseCap` pins three things: an overshooting unary response fails, a payload *under* the cap still round-trips through the external channel (so the cap is a cap and not a wall), and a producer gets no continuation escape from it — the direct opposite of `TestHttpResponseCapSoftWire`, which pins that a producer *does* get one for the wire cap.
+`TestExternalizedResponseCap` pins three things: an overshooting unary response fails, a payload *under* the cap still round-trips through the external channel (so the cap is a cap and not a wall), and a producer gets no continuation escape from it. The wire-cap group now requires the same cursor-free strict failure.
 
 Supply `conformance_http_externalized_cap_port`: a worker with storage wired, a tight `max_externalized_response_bytes`, and a **generous** `max_response_bytes`. Getting that second part wrong is the trap — with both caps tight, the body cap fails first and the group passes while proving nothing about the external channel. The group is capability-gated on the advertisement, so a port with no external channel skips; a port that advertises has no way out, because the header is the promise.
 

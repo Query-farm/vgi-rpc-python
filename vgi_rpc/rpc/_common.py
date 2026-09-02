@@ -179,6 +179,8 @@ class CallContext:
         "implementation",
         "kind",
         "peer_evidence",
+        "preferred_response_bytes",
+        "response_limit_bytes",
         "transport_metadata",
     )
 
@@ -194,6 +196,8 @@ class CallContext:
         kind: TransportKind | None = None,
         implementation: Any = None,
         peer_evidence: PeerEvidenceSet | None = None,
+        response_limit_bytes: int | None = None,
+        preferred_response_bytes: int | None = None,
     ) -> None:
         """Initialize with auth context, client-log callback, and optional server context fields.
 
@@ -214,11 +218,17 @@ class CallContext:
                 dispatching the top-level RpcServer is fronting.
             peer_evidence: Immutable transport peer evidence. When omitted,
                 it is inherited from the active transport context.
+            response_limit_bytes: Effective hard limit for this response, if
+                the transport negotiated one.
+            preferred_response_bytes: Server-preferred response target,
+                clamped to ``response_limit_bytes`` when both are present.
 
         """
         self.auth = auth
         self.emit_client_log = emit_client_log
         self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
+        self.response_limit_bytes = response_limit_bytes
+        self.preferred_response_bytes = preferred_response_bytes
         self.kind: TransportKind | None = kind
         self.implementation: Any = implementation
         if peer_evidence is None:

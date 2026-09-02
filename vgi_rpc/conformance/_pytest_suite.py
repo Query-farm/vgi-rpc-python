@@ -2744,8 +2744,7 @@ class TestExternalizedResponseCap:
     """``max_externalized_response_bytes`` must be enforced, not just advertised.
 
     This is the cap with no escape valve. ``max_response_bytes`` governs
-    what lands on the wire and is *soft* for producer streams, because a
-    continuation token can carry the overshoot to the next turn. Bytes
+    what lands on the wire and is also strict for producer streams. Bytes
     already uploaded to external storage cannot be un-uploaded, so this cap
     is **hard on every method type** — which also makes it the one whose
     absence costs real money and real egress before anyone notices.
@@ -2821,15 +2820,7 @@ class TestExternalizedResponseCap:
             assert proxy.echo_large_string(value=payload) == payload
 
     def test_producer_gets_no_continuation_escape(self, conformance_http_externalized_cap_port: int) -> None:
-        """Producers do **not** get the soft-cap treatment for this cap.
-
-        ``TestHttpResponseCapSoftWire`` pins the opposite behaviour for
-        ``max_response_bytes``: a producer overshooting the *wire* cap
-        splits across continuation tokens rather than failing. The external
-        cap cannot work that way — the upload has already happened by the
-        time anyone could mint a continuation — so a producer that
-        overshoots it must surface an error like any other method.
-        """
+        """Producers get no continuation escape from the external cap."""
         caps = self._caps(conformance_http_externalized_cap_port)
         target_rows = max(4096, (caps.max_externalized_response_bytes * 8) // 16)
         with (
@@ -2839,15 +2830,8 @@ class TestExternalizedResponseCap:
             list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
 
 
-class TestHttpResponseCapSoftWire:
-    """Producer streams have a *soft* wire cap.
-
-    Verifies the design choice that a producer emitting more than
-    ``max_response_bytes`` does **not** strict-fail when there's no
-    externalisation — continuation tokens cover the overshoot
-    transparently.  The opposite direction (strict-fail) is exercised
-    in :class:`TestHttpResponseCap` for unary and exchange.
-    """
+class TestHttpResponseCapProducer:
+    """Producer streams preserve lockstep and enforce the hard wire cap."""
 
     def test_cap_does_not_coalesce_producer_turns(self, conformance_http_strict_cap_port: int) -> None:
         """A response cap never authorizes more than one state transition."""
@@ -2866,22 +2850,20 @@ class TestHttpResponseCapSoftWire:
             assert second_token is not None, "unfinished second turn must carry a continuation token"
             session.close()
 
-    def test_producer_overshoot_uses_continuation(self, conformance_http_strict_cap_port: int) -> None:
-        """Oversize producer emit splits across continuation tokens, not RpcError."""
+    def test_producer_overshoot_is_strict_error(self, conformance_http_strict_cap_port: int) -> None:
+        """An oversize producer response is a structured error, not a cursor."""
         from vgi_rpc.http import http_capabilities, http_connect
 
         caps = http_capabilities(base_url=f"http://127.0.0.1:{conformance_http_strict_cap_port}")
         assert caps.max_response_bytes is not None
         # Emit ~2x the wire cap of int64+int64 rows in a single batch.
-        # A single oversized iteration overflows the cap; the framework
-        # emits the body and mints a continuation token.  No RpcError.
         target_rows = max(1024, (caps.max_response_bytes * 2) // 16)
-        with http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_strict_cap_port}") as proxy:
-            batches = list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
-            # Single emit + finish; the framework may have split it into
-            # the data batch + a continuation token + trailing finish, but
-            # the client-visible batches are: 1 data batch.
-            assert sum(b.batch.num_rows for b in batches) == target_rows
+        with (
+            http_connect(ConformanceService, f"http://127.0.0.1:{conformance_http_strict_cap_port}") as proxy,
+            pytest.raises(RpcError, match=r"max_response_bytes") as caught,
+        ):
+            list(proxy.produce_oversized_batch(rows_per_batch=target_rows))
+        assert caught.value.error_type == "ResponseTooLargeError"
 
 
 # ---------------------------------------------------------------------------

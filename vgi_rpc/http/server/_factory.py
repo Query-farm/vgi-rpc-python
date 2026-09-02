@@ -21,6 +21,7 @@ from vgi_rpc.rpc import AuthContext, PeerAuthenticationPolicy, PeerIdentityProvi
 
 from .._common import (
     _SESSION_ENDPOINT,
+    ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
     AUTH_PROXY_REQUIRED_HEADER,
     AUTH_REASON_HEADER,
     ECHO_HEADER_PREFIX,
@@ -95,8 +96,11 @@ def make_wsgi_app(
     prefix: str = "",
     token_key: bytes | None = None,
     max_response_bytes: int | None = None,
+    hosting_max_response_bytes: int | None = None,
+    preferred_response_bytes: int | None = None,
     max_externalized_response_bytes: int | None = None,
     max_request_bytes: int | None = None,
+    hosting_max_request_bytes: int | None = None,
     authenticate: Callable[[falcon.Request], AuthContext] | None = None,
     peer_identity_providers: Sequence[PeerIdentityProvider] = (),
     peer_authentication_policy: PeerAuthenticationPolicy | None = None,
@@ -140,16 +144,24 @@ def make_wsgi_app(
             issued by one worker are invalid in another — you **must**
             provide a shared key for multi-process deployments (e.g.
             gunicorn with multiple workers).
-        max_response_bytes: HTTP body cap.  Measured against the on-wire
-            body size only (``resp_buf.tell()``); externalised payloads
+        max_response_bytes: Application HTTP response body cap.  Combined
+            with ``hosting_max_response_bytes`` and the per-request
+            ``VGI-Accept-Max-Response-Bytes`` value by taking the minimum.
+            Measured against decoded Arrow IPC bytes, including IPC framing
+            but before HTTP content coding (``resp_buf.tell()``); externalised payloads
             are governed by the separate ``max_externalized_response_bytes``
             below. Applies to every HTTP method (unary, exchange, and
             producer streams). Producer streams are always lock-step: one
             request performs one state transition and returns at most one data
-            batch, followed by a continuation token when unfinished. A single
-            producer batch may overshoot this soft wire cap; unary and exchange
-            responses strict-fail when they cannot be externalised under it.
+            batch, followed by a continuation token when unfinished. Every
+            successful response strict-fails when it cannot be
+            externalised under the effective cap.
             When ``None`` (the default), response bodies are unbounded.
+        hosting_max_response_bytes: Optional response cap imposed by the
+            hosting environment.  It can only tighten the application cap.
+        preferred_response_bytes: Optional server-side batch-size target
+            visible to worker code. It is clamped to the effective hard cap;
+            it never weakens one.
         max_externalized_response_bytes: Cap on the *external* channel —
             total bytes uploaded to external storage across one HTTP
             response (one producer turn or one unary/exchange call).
@@ -164,8 +176,10 @@ def make_wsgi_app(
             ``VGI-Max-Request-Bytes`` response header on every response
             (including OPTIONS).  Clients can use ``http_capabilities()``
             to discover this limit and decide whether to use external
-            storage for large payloads.  Advertisement only — no
-            server-side enforcement.  ``None`` (default) omits the header.
+            storage for large payloads. The cap is enforced before Arrow
+            dispatch. ``None`` (default) omits the header.
+        hosting_max_request_bytes: Optional hosting request cap. The effective
+            request cap is the minimum of this and ``max_request_bytes``.
         authenticate: Optional callback that extracts an :class:`AuthContext`
             from a Falcon ``Request``.  When provided, every request is
             authenticated before dispatch.  The callback should raise
@@ -359,6 +373,39 @@ def make_wsgi_app(
         )
         max_response_bytes = max_stream_response_bytes
 
+    request_byte_limits = {
+        "max_request_bytes": max_request_bytes,
+        "hosting_max_request_bytes": hosting_max_request_bytes,
+    }
+    for name, value in request_byte_limits.items():
+        if value is not None and (type(value) is not int or not 1 <= value <= (1 << 53) - 1):
+            raise ValueError(f"{name} must be an integer from 1 through {(1 << 53) - 1}")
+
+    response_byte_limits = {
+        "max_response_bytes": max_response_bytes,
+        "hosting_max_response_bytes": hosting_max_response_bytes,
+        "preferred_response_bytes": preferred_response_bytes,
+    }
+    for name, value in response_byte_limits.items():
+        if value is not None and (type(value) is not int or not 65536 <= value <= (1 << 53) - 1):
+            raise ValueError(f"{name} must be an integer from 65536 through {(1 << 53) - 1}")
+
+    effective_max_request_bytes = (
+        min(value for value in (max_request_bytes, hosting_max_request_bytes) if value is not None)
+        if max_request_bytes is not None or hosting_max_request_bytes is not None
+        else None
+    )
+    effective_max_response_bytes = (
+        min(value for value in (max_response_bytes, hosting_max_response_bytes) if value is not None)
+        if max_response_bytes is not None or hosting_max_response_bytes is not None
+        else None
+    )
+    effective_preferred_response_bytes = (
+        min(value for value in (preferred_response_bytes, effective_max_response_bytes) if value is not None)
+        if preferred_response_bytes is not None
+        else None
+    )
+
     if token_key is None:
         warnings.warn(
             "No token_key provided; generating a random per-process AEAD key. "
@@ -386,12 +433,13 @@ def make_wsgi_app(
     app_handler = _HttpRpcApp(
         server,
         token_key,
-        max_response_bytes,
-        max_request_bytes,
+        effective_max_response_bytes,
+        effective_max_request_bytes,
         upload_url_provider,
         max_upload_bytes,
         token_ttl,
         max_externalized_response_bytes=max_externalized_response_bytes,
+        preferred_response_bytes=effective_preferred_response_bytes,
         call_state_cache_entries=call_state_cache_entries,
     )
     # Resolve the proxy-header dependency now, from the `authenticate` the
@@ -426,10 +474,10 @@ def make_wsgi_app(
     # URL control route accepts a tiny valid request, but it is still an
     # attacker-controlled POST body and must not bypass the allocation guard.
     # Capability discovery has no request body and remains exempt.
-    if max_request_bytes is not None:
+    if effective_max_request_bytes is not None:
         middleware.append(
             _MaxRequestBytesMiddleware(
-                max_request_bytes,
+                effective_max_request_bytes,
                 exempt_prefixes=(f"{prefix}/health",),
             )
         )
@@ -474,7 +522,7 @@ def make_wsgi_app(
         codec_levels = {enc: (compression_level if enc is Encoding.ZSTD else 6) for enc in decodable}
     enabled_encodings: tuple[Encoding, ...] = tuple(codec_levels)
     if decodable or codec_levels:
-        max_decompressed_bytes = max_request_bytes
+        max_decompressed_bytes = effective_max_request_bytes
         middleware.append(
             _CompressionMiddleware(
                 codec_levels,
@@ -493,12 +541,14 @@ def make_wsgi_app(
 
     # Build capability headers
     capability_headers: dict[str, str] = {}
-    if max_request_bytes is not None:
-        capability_headers[MAX_REQUEST_BYTES_HEADER] = str(max_request_bytes)
+    if effective_max_request_bytes is not None:
+        capability_headers[MAX_REQUEST_BYTES_HEADER] = str(effective_max_request_bytes)
         cors_expose.append(MAX_REQUEST_BYTES_HEADER)
-    if max_response_bytes is not None:
-        capability_headers[MAX_RESPONSE_BYTES_HEADER] = str(max_response_bytes)
+    if effective_max_response_bytes is not None:
+        capability_headers[MAX_RESPONSE_BYTES_HEADER] = str(effective_max_response_bytes)
         cors_expose.append(MAX_RESPONSE_BYTES_HEADER)
+    capability_headers[ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER] = "true"
+    cors_expose.append(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER)
     if max_externalized_response_bytes is not None:
         capability_headers[MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER] = str(max_externalized_response_bytes)
         cors_expose.append(MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER)

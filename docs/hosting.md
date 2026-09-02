@@ -38,7 +38,7 @@ app = make_wsgi_app(
 | `token_key` | XChaCha20-Poly1305 AEAD key for stream state tokens | Random per-process (breaks multi-worker!) |
 | `prefix` | URL path prefix for RPC endpoints | `/vgi` |
 | `max_request_bytes` | Advertised request size limit | None (unlimited) |
-| `max_response_bytes` | HTTP body cap (every method).  Soft for producer streams (continuation tokens); hard for unary + exchange (200 + EXCEPTION batch on overshoot) | None (unlimited) |
+| `max_response_bytes` | Application HTTP body cap (every method). Combined by minimum with the hosting and client caps; overshoot is a structured error with no producer cursor | None (unlimited) |
 | `max_externalized_response_bytes` | Cap on bytes uploaded to external storage per HTTP response.  Always hard.  Pre-flighted before the upload | None (unlimited) |
 | `max_upload_bytes` | Advertised upload size limit | None (unlimited) |
 | `authenticate` | Auth callback `(Request) → AuthContext` | None (anonymous) |
@@ -314,7 +314,7 @@ handler = make_lambda_handler(app)
 - Set `externalize_threshold_bytes` well below the payload limit (512 KB is a good starting point) to leave headroom for log batches and metadata
 - Use zstd compression — it reduces S3 storage and fetch time
 - Store the token key in AWS Secrets Manager and cache it in the Lambda init phase
-- For producer streams, use `max_response_bytes` as the per-turn sizing budget exposed to the worker. Every unfinished turn returns a continuation token and the client transparently resumes; the server still invokes the producer exactly once per request
+- For producer streams, use `preferred_response_bytes` as the batching target and `max_response_bytes` as the hard per-turn limit exposed to the worker. Every unfinished successful turn returns a continuation token; an oversize turn returns a cursor-free structured error
 
 ### Cloudflare Workers
 

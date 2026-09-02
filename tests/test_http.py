@@ -93,12 +93,12 @@ def client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
 
 @pytest.fixture(params=["", "/vgi"])
 def resumable_client(request: pytest.FixtureRequest) -> Iterator[_SyncTestClient]:
-    """Create a sync client with resumable streaming enabled (small limit to force continuations)."""
+    """Create a bounded sync client for resumable-stream tests."""
     prefix: str = request.param
     c = make_sync_client(
         RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
         token_key=b"test-key",
-        max_response_bytes=200,
+        max_response_bytes=64 * 1024,
         prefix=prefix,
     )
     yield c
@@ -351,7 +351,7 @@ class TestServerErrorHeader:
         cap_client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             token_key=b"test-key",
-            max_response_bytes=200,
+            max_response_bytes=65536,
         )
         try:
             # /init for the transform exchange — small payload, fits the cap.
@@ -459,7 +459,7 @@ class TestResumableServerStream:
             assert len(batches) == 0
 
     def test_disabled_by_default(self, client: _SyncTestClient) -> None:
-        """Without max_response_bytes, no continuation tokens are used."""
+        """Unbounded producer streams still follow lockstep continuations."""
         with http_connect(RpcFixtureService, client=client) as proxy:
             stream = proxy.generate(count=5)
             assert isinstance(stream, HttpStreamSession)
@@ -529,7 +529,7 @@ class TestResumableServerStream:
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             token_key=b"test-key",
-            max_response_bytes=200,
+            max_response_bytes=64 * 1024,
         )
         with http_connect(RpcFixtureService, client=c) as proxy:
             batches = list(proxy.generate(count=1))
@@ -678,7 +678,7 @@ class TestStateTokenStateEncoding:
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             token_key=key,
-            max_response_bytes=200,
+            max_response_bytes=64 * 1024,
             token_ttl=3600,
         )
         resp = c.post(
@@ -720,7 +720,7 @@ class TestStateTokenStateEncoding:
         c = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             token_key=key,
-            max_response_bytes=200,
+            max_response_bytes=64 * 1024,
             token_ttl=0,
         )
         resp = c.post(
@@ -806,6 +806,7 @@ class TestStateTokenStateEncoding:
             b"test-input-schema",
             call_id,
             "sid-1",
+            None,
         )
 
     def test_call_and_cursor_tokens_are_not_interchangeable(self) -> None:
@@ -1104,17 +1105,23 @@ class TestHttpExternalStorage:
             mock.get(pattern, callback=_get_callback)
 
     def test_unary_large_externalized(self) -> None:
-        """Large unary result is externalized by server and resolved by client."""
+        """Externalization rescues a result above the client's hard body cap."""
         storage = MockStorage()
         config = self._make_config(storage, threshold=10)
         client = self._make_client(config)
+        payload = "x" * (256 * 1024)
 
         with aiointercept_ctx() as mock:
             self._mock_aio_dynamic(storage, mock)
-            with http_connect(_ExternalService, client=client, external_location=config) as proxy:
-                result = proxy.echo_large(data="x" * 200)
+            with http_connect(
+                _ExternalService,
+                client=client,
+                external_location=config,
+                accepted_max_response_bytes=65536,
+            ) as proxy:
+                result = proxy.echo_large(data=payload)
 
-        assert result == "x" * 200
+        assert result == payload
         assert len(storage.data) >= 1
         client.close()
 
@@ -1964,11 +1971,11 @@ class TestUploadUrlEndpoint:
     def test_oversized_control_body_is_rejected_before_allocation(self) -> None:
         """The upload control route obeys max_request_bytes before allocation."""
         storage = MockStorage()
-        client = self._make_client(storage, max_request_bytes=1024)
+        client = self._make_client(storage, max_request_bytes=65536)
 
         response = client.post(
             f"{_BASE_URL}{client.prefix}/__upload_url__/init",
-            content=b"x" * 1025,
+            content=b"x" * 65537,
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
         assert response.status_code == 413
@@ -2167,7 +2174,7 @@ class TestZstdCompression:
         client = make_sync_client(
             RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
             token_key=b"test-key",
-            max_response_bytes=200,
+            max_response_bytes=64 * 1024,
             compression_level=3,
         )
         with http_connect(RpcFixtureService, client=client, compression_level=3) as proxy:

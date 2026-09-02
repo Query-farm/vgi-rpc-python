@@ -54,6 +54,8 @@ from vgi_rpc.http._client import (
 )
 from vgi_rpc.http._common import (
     _ARROW_CONTENT_TYPE,
+    ACCEPT_MAX_RESPONSE_BYTES_HEADER,
+    ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
     AUTH_PROXY_REQUIRED_HEADER,
     AUTH_REASON_HEADER,
     MAX_REQUEST_BYTES_HEADER,
@@ -148,6 +150,8 @@ with contextlib.suppress(ImportError):
 __all__ = [
     "AUTH_PROXY_REQUIRED_HEADER",
     "AUTH_REASON_HEADER",
+    "ACCEPT_MAX_RESPONSE_BYTES_HEADER",
+    "ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER",
     "AuthFailure",
     "AuthReason",
     "AuthUnavailableError",

@@ -942,11 +942,11 @@ class TestHttpServerStreamAccessLog:
         from vgi_rpc.http import http_connect, make_sync_client
 
         server = RpcServer(_StreamService, _StreamServiceImpl(), server_id="stream_srv")
-        # Small max_response_bytes to force continuation
+        # Bounded response large enough for each lockstep turn.
         client = make_sync_client(
             server,
             token_key=b"testtesttesttesttesttesttesttest",
-            max_response_bytes=1,
+            max_response_bytes=64 * 1024,
         )
 
         with (

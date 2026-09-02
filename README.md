@@ -487,7 +487,7 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 |---|---|---|
 | `prefix` | `""` | URL prefix for all RPC endpoints (default: root) |
 | `token_key` | random 32 bytes per process | AEAD (XChaCha20-Poly1305) master key for sealing state/session tokens. **Must** be shared across workers in multi-process deployments |
-| `max_response_bytes` | `None` | Cap on the on-wire HTTP body. Hard for unary/exchange (surfaces as `RpcError`); a soft per-turn sizing budget for producer streams. Every unfinished producer turn returns a continuation token. Externalised payloads are not charged against it |
+| `max_response_bytes` | `None` | Application cap on decoded Arrow IPC bytes for every HTTP RPC response (before gzip/zstd content coding). Combined by minimum with `hosting_max_response_bytes` and the client's accepted maximum. Overshoot is a structured `ResponseTooLargeError`; externalised payloads are not charged against it |
 | `max_externalized_response_bytes` | `None` | Hard cap on total bytes uploaded to external storage during one HTTP response |
 | `max_request_bytes` | `None` | Advertise max request body size via `VGI-Max-Request-Bytes` header (no enforcement) |
 | `authenticate` | `None` | Callback `(falcon.Request) -> AuthContext` for request authentication |

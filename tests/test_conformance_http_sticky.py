@@ -435,13 +435,14 @@ class TestEchoHeadersServer:
                 sess.increment_counter(by=1)  # follow-up response should NOT carry echo
         finally:
             _hc._SessionTrackingClient._capture = orig_capture  # type: ignore[method-assign]
-        # First captured response is the open: must have the echo header.
-        assert seen_echo_headers[0] == {"x-test-echo-marker": "captured-by-client"}, (
-            f"open response must carry VGI-Echo-x-test-echo-marker; saw {seen_echo_headers[0]!r}"
+        # Mandatory response-budget discovery is captured first; the next
+        # response is the session-opening RPC and must carry the echo header.
+        assert seen_echo_headers[1] == {"x-test-echo-marker": "captured-by-client"}, (
+            f"open response must carry VGI-Echo-x-test-echo-marker; saw {seen_echo_headers[1]!r}"
         )
         # Subsequent responses do NOT carry the echo header (once-only emission).
-        assert seen_echo_headers[1] == {}, (
-            f"subsequent responses must NOT carry VGI-Echo-* (echo is once-only); saw {seen_echo_headers[1]!r}"
+        assert seen_echo_headers[2] == {}, (
+            f"subsequent responses must NOT carry VGI-Echo-* (echo is once-only); saw {seen_echo_headers[2]!r}"
         )
 
     def test_absent_when_unconfigured(self, sticky_client: _SyncTestClient) -> None:
@@ -489,11 +490,12 @@ class TestEchoHeadersClient:
                 sess.increment_counter(by=1)
         finally:
             _hc._SessionTrackingClient._merge_headers = orig_merge  # type: ignore[method-assign]
-        # Open call has no echo header on the way out (it's the FIRST call;
-        # the server's echo header lands on the *response*).
+        # Capability discovery and the open call have no echo header on the
+        # way out; the server's echo header lands on the open response.
         assert "x-test-echo-marker" not in captured_request_headers[0]
+        assert "x-test-echo-marker" not in captured_request_headers[1]
         # Every subsequent request carries the captured echo header.
-        for i, hdrs in enumerate(captured_request_headers[1:], start=1):
+        for i, hdrs in enumerate(captured_request_headers[2:], start=2):
             assert hdrs.get("x-test-echo-marker") == "captured-by-client", (
                 f"request #{i} must carry the captured echo header; got {hdrs!r}"
             )

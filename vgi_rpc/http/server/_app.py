@@ -76,6 +76,7 @@ class _HttpRpcApp:
         "_max_request_bytes",
         "_max_response_bytes",
         "_max_upload_bytes",
+        "_preferred_response_bytes",
         "_server",
         "_state_types",
         "_token_key",
@@ -93,6 +94,7 @@ class _HttpRpcApp:
         max_upload_bytes: int | None = None,
         token_ttl: int = 3600,
         max_externalized_response_bytes: int | None = None,
+        preferred_response_bytes: int | None = None,
         call_state_cache_entries: int = 4096,
     ) -> None:
         self._server = server
@@ -100,6 +102,7 @@ class _HttpRpcApp:
         self._state_types = _resolve_state_types(server)
         self._max_response_bytes = max_response_bytes
         self._max_externalized_response_bytes = max_externalized_response_bytes
+        self._preferred_response_bytes = preferred_response_bytes
         self._max_request_bytes = max_request_bytes
         self._upload_url_provider = upload_url_provider
         self._max_upload_bytes = max_upload_bytes
