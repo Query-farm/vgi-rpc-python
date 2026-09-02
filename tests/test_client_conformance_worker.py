@@ -30,7 +30,12 @@ from vgi_rpc.conformance.client_worker import (
     StrictExchangeSchemaMiddleware,
 )
 from vgi_rpc.external import ClientExternalConfig
-from vgi_rpc.http import http_capabilities, http_connect, http_introspect
+from vgi_rpc.http import (
+    ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
+    http_capabilities,
+    http_connect,
+    http_introspect,
+)
 from vgi_rpc.introspect import introspect
 from vgi_rpc.metadata import (
     CALL_STATE_KEY,
@@ -245,14 +250,16 @@ def test_strict_http_worker_rejects_inferred_all_null_schema() -> None:
         return [b""]
 
     status = ""
+    response_headers: list[tuple[str, str]] = []
 
     def start_response(
         value: str,
         headers: list[tuple[str, str]],
         exc_info: object = None,
     ) -> Callable[[bytes], object]:
-        nonlocal status
+        nonlocal response_headers, status
         status = value
+        response_headers = headers
 
         def write(data: bytes) -> object:
             return None
@@ -271,7 +278,51 @@ def test_strict_http_worker_rejects_inferred_all_null_schema() -> None:
     result = StrictExchangeSchemaMiddleware(delegate)(environ, start_response)
     assert not delegated
     assert status == "400 Bad Request"
+    assert response_headers.count((ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true")) == 1
     assert b"schema mismatch" in b"".join(cast("list[bytes]", result))
+
+
+def test_schema_guard_malformed_body_repeats_response_budget_support() -> None:
+    """The guard's parse-failure 400 follows the same every-response contract."""
+    delegated = False
+
+    def delegate(environ: WSGIEnvironment, start_response: StartResponse) -> list[bytes]:
+        nonlocal delegated
+        delegated = True
+        return [b""]
+
+    status = ""
+    response_headers: list[tuple[str, str]] = []
+
+    def start_response(
+        value: str,
+        headers: list[tuple[str, str]],
+        exc_info: object = None,
+    ) -> Callable[[bytes], object]:
+        nonlocal response_headers, status
+        status = value
+        response_headers = headers
+
+        def write(data: bytes) -> object:
+            return None
+
+        return write
+
+    body = b"not arrow ipc"
+    environ = cast(
+        "WSGIEnvironment",
+        {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/typed_exchange/exchange",
+            "CONTENT_LENGTH": str(len(body)),
+            "wsgi.input": BytesIO(body),
+        },
+    )
+    result = StrictExchangeSchemaMiddleware(delegate)(environ, start_response)
+    assert not delegated
+    assert status == "400 Bad Request"
+    assert response_headers.count((ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true")) == 1
+    assert b"not valid Arrow IPC" in b"".join(cast("list[bytes]", result))
 
 
 def test_http_worker_enforces_wire_schema_end_to_end() -> None:

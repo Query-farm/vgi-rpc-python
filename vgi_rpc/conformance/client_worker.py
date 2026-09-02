@@ -319,10 +319,20 @@ class StrictExchangeSchemaMiddleware:
     @staticmethod
     def _reject(start_response: StartResponse, message: str) -> list[bytes]:
         """Return a deterministic HTTP 400 without invoking the RPC handler."""
+        # This middleware deliberately sits outside Falcon so it can inspect
+        # the original exchange schema before the framework's safe casts. Its
+        # early responses therefore bypass _CapabilitiesMiddleware and must
+        # repeat the mandatory response-budget support field themselves.
+        from vgi_rpc.http._common import ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER
+
         body = message.encode()
         start_response(
             "400 Bad Request",
-            [("Content-Type", "text/plain; charset=utf-8"), ("Content-Length", str(len(body)))],
+            [
+                ("Content-Type", "text/plain; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+                (ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true"),
+            ],
         )
         return [body]
 
