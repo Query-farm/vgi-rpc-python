@@ -91,6 +91,21 @@ from vgi_rpc.utils import (
 # google-cloud-storage) that subprocess workers and CLI users don't need at
 # import time.
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
+    # vgi_rpc.iroh (official native iroh binding)
+    "DispatchCertainty": ("vgi_rpc.iroh", "DispatchCertainty"),
+    "IROH_ARROW_MUX_ALPN": ("vgi_rpc.iroh", "IROH_ARROW_MUX_ALPN"),
+    "IROH_HTTP_ALPN": ("vgi_rpc.iroh", "IROH_HTTP_ALPN"),
+    "IrohErrorCategory": ("vgi_rpc.iroh", "IrohErrorCategory"),
+    "IrohErrorStage": ("vgi_rpc.iroh", "IrohErrorStage"),
+    "IrohHttpTransport": ("vgi_rpc.iroh", "IrohHttpTransport"),
+    "IrohTarget": ("vgi_rpc.iroh", "IrohTarget"),
+    "IrohTransport": ("vgi_rpc.iroh", "IrohTransport"),
+    "IrohTransportError": ("vgi_rpc.iroh", "IrohTransportError"),
+    "IrohUriError": ("vgi_rpc.iroh", "IrohUriError"),
+    "endpoint_connect": ("vgi_rpc.iroh", "endpoint_connect"),
+    "httpi_connect": ("vgi_rpc.iroh", "httpi_connect"),
+    "iroh_connect": ("vgi_rpc.iroh", "iroh_connect"),
+    "parse_iroh_uri": ("vgi_rpc.iroh", "parse_iroh_uri"),
     # vgi_rpc.http (Falcon + httpx2)
     "MAX_REQUEST_BYTES_HEADER": ("vgi_rpc.http", "MAX_REQUEST_BYTES_HEADER"),
     "MAX_UPLOAD_BYTES_HEADER": ("vgi_rpc.http", "MAX_UPLOAD_BYTES_HEADER"),
@@ -302,6 +317,23 @@ if _optional_module_available("boto3"):
     __all__.append("S3Storage")
 if _optional_module_available("google.cloud.storage"):
     __all__.append("GCSStorage")
+if _optional_module_available("iroh"):
+    __all__ += [
+        "DispatchCertainty",
+        "IROH_ARROW_MUX_ALPN",
+        "IROH_HTTP_ALPN",
+        "IrohErrorCategory",
+        "IrohErrorStage",
+        "IrohHttpTransport",
+        "IrohTarget",
+        "IrohTransport",
+        "IrohTransportError",
+        "IrohUriError",
+        "endpoint_connect",
+        "httpi_connect",
+        "iroh_connect",
+        "parse_iroh_uri",
+    ]
 
 # Attach NullHandler to the root logger so library users don't get
 # "No handler found" warnings.

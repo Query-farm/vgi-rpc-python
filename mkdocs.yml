@@ -145,6 +145,8 @@ nav:
     - Unauthorized Response Specification: unauthorized-spec.md
     - Log Shipping: log-shipping/README.md
     - Wire Protocol: WIRE_PROTOCOL.md
+    - Iroh Transport Contract: iroh-transports.md
+    - Native Iroh Client: iroh-client.md
     - Conformance Testing: cross-language-conformance.md
     - Cross-Language Porting Guide: porting-guide.md
   - About:

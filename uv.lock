@@ -950,6 +950,17 @@ wheels = [
 ]
 
 [[package]]
+name = "iroh"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/94/2a/f9f1cee7b0d3c71b95c06304b4e60381a7107dbccff7183ed9ff58b38141/iroh-1.1.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b1c920f14323badc451e45b747da02d07a6e40ea2c1c97eeed5539e3ebc2b8b7", size = 6317758, upload-time = "2026-07-16T13:54:08.111Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/dd/2f0a2bc113ced26981fb141cecc75e0682996ec1f49a4398c97b351c2196/iroh-1.1.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:abdf089cad4420e2e474a0fe8694aa32f91d7a49f569b559e18edd247a29af03", size = 7281850, upload-time = "2026-07-16T13:54:10.326Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/ed/bcc0599f186ca75936b883299596b88871075a4c4312255a7c2b752b6783/iroh-1.1.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:4989c7b8f6ab2ebe7afc0c2cf55b7608f7fd05f02bffee1af8d937e05de0e768", size = 7507226, upload-time = "2026-07-16T13:54:12.663Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/44/4b53f0dbc6ea161ed560b1a4b4cc317e2be77a32b00fa86cfab9fd6e5cb9/iroh-1.1.0-py3-none-win_amd64.whl", hash = "sha256:45f95b56651d32163628449727f7f3c3e311870e83599c74bc88725541ca1829", size = 6548858, upload-time = "2026-07-16T13:54:14.554Z" },
+]
+
+[[package]]
 name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple" }
@@ -2808,6 +2819,10 @@ http = [
     { name = "waitress" },
     { name = "zstandard" },
 ]
+iroh = [
+    { name = "httpx2", extra = ["zstd"] },
+    { name = "iroh" },
+]
 mtls = [
     { name = "cryptography" },
 ]
@@ -2883,6 +2898,8 @@ requires-dist = [
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.10" },
     { name = "httpx2", marker = "extra == 'cli'", specifier = ">=2.9.1" },
     { name = "httpx2", extras = ["zstd"], marker = "extra == 'http'", specifier = ">=2.9.1" },
+    { name = "httpx2", extras = ["zstd"], marker = "extra == 'iroh'", specifier = ">=2.9.1" },
+    { name = "iroh", marker = "extra == 'iroh'", specifier = ">=1.1,<2" },
     { name = "joserfc", marker = "extra == 'oauth'", specifier = ">=1.0" },
     { name = "jsonschema", marker = "extra == 'conformance'", specifier = ">=4.0" },
     { name = "msgpack", marker = "extra == 'http'", specifier = ">=1.0" },
@@ -2901,7 +2918,7 @@ requires-dist = [
     { name = "zstandard", marker = "extra == 'external'", specifier = ">=0.20" },
     { name = "zstandard", marker = "extra == 'http'", specifier = ">=0.20" },
 ]
-provides-extras = ["http", "s3", "gcs", "cli", "external", "otel", "oauth", "mtls", "sentry", "conformance"]
+provides-extras = ["http", "s3", "gcs", "cli", "external", "otel", "oauth", "mtls", "sentry", "conformance", "iroh"]
 
 [package.metadata.requires-dev]
 dev = [

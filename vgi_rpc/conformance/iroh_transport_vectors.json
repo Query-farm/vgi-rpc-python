@@ -1,0 +1,43 @@
+{
+  "contract_version": 1,
+  "alpns": {
+    "iroh": "vgi-rpc/arrow-mux/1",
+    "httpi": "iroh-http/2"
+  },
+  "uri_cases": [
+    {"uri": "iroh://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "valid": true, "scheme": "iroh", "base_path": ""},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "valid": true, "scheme": "httpi", "base_path": ""},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/", "valid": true, "scheme": "httpi", "base_path": ""},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/vgi", "valid": true, "scheme": "httpi", "base_path": "/vgi"},
+    {"uri": "IROH://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "valid": false},
+    {"uri": "HTTPI://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "valid": false},
+    {"uri": "iroh://0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef", "valid": false},
+    {"uri": "iroh://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde", "valid": false},
+    {"uri": "iroh://user@0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "valid": false},
+    {"uri": "iroh://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:443", "valid": false},
+    {"uri": "iroh://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/", "valid": false},
+    {"uri": "iroh://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef?x=1", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/vgi#x", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/a//b", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/vgi/", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/a/../b", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/a/%2e%2e/b", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/a%2fb", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/a%5cb", "valid": false},
+    {"uri": "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/a\u007fb", "valid": false},
+    {"uri": "https://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "valid": false}
+  ],
+  "error_cases": [
+    {"operation": "invalid_uri", "stage": "parse", "category": "invalid_input", "dispatch_certainty": "not_sent"},
+    {"operation": "binding_missing", "stage": "bind", "category": "unsupported", "dispatch_certainty": "not_sent"},
+    {"operation": "discovery_failed", "stage": "resolve", "category": "unavailable", "dispatch_certainty": "not_sent"},
+    {"operation": "connect_timeout", "stage": "connect", "category": "timeout", "dispatch_certainty": "not_sent"},
+    {"operation": "alpn_mismatch", "stage": "alpn", "category": "protocol", "dispatch_certainty": "not_sent"},
+    {"operation": "stream_open_failed", "stage": "open_stream", "category": "unavailable", "dispatch_certainty": "not_sent"},
+    {"operation": "write_failed", "stage": "write", "category": "connection_reset", "dispatch_certainty": "unknown"},
+    {"operation": "read_failed", "stage": "read", "category": "connection_reset", "dispatch_certainty": "sent"},
+    {"operation": "cancelled_before_write", "stage": "cancel", "category": "cancelled", "dispatch_certainty": "not_sent"},
+    {"operation": "cancelled_during_write", "stage": "cancel", "category": "cancelled", "dispatch_certainty": "unknown"},
+    {"operation": "cancelled_during_read", "stage": "cancel", "category": "cancelled", "dispatch_certainty": "sent"}
+  ]
+}

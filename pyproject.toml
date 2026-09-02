@@ -59,6 +59,9 @@ oauth = ["joserfc>=1.0"]
 mtls = ["cryptography>=50.0"]
 sentry = ["sentry-sdk>=2.0"]
 conformance = ["jsonschema>=4.0", "psutil>=6.0"]
+# Official n0 Python binding.  This is an in-process native transport; VGI
+# never downloads or launches a connector executable.
+iroh = ["iroh>=1.1,<2", "httpx2[zstd]>=2.9.1"]
 
 [project.scripts]
 vgi-rpc = "vgi_rpc.cli:app"
