@@ -200,8 +200,7 @@ def test_native_raw_iroh_rpc_loopback() -> None:
         thread.start()
         uri = f"iroh://{endpoint.id().to_bytes().hex()}"
         direct_addresses = [
-            address.replace("0.0.0.0:", "127.0.0.1:").replace("[::]:", "[::1]:")
-            for address in endpoint.bound_sockets()
+            address.replace("0.0.0.0:", "127.0.0.1:").replace("[::]:", "[::1]:") for address in endpoint.bound_sockets()
         ]
         with iroh_connect(
             RpcFixtureService,
