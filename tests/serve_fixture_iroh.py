@@ -49,6 +49,11 @@ async def _main() -> None:
         response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello"
         await stream.send().write_all(response)
         await stream.send().finish()
+        # Do not close the endpoint immediately after FIN: on slower CI runners
+        # that can race the client's final body read and turn a valid response
+        # into a connection-level ReadError. Wait until the peer acknowledges the
+        # finished send side (or its own close) first.
+        await asyncio.wait_for(stream.send().stopped(), timeout=10)
     finally:
         await endpoint.close()
 
