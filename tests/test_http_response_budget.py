@@ -138,6 +138,7 @@ def test_capability_discovery_and_native_default_header() -> None:
     client = make_sync_client(
         RpcServer(_BudgetProtocol, _BudgetImpl()), token_key=b"budget-key", authenticate=authenticate
     )
+
     class _ObservingClient:
         prefix = ""
 
