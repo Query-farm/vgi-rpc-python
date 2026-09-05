@@ -249,3 +249,66 @@ def test_native_httpi_loopback_uses_http11_on_one_bistream() -> None:
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=10)
+
+
+def test_httpi_client_finishes_request_half_after_reading_response() -> None:
+    """Keep Hyper-compatible request lifetime ordering on every bi-stream."""
+
+    class FakeSend:
+        def write_all(self, data: bytes) -> tuple[str, bytes]:
+            return ("write", data)
+
+        def finish(self) -> tuple[str]:
+            return ("finish",)
+
+    class FakeRecv:
+        def read(self, _size: int) -> tuple[str]:
+            return ("read",)
+
+    class FakeStream:
+        send_half = FakeSend()
+        recv_half = FakeRecv()
+
+        def send(self) -> FakeSend:
+            return self.send_half
+
+        def recv(self) -> FakeRecv:
+            return self.recv_half
+
+    class FakeConnection:
+        def open_bi(self) -> tuple[str]:
+            return ("open",)
+
+    class FakeSession:
+        connection = FakeConnection()
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.response_sent = False
+
+        def call(self, operation: tuple[Any, ...], *_args: Any, **_kwargs: Any) -> Any:
+            kind = operation[0]
+            self.events.append(kind)
+            if kind == "open":
+                return FakeStream()
+            if kind == "write":
+                return None
+            if kind == "read":
+                if self.response_sent:
+                    return b""
+                self.response_sent = True
+                return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            if kind == "finish":
+                return None
+            raise AssertionError(f"unexpected operation: {kind}")
+
+    session = FakeSession()
+    transport = object.__new__(IrohHttpTransport)
+    transport._session = cast("Any", session)
+    transport._httpx = httpx2
+    transport._target = parse_iroh_uri(f"httpi://{'11' * 32}")
+
+    response = transport.handle_request(httpx2.Request("GET", "http://iroh.test/vgi"))
+
+    assert response.text == "ok"
+    assert session.events.index("read") < session.events.index("finish")

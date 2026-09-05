@@ -890,13 +890,21 @@ class IrohHttpTransport:
             head += b"".join(name + b": " + value + b"\r\n" for name, value in headers) + b"\r\n"
             certainty = DispatchCertainty.UNKNOWN
             self._session.call(send.write_all(head + body), IrohErrorStage.WRITE, certainty)
-            self._session.call(send.finish(), IrohErrorStage.WRITE, certainty)
             certainty = DispatchCertainty.SENT
-            status, response_headers, response_body = _read_http_response(
-                self._session,
-                recv,
-                request.method,
-            )
+            # Keep the request half open while the server produces its response.
+            # Hyper's HTTP/1 server treats a client FIN before response dispatch as
+            # an incomplete connection even when Content-Length bytes are present.
+            # One request still owns one bi-stream; finish our send side only after
+            # the response framing has been consumed.
+            try:
+                status, response_headers, response_body = _read_http_response(
+                    self._session,
+                    recv,
+                    request.method,
+                )
+            finally:
+                with contextlib.suppress(BaseException):
+                    self._session.call(send.finish(), IrohErrorStage.CLOSE, certainty)
             return self._httpx.Response(
                 status,
                 headers=response_headers,
