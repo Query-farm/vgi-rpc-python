@@ -31,14 +31,19 @@ implementation; an em dash means no implementation yet.
 | Provider-neutral evidence, policies, context, binding | done | done | done | done | done | done | done |
 | Tailscale Serve / LocalAPI | done | done | done | provider only; HTTP socket adapter missing | done | done | done |
 | Native LocalAPI transport | Unix/HTTP only | Unix + macOS + Windows | Unix/HTTP only | Unix/HTTP only | Unix/HTTP only | Unix + Windows + HTTP | Unix/HTTP only |
-| Raw TCP connection snapshot + PROXY v2 | done | done | done | — | — | — | done |
+| Raw TCP connection snapshot + PROXY v2 | done | done | done | done | done | done | done |
 | Trusted Envoy/nginx/AWS/GCP/Azure HTTP SPIFFE evidence | done | done | done | done | done | done | library only; host integration required |
 | Direct TLS X.509-SVID verification | done (manual SVID rotation) | done (server) | done (server) | — | — | — | — |
 | Explicit SOCKS5h client dialing | done | done | done | done | done (raw only) | done | done |
 | Real Tailnet data-plane/identity gate | done (Linux reference, opt-in) | — | — | — | — | — | — |
-| Optional Iroh stateful transport | N/A | N/A | done | N/A | N/A | N/A | N/A |
+| Native Iroh client (`iroh://` / `httpi://`) | done | provider seam | done | done (Node; browser HTTPi package) | done | done | done |
+| Iroh bridge identity (raw / HTTP) | done / done | done / done | done / done | done / host-adapter seam | done / done | done / done | done / done |
+| High-level VGI framework convenience | done | worker | client + worker | client + worker | Kotlin/Java worker | worker | worker |
 
-High-level `vgi-python` consumes the Python SOCKS5h option. DuckDB VGI consumes
+High-level `vgi-python` consumes the Python SOCKS5h and native Iroh options.
+The Rust and TypeScript high-level clients accept canonical Iroh endpoint
+URIs; worker frameworks expose the common bridge contract described in
+`iroh-framework-operations.md`. DuckDB VGI consumes
 `TCP_PROXY` internally; the core SOCKS transport sources compile, while the
 repository's full extension build remains blocked by existing Haybarn API
 conversion errors in unrelated worker-pool, result-cache, table-function, and
@@ -78,14 +83,14 @@ catalog/secret code.
   built-in `require`/`all_of` binding currently includes all attributes, so a
   display-name, node-name, or certificate-fingerprint change safely forces a
   state reopen even when the stable principal is unchanged.
-- Add consistent raw-TCP admission and lifecycle controls before calling the
+- Complete consistent raw-TCP admission and lifecycle controls before calling the
   stateful profile production-safe: global pending/active connection caps,
   setup/first-frame and per-connection idle deadlines, graceful drain, and
   bounded response writes/backpressure, with optional per-principal quotas.
   Python's default sequential listener can be blocked by one silent client;
   its threaded listener is unlimited unless `max_connections` is configured.
-  Current Go/Rust defaults can admit unbounded silent or stopped-reader
-  connections. C++ now implements baseline pending/active caps plus bounded
+  Older/default framework listeners may admit unbounded silent or stopped-reader
+  connections; bridge mode should use the bounded lower-level listener. C++ implements baseline pending/active caps plus bounded
   setup, read-idle, and response-write deadlines, but has no per-principal
   quotas and a synchronous identity callback can occupy one bounded worker
   until it returns. An L4 load balancer distributes these risks but does not

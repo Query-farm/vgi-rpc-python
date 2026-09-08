@@ -24,7 +24,7 @@ Define RPC interfaces as Python `Protocol` classes. The framework derives Arrow 
 - **Protocol-based interfaces** — define services as typed Python Protocol classes; proxies preserve the Protocol type for full IDE autocompletion
 - **Apache Arrow IPC wire format** — zero-copy serialization for structured data
 - **Two method types** — unary and streaming (producer and exchange patterns)
-- **Transport-agnostic** — in-process pipes, subprocess, Unix domain sockets, shared memory, or HTTP
+- **Transport-agnostic** — pipes, subprocesses, Unix/TCP sockets, shared memory, HTTP, Tailnets, or authenticated Iroh/QUIC
 - **Automatic schema inference** — Python type annotations map to Arrow types
 - **Pluggable authentication** — `AuthContext` + middleware for HTTP auth (JWT, API key, etc.)
 - **OAuth discovery** — RFC 9728 protected resource metadata + JWT authentication via Authlib
@@ -53,7 +53,12 @@ pip install vgi-rpc[external]   # External storage fetch (aiohttp + zstandard)
 pip install vgi-rpc[otel]       # OpenTelemetry instrumentation
 pip install vgi-rpc[sentry]     # Sentry error reporting
 pip install vgi-rpc[oauth]      # JWT authentication (Authlib)
+pip install vgi-rpc[iroh]       # Native iroh:// and httpi:// clients
 ```
+
+See [Iroh framework operations](docs/iroh-framework-operations.md) for
+cross-language workers, private relays, bridge identity, scaling, and drain
+guidance.
 
 Requires Python 3.13+.
 

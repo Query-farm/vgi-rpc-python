@@ -36,6 +36,10 @@ and relay-disabled mode are mutually exclusive.  A missing optional native
 binding produces `unsupported`, never a connector download or direct-network
 fallback.
 
+Framework worker commands, the cross-language bridge topology, private relay
+configuration, scaling, health, and drain guidance are collected in
+[Iroh framework operations](iroh-framework-operations.md).
+
 ## Errors
 
 Iroh transport failures expose three independent fields:
