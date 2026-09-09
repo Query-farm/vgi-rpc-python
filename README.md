@@ -56,6 +56,26 @@ pip install vgi-rpc[oauth]      # JWT authentication (Authlib)
 pip install vgi-rpc[iroh]       # Native iroh:// and httpi:// clients
 ```
 
+The Iroh extra also includes the Stockgate worker client for registration,
+heartbeats, signed resolution, and endpoint cleanup. See
+[Stockgate worker client](docs/stockgate-client.md).
+
+Install the `cli` and `iroh` extras to register a worker through the normal
+human device-login flow:
+
+```bash
+qf service register o/acme/weather --relay-url https://relay.example
+```
+
+For a process-lifetime identity that is never written to disk, let `qf` own
+the worker and bridge lifecycle:
+
+```bash
+qf service run o/acme/weather \
+  --raw-upstream tcp://127.0.0.1:9400 \
+  -- my-weather-worker --listen 127.0.0.1:9400
+```
+
 See [Iroh framework operations](docs/iroh-framework-operations.md) for
 cross-language workers, private relays, bridge identity, scaling, and drain
 guidance.

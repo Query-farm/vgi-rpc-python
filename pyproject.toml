@@ -64,6 +64,7 @@ conformance = ["jsonschema>=4.0", "psutil>=6.0"]
 iroh = ["iroh>=1.1,<2", "httpx2[zstd]>=2.9.1"]
 
 [project.scripts]
+qf = "vgi_rpc.qf:app"
 vgi-rpc = "vgi_rpc.cli:app"
 vgi-rpc-conformance = "vgi_rpc.conformance._cli:main"
 vgi-rpc-test = "vgi_rpc.conformance._test_cli:main"
