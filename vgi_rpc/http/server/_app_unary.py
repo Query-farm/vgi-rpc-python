@@ -39,7 +39,6 @@ from vgi_rpc.rpc._common import (
     ProtocolError,
     _current_call_stats,
     _DispatchHook,
-    _record_output,
 )
 from vgi_rpc.utils import new_ipc_stream
 
@@ -117,31 +116,6 @@ def _run_unary_sync(
             # opaque JSON 500 response.
             raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
-        # Pre-built __describe__ batch — write directly, skip implementation call.
-        describe_batch = app._server._describe_batch
-        if describe_batch is not None and method_name == "__describe__":
-            _record_output(describe_batch)
-            resp_buf = BytesIO()
-            with new_ipc_stream(resp_buf, describe_batch.schema) as writer:
-                writer.write_batch(describe_batch, custom_metadata=app._server._describe_metadata)
-            resp_buf.seek(0)
-            auth, transport_metadata = _get_auth_and_metadata()
-            _emit_access_log(
-                info.protocol_name or app._server.protocol_name,
-                method_name,
-                info.method_type.value,
-                app._server.server_id,
-                auth,
-                transport_metadata,
-                0.0,
-                "ok",
-                http_status=HTTPStatus.OK.value,
-                stats=stats,
-                server_version=app._server.server_version,
-                protocol_hash=app._server.protocol_hash,
-            )
-            return resp_buf, HTTPStatus.OK
-
         server_id = app._server.server_id
         # Follows the protocol that owns the resolved method — a wrong protocol
         # label in an access record looks plausible rather than failing.
@@ -158,7 +132,7 @@ def _run_unary_sync(
                 method_name=method_name,
                 protocol_name=protocol_name,
                 kind=app._server.transport_kind,
-                implementation=app._server.implementation,
+                implementation=app._server.implementation_for(info),
                 response_limit_bytes=response_budget.response_limit_bytes,
                 preferred_response_bytes=response_budget.preferred_response_bytes,
             )
@@ -183,7 +157,7 @@ def _run_unary_sync(
             with new_ipc_stream(resp_buf, schema) as writer:
                 sink.flush_contents(writer, schema)
                 try:
-                    result = getattr(app._server.implementation, method_name)(**kwargs)
+                    result = getattr(app._server.implementation_for(info), method_name)(**kwargs)
                     _validate_result(info.name, result, info.result_type)
                     # Build the result batch eagerly so we can pre-flight the
                     # external-channel cap before paying for an upload that

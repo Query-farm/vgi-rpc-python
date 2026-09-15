@@ -368,7 +368,10 @@ class TestPipeStats:
 
         assert desc is not None
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
-        describe_records = [r for r in access_records if _extra(r, "method") == "__describe__"]
+        # Reflection is an ordinary protocol now, so its calls are dispatched
+        # and therefore access-logged.  The old __describe__ fast path answered
+        # from a pre-built batch and appeared in no access record at all.
+        describe_records = [r for r in access_records if _extra(r, "method") == "describe"]
         assert len(describe_records) >= 1
         record = describe_records[0]
         assert _extra(record, "input_batches") == 1  # params batch
@@ -436,7 +439,10 @@ class TestHttpStats:
 
         assert desc is not None
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
-        describe_records = [r for r in access_records if _extra(r, "method") == "__describe__"]
+        # Reflection is an ordinary protocol now, so its calls are dispatched
+        # and therefore access-logged.  The old __describe__ fast path answered
+        # from a pre-built batch and appeared in no access record at all.
+        describe_records = [r for r in access_records if _extra(r, "method") == "describe"]
         assert len(describe_records) >= 1
         record = describe_records[0]
         assert _extra(record, "output_batches") == 1

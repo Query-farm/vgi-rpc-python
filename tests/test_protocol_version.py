@@ -385,12 +385,11 @@ class TestServerWireBehaviour:
         assert result == "hi x"
 
     def test_describe_bypass(self) -> None:
-        """__describe__ must succeed even when client and server protocol_versions mismatch.
+        """Reflection must answer even when client and server versions mismatch.
 
-        Describe is the diagnostic path a mismatched client uses to learn the
-        server's expected version. If the server gated __describe__ on
-        protocol_version, version-mismatched clients would have no way to
-        recover beyond reading the (also-truncated) framework error.
+        It is the protocol a mismatched client calls to learn the server's
+        expected version.  Gating it would leave such a client nothing to read
+        but the framework error it is already confused by.
         """
         from vgi_rpc.introspect import introspect
 
@@ -402,8 +401,13 @@ class TestServerWireBehaviour:
         try:
 
             def serve() -> None:
-                """Serve one request; describe must dispatch normally."""
+                """Serve two requests: introspect asks what is hosted, then describes it.
+
+                With a server free to host several protocols there is no longer
+                a single "the" protocol to describe without first asking.
+                """
                 with contextlib.suppress(BaseException):
+                    server.serve_one(server_t)
                     server.serve_one(server_t)
 
             t = threading.Thread(target=serve, daemon=True)

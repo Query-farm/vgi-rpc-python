@@ -9,7 +9,7 @@ import html as _html
 
 import falcon
 
-from vgi_rpc.introspect import MethodDescription, parse_describe_batch
+from vgi_rpc.introspect import MethodDescription
 from vgi_rpc.rpc import RpcServer
 
 from .._common import _FONT_IMPORTS, _VGI_LOGO_HTML
@@ -281,15 +281,17 @@ def _build_describe_html(server: RpcServer, prefix: str, repo_url: str | None) -
         UTF-8 encoded HTML bytes.
 
     """
-    assert server._describe_batch is not None
-    assert server._describe_metadata is not None
-    desc = parse_describe_batch(server._describe_batch, server._describe_metadata)
+    # Built from the server's own reflection binding rather than from a wire
+    # round trip: the page is rendered in the same process that would answer
+    # one, so going out over HTTP to ask itself buys nothing.
+    from vgi_rpc.introspect import _adapt_description
+    from vgi_rpc.rpc._reflection import Reflection, ReflectionImpl
 
-    cards: list[str] = []
-    for name in sorted(desc.methods):
-        if name == "__describe__":
-            continue
-        cards.append(_build_method_card(desc.methods[name]))
+    reflection = server.bindings[Reflection.protocol_name].impl
+    assert isinstance(reflection, ReflectionImpl)
+    desc = _adapt_description(reflection.describe(server.protocol_name), reflection.list_protocols())
+
+    cards = [_build_method_card(desc.methods[name]) for name in sorted(desc.methods)]
 
     repo_link = f'&middot; <a href="{_html.escape(repo_url)}">Source repository</a>' if repo_url else ""
     return _DESCRIBE_HTML_TEMPLATE.format(

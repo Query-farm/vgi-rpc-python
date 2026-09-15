@@ -16,19 +16,9 @@ import pytest
 
 from vgi_rpc.http import _SyncTestClient, http_introspect, make_sync_client
 from vgi_rpc.introspect import (
-    DESCRIBE_VERSION,
     ServiceDescription,
-    build_describe_batch,
     compute_protocol_hash,
     introspect,
-    parse_describe_batch,
-)
-from vgi_rpc.metadata import (
-    DESCRIBE_VERSION_KEY,
-    PROTOCOL_HASH_KEY,
-    PROTOCOL_NAME_KEY,
-    REQUEST_VERSION_KEY,
-    SERVER_ID_KEY,
 )
 from vgi_rpc.rpc import (
     AnnotatedBatch,
@@ -168,92 +158,6 @@ class _EmptyProtoImpl:
     """Implementation of empty protocol."""
 
 
-# ---------------------------------------------------------------------------
-# Unit tests: build_describe_batch
-# ---------------------------------------------------------------------------
-
-
-class TestBuildDescribeBatch:
-    """Tests for build_describe_batch."""
-
-    def test_correct_schema_and_row_count(self) -> None:
-        """Batch has correct schema and one row per method."""
-        methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        assert batch.num_rows == len(methods)
-        assert batch.schema.get_field_index("name") >= 0
-        assert batch.schema.get_field_index("method_type") >= 0
-        assert batch.schema.get_field_index("has_return") >= 0
-        assert batch.schema.get_field_index("params_schema_ipc") >= 0
-        assert batch.schema.get_field_index("result_schema_ipc") >= 0
-        assert batch.schema.get_field_index("has_header") >= 0
-        assert batch.schema.get_field_index("header_schema_ipc") >= 0
-        assert batch.schema.get_field_index("is_exchange") >= 0
-
-    def test_pythonisms_dropped(self) -> None:
-        """v4 dropped doc, param_types_json, param_defaults_json, param_docs_json."""
-        methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        names = set(batch.schema.names)
-        assert "doc" not in names
-        assert "param_types_json" not in names
-        assert "param_defaults_json" not in names
-        assert "param_docs_json" not in names
-
-    def test_batch_metadata(self) -> None:
-        """Batch custom_metadata contains protocol name, versions, hash, server_id."""
-        methods = rpc_methods(_TestProto)
-        batch, cm = build_describe_batch("TestProto", methods, "srv123")
-        assert batch.schema.metadata is None
-        assert cm[PROTOCOL_NAME_KEY] == b"TestProto"
-        assert cm[REQUEST_VERSION_KEY] == b"1"
-        assert cm[DESCRIBE_VERSION_KEY] == DESCRIBE_VERSION.encode()
-        assert cm[SERVER_ID_KEY] == b"srv123"
-        h = cm[PROTOCOL_HASH_KEY].decode()
-        assert len(h) == 64
-        assert all(c in "0123456789abcdef" for c in h)
-
-    def test_method_types_correct(self) -> None:
-        """Method type column matches expected values."""
-        methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        rows = batch.to_pydict()
-        name_to_type = dict(zip(rows["name"], rows["method_type"], strict=True))
-        assert name_to_type["add"] == "unary"
-        assert name_to_type["stream_data"] == "stream"
-        assert name_to_type["bidi"] == "stream"
-
-    def test_has_return_column(self) -> None:
-        """has_return is True for unary returning value, False for None/streams."""
-        methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        rows = batch.to_pydict()
-        name_to_ret = dict(zip(rows["name"], rows["has_return"], strict=True))
-        assert name_to_ret["add"] is True
-        assert name_to_ret["noop"] is False
-        assert name_to_ret["stream_data"] is False
-        # bidi returns Stream which has no unary return
-        assert name_to_ret["bidi"] is False
-
-    def test_schemas_deserializable(self) -> None:
-        """params_schema_ipc and result_schema_ipc are valid Arrow schemas."""
-        methods = rpc_methods(_TestProto)
-        batch, _cm = build_describe_batch("TestProto", methods, "srv123")
-        for i in range(batch.num_rows):
-            ps_bytes: bytes = batch.column("params_schema_ipc")[i].as_py()
-            rs_bytes: bytes = batch.column("result_schema_ipc")[i].as_py()
-            ps = pa.ipc.read_schema(pa.py_buffer(ps_bytes))
-            rs = pa.ipc.read_schema(pa.py_buffer(rs_bytes))
-            assert isinstance(ps, pa.Schema)
-            assert isinstance(rs, pa.Schema)
-
-    def test_empty_protocol(self) -> None:
-        """Empty protocol produces 0-row batch."""
-        methods = rpc_methods(_EmptyProto)
-        batch, _cm = build_describe_batch("EmptyProto", methods, "srv123")
-        assert batch.num_rows == 0
-
-
 class TestProtocolHash:
     """Tests for compute_protocol_hash.
 
@@ -279,69 +183,15 @@ class TestProtocolHash:
         assert all(c in "0123456789abcdef" for c in h)
 
 
-# ---------------------------------------------------------------------------
-# Unit tests: parse_describe_batch (round-trip)
-# ---------------------------------------------------------------------------
+def _describe(protocol: type, impl: object) -> ServiceDescription:
+    """Build a ServiceDescription in-process, without a wire round trip."""
+    from vgi_rpc.introspect import _adapt_description
+    from vgi_rpc.rpc._reflection import Reflection, ReflectionImpl
 
-
-class TestParseDescribeBatch:
-    """Tests for parse_describe_batch round-trip with build_describe_batch."""
-
-    def test_round_trip(self) -> None:
-        """Build then parse produces correct ServiceDescription."""
-        methods = rpc_methods(_TestProto)
-        batch, cm = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
-
-        assert desc.protocol_name == "TestProto"
-        assert desc.request_version == "1"
-        assert desc.describe_version == DESCRIBE_VERSION
-        assert desc.server_id == "srv123"
-        assert len(desc.methods) == len(methods)
-
-    def test_method_description_fields(self) -> None:
-        """Parsed MethodDescription has correct fields."""
-        methods = rpc_methods(_TestProto)
-        batch, cm = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
-
-        add = desc.methods["add"]
-        assert add.name == "add"
-        assert add.method_type == MethodType.UNARY
-        assert add.has_return is True
-
-    def test_schemas_preserved(self) -> None:
-        """Params and result schemas are correctly round-tripped."""
-        methods = rpc_methods(_TestProto)
-        batch, cm = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
-
-        add_info = methods["add"]
-        add_desc = desc.methods["add"]
-        assert add_desc.params_schema == add_info.params_schema
-        assert add_desc.result_schema == add_info.result_schema
-
-    def test_protocol_hash_round_trip(self) -> None:
-        """ServiceDescription.protocol_hash is populated from the wire."""
-        methods = rpc_methods(_TestProto)
-        batch, cm = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
-        assert len(desc.protocol_hash) == 64
-        assert desc.protocol_hash == compute_protocol_hash("TestProto", methods)
-
-    def test_empty_protocol_round_trip(self) -> None:
-        """Empty protocol round-trips correctly."""
-        methods = rpc_methods(_EmptyProto)
-        batch, cm = build_describe_batch("EmptyProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
-
-        assert desc.protocol_name == "EmptyProto"
-        assert len(desc.methods) == 0
-
-
-# ---------------------------------------------------------------------------
-# ServiceDescription.__str__
-# ---------------------------------------------------------------------------
+    server = RpcServer(protocol, impl, server_id="srv123", enable_describe=True)
+    reflection = server.bindings[Reflection.protocol_name].impl
+    assert isinstance(reflection, ReflectionImpl)
+    return _adapt_description(reflection.describe(server.protocol_name), reflection.list_protocols())
 
 
 class TestServiceDescriptionStr:
@@ -349,9 +199,7 @@ class TestServiceDescriptionStr:
 
     def test_readable_output(self) -> None:
         """__str__ produces human-readable output."""
-        methods = rpc_methods(_TestProto)
-        batch, cm = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
+        desc = _describe(_TestProto, _TestProtoImpl())
         text = str(desc)
 
         assert "TestProto" in text
@@ -362,19 +210,14 @@ class TestServiceDescriptionStr:
 
     def test_protocol_hash_in_output(self) -> None:
         """The hash is rendered in the __str__ summary."""
-        methods = rpc_methods(_TestProto)
-        batch, cm = build_describe_batch("TestProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
+        desc = _describe(_TestProto, _TestProtoImpl())
         text = str(desc)
         assert "protocol_hash:" in text
         assert desc.protocol_hash in text
 
     def test_empty_protocol_str(self) -> None:
         """Empty protocol produces minimal output."""
-        methods = rpc_methods(_EmptyProto)
-        batch, cm = build_describe_batch("EmptyProto", methods, "srv123")
-        desc = parse_describe_batch(batch, cm)
-        text = str(desc)
+        text = str(_describe(_EmptyProto, _EmptyProtoImpl()))
         assert "EmptyProto" in text
 
 
@@ -416,7 +259,7 @@ class TestIntrospectPipe:
         thread = threading.Thread(target=_run_server_thread, args=(server, server_transport), daemon=True)
         thread.start()
         try:
-            with pytest.raises(RpcError, match="does not implement the reserved method"):
+            with pytest.raises(RpcError, match="does not host protocol"):
                 introspect(client_transport)
         finally:
             client_transport.close()
@@ -546,13 +389,18 @@ class TestRpcServerDescribe:
     """Tests for RpcServer describe-related properties."""
 
     def test_describe_enabled_true(self) -> None:
-        """describe_enabled returns True when enabled."""
+        """``enable_describe`` is reflection-binding registration now."""
         server = RpcServer(_TestProto, _TestProtoImpl(), enable_describe=True)
         assert server.describe_enabled is True
-        assert server._describe_batch is not None
+        assert "vgi_rpc.Reflection.v1" in server.bindings
 
     def test_describe_enabled_false(self) -> None:
-        """describe_enabled returns False by default."""
+        """Off by default, and then the protocol is simply not hosted.
+
+        Not routed-and-refusing: a client gets the same "no such protocol"
+        answer it would get from any server that does not host one, rather
+        than a bespoke "introspection is disabled" it has to special-case.
+        """
         server = RpcServer(_TestProto, _TestProtoImpl())
         assert server.describe_enabled is False
-        assert server._describe_batch is None
+        assert "vgi_rpc.Reflection.v1" not in server.bindings

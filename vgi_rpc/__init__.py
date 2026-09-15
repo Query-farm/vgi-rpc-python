@@ -20,7 +20,6 @@ from vgi_rpc.external import (
 )
 from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.introspect import (
-    DESCRIBE_METHOD_NAME,
     MethodDescription,
     ServiceDescription,
     introspect,
@@ -215,7 +214,6 @@ __all__ = [
     "OutputCollector",
     "AnnotatedBatch",
     # Introspection
-    "DESCRIBE_METHOD_NAME",
     "MethodDescription",
     "ServiceDescription",
     "introspect",

@@ -1,5 +1,6 @@
-# Golden describe payload — see tests/test_describe_golden.py
+# Golden reflection description — see tests/test_describe_golden.py
 protocol: ConformanceService
+protocol_version: 2.0.0
 protocol_hash: be0a74ec68ca84582e690afa83469a000d2e05cbe2a8d8956c98d8fbf84a96c4
 method_count: 87
 
@@ -7,7 +8,8 @@ add_floats
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       a: double not null
       b: double not null
@@ -18,7 +20,8 @@ cancel_probe_counters
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -28,7 +31,8 @@ cancellable_exchange
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -38,7 +42,8 @@ cancellable_producer
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -48,7 +53,8 @@ close_counter
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -58,7 +64,8 @@ concatenate
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       prefix: string not null
       suffix: string not null
@@ -70,7 +77,8 @@ echo_all_types
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       data: binary not null
   result:
@@ -80,7 +88,8 @@ echo_annotated_optional_int
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int32
   result:
@@ -90,7 +99,8 @@ echo_bool
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: bool not null
   result:
@@ -100,7 +110,8 @@ echo_bounding_box
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       box: binary not null
   result:
@@ -110,7 +121,8 @@ echo_bytes
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       data: binary not null
   result:
@@ -120,7 +132,8 @@ echo_container_wide_types
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       data: binary not null
   result:
@@ -130,7 +143,8 @@ echo_date
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: date32[day] not null
   result:
@@ -140,7 +154,8 @@ echo_decimal
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: decimal128(20, 4) not null
   result:
@@ -150,7 +165,8 @@ echo_deep_nested
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       data: binary not null
   result:
@@ -160,7 +176,8 @@ echo_dict
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       mapping: map<string, int64> not null
   result:
@@ -170,7 +187,8 @@ echo_dict_encoded_string
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: dictionary<values=string, indices=int16, ordered=0> not null
   result:
@@ -180,7 +198,8 @@ echo_duration
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: duration[us] not null
   result:
@@ -190,7 +209,8 @@ echo_embedded_arrow
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       data: binary not null
   result:
@@ -200,7 +220,8 @@ echo_enum
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       status: dictionary<values=string, indices=int16, ordered=0> not null
   result:
@@ -210,7 +231,8 @@ echo_fixed_binary
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: fixed_size_binary[8] not null
   result:
@@ -220,7 +242,8 @@ echo_float
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: double not null
   result:
@@ -230,7 +253,8 @@ echo_float32
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: float not null
   result:
@@ -240,7 +264,8 @@ echo_int
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int64 not null
   result:
@@ -250,7 +275,8 @@ echo_int16
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int16 not null
   result:
@@ -260,7 +286,8 @@ echo_int32
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int32 not null
   result:
@@ -270,7 +297,8 @@ echo_int8
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int8 not null
   result:
@@ -280,7 +308,8 @@ echo_large_binary
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: large_binary not null
   result:
@@ -290,7 +319,8 @@ echo_large_string
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: large_string not null
   result:
@@ -300,7 +330,8 @@ echo_list
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       values: list<item: string> not null
   result:
@@ -310,7 +341,8 @@ echo_nested_list
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       matrix: list<item: list<item: int64>> not null
   result:
@@ -320,7 +352,8 @@ echo_optional_int
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int64
   result:
@@ -330,7 +363,8 @@ echo_optional_point
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       point: binary
   result:
@@ -340,7 +374,8 @@ echo_optional_string
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: string
   result:
@@ -350,7 +385,8 @@ echo_outer_optional_non_null
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int32 not null
   result:
@@ -360,7 +396,8 @@ echo_point
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       point: binary not null
   result:
@@ -370,7 +407,8 @@ echo_status_list
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       statuses: list<item: dictionary<values=string, indices=int16, ordered=0>> not null
   result:
@@ -380,7 +418,8 @@ echo_string
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: string not null
   result:
@@ -390,7 +429,8 @@ echo_time
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: time64[us] not null
   result:
@@ -400,7 +440,8 @@ echo_timestamp
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: timestamp[us] not null
   result:
@@ -410,7 +451,8 @@ echo_timestamp_utc
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: timestamp[us, tz=UTC] not null
   result:
@@ -420,7 +462,8 @@ echo_uint16
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: uint16 not null
   result:
@@ -430,7 +473,8 @@ echo_uint32
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: uint32 not null
   result:
@@ -440,7 +484,8 @@ echo_uint64
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: uint64 not null
   result:
@@ -450,7 +495,8 @@ echo_uint8
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: uint8 not null
   result:
@@ -460,7 +506,8 @@ echo_wide_types
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       data: binary not null
   result:
@@ -470,7 +517,8 @@ echo_with_all_log_levels
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: string not null
   result:
@@ -480,7 +528,8 @@ echo_with_info_log
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: string not null
   result:
@@ -490,7 +539,8 @@ echo_with_log_extras
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: string not null
   result:
@@ -500,7 +550,8 @@ echo_with_multi_logs
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: string not null
   result:
@@ -510,7 +561,8 @@ exchange_accumulate
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -520,7 +572,8 @@ exchange_cast_compatible
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -530,7 +583,8 @@ exchange_error_on_init
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -540,7 +594,8 @@ exchange_error_on_nth
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       fail_on: int64 not null
   result:
@@ -550,7 +605,8 @@ exchange_oversized
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       rows_per_batch: int64 not null
   result:
@@ -560,7 +616,8 @@ exchange_scale
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       factor: double not null
   result:
@@ -570,7 +627,8 @@ exchange_session_counter
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -580,7 +638,8 @@ exchange_with_header
   method_type: stream
   has_return: False
   has_header: True
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       factor: double not null
   result:
@@ -590,7 +649,8 @@ exchange_with_logs
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -600,7 +660,8 @@ exchange_with_rich_header
   method_type: stream
   has_return: False
   has_header: True
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       seed: int64 not null
       factor: double not null
@@ -611,7 +672,8 @@ exchange_zero_columns
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -621,7 +683,8 @@ increment_counter
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       by: int64 not null
   result:
@@ -631,7 +694,8 @@ inspect_point
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       point: binary not null
   result:
@@ -641,7 +705,8 @@ open_counter
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       initial: int64 not null
   result:
@@ -651,7 +716,8 @@ oversized_unary
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       target_bytes: int64 not null
   result:
@@ -661,7 +727,8 @@ pack_nested_containers
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       statuses: list<item: dictionary<values=string, indices=int16, ordered=0>> not null
       points: list<item: struct<x: double not null, y: double not null>> not null
@@ -673,7 +740,8 @@ produce_dynamic_schema
   method_type: stream
   has_return: False
   has_header: True
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       seed: int64 not null
       count: int64 not null
@@ -686,7 +754,8 @@ produce_empty
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -696,7 +765,8 @@ produce_error_mid_stream
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       emit_before_error: int64 not null
   result:
@@ -706,7 +776,8 @@ produce_error_on_init
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -716,7 +787,8 @@ produce_large_batches
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       rows_per_batch: int64 not null
       batch_count: int64 not null
@@ -727,7 +799,8 @@ produce_n
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       count: int64 not null
   result:
@@ -737,7 +810,8 @@ produce_oversized_batch
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       rows_per_batch: int64 not null
   result:
@@ -747,7 +821,8 @@ produce_single
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -757,7 +832,8 @@ produce_tick_metadata
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       count: int64 not null
   result:
@@ -767,7 +843,8 @@ produce_with_header
   method_type: stream
   has_return: False
   has_header: True
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       count: int64 not null
   result:
@@ -777,7 +854,8 @@ produce_with_header_and_logs
   method_type: stream
   has_return: False
   has_header: True
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       count: int64 not null
   result:
@@ -787,7 +865,8 @@ produce_with_logs
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       count: int64 not null
   result:
@@ -797,7 +876,8 @@ produce_with_rich_header
   method_type: stream
   has_return: False
   has_header: True
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       seed: int64 not null
       count: int64 not null
@@ -808,7 +888,8 @@ raise_runtime_error
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       message: string not null
   result:
@@ -818,7 +899,8 @@ raise_type_error
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       message: string not null
   result:
@@ -828,7 +910,8 @@ raise_value_error
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       message: string not null
   result:
@@ -838,7 +921,8 @@ reset_cancel_probe
   method_type: unary
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -848,7 +932,8 @@ stream_session_counter
   method_type: stream
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: unknown
+  idempotency: unknown
   params:
       count: int64 not null
   result:
@@ -858,7 +943,8 @@ void_noop
   method_type: unary
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       (empty)
   result:
@@ -868,7 +954,8 @@ void_with_param
   method_type: unary
   has_return: False
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       value: int64 not null
   result:
@@ -878,7 +965,8 @@ with_defaults
   method_type: unary
   has_return: True
   has_header: False
-  is_exchange: None
+  stream_kind: (n/a)
+  idempotency: unknown
   params:
       required: int64 not null
       optional_str: string not null

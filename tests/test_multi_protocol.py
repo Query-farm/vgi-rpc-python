@@ -281,19 +281,20 @@ class TestRouting:
         assert "does not host protocol 'demo.Nope.v1'" in out
         assert "has no method" not in out
 
-    def test_describe_needs_no_routing_key(self) -> None:
-        """__describe__ is the diagnostic path a mismatched client uses.
+    def test_discovery_routes_like_any_other_protocol(self) -> None:
+        """Reflection names itself in the routing key, same as everything else.
 
-        Requiring it to name a protocol first would remove the tool exactly when
-        it is needed.
+        The old ``__describe__`` was exempt from routing because it had no
+        protocol to name.  Now it has one, carried in its own name, so a client
+        that speaks the routing rules at all can reach it.
         """
         srv = RpcServer(Alpha, AlphaImpl(), enable_describe=True)
-        assert self._resolve(srv, "__describe__", None).startswith("ok:")
+        assert self._resolve(srv, "describe", b"vgi_rpc.Reflection.v1") == "ok:vgi_rpc.Reflection.v1"
 
-    def test_reserved_but_unimplemented_answers_method_not_implemented(self) -> None:
-        """Not 'you failed to route' — the caller's routing was never the problem."""
-        out = self._resolve(RpcServer(Alpha, AlphaImpl()), "__describe__", None)
-        assert "does not implement the reserved method" in out
+    def test_discovery_is_absent_rather_than_refusing_when_disabled(self) -> None:
+        """A server without reflection does not host it, and says so plainly."""
+        out = self._resolve(RpcServer(Alpha, AlphaImpl()), "describe", b"vgi_rpc.Reflection.v1")
+        assert "does not host protocol" in out
 
 
 class TestVersionGate:

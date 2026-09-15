@@ -1,6 +1,6 @@
 """The ``__transport_options__`` RPC method — transport capability negotiation.
 
-A framework-level handshake, parallel to ``__describe__`` (see
+A framework-level handshake, parallel to ``vgi_rpc.Reflection.v1`` (see
 :mod:`vgi_rpc.introspect`). The client calls it once per worker, before
 ``init``, to discover which transport features the worker supports; the
 shared-memory side-channel (and, later, compression / AEAD) is used only when

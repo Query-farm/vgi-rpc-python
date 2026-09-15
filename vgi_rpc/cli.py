@@ -1244,15 +1244,15 @@ def call(
     on_log = _get_on_log(config)
 
     # The server enforces ``vgi_rpc.protocol_version`` at the dispatch
-    # boundary when the Protocol declares one (``__describe__`` surfaces it).
+    # boundary when the Protocol declares one (reflection surfaces it).
     # Forward the discovered value on every call so a versioned worker
     # doesn't reject the request as "client did not send a
     # vgi_rpc.protocol_version metadata key". Empty string → ``None`` keeps
     # the request structurally exempt for un-versioned servers.
     protocol_version = desc.protocol_version or None
-    # The routing key, taken from the same describe response. __describe__ is
-    # exempt from routing, so this is the bootstrap: ask what the server
-    # speaks, then address it.
+    # The routing key, taken from the same describe response.  Reflection has
+    # a fixed name, so it is the bootstrap: ask the one protocol whose name a
+    # client can know a priori what else the server speaks, then address that.
     protocol = desc.protocol_name or None
 
     try:

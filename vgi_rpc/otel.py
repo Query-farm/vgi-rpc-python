@@ -266,7 +266,7 @@ class _OtelDispatchHook:
             # Prefer the protocol that owns the *resolved* method. A server may
             # host several, so a name baked in at hook-registration time would
             # label every span with whichever protocol happened to be primary.
-            # Synthetic methods (e.g. __describe__) carry no protocol_name and
+            # Framework built-ins carry no protocol_name and
             # fall back to the server's.
             attrs: dict[str, str] = {
                 "rpc.system": "vgi_rpc",

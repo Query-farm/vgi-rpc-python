@@ -81,6 +81,7 @@ from ._common import (
     Encoding,
     available_encodings,
     parse_encoding_list,
+    rpc_path,
     rpc_path_from_prefix,
 )
 from ._common import (
@@ -1037,8 +1038,14 @@ def http_introspect(
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
+    external_location: ExternalLocationConfig | None = None,
 ) -> ServiceDescription:
-    """Send a ``__describe__`` request over HTTP and return a ``ServiceDescription``.
+    """Describe a server's primary protocol over HTTP.
+
+    Two round trips: ``list_protocols`` to learn what is hosted, then
+    ``describe`` on the first protocol that is not reflection itself.  With a
+    server free to host several protocols there is no longer a single "the"
+    protocol to describe without first asking.
 
     Args:
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
@@ -1049,6 +1056,12 @@ def http_introspect(
         ipc_validation: Validation level for incoming IPC batches.
         retry: Optional retry configuration for transient HTTP failures.
         accepted_max_response_bytes: Hard response limit sent with the request.
+        external_location: Configuration for fetching an externalized reply.
+            Needed against a server that externalizes: reflection is an
+            ordinary protocol now, so its replies are subject to the
+            transport's payload handling like any other method's.  The old
+            ``__describe__`` fast path was exempt only by accident of
+            answering before dispatch.
 
     Returns:
         A ``ServiceDescription`` with all method metadata.
@@ -1059,7 +1072,9 @@ def http_introspect(
         ValueError: If *base_url* is ``None`` and *client* is ``None``.
 
     """
-    from vgi_rpc.introspect import DESCRIBE_METHOD_NAME, parse_describe_batch
+    from vgi_rpc.introspect import _adapt_description
+    from vgi_rpc.rpc._reflection import ProtocolList, Reflection
+    from vgi_rpc.rpc._reflection import ServiceDescription as WireDescription
 
     own_client = client is None
     if client is None:
@@ -1070,20 +1085,6 @@ def http_introspect(
         prefix = getattr(client, "prefix", "")
 
     try:
-        # Build a minimal request: empty params with __describe__ method name
-        req_buf = BytesIO()
-        request_metadata = pa.KeyValueMetadata(
-            {
-                b"vgi_rpc.method": DESCRIBE_METHOD_NAME.encode(),
-                b"vgi_rpc.request_version": b"1",
-            }
-        )
-        with new_ipc_stream(req_buf, _EMPTY_SCHEMA) as writer:
-            writer.write_batch(
-                pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA),
-                custom_metadata=request_metadata,
-            )
-
         accepted_max_response_bytes = _validate_accepted_max_response_bytes(accepted_max_response_bytes)
         _require_response_budget_support(
             client=client,
@@ -1091,28 +1092,65 @@ def http_introspect(
             retry=retry,
             accepted_max_response_bytes=accepted_max_response_bytes,
         )
-        headers = {"Content-Type": _ARROW_CONTENT_TYPE}
-        if accepted_max_response_bytes is not None:
-            headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = str(accepted_max_response_bytes)
-        resp = _post_with_retry(
-            client,
-            f"{prefix}/{DESCRIBE_METHOD_NAME}",
-            content=req_buf.getvalue(),
-            headers=headers,
-            config=retry,
-            response_limit_bytes=accepted_max_response_bytes,
+
+        def call(method: str, params_schema: pa.Schema, params: dict[str, object]) -> bytes:
+            """Make one unary reflection call and return its ``result`` bytes.
+
+            Built by hand rather than through the generated client because
+            introspection is what a caller does *before* it has a client bound
+            to a protocol -- that is the whole point of it.
+            """
+            req_buf = BytesIO()
+            request_metadata = pa.KeyValueMetadata(
+                {
+                    b"vgi_rpc.method": method.encode(),
+                    b"vgi_rpc.protocol": Reflection.protocol_name.encode(),
+                    b"vgi_rpc.request_version": b"1",
+                }
+            )
+            with new_ipc_stream(req_buf, params_schema) as writer:
+                writer.write_batch(
+                    pa.RecordBatch.from_pydict({k: [v] for k, v in params.items()}, schema=params_schema),
+                    custom_metadata=request_metadata,
+                )
+
+            headers = {"Content-Type": _ARROW_CONTENT_TYPE}
+            if accepted_max_response_bytes is not None:
+                headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = str(accepted_max_response_bytes)
+            resp = _post_with_retry(
+                client,
+                rpc_path(Reflection.protocol_name, method, prefix=prefix),
+                content=req_buf.getvalue(),
+                headers=headers,
+                config=retry,
+                response_limit_bytes=accepted_max_response_bytes,
+            )
+
+            content = _enforce_accepted_response_bytes(resp.content, accepted_max_response_bytes)
+            reader = _open_response_stream(content, resp.status_code, ipc_validation)
+            while True:
+                batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+                if not _dispatch_log_or_error(batch, custom_metadata):
+                    break
+            _drain_stream(reader)
+            # A server configured to externalize returns a pointer batch, so
+            # the reply has to be resolved like any other -- reflection is an
+            # ordinary protocol and gets no exemption from the transport's
+            # payload handling.
+            resolved, _ = resolve_external_location(batch, custom_metadata, external_location, None, ipc_validation)
+            result: bytes = resolved.column("result")[0].as_py()
+            return result
+
+        listing = ProtocolList.deserialize_from_bytes(call("list_protocols", _EMPTY_SCHEMA, {}))
+        application = [p for p in listing.protocols if not p.protocol.startswith("vgi_rpc.")]
+        if not application:
+            raise ValueError(f"Server {listing.server_id} hosts no application protocol.")
+
+        params_schema = pa.schema([pa.field("protocol", pa.utf8(), nullable=False)])
+        described = WireDescription.deserialize_from_bytes(
+            call("describe", params_schema, {"protocol": application[0].protocol})
         )
-
-        content = _enforce_accepted_response_bytes(resp.content, accepted_max_response_bytes)
-        reader = _open_response_stream(content, resp.status_code, ipc_validation)
-        # Skip log batches
-        while True:
-            batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
-            if not _dispatch_log_or_error(batch, custom_metadata):
-                break
-        _drain_stream(reader)
-
-        return parse_describe_batch(batch, custom_metadata)
+        return _adapt_description(described, listing)
     finally:
         if own_client:
             client.close()

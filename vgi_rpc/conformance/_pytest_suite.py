@@ -4036,10 +4036,10 @@ class TestSticky:
         assert resp.status_code == 200
 
     def test_describe_unchanged(self) -> None:
-        """Enabling sticky must NOT change ``DESCRIBE_VERSION`` or the protocol payload shape.
+        """Enabling sticky must not change what introspection reports.
 
         Builds an in-process pipe-transport conformance server with
-        ``enable_describe=True`` and verifies the describe payload — runs
+        ``enable_describe=True`` and verifies the description — runs
         regardless of which HTTP fixtures the runner provides (so other-
         language ports without a Python sticky HTTP fixture can still skip
         via :meth:`_skip_unless_sticky` but exercise this contract).
@@ -4053,15 +4053,13 @@ class TestSticky:
         finally:
             client_transport.close()
             thread.join(timeout=5)
-        # PR1 contract: __describe__ wire format is untouched by sticky
-        # support. Future changes to DESCRIBE_VERSION should be a
-        # deliberate bump with a corresponding cross-language port update.
-        assert desc.describe_version == "4"
-        # The 3 sticky conformance methods must be visible (since the
-        # conformance service defines them) but `is_sticky` is not a
-        # describe field — methods look just like normal unary methods.
+        # Stickiness is a *transport* property, not part of a protocol's wire
+        # surface, so it must leave the description alone.  The three sticky
+        # conformance methods appear because the service defines them, and they
+        # look exactly like ordinary unary methods -- there is no `is_sticky`
+        # field for a client to branch on, deliberately.
         for name in ("open_counter", "increment_counter", "close_counter"):
-            assert name in desc.methods, f"sticky conformance method '{name}' must appear in __describe__"
+            assert name in desc.methods, f"sticky conformance method '{name}' must be described"
             assert desc.methods[name].method_type == MethodType.UNARY
 
     def test_capabilities_advertised(self, conformance_http_port: int) -> None:

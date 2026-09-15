@@ -36,7 +36,7 @@ from vgi_rpc.http import (
     http_connect,
     http_introspect,
 )
-from vgi_rpc.introspect import introspect
+from vgi_rpc.introspect import DESCRIBE_VERSION, introspect
 from vgi_rpc.metadata import (
     CALL_STATE_KEY,
     LOCATION_KEY,
@@ -371,7 +371,7 @@ def test_worker_describe_contract_covers_native_client_methods() -> None:
         description = http_introspect(base_url, prefix="/vgi")
 
     assert description.protocol_name == "ClientConformanceService"
-    assert description.describe_version == "4"
+    assert description.describe_version == DESCRIBE_VERSION
     assert len(description.protocol_hash) == 64
     expected = {
         "typed_exchange",
@@ -648,7 +648,7 @@ def test_stdio_worker_exposes_raw_client_surface_and_dynamic_shm(monkeypatch: py
     try:
         description = introspect(transport)
         assert description.protocol_name == "ClientConformanceService"
-        assert description.describe_version == "4"
+        assert description.describe_version == DESCRIBE_VERSION
         assert TRANSPORT_OPTIONS_METHOD_NAME not in description.methods
         options = _transport_options(transport)
         assert options.get(TRANSPORT_SHM_KEY) == (b"true" if shm_available() else b"false")

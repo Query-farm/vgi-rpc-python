@@ -1,27 +1,16 @@
-# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
-# SPDX-License-Identifier: Apache-2.0
+"""Client-side introspection over ``vgi_rpc.Reflection.v1``.
 
-"""Introspection support for vgi-rpc servers.
+Introspection used to be ``__describe__``, a hardcoded method name answered
+from a pre-built batch in a bespoke format.  It is now an ordinary co-hosted
+protocol (see ``rpc/_reflection.py``), which is what lets six ports generate it
+rather than hand-maintain it.
 
-Provides a built-in ``__describe__`` RPC method that returns machine-readable
-metadata about all methods exposed by an ``RpcServer``.  The response is a
-standard Arrow IPC batch with one row per method, plus batch ``custom_metadata``
-for protocol name, versions, and server identity.
-
-Server side
------------
-``build_describe_batch()`` builds the cached response batch at server init
-time.  ``RpcServer`` (with ``enable_describe=True``) handles ``__describe__``
-requests by writing this pre-built batch directly.
-
-Client side
------------
-``introspect()`` sends a ``__describe__`` request over a pipe/subprocess
-transport and returns a ``ServiceDescription``.  ``http_introspect()`` does
-the same over HTTP (see ``http.py``).
-
-``parse_describe_batch()`` converts the raw Arrow batch into a typed
-``ServiceDescription`` for programmatic use.
+What survives here is the *client-side view*: ``ServiceDescription`` and
+``MethodDescription`` are convenience dataclasses for Python callers, not a
+wire format -- they were only ever the latter by accident of there having been
+a single encoding.  ``introspect()`` and ``http_introspect()`` speak reflection
+and present the result in this shape, so the CLI, the describe page and the
+conformance runner did not have to change.
 """
 
 from __future__ import annotations
@@ -33,19 +22,13 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.metadata import (
-    DESCRIBE_VERSION_KEY,
-    PROTOCOL_HASH_KEY,
-    PROTOCOL_NAME_KEY,
-    PROTOCOL_VERSION_KEY,
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
     RPC_METHOD_KEY,
-    SERVER_ID_KEY,
 )
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     MethodType,
-    RpcMethodInfo,
     RpcTransport,
     _dispatch_log_or_error,
     _drain_stream,
@@ -54,45 +37,38 @@ from vgi_rpc.rpc._protocol_hash import compute_protocol_hash as _compute_protoco
 from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
 
 __all__ = [
-    "DESCRIBE_METHOD_NAME",
     "DESCRIBE_VERSION",
     "MethodDescription",
     "ServiceDescription",
-    "build_describe_batch",
     "compute_protocol_hash",
     "introspect",
-    "parse_describe_batch",
 ]
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-DESCRIBE_METHOD_NAME = "__describe__"
-"""Well-known method name for introspection requests."""
+#: Re-exported so ``vgi_rpc.introspect.compute_protocol_hash`` keeps working.
+#: The definition lives in ``rpc/_protocol_hash.py`` because it is taken over
+#: the decoded description rather than over any particular encoding of it.
+compute_protocol_hash = _compute_protocol_hash
 
-DESCRIBE_VERSION = "4"
-"""Introspection format version for forward compatibility.
+DESCRIBE_VERSION = "5"
+"""Introspection format version.
+
+Vestigial since v5: introspection is ``vgi_rpc.Reflection.v1`` now, a protocol
+whose major version is part of its own name, so there is no separate format
+number to negotiate.  Reported for the benefit of readers who still look for
+it, and it will not move again.
 
 History:
-  - v4: dropped Python-flavoured fields (``doc``, ``param_types_json``,
-    ``param_defaults_json``, ``param_docs_json``); introduced
-    ``protocol_hash`` (SHA-256 over the canonical describe payload).
+  - v5: introspection became a protocol.  ``__describe__``, ``_DESCRIBE_SCHEMA``,
+    ``build_describe_batch`` and ``parse_describe_batch`` are gone; the payload
+    is a generated schema and the hash is taken over the decoded description.
+  - v4: dropped Python-flavoured fields; introduced ``protocol_hash``.
   - v3: added ``param_docs_json``.
   - v2: added ``has_header``, ``header_schema_ipc``, ``is_exchange``.
 """
-
-_DESCRIBE_FIELDS: list[pa.Field[pa.DataType]] = [
-    pa.field("name", pa.utf8()),
-    pa.field("method_type", pa.utf8()),
-    pa.field("has_return", pa.bool_()),
-    pa.field("params_schema_ipc", pa.binary()),
-    pa.field("result_schema_ipc", pa.binary()),
-    pa.field("has_header", pa.bool_()),
-    pa.field("header_schema_ipc", pa.binary(), nullable=True),
-    pa.field("is_exchange", pa.bool_(), nullable=True),
-]
-_DESCRIBE_SCHEMA = pa.schema(_DESCRIBE_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -195,215 +171,139 @@ class ServiceDescription:
 # ---------------------------------------------------------------------------
 
 
-def build_describe_batch(
-    protocol_name: str,
-    methods: Mapping[str, RpcMethodInfo],
-    server_id: str,
-    protocol_version: str | None = None,
-) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
-    """Build the ``__describe__`` response batch.
-
-    One row per method, sorted by name.  The returned
-    ``pa.KeyValueMetadata`` carries protocol name, wire protocol
-    version, describe format version, ``protocol_hash``, server
-    identity, and (when configured) ``protocol_version`` — callers pass
-    it as ``custom_metadata`` when writing.
-
-    Args:
-        protocol_name: Name of the Protocol class.
-        methods: Method metadata from ``rpc_methods()``.
-        server_id: The server's identity string.
-        protocol_version: Optional application protocol surface version
-            (canonical semver MAJOR.MINOR.PATCH). When supplied, emitted
-            under ``vgi_rpc.protocol_version`` so a version-mismatched
-            client can discover the server's expected version by calling
-            ``__describe__``. Not part of the protocol_hash payload.
-
-    Returns:
-        A ``(pa.RecordBatch, pa.KeyValueMetadata)`` tuple.  The batch
-        uses the plain ``_DESCRIBE_SCHEMA`` (no schema-level metadata);
-        the metadata dict carries the five introspection keys.
-
-    """
-    names: list[str] = []
-    method_types: list[str] = []
-    has_returns: list[bool] = []
-    params_schemas: list[bytes] = []
-    result_schemas: list[bytes] = []
-    has_headers: list[bool] = []
-    header_schemas: list[bytes | None] = []
-    is_exchanges: list[bool | None] = []
-
-    for name, info in sorted(methods.items()):
-        names.append(name)
-        method_types.append(info.method_type.value)
-        has_returns.append(info.has_return)
-        params_schemas.append(info.params_schema.serialize().to_pybytes())
-        result_schemas.append(info.result_schema.serialize().to_pybytes())
-        has_headers.append(info.header_type is not None)
-        header_schemas.append(
-            info.header_type.ARROW_SCHEMA.serialize().to_pybytes() if info.header_type is not None else None
-        )
-        is_exchanges.append(info.is_exchange)
-
-    batch = pa.RecordBatch.from_pydict(
-        {
-            "name": names,
-            "method_type": method_types,
-            "has_return": has_returns,
-            "params_schema_ipc": params_schemas,
-            "result_schema_ipc": result_schemas,
-            "has_header": has_headers,
-            "header_schema_ipc": header_schemas,
-            "is_exchange": is_exchanges,
-        },
-        schema=_DESCRIBE_SCHEMA,
-    )
-
-    # Over the decoded description, not this batch's bytes: each port's Arrow
-    # implementation may emit different bytes for the same logical schema, so a
-    # hash over encoder output is comparable only against itself.
-    protocol_hash = compute_protocol_hash(protocol_name, methods)
-
-    md_dict: dict[bytes, bytes] = {
-        PROTOCOL_NAME_KEY: protocol_name.encode(),
-        REQUEST_VERSION_KEY: REQUEST_VERSION,
-        DESCRIBE_VERSION_KEY: DESCRIBE_VERSION.encode(),
-        PROTOCOL_HASH_KEY: protocol_hash.encode(),
-        SERVER_ID_KEY: server_id.encode(),
-    }
-    if protocol_version is not None:
-        md_dict[PROTOCOL_VERSION_KEY] = protocol_version.encode()
-    custom_metadata = pa.KeyValueMetadata(md_dict)
-    return batch, custom_metadata
-
-
-# ---------------------------------------------------------------------------
-# Protocol hash
-# ---------------------------------------------------------------------------
-
-
-#: Re-exported so ``vgi_rpc.introspect.compute_protocol_hash`` keeps working.
-#: The definition lives in ``rpc/_protocol_hash.py`` because it is taken over
-#: the decoded description rather than over a describe *batch* -- the batch is
-#: one encoding of that description, and not the same one in every port.
-compute_protocol_hash = _compute_protocol_hash
-
-
-# ---------------------------------------------------------------------------
-# Client-side: parse the response batch
-# ---------------------------------------------------------------------------
-
-
-def parse_describe_batch(
-    batch: pa.RecordBatch,
-    custom_metadata: pa.KeyValueMetadata | None = None,
-) -> ServiceDescription:
-    """Parse a ``__describe__`` response batch into a ``ServiceDescription``.
-
-    Reads batch ``custom_metadata`` for protocol name, versions, and server
-    identity.  Each row is converted to a ``MethodDescription``.
-
-    Args:
-        batch: The response ``RecordBatch`` from a ``__describe__`` call.
-        custom_metadata: The batch custom metadata carrying protocol name,
-            versions, and server identity.
-
-    Returns:
-        A ``ServiceDescription`` with all method metadata.
-
-    Raises:
-        ValueError: If required metadata is missing.
-
-    """
-    md: dict[bytes, bytes] = dict(custom_metadata) if custom_metadata is not None else {}
-
-    protocol_name: str = md.get(PROTOCOL_NAME_KEY, b"").decode()
-    request_version: str = md.get(REQUEST_VERSION_KEY, b"").decode()
-    describe_version: str = md.get(DESCRIBE_VERSION_KEY, b"").decode()
-    protocol_hash: str = md.get(PROTOCOL_HASH_KEY, b"").decode()
-    server_id: str = md.get(SERVER_ID_KEY, b"").decode()
-    protocol_version: str = md.get(PROTOCOL_VERSION_KEY, b"").decode()
-
-    method_map: dict[str, MethodDescription] = {}
-    for i in range(batch.num_rows):
-        name: str = batch.column("name")[i].as_py()
-        method_type = MethodType(batch.column("method_type")[i].as_py())
-        has_return: bool = batch.column("has_return")[i].as_py()
-
-        params_schema_bytes: bytes = batch.column("params_schema_ipc")[i].as_py()
-        result_schema_bytes: bytes = batch.column("result_schema_ipc")[i].as_py()
-        params_schema = pa.ipc.read_schema(pa.py_buffer(params_schema_bytes))
-        result_schema = pa.ipc.read_schema(pa.py_buffer(result_schema_bytes))
-
-        has_header: bool = batch.column("has_header")[i].as_py()
-        header_schema: pa.Schema | None = None
-        header_schema_bytes: bytes | None = batch.column("header_schema_ipc")[i].as_py()
-        if header_schema_bytes is not None:
-            header_schema = pa.ipc.read_schema(pa.py_buffer(header_schema_bytes))
-
-        is_exchange: bool | None = batch.column("is_exchange")[i].as_py()
-
-        method_map[name] = MethodDescription(
-            name=name,
-            method_type=method_type,
-            has_return=has_return,
-            params_schema=params_schema,
-            result_schema=result_schema,
-            has_header=has_header,
-            header_schema=header_schema,
-            is_exchange=is_exchange,
-        )
-
-    return ServiceDescription(
-        protocol_name=protocol_name,
-        request_version=request_version,
-        describe_version=describe_version,
-        protocol_hash=protocol_hash,
-        server_id=server_id,
-        methods=method_map,
-        protocol_version=protocol_version,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Client-side: pipe/subprocess introspection
-# ---------------------------------------------------------------------------
-
-
-def introspect(
+def _reflection_call(
     transport: RpcTransport,
-    ipc_validation: IpcValidation = IpcValidation.FULL,
-) -> ServiceDescription:
-    """Send a ``__describe__`` request over any ``RpcTransport``.
+    method: str,
+    params_schema: pa.Schema,
+    params: dict[str, object],
+    ipc_validation: IpcValidation,
+) -> bytes:
+    """Make one unary call to ``vgi_rpc.Reflection.v1`` over a raw transport.
 
-    Args:
-        transport: An open ``RpcTransport``.
-        ipc_validation: Validation level for incoming IPC batches.
-
-    Returns:
-        A ``ServiceDescription`` with all method metadata.
-
-    Raises:
-        RpcError: If the server does not support introspection or returns
-            an error.
-
+    Written by hand rather than through the generated client because
+    introspection is what a caller does *before* it has a client bound to a
+    protocol -- that is the whole point of it.
     """
-    # Write a minimal request: empty params, method = __describe__
-    request_metadata = pa.KeyValueMetadata(
-        {RPC_METHOD_KEY: DESCRIBE_METHOD_NAME.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION}
-    )
-    with new_ipc_stream(transport.writer, _EMPTY_SCHEMA) as writer:
-        empty_batch = pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
-        writer.write_batch(empty_batch, custom_metadata=request_metadata)
+    from vgi_rpc.metadata import PROTOCOL_KEY
+    from vgi_rpc.rpc._reflection import Reflection
 
-    # Read response
+    request_metadata = pa.KeyValueMetadata(
+        {
+            RPC_METHOD_KEY: method.encode(),
+            PROTOCOL_KEY: Reflection.protocol_name.encode(),
+            REQUEST_VERSION_KEY: REQUEST_VERSION,
+        }
+    )
+    with new_ipc_stream(transport.writer, params_schema) as writer:
+        writer.write_batch(
+            pa.RecordBatch.from_pydict({k: [v] for k, v in params.items()}, schema=params_schema),
+            custom_metadata=request_metadata,
+        )
+
     reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
-    # Skip log batches, collect the data batch
     while True:
         batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         if not _dispatch_log_or_error(batch, custom_metadata):
             break
     _drain_stream(reader)
+    del custom_metadata
+    # A dataclass return rides as serialized bytes in a single ``result``
+    # column -- the framework's ordinary unary convention.  Reflection is an
+    # ordinary protocol now, so it is subject to it like everything else.
+    result: bytes = batch.column("result")[0].as_py()
+    return result
 
-    return parse_describe_batch(batch, custom_metadata)
+
+def introspect(
+    transport: RpcTransport,
+    ipc_validation: IpcValidation = IpcValidation.FULL,
+    protocol: str | None = None,
+) -> ServiceDescription:
+    """Describe a server's protocol over any ``RpcTransport``.
+
+    Two round trips: ``list_protocols`` to learn what is hosted, then
+    ``describe`` on one of them.  The first is unavoidable now that a server
+    may host several protocols -- there is no longer a single "the" protocol to
+    ask about without asking.
+
+    Args:
+        transport: An open ``RpcTransport``.
+        ipc_validation: Validation level for incoming IPC batches.
+        protocol: Which protocol to describe.  Defaults to the first hosted
+            one that is not reflection itself, which is the primary.
+
+    Returns:
+        A ``ServiceDescription`` with all method metadata.
+
+    Raises:
+        RpcError: If the server does not support reflection or returns an
+            error.
+        ValueError: If the server hosts no application protocol.
+
+    """
+    from vgi_rpc.rpc._reflection import ProtocolList
+    from vgi_rpc.rpc._reflection import ServiceDescription as WireDescription
+
+    listing = ProtocolList.deserialize_from_bytes(
+        _reflection_call(transport, "list_protocols", _EMPTY_SCHEMA, {}, ipc_validation)
+    )
+
+    if protocol is None:
+        application = [p for p in listing.protocols if not p.protocol.startswith("vgi_rpc.")]
+        if not application:
+            raise ValueError(f"Server {listing.server_id} hosts no application protocol.")
+        protocol = application[0].protocol
+
+    params_schema = pa.schema([pa.field("protocol", pa.utf8(), nullable=False)])
+    described = WireDescription.deserialize_from_bytes(
+        _reflection_call(transport, "describe", params_schema, {"protocol": protocol}, ipc_validation)
+    )
+
+    return _adapt_description(described, listing)
+
+
+def _adapt_description(wire: object, listing: object) -> ServiceDescription:
+    """Present a reflection reply in this module's client-side shape.
+
+    ``introspect.ServiceDescription`` is a *client-side view*, not a wire
+    format -- it was only ever the latter by accident of there being one
+    encoding.  Keeping it lets the CLI, the describe page and the conformance
+    runner move to reflection without changing a line.
+    """
+    methods: dict[str, MethodDescription] = {}
+    for m in wire.methods:  # type: ignore[attr-defined]
+        methods[m.name] = MethodDescription(
+            name=m.name,
+            method_type=MethodType(m.method_type),
+            has_return=m.has_return,
+            params_schema=_read_schema(m.params_schema_ipc),
+            result_schema=_read_schema(m.result_schema_ipc),
+            has_header=m.has_header,
+            header_schema=_read_schema(m.header_schema_ipc) if m.has_header else None,
+            is_exchange=_is_exchange(m.stream_kind),
+        )
+    return ServiceDescription(
+        protocol_name=wire.protocol,  # type: ignore[attr-defined]
+        request_version=listing.request_version,  # type: ignore[attr-defined]
+        describe_version=DESCRIBE_VERSION,
+        protocol_hash=wire.protocol_hash,  # type: ignore[attr-defined]
+        server_id=listing.server_id,  # type: ignore[attr-defined]
+        methods=methods,
+        protocol_version=wire.protocol_version,  # type: ignore[attr-defined]
+    )
+
+
+def _read_schema(ipc_bytes: bytes) -> pa.Schema:
+    """Read a schema from IPC bytes, treating empty as the empty schema."""
+    if not ipc_bytes:
+        return _EMPTY_SCHEMA
+    return ipc.read_schema(pa.py_buffer(ipc_bytes))
+
+
+def _is_exchange(stream_kind: str) -> bool | None:
+    """Map a reflection stream kind back to this module's tri-state bool."""
+    if stream_kind == "exchange":
+        return True
+    if stream_kind == "producer":
+        return False
+    return None

@@ -1299,7 +1299,14 @@ def conformance_describe(
             tcp_transport.close()
     if param == "http_externalize_always":
         ext_port: int = request.getfixturevalue("conformance_http_externalize_always_port")
-        return http_introspect(base_url=f"http://127.0.0.1:{ext_port}")
+        # This server externalizes every reply, reflection's included, so the
+        # client needs to be able to fetch one back.
+        from vgi_rpc.external import ExternalLocationConfig
+
+        return http_introspect(
+            base_url=f"http://127.0.0.1:{ext_port}",
+            external_location=ExternalLocationConfig(url_validator=None),
+        )
     return http_introspect(base_url=f"http://127.0.0.1:{conformance_http_port}")
 
 

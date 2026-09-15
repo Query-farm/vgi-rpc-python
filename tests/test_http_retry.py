@@ -764,7 +764,9 @@ class TestHttpIntrospectWithRetry:
             accepted_max_response_bytes=None,
         )
         assert "add" in desc.methods
-        assert wrapper.call_count == 2
+        # One failed POST, its retry, then the second reflection call:
+        # introspect asks list_protocols before it can describe anything.
+        assert wrapper.call_count == 3
 
 
 class TestHttpCapabilitiesWithRetry:

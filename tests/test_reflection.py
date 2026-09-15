@@ -223,7 +223,7 @@ class TestTolerantDecoding:
             method_type: str
             has_return: bool
             has_header: bool
-            is_exchange: bool
+            stream_kind: str
             params_schema_ipc: bytes
             result_schema_ipc: bytes
             header_schema_ipc: bytes
@@ -233,7 +233,7 @@ class TestTolerantDecoding:
             method_type="unary",
             has_return=True,
             has_header=False,
-            is_exchange=False,
+            stream_kind="",
             params_schema_ipc=b"",
             result_schema_ipc=b"",
             header_schema_ipc=b"",

@@ -278,7 +278,7 @@ def _run_stream_init_sync(
                 method_name=method_name,
                 protocol_name=protocol_name,
                 kind=app._server.transport_kind,
-                implementation=app._server.implementation,
+                implementation=app._server.implementation_for(info),
                 response_limit_bytes=_current_response_budget.get().response_limit_bytes,
                 preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
             )
@@ -299,7 +299,7 @@ def _run_stream_init_sync(
             kwargs=kwargs,
         ) as outcome:
             try:
-                result: Stream[StreamState, Any] = getattr(app._server.implementation, method_name)(**kwargs)
+                result: Stream[StreamState, Any] = getattr(app._server.implementation_for(info), method_name)(**kwargs)
             # No narrow (TypeError, pa.ArrowInvalid) -> 400 branch here; see the
             # matching note in _app_unary.py.  Request errors are already caught
             # above by the _read_request / _deserialize_params / _validate_params
@@ -614,7 +614,7 @@ def _run_stream_exchange_sync(
                     method_name=method_name,
                     protocol_name=protocol_name,
                     kind=app._server.transport_kind,
-                    implementation=app._server.implementation,
+                    implementation=app._server.implementation_for(info),
                     response_limit_bytes=_current_response_budget.get().response_limit_bytes,
                     preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
                 )
@@ -790,7 +790,7 @@ def _run_http_exchange_turn(
             method_name=method_name,
             protocol_name=protocol_name,
             kind=app._server.transport_kind,
-            implementation=app._server.implementation,
+            implementation=app._server.implementation_for(info),
             response_limit_bytes=_current_response_budget.get().response_limit_bytes,
             preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
         )
@@ -1055,7 +1055,7 @@ def _run_http_producer_turn(
             method_name=method_name,
             protocol_name=protocol_name,
             kind=app._server.transport_kind,
-            implementation=app._server.implementation,
+            implementation=app._server.implementation_for(info),
             response_limit_bytes=response_budget.response_limit_bytes,
             preferred_response_bytes=response_budget.preferred_response_bytes,
         )

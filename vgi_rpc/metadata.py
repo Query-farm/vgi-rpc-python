@@ -112,14 +112,14 @@ SHM_SEGMENT_SIZE_KEY = b"vgi_rpc.shm_segment_size"
 # shared-memory side-channel is used only when both peers advertise "true".
 TRANSPORT_SHM_KEY = b"vgi_rpc.transport.shm"
 
-# Introspection (__describe__ response batch metadata)
+# Introspection (reflection response batch metadata)
 PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"
 DESCRIBE_VERSION_KEY = b"vgi_rpc.describe_version"
 PROTOCOL_HASH_KEY = b"vgi_rpc.protocol_hash"
 
 # Application protocol surface version. Carried on every request batch from a
 # vgi-rpc RpcClient bound to a Protocol that declares ``protocol_version``; also
-# emitted in the __describe__ response. Format: canonical semver MAJOR.MINOR.PATCH
+# emitted with a reflection response. Format: canonical semver MAJOR.MINOR.PATCH
 # (see ``SEMVER_REGEX``). Enforced at dispatch boundary on the server: exact
 # major+minor match required, patch ignored. Distinct from ``REQUEST_VERSION``
 # (wire framing) and from any catalog-level data-version semantics.

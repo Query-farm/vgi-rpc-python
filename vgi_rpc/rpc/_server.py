@@ -67,7 +67,6 @@ from vgi_rpc.rpc._common import (
     _get_auth_and_metadata,
     _logger,
     _record_input,
-    _record_output,
     _TransportContext,
 )
 from vgi_rpc.rpc._debug import wire_stream_logger
@@ -526,8 +525,6 @@ class RpcServer:
     __slots__ = (
         "_bindings",
         "_ctx_methods",
-        "_describe_batch",
-        "_describe_metadata",
         "_dispatch_hook",
         "_external_config",
         "_impl",
@@ -556,12 +553,6 @@ class RpcServer:
             for name in methods
             if (method := getattr(impl, name, None)) is not None and "ctx" in inspect.signature(method).parameters
         )
-
-    def _describe_payload_for(self, binding: _ProtocolBinding) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
-        """Build one protocol's ``__describe__`` batch and metadata."""
-        from vgi_rpc.introspect import build_describe_batch
-
-        return build_describe_batch(binding.name, binding.methods, self._server_id, binding.version)
 
     def _resolve(self, method_name: str) -> RpcMethodInfo:
         """Resolve ``(protocol, method)`` from the current request's metadata.
@@ -632,8 +623,6 @@ class RpcServer:
 
     def _build_binding(self, proto: type, impl: object, *, allow_reserved: bool = False) -> _ProtocolBinding:
         """Validate one protocol/implementation pair and freeze it into a binding."""
-        from vgi_rpc.metadata import PROTOCOL_HASH_KEY
-
         # vars() not getattr(): a subclass that does not redeclare must not
         # inherit its base's version, or it silently claims compatibility it
         # was never checked for.
@@ -655,9 +644,8 @@ class RpcServer:
         except ValueError as exc:
             raise ValueError(f"{proto.__name__}: {exc}") from exc
 
-        from vgi_rpc.introspect import build_describe_batch
+        from ._protocol_hash import compute_protocol_hash
 
-        _, md = build_describe_batch(name, methods, self._server_id, version)
         return _ProtocolBinding(
             protocol=proto,
             name=name,
@@ -665,7 +653,7 @@ class RpcServer:
             methods=methods,
             version=version,
             version_parts=version_parts,
-            protocol_hash=md.get(PROTOCOL_HASH_KEY, b"").decode(),
+            protocol_hash=compute_protocol_hash(name, methods),
             ctx_methods=self._ctx_methods_for(impl, methods),
         )
 
@@ -778,30 +766,6 @@ class RpcServer:
                             b.name,
                             extra={"server_id": self._server_id, "method": method_name},
                         )
-
-        _hash_batch, _hash_md = self._describe_payload_for(primary)
-
-        if enable_describe:
-            from vgi_rpc.introspect import DESCRIBE_METHOD_NAME
-
-            self._describe_batch: pa.RecordBatch | None = _hash_batch
-            self._describe_metadata: pa.KeyValueMetadata | None = _hash_md
-            # Register __describe__ as a synthetic unary method so normal dispatch handles it.
-            self._methods = {
-                **self._methods,
-                DESCRIBE_METHOD_NAME: RpcMethodInfo(
-                    name=DESCRIBE_METHOD_NAME,
-                    params_schema=_EMPTY_SCHEMA,
-                    result_schema=self._describe_batch.schema,
-                    result_type=type(None),
-                    method_type=MethodType.UNARY,
-                    has_return=True,
-                    doc="Return machine-readable metadata about all server methods.",
-                ),
-            }
-        else:
-            self._describe_batch = None
-            self._describe_metadata = None
 
         # Primary's, for the single-protocol attribute. Dispatch uses the
         # binding's own set so a method taking `ctx` on one protocol does not
@@ -1019,8 +983,15 @@ class RpcServer:
 
     @property
     def describe_enabled(self) -> bool:
-        """Whether ``__describe__`` introspection is enabled."""
-        return self._describe_batch is not None
+        """Whether this server hosts the reflection protocol.
+
+        Named for the ``enable_describe`` constructor argument it reports, and
+        kept because the HTTP factory gates its human-readable describe page on
+        it.
+        """
+        from ._reflection import Reflection
+
+        return Reflection.protocol_name in self._bindings
 
     @property
     def ipc_validation(self) -> IpcValidation:
@@ -1367,7 +1338,7 @@ class RpcServer:
                 method_name=info.name,
                 protocol_name=self.protocol_name,
                 kind=self._transport_kind,
-                implementation=self._impl,
+                implementation=self.implementation_for(info),
             )
         return sink, auth, transport_metadata
 
@@ -1380,27 +1351,6 @@ class RpcServer:
         stats: CallStatistics | None = None,
         shm: ShmSegment | None = None,
     ) -> None:
-        # Pre-built __describe__ batch — write directly, skip implementation call.
-        if self._describe_batch is not None and info.name == "__describe__":
-            _record_output(self._describe_batch)
-            with new_ipc_stream(transport.writer, self._describe_batch.schema) as writer:
-                writer.write_batch(self._describe_batch, custom_metadata=self._describe_metadata)
-            auth, transport_md = _get_auth_and_metadata()
-            _emit_access_log(
-                info.protocol_name or self.protocol_name,
-                info.name,
-                info.method_type.value,
-                self._server_id,
-                auth,
-                transport_md,
-                0.0,
-                "ok",
-                stats=stats,
-                server_version=self._server_version,
-                protocol_hash=self._protocol_hash,
-            )
-            return
-
         schema = info.result_schema
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
         # The protocol that owns the *resolved* method, not a server-wide
@@ -1425,7 +1375,7 @@ class RpcServer:
             with new_ipc_stream(transport.writer, schema) as writer:
                 sink.flush_contents(writer, schema)
                 try:
-                    result = getattr(self._impl, info.name)(**kwargs)
+                    result = getattr(self.implementation_for(info), info.name)(**kwargs)
                     _validate_result(info.name, result, info.result_type)
                 except Exception as exc:
                     _hook_exc = exc
@@ -1498,7 +1448,7 @@ class RpcServer:
         # NOTE: Two finally blocks — the inner one handles init errors (with early return),
         # the outer one handles streaming errors.  Only one access log fires per call.
         try:
-            result: Stream[StreamState, Any] = getattr(self._impl, info.name)(**kwargs)
+            result: Stream[StreamState, Any] = getattr(self.implementation_for(info), info.name)(**kwargs)
         except Exception as exc:
             _hook_exc = exc
             status = "error"
@@ -1577,7 +1527,7 @@ class RpcServer:
                                 method_name=info.name,
                                 protocol_name=protocol_name,
                                 kind=self._transport_kind,
-                                implementation=self._impl,
+                                implementation=self.implementation_for(info),
                             )
                             try:
                                 state.on_cancel(cancel_ctx)
@@ -1622,7 +1572,7 @@ class RpcServer:
                             method_name=info.name,
                             protocol_name=protocol_name,
                             kind=self._transport_kind,
-                            implementation=self._impl,
+                            implementation=self.implementation_for(info),
                         )
                         state.process(ab_in, out, process_ctx)
                         if not out.finished:

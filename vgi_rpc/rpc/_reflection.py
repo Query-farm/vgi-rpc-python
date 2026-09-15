@@ -45,6 +45,7 @@ from vgi_rpc.utils import ArrowSerializableDataclass
 
 __all__ = [
     "IDEMPOTENCY_LEVELS",
+    "STREAM_KINDS",
     "MethodInfo",
     "ProtocolList",
     "ProtocolSummary",
@@ -61,6 +62,12 @@ __all__ = [
 #: - ``idempotent``     -- has side effects, but repeating it is equivalent to
 #:                         performing it once.
 IDEMPOTENCY_LEVELS = ("unknown", "no_side_effects", "idempotent")
+
+#: What a stream method does, when that is knowable.  Whether a stream is an
+#: exchange is decided by the implementation's return type, not by the
+#: Protocol, so a server describing its own Protocol often cannot say --
+#: ``unknown`` is the honest answer and is spelled rather than left null.
+STREAM_KINDS = ("unknown", "producer", "exchange")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -79,7 +86,11 @@ class MethodInfo(ArrowSerializableDataclass):
         method_type: ``"unary"`` or ``"stream"``.
         has_return: Whether a unary method returns a value.
         has_header: Whether a stream declares a header type.
-        is_exchange: For streams, whether the client also sends.
+        stream_kind: For streams, one of :data:`STREAM_KINDS`; empty for
+            unary.  A string rather than a nullable bool because the state is
+            genuinely three-valued -- whether a stream is an exchange is an
+            *implementation* property, not visible on the Protocol -- and
+            "unknown" should be said rather than encoded as absence.
         params_schema_ipc: Request parameter schema, as Arrow IPC.
         result_schema_ipc: Response schema, as Arrow IPC; empty when
             ``has_return`` is false.
@@ -95,7 +106,7 @@ class MethodInfo(ArrowSerializableDataclass):
     method_type: str
     has_return: bool
     has_header: bool
-    is_exchange: bool
+    stream_kind: str
     params_schema_ipc: bytes
     result_schema_ipc: bytes
     header_schema_ipc: bytes
@@ -300,7 +311,7 @@ class ReflectionImpl:
                     method_type=info.method_type.value,
                     has_return=bool(info.has_return),
                     has_header=info.header_type is not None,
-                    is_exchange=bool(info.is_exchange),
+                    stream_kind=_stream_kind(info),
                     params_schema_ipc=_schema_ipc(info.params_schema),
                     result_schema_ipc=_schema_ipc(info.result_schema if info.has_return else None),
                     header_schema_ipc=_schema_ipc(
@@ -324,3 +335,15 @@ def _request_version() -> str:
     from vgi_rpc.metadata import REQUEST_VERSION
 
     return REQUEST_VERSION.decode()
+
+
+def _stream_kind(info: object) -> str:
+    """Return the stream kind for *info*, or empty for a unary method."""
+    from vgi_rpc.rpc import MethodType
+
+    if info.method_type is not MethodType.STREAM:  # type: ignore[attr-defined]
+        return ""
+    is_exchange = info.is_exchange  # type: ignore[attr-defined]
+    if is_exchange is None:
+        return "unknown"
+    return "exchange" if is_exchange else "producer"
