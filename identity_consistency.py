@@ -42,7 +42,8 @@ PORTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "rust": ("vgi-rpc-rust", ("vgi-rpc/**/*.rs", "vgi-rpc-macros/**/*.rs", "tests/**/*.rs")),
     "java": ("vgi-rpc-java", ("vgirpc/src/**/*.java",)),
     "csharp": ("vgi-rpc-csharp", ("src/**/*.cs", "tests/**/*.cs", "test/**/*.cs")),
-    "cpp": ("vgi-rpc-c++", ("src/**/*.cpp", "src/**/*.hpp", "include/**/*.hpp", "test/**/*.cpp", "tests/**/*.cpp")),
+    "cpp": ("vgi-rpc-c++", ("src/**/*.cpp", "src/**/*.hpp", "src/**/*.h", "include/**/*.hpp",
+                            "include/**/*.h", "test/**/*.cpp", "tests/**/*.cpp")),
 }
 
 #: (label, regex, why it matters if it differs)
@@ -136,7 +137,9 @@ def identity_sources(root: Path, globs: tuple[str, ...]) -> list[Path]:
                 text = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if "Identity.v1" in text or "introspect_token" in text or "issue_grant" in text:
+            by_path = "identity" in p.as_posix().lower() and "peer" not in p.as_posix().lower()
+            by_content = "Identity.v1" in text or "introspect_token" in text or "issue_grant" in text
+            if by_path or by_content:
                 hits.append(p)
     return hits
 
