@@ -296,3 +296,85 @@ class TestPreimageShape:
         schema = pa.schema(fields)
         roundtripped = pa.ipc.read_schema(pa.py_buffer(schema.serialize()))
         assert schema_tokens(schema) == schema_tokens(roundtripped)
+
+
+class TestIdentityV1IsACrossPortVector:
+    """``vgi_rpc.Identity.v1``'s digests, pinned as the ports' shared vector.
+
+    Identity is the first protocol every port implements from a written
+    contract rather than by translating the reference line by line, so these
+    three digests are what the six ports assert against.  Pinning them here
+    keeps the reference honest: if a change to the codec or the type tokens
+    moves Identity's shape, this fails in the port that defines the vector
+    rather than in six ports that copied it.
+
+    The two single-method digests are not decoration.  A method whose hook the
+    deployment did not configure is *not hosted at all*, and the binding's
+    method set -- and so its hash -- narrows with it.  A port that instead
+    hosted a method that refuses would produce the both-methods digest for a
+    server that cannot mint, which is precisely the "routed-and-refusing"
+    shape the design rejects.  Only a narrowed digest distinguishes them.
+    """
+
+    #: Both methods hosted.
+    BOTH = "8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5"
+    #: Only ``introspect_token`` -- a worker that resolves but does not mint.
+    INTROSPECT_ONLY = "27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385"
+    #: Only ``issue_grant`` -- a worker that mints but does not resolve.
+    GRANT_ONLY = "c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8"
+
+    @staticmethod
+    def _methods(*only: str) -> dict[str, Any]:
+        from vgi_rpc.rpc._token_identity import Identity
+        from vgi_rpc.rpc._types import rpc_methods
+
+        methods = rpc_methods(Identity)
+        return {k: v for k, v in methods.items() if not only or k in only}
+
+    def test_both_methods(self) -> None:
+        """A deployment offering both methods hashes to the shared vector."""
+        from vgi_rpc.rpc._token_identity import Identity
+
+        assert compute_protocol_hash(Identity.protocol_name, self._methods()) == self.BOTH
+
+    def test_narrowed_to_introspect_token(self) -> None:
+        """A worker that resolves but cannot mint hosts one method, and says so."""
+        from vgi_rpc.rpc._token_identity import Identity
+
+        digest = compute_protocol_hash(Identity.protocol_name, self._methods("introspect_token"))
+        assert digest == self.INTROSPECT_ONLY
+        assert digest != self.BOTH
+
+    def test_narrowed_to_issue_grant(self) -> None:
+        """A worker that mints but cannot resolve hosts one method, and says so."""
+        from vgi_rpc.rpc._token_identity import Identity
+
+        digest = compute_protocol_hash(Identity.protocol_name, self._methods("issue_grant"))
+        assert digest == self.GRANT_ONLY
+        assert digest != self.BOTH
+
+    def test_scopes_declares_a_nullable_list_item(self) -> None:
+        """Arrow treats child nullability as part of the type, so this is the hash.
+
+        Called out because it is the single most portable mistake here: a port
+        that spells the item non-nullable describes a surface the reference
+        does not have, and TypeScript shipped exactly that across every list
+        type before the canonical preimage could show it.
+        """
+        from vgi_rpc.rpc._token_identity import Identity
+
+        entry = next(
+            m
+            for m in protocol_description(Identity.protocol_name, self._methods())["methods"]
+            if m["name"] == "issue_grant"
+        )
+        scopes = next(p for p in entry["params"] if p["name"] == "scopes")
+        assert scopes["type"] == "list<item?:utf8>"
+
+    def test_the_preimage_is_diffable_by_a_failing_port(self) -> None:
+        """A port whose digest disagrees should be able to diff JSON, not guess."""
+        from vgi_rpc.rpc._token_identity import Identity
+
+        blob = canonical_json(protocol_description(Identity.protocol_name, self._methods()))
+        assert json.loads(blob)["protocol"] == "vgi_rpc.Identity.v1"
+        assert [m["name"] for m in json.loads(blob)["methods"]] == ["introspect_token", "issue_grant"]
