@@ -202,15 +202,18 @@ def main() -> None:
 
         shape: list[str] = []
         for method in sorted(set(reference.methods) & set(desc.methods)):
-            a, b = reference.methods[method], desc.methods[method]
-            if a.method_type != b.method_type:
-                shape.append(f"{method}: method_type {a.method_type.value} vs {b.method_type.value}")
-            elif a.params_schema != b.params_schema:
-                shape.append(f"{method}: params schema differs")
-            elif a.has_return != b.has_return:
-                shape.append(f"{method}: has_return {a.has_return} vs {b.has_return}")
-            elif a.has_return and a.result_schema != b.result_schema:
-                shape.append(f"{method}: result schema differs")
+            # Named in the same order as the heading above: this port first,
+            # then the reference. Getting that backwards sends a reader to fix
+            # the wrong side.
+            port, ref = desc.methods[method], reference.methods[method]
+            if port.method_type != ref.method_type:
+                shape.append(f"{method}: method_type {port.method_type.value} vs {ref.method_type.value}")
+            elif port.has_return != ref.has_return:
+                shape.append(f"{method}: has_return {port.has_return} vs {ref.has_return}")
+            elif port.params_schema != ref.params_schema:
+                shape.append(f"{method}: params {port.params_schema} vs {ref.params_schema}")
+            elif port.has_return and port.result_schema != ref.result_schema:
+                shape.append(f"{method}: result {port.result_schema} vs {ref.result_schema}")
         if shape:
             failed = True
             print()
