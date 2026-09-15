@@ -261,6 +261,19 @@ fires.
 rejection can only have come from the guard, and assert the hook was never
 reached. That second assertion is the half that fails when the guard is skipped.
 
+**The hole tracks exactly where uniformity applies.** Measured across the ports:
+the rate limit and the freshness check were already soundly tested everywhere,
+because their refusals are distinguishable by type or by message. Only guards
+whose refusal collapses into the *uniform* `token_unresolved` answer -- the
+length cap and the JWS trap -- can be tested vacuously. That is the rule for
+deciding where to look first in a port you have not audited.
+
+Watch for the subtler form too: a test can pass for a reason its name disclaims.
+C#'s `AuthorizationPrecedesTheLengthCheck` asserts the allowlist refusal, which
+fires first whatever the cap does, so despite its name it never touched the cap.
+A test whose name claims one property while asserting another is worse than a
+missing test, because it reads as coverage in review.
+
 **Mutation-check every guard test.** Break the guard on purpose and confirm the
 test goes red. A guard test that passes against a deliberately broken guard is
 worse than no test, because it is counted as coverage. Every port should do this
