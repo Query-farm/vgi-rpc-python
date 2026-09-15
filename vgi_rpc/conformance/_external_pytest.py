@@ -48,6 +48,7 @@ def _request_body(method_name: str, **kwargs: object) -> bytes:
         method_name,
         info.params_schema,
         kwargs,
+        protocol=vars(ConformanceService).get("protocol_name") or ConformanceService.__name__,
         protocol_version=version if isinstance(version, str) else None,
     )
     return buf.getvalue()

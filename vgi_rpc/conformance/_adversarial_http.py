@@ -18,7 +18,13 @@ import pytest
 from pyarrow import ipc
 
 from vgi_rpc.conformance._protocol import ConformanceService
-from vgi_rpc.metadata import PROTOCOL_VERSION_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+from vgi_rpc.metadata import (
+    PROTOCOL_KEY,
+    PROTOCOL_VERSION_KEY,
+    REQUEST_VERSION,
+    REQUEST_VERSION_KEY,
+    RPC_METHOD_KEY,
+)
 from vgi_rpc.rpc import RpcError, _dispatch_log_or_error, _drain_stream, rpc_methods
 from vgi_rpc.utils import IpcValidation, ValidatedReader
 
@@ -32,6 +38,8 @@ pytestmark = pytest.mark.timeout(5)
 _CONFORMANCE_PROTOCOL = "ConformanceService"
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 _PROTOCOL_VERSION = vars(ConformanceService)["protocol_version"]
+#: The routing key every request must carry.
+_PROTOCOL_NAME = vars(ConformanceService).get("protocol_name") or ConformanceService.__name__
 
 _METHOD_VALUES: dict[str, dict[str, object]] = {
     "add_floats": {"a": 1.0, "b": 2.0},
@@ -74,6 +82,13 @@ def _request_body(
         RPC_METHOD_KEY: method_name.encode(),
         REQUEST_VERSION_KEY: REQUEST_VERSION,
         PROTOCOL_VERSION_KEY: str(_PROTOCOL_VERSION).encode(),
+        # The routing key is required on every request. Omitting it here made
+        # these probes test a shape no conformant client emits: a server that
+        # correctly refuses an unrouted request failed the *recovery* calls
+        # too, so one missing key read as dozens of unrelated contract
+        # failures. Mutating it is a deliberate probe (`missing_protocol`);
+        # omitting it by accident is not.
+        PROTOCOL_KEY: _PROTOCOL_NAME.encode(),
     }
     if metadata_mutation == "missing_method":
         del metadata[RPC_METHOD_KEY]
@@ -81,6 +96,8 @@ def _request_body(
         del metadata[REQUEST_VERSION_KEY]
     elif metadata_mutation == "wrong_request_version":
         metadata[REQUEST_VERSION_KEY] = b"999"
+    elif metadata_mutation == "missing_protocol":
+        del metadata[PROTOCOL_KEY]
     elif metadata_mutation == "non_utf8_method":
         metadata[RPC_METHOD_KEY] = b"\xff\xfe"
     elif metadata_mutation is not None:
