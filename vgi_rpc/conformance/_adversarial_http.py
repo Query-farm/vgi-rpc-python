@@ -313,6 +313,18 @@ class TestAdversarialHttpRequestContract:
             f"({resp.status_code}). On HTTP the path segment resolves the binding, so "
             f"absent is the single-carrier case, not an error."
         )
+        # The status alone proves nothing: this protocol's error envelope rides
+        # *inside* a 200, so a request admitted at the routing boundary and then
+        # refused before dispatch looks identical to one that ran. Read the value
+        # back -- a call that actually reached the method is the only thing that
+        # distinguishes "accepted" from "rejected politely".
+        batch = ipc.open_stream(BytesIO(resp.content)).read_next_batch()
+        assert "result" in batch.schema.names, (
+            f"the request was admitted but never dispatched: HTTP 200 whose batch carries "
+            f"{batch.schema.names} rather than a result. Accepting an absent routing key "
+            f"means running the call, not returning an error envelope with a success status."
+        )
+        assert batch.column("result")[0].as_py() == pytest.approx(3.0)
 
     @pytest.mark.parametrize(
         ("invalid_schema", "missing_method"),
