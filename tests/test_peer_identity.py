@@ -227,8 +227,8 @@ def test_all_of_binds_application_principal_into_state_tokens() -> None:
     policy = all_of_peer_identities("spiffe", identity_linker=lambda _auth, _identities: None)
     alice = policy(evidence, AuthContext(domain="bearer", authenticated=True, principal="alice"))
     bob = policy(evidence, AuthContext(domain="bearer", authenticated=True, principal="bob"))
-    assert _compute_aad(alice) != _compute_aad(bob)
-    assert _compute_call_aad(alice) != _compute_call_aad(bob)
+    assert _compute_aad(alice, protocol="TestProto") != _compute_aad(bob, protocol="TestProto")
+    assert _compute_call_aad(alice, protocol="TestProto") != _compute_call_aad(bob, protocol="TestProto")
 
 
 def test_all_of_requires_an_identity_linker() -> None:
@@ -245,8 +245,8 @@ def test_required_peer_evidence_binds_anonymous_state_tokens() -> None:
     policy = require_peer_identity("spiffe")
     first_auth = policy(first, AuthContext.anonymous())
     second_auth = policy(second, AuthContext.anonymous())
-    assert _compute_aad(first_auth) != _compute_aad(second_auth)
-    assert _compute_call_aad(first_auth) != _compute_call_aad(second_auth)
+    assert _compute_aad(first_auth, protocol="TestProto") != _compute_aad(second_auth, protocol="TestProto")
+    assert _compute_call_aad(first_auth, protocol="TestProto") != _compute_call_aad(second_auth, protocol="TestProto")
 
 
 def test_required_peer_evidence_accepts_capability_only_evidence() -> None:

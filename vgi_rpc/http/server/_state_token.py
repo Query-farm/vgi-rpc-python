@@ -179,7 +179,15 @@ def _unpack_plaintext(data: bytes) -> bytes:
         ) from exc
 
 
-def _compute_call_aad(auth: AuthContext | None) -> bytes:
+#: Scope for tokens that belong to the server rather than to any one protocol
+#: (session tokens, which live at the un-namespaced prefix).  Spelled with a
+#: leading NUL so it cannot collide with a protocol name, which must start
+#: ``[A-Za-z_]``.  Passing it is deliberate: every AAD call site has to name
+#: its scope, so a new one cannot silently inherit an unbound token.
+SERVER_SCOPE = "\x00server"
+
+
+def _compute_call_aad(auth: AuthContext | None, *, protocol: str) -> bytes:
     r"""Build the AAD that binds a *call* token to its issuing principal.
 
     Identical in shape to :func:`_compute_aad` but with a distinct
@@ -190,27 +198,31 @@ def _compute_call_aad(auth: AuthContext | None) -> bytes:
 
     Args:
         auth: The authentication context for the current request.
+        protocol: Wire name of the protocol that owns this stream, or
+            :data:`SERVER_SCOPE` for a token that belongs to the server rather
+            than to any one protocol.
 
     Returns:
         Associated-data bytes for the AEAD seal/open call.
 
     """
     binding = auth.claims.get("peer_evidence_binding") if auth is not None else None
-    prefix = b"vgi_rpc.call.v2\x00" if isinstance(binding, str) and binding else b"vgi_rpc.call.v1\x00"
+    prefix = b"vgi_rpc.call.v4\x00" if isinstance(binding, str) and binding else b"vgi_rpc.call.v3\x00"
+    scope = b"\x00" + protocol.encode()
     if auth is None or not auth.authenticated:
         aad = prefix + b"\x00anonymous"
         if isinstance(binding, str) and binding:
             aad += b"\x00" + binding.encode()
-        return aad
+        return aad + scope
     domain = (auth.domain or "").encode()
     principal = (auth.principal or "").encode()
     aad = prefix + b"\x01" + domain + b"\x00" + principal
     if isinstance(binding, str) and binding:
         aad += b"\x00" + binding.encode()
-    return aad
+    return aad + scope
 
 
-def _compute_aad(auth: AuthContext | None) -> bytes:
+def _compute_aad(auth: AuthContext | None, *, protocol: str) -> bytes:
     r"""Build the AAD that binds a state token to its issuing principal.
 
     Wire format::
@@ -228,26 +240,37 @@ def _compute_aad(auth: AuthContext | None) -> bytes:
     therefore prefix-unambiguous with respect to the variable-length
     identity tail.
 
+    The protocol is part of the AAD rather than the plaintext so a
+    cross-protocol continuation fails the AEAD tag check -- it is rejected as
+    an invalid token, with no comparison code to get wrong and nothing to
+    forget on the cache-hit path, where the *call* token is never opened at
+    all.  The cursor token is always opened first, so binding it here covers
+    both paths.
+
     Args:
         auth: The authentication context for the current request.
+        protocol: Wire name of the protocol that owns this stream, or
+            :data:`SERVER_SCOPE` for a token that belongs to the server rather
+            than to any one protocol.
 
     Returns:
         Associated-data bytes for the AEAD seal/open call.
 
     """
     binding = auth.claims.get("peer_evidence_binding") if auth is not None else None
-    prefix = b"vgi_rpc.state.v5\x00" if isinstance(binding, str) and binding else b"vgi_rpc.state.v4\x00"
+    prefix = b"vgi_rpc.state.v7\x00" if isinstance(binding, str) and binding else b"vgi_rpc.state.v6\x00"
+    scope = b"\x00" + protocol.encode()
     if auth is None or not auth.authenticated:
         aad = prefix + b"\x00anonymous"
         if isinstance(binding, str) and binding:
             aad += b"\x00" + binding.encode()
-        return aad
+        return aad + scope
     domain = (auth.domain or "").encode()
     principal = (auth.principal or "").encode()
     aad = prefix + b"\x01" + domain + b"\x00" + principal
     if isinstance(binding, str) and binding:
         aad += b"\x00" + binding.encode()
-    return aad
+    return aad + scope
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +527,7 @@ def _mint_call_token(
     stream_id: str,
     response_limit_bytes: int | None = None,
     *,
+    protocol: str,
     now: int | None = None,
 ) -> tuple[bytes, bytes, bytes]:
     """Serialize and seal a stream's call token.  Called once, by ``/init``.
@@ -514,6 +538,8 @@ def _mint_call_token(
         input_schema: Per-stream input schema (frozen at init).
         token_key: Master AEAD key from the server config.
         auth: Authenticated identity for AAD binding.
+        protocol: Wire name of the protocol that owns this stream, bound into
+            the AAD so a continuation cannot cross protocols.
         stream_id: Chain-correlation id.
         response_limit_bytes: Effective hard response limit sealed at init.
         now: Override for the baked-in timestamp; default ``time.time()``.
@@ -534,7 +560,7 @@ def _mint_call_token(
         call_id,
         stream_id,
         token_key,
-        _compute_call_aad(auth),
+        _compute_call_aad(auth, protocol=protocol),
         int(time.time()) if now is None else now,
         response_limit_bytes,
     )
@@ -649,6 +675,7 @@ def _mint_cursor_token(
     token_key: bytes,
     auth: AuthContext | None,
     *,
+    protocol: str,
     now: int | None = None,
 ) -> tuple[bytes, bytes]:
     """Serialize the cursor state and seal it into a continuation token.
@@ -664,6 +691,8 @@ def _mint_cursor_token(
         call_id: The call id this stream's cursor is bound to.
         token_key: Master AEAD key from the server config.
         auth: Authenticated identity for AAD binding.
+        protocol: Wire name of the protocol that owns this stream, bound into
+            the AAD so a continuation cannot cross protocols.
         now: Override for the baked-in timestamp; default ``time.time()``.
 
     Returns:
@@ -677,7 +706,7 @@ def _mint_cursor_token(
         state_bytes,
         call_id,
         token_key,
-        _compute_aad(auth),
+        _compute_aad(auth, protocol=protocol),
         int(time.time()) if now is None else now,
     )
     return token, state_bytes
@@ -766,8 +795,8 @@ def _resolve_state_cls(
 
 def _resolve_state_types(
     server: RpcServer,
-) -> dict[str, _StateInfo]:
-    """Introspect server implementation to map method names to concrete state types.
+) -> dict[tuple[str, str], _StateInfo]:
+    """Introspect each binding's implementation to map methods to state types.
 
     Examines the return type hints of each stream method on the
     implementation (not the protocol) to extract the concrete
@@ -777,40 +806,50 @@ def _resolve_state_types(
     ordered tuple of classes so token state can carry a compact
     numeric tag instead of class names.
 
+    Keyed by ``(protocol_name, method_name)``, and introspecting the
+    implementation that owns each binding.  A bare method name is not a key
+    here: two protocols may each declare a stream ``fetch`` with unrelated
+    state types, and union tag indices are positional -- so resolving one
+    against the other's state info mints a mis-tagged cursor rather than
+    failing.
+
     Args:
-        server: The ``RpcServer`` whose implementation to introspect.
+        server: The ``RpcServer`` whose bindings to introspect.
 
     Returns:
-        Mapping of method name to state info (single class or union dict).
+        Mapping of ``(protocol, method)`` to state info (single class or union).
 
     """
-    result: dict[str, _StateInfo] = {}
-    for name, info in server.methods.items():
-        if info.method_type != MethodType.STREAM:
-            continue
-        impl_method = getattr(server.implementation, name, None)
-        if impl_method is None:
-            continue
-        try:
-            hints = get_type_hints(impl_method)
-        except (NameError, AttributeError) as exc:
-            msg = f"Cannot resolve type hints for stream method {name!r}: {exc}"
-            raise TypeError(msg) from exc
-        return_hint = hints.get("return")
-        if return_hint is None:
-            continue
-        origin = get_origin(return_hint)
-        if origin is Stream:
-            args = get_args(return_hint)
-            if not args:
+    result: dict[tuple[str, str], _StateInfo] = {}
+    for binding in server.bindings.values():
+        for name, info in binding.methods.items():
+            if info.method_type != MethodType.STREAM:
                 continue
-            state_arg = args[0]
-            if isinstance(state_arg, type) and issubclass(state_arg, StreamState):
-                result[name] = state_arg
-            elif isinstance(state_arg, _types.UnionType):
-                members = tuple(t for t in get_args(state_arg) if isinstance(t, type) and issubclass(t, StreamState))
-                if len(members) == 1:
-                    result[name] = members[0]
-                elif members:
-                    result[name] = members
+            impl_method = getattr(binding.impl, name, None)
+            if impl_method is None:
+                continue
+            try:
+                hints = get_type_hints(impl_method)
+            except (NameError, AttributeError) as exc:
+                msg = f"Cannot resolve type hints for stream method {name!r}: {exc}"
+                raise TypeError(msg) from exc
+            return_hint = hints.get("return")
+            if return_hint is None:
+                continue
+            origin = get_origin(return_hint)
+            if origin is Stream:
+                args = get_args(return_hint)
+                if not args:
+                    continue
+                state_arg = args[0]
+                if isinstance(state_arg, type) and issubclass(state_arg, StreamState):
+                    result[(binding.name, name)] = state_arg
+                elif isinstance(state_arg, _types.UnionType):
+                    members = tuple(
+                        t for t in get_args(state_arg) if isinstance(t, type) and issubclass(t, StreamState)
+                    )
+                    if len(members) == 1:
+                        result[(binding.name, name)] = members[0]
+                    elif members:
+                        result[(binding.name, name)] = members
     return result

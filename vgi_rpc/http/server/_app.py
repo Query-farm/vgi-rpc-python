@@ -195,6 +195,6 @@ class _HttpRpcApp:
         """Delegate to :func:`_app_stream._run_stream_init_sync`."""
         return _dispatchers().stream_init(self, method_name, info, stream)
 
-    def _stream_exchange_sync(self, method_name: str, stream: IOBase | pa.NativeFile) -> ResponseStream:
+    def _stream_exchange_sync(self, info: RpcMethodInfo, stream: IOBase | pa.NativeFile) -> ResponseStream:
         """Delegate to :func:`_app_stream._run_stream_exchange_sync`."""
-        return _dispatchers().stream_exchange(self, method_name, stream)
+        return _dispatchers().stream_exchange(self, info, stream)

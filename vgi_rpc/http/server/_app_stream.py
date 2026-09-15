@@ -219,10 +219,10 @@ def _run_stream_init_sync(
     stats = CallStatistics()
     stats_token = _current_call_stats.set(stats)
     try:
-        state_info = app._state_types.get(method_name)
+        state_info = app._state_types.get((info.protocol_name, info.name))
         if state_info is None:
             raise _RpcHttpError(
-                RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
+                RuntimeError(f"Cannot resolve state type for {info.protocol_name}/{info.name}"),
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
         try:
@@ -320,6 +320,7 @@ def _run_stream_init_sync(
                 auth,
                 stream_id,
                 _current_response_budget.get().response_limit_bytes,
+                protocol=info.protocol_name,
             )
             # Warm the cache with the objects we already hold, so this stream's
             # first continuation does not have to open the token it was just
@@ -415,7 +416,7 @@ def _run_http_producer_init(
         schema=result.output_schema,
         state=result.state,
         input_schema=result.input_schema,
-        method_name=method_name,
+        info=info,
         stream_id=stream_id,
         call_id=call_id,
         call_token=call_token,
@@ -468,6 +469,7 @@ def _run_http_exchange_init(
             call_id,
             app._token_key,
             auth,
+            protocol=info.protocol_name,
         )
         outcome.response_state_bytes = state_bytes
 
@@ -500,7 +502,7 @@ def _run_http_exchange_init(
 
 def _run_stream_exchange_sync(
     app: _HttpRpcApp,
-    method_name: str,
+    info: RpcMethodInfo,
     stream: IOBase | pa.NativeFile,
 ) -> ResponseStream:
     """Run stream exchange synchronously.
@@ -512,13 +514,14 @@ def _run_stream_exchange_sync(
     and exchanges never re-send headers (state is recovered from the
     signed token, which does not include header data).
     """
+    method_name = info.name
     stats = CallStatistics()
     stats_token = _current_call_stats.set(stats)
     try:
-        state_info = app._state_types.get(method_name)
+        state_info = app._state_types.get((info.protocol_name, info.name))
         if state_info is None:
             raise _RpcHttpError(
-                RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
+                RuntimeError(f"Cannot resolve state type for {info.protocol_name}/{info.name}"),
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
@@ -555,7 +558,7 @@ def _run_stream_exchange_sync(
             resolved_call,
             call_id,
             request_state_bytes,
-        ) = _unpack_and_recover_state(app, token, call_token, state_info, auth)
+        ) = _unpack_and_recover_state(app, token, call_token, state_info, info, auth)
         output_schema = resolved_call.output_schema
         input_schema = resolved_call.input_schema
         stream_id = resolved_call.stream_id
@@ -571,12 +574,11 @@ def _run_stream_exchange_sync(
         if not is_producer and not cancel_flag:
             _record_input(input_batch)
 
-        # Resolve method info for hook.  ``_stream_exchange_sync`` is only
-        # reached for known stream methods (``_resources.py`` rejects
-        # unknown methods with 404 before dispatch), so this is always
-        # populated; the cancel branch passes ``info=None`` to its
-        # telemetry shell deliberately, not because info is missing.
-        info = app._server.methods.get(method_name)
+        # ``info`` was resolved from this request's own (protocol, method)
+        # before dispatch and passed in, rather than looked up again by bare
+        # method name here: a continuation must stay on the protocol it
+        # started on, and a bare-name lookup would silently land on whichever
+        # binding declared that name first.
 
         # ``request_state_bytes`` holds the *decrypted plaintext* state — so
         # the access log records a useful audit artifact (and not the
@@ -638,7 +640,7 @@ def _run_stream_exchange_sync(
                     schema=output_schema,
                     state=state_obj,
                     input_schema=input_schema,
-                    method_name=method_name,
+                    info=info,
                     stream_id=stream_id,
                     call_id=call_id,
                     auth=auth,
@@ -683,7 +685,7 @@ def _run_stream_exchange_sync(
                 input_schema=input_schema,
                 input_batch=input_batch,
                 custom_metadata=custom_metadata,
-                method_name=method_name,
+                info=info,
                 call_id=call_id,
                 auth=auth,
                 transport_metadata=transport_metadata,
@@ -702,7 +704,7 @@ def _run_http_exchange_turn(
     input_schema: pa.Schema,
     input_batch: pa.RecordBatch,
     custom_metadata: pa.KeyValueMetadata | None,
-    method_name: str,
+    info: RpcMethodInfo,
     call_id: bytes,
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
@@ -729,11 +731,12 @@ def _run_http_exchange_turn(
     :class:`_RpcHttpError` (status 500) so the telemetry shell records
     them via the ``hook_exc`` path.
     """
+    method_name = info.name
     server_id = app._server.server_id
-    # Continuation paths carry no `info`; the protocol is recovered from the
-    # sealed call token instead (PR 2). Until then this labels with the
-    # server's primary protocol, which is correct for a single-protocol server.
-    protocol_name = app._server.protocol_name
+    # The binding's own name: an access record labelled with the primary
+    # protocol while serving a secondary one is the failure mode that looks
+    # plausible on a dashboard rather than raising anywhere.
+    protocol_name = info.protocol_name or app._server.protocol_name
 
     # External-location resolution on inbound input.  Failures pre-date
     # the method dispatch but still need to surface as 500 to the client.
@@ -797,6 +800,7 @@ def _run_http_exchange_turn(
             call_id,
             app._token_key,
             auth,
+            protocol=info.protocol_name,
         )
         outcome.response_state_bytes = updated_state_bytes
         out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
@@ -878,7 +882,7 @@ def _run_http_producer_turn(
     schema: pa.Schema,
     state: StreamState,
     input_schema: pa.Schema,
-    method_name: str,
+    info: RpcMethodInfo,
     stream_id: str,
     call_id: bytes,
     auth: AuthContext,
@@ -891,6 +895,11 @@ def _run_http_producer_turn(
     call_state_bytes: bytes | None = None,
 ) -> pa.BufferReader:
     """Run one HTTP turn of a producer stream.
+
+    Takes the resolved ``info`` rather than a bare method name because a
+    producer turn mints a cursor token, and the state types that token is
+    tagged against are per binding -- two protocols may each declare a stream
+    of the same name over unrelated state.
 
     A "turn" here means a single HTTP request/response cycle:
 
@@ -920,6 +929,8 @@ def _run_http_producer_turn(
         schema: The output schema for the stream.
         state: The stream state object.
         input_schema: The input schema (stored in the call token).
+        info: The resolved method.  Carries the protocol, which selects the
+            state types this turn's cursor token is tagged against.
         method_name: The RPC method name (for logging context).
         stream_id: The chain-correlation id for this stream.  Generated
             fresh by the init turn and recovered from the inbound call
@@ -974,11 +985,12 @@ def _run_http_producer_turn(
         ``resp.stream``, both of which ``BufferReader`` provides natively.
 
     """
+    method_name = info.name
     server_id = app._server.server_id
-    # Continuation paths carry no `info`; the protocol is recovered from the
-    # sealed call token instead (PR 2). Until then this labels with the
-    # server's primary protocol, which is correct for a single-protocol server.
-    protocol_name = app._server.protocol_name
+    # The binding's own name: an access record labelled with the primary
+    # protocol while serving a secondary one is the failure mode that looks
+    # plausible on a dashboard rather than raising anywhere.
+    protocol_name = info.protocol_name or app._server.protocol_name
     # Native sink — see the note in this function's docstring. `tell()` (used for
     # the max_bytes check below) is supported; `seek()` is not needed on a
     # write-only stream.
@@ -1094,13 +1106,15 @@ def _run_http_producer_turn(
                 if not out.finished:
                     # Serialize the cursor after exactly one transition. The
                     # client must submit another request to advance again.
-                    state_info = app._state_types.get(method_name)
+                    state_info = app._state_types.get((info.protocol_name, info.name))
                     if state_info is None:
                         raise _RpcHttpError(
-                            RuntimeError(f"Cannot resolve state type for method '{method_name}'"),
+                            RuntimeError(f"Cannot resolve state type for {info.protocol_name}/{info.name}"),
                             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
-                    token, state_bytes = _mint_cursor_token(state, state_info, call_id, app._token_key, auth)
+                    token, state_bytes = _mint_cursor_token(
+                        state, state_info, call_id, app._token_key, auth, protocol=info.protocol_name
+                    )
                     outcome.response_state_bytes = state_bytes
                     token_md: dict[bytes, bytes] = {STATE_KEY: token}
                     if call_token is not None:
@@ -1145,6 +1159,7 @@ def _unpack_and_recover_state(
     token: bytes,
     call_token: bytes | None,
     state_info: _StateInfo,
+    info: RpcMethodInfo,
     auth: AuthContext | None,
 ) -> tuple[StreamState, _ResolvedCall, bytes, bytes]:
     """Open a cursor token, resolve its call, and rebuild the state object.
@@ -1173,6 +1188,8 @@ def _unpack_and_recover_state(
             concrete classes for union types.  When a tuple is provided, the
             concrete class is resolved from the numeric tag embedded in
             ``state_bytes``.
+        info: The resolved method, naming the binding whose implementation the
+            recovered state is rehydrated against.
         auth: Authenticated identity for the current request.
 
     Returns:
@@ -1190,12 +1207,14 @@ def _unpack_and_recover_state(
             both tampering and cross-principal replay).
 
     """
-    state_bytes, call_id = _open_cursor_token(token, app._token_key, _compute_aad(auth), app._token_ttl)
+    state_bytes, call_id = _open_cursor_token(
+        token, app._token_key, _compute_aad(auth, protocol=info.protocol_name), app._token_ttl
+    )
 
     now = time.time()
     resolved = app._call_state_cache.get(call_id, auth, now)
     if resolved is None:
-        resolved = _resolve_call_from_token(app, call_token, call_id, state_info, auth)
+        resolved = _resolve_call_from_token(app, call_token, call_id, state_info, info, auth)
         app._call_state_cache.put(call_id, auth, resolved, now)
 
     if resolved.stream_id:
@@ -1205,7 +1224,10 @@ def _unpack_and_recover_state(
         state_cls, raw_state_bytes = _resolve_state_cls(state_bytes, state_info)
         state_obj = _deserialize_state_bytes(state_cls, raw_state_bytes, app._server.ipc_validation)
         state_obj.bind_call_state(resolved.call_state)
-        state_obj.rehydrate(app._server.implementation)
+        # The owning binding's implementation -- a secondary protocol's state
+        # rehydrated against the primary object would reattach to the wrong
+        # connections, caches and handles.
+        state_obj.rehydrate(app._server.implementation_for(info))
     except Exception as exc:
         raise _RpcHttpError(
             RuntimeError(f"Failed to deserialize state: {exc}"),
@@ -1235,6 +1257,7 @@ def _resolve_call_from_token(
     call_token: bytes | None,
     expected_call_id: bytes,
     state_info: _StateInfo,
+    info: RpcMethodInfo,
     auth: AuthContext | None,
 ) -> _ResolvedCall:
     """Open a client-supplied call token — the cache-miss path.
@@ -1243,6 +1266,8 @@ def _resolve_call_from_token(
         app: The HTTP app providing the AEAD key, TTL, and state types.
         call_token: The sealed call token from ``CALL_STATE_KEY``.
         expected_call_id: The call id the cursor token named.
+        info: The resolved method, naming the protocol bound into the token's
+            AAD -- so a token minted under another protocol fails to open.
         state_info: The method's state class (or union tuple), which
             declares the call-state type to deserialize into.
         auth: Authenticated identity for the current request.
@@ -1270,7 +1295,9 @@ def _resolve_call_from_token(
         token_call_id,
         stream_id,
         response_limit_bytes,
-    ) = _open_call_token(call_token, app._token_key, _compute_call_aad(auth), app._token_ttl)
+    ) = _open_call_token(
+        call_token, app._token_key, _compute_call_aad(auth, protocol=info.protocol_name), app._token_ttl
+    )
     # Constant-time compare: the ids are both server-minted and already
     # authenticated, so this is belt-and-braces against a client pairing two
     # of its own tokens from different streams.

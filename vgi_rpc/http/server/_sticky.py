@@ -71,7 +71,7 @@ from .._common import (
     SESSION_HEADER,
 )
 from ._responses import _set_error_response
-from ._state_token import _compute_aad
+from ._state_token import SERVER_SCOPE, _compute_aad
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -501,11 +501,13 @@ class _StickyMiddleware:
         # Resolve any presented session token. AAD is the same shape as
         # stream tokens — bound to the request's authenticated identity —
         # so cross-principal replay fails decryption at the crypto layer.
+        # Scoped to the server rather than a protocol: `__session__` lives at
+        # the un-namespaced prefix and a session outlives any one call.
         token_header = req.get_header(SESSION_HEADER)
         if token_header:
             try:
                 auth, _ = _get_auth_and_metadata()
-                aad = _compute_aad(auth)
+                aad = _compute_aad(auth, protocol=SERVER_SCOPE)
                 server_id, session_id, _expires_at = _open_session_token(
                     token_header.strip(),
                     self._token_key,
@@ -580,7 +582,7 @@ class _StickyMiddleware:
         """Register *state* in the registry and seal a token bound to the principal."""
         session_id, expires_at = self._registry.open(state, ttl, principal_key)
         auth, _ = _get_auth_and_metadata()
-        aad = _compute_aad(auth)
+        aad = _compute_aad(auth, protocol=SERVER_SCOPE)
         token = _seal_session_token(
             server_id=_expected_server_id(req),
             session_id=session_id,
@@ -707,7 +709,7 @@ class _SessionResource:
             resp.status = HTTPStatus.OK
             return
         auth, _ = _get_auth_and_metadata()
-        aad = _compute_aad(auth)
+        aad = _compute_aad(auth, protocol=SERVER_SCOPE)
         try:
             server_id, session_id, _expires_at = _open_session_token(
                 token_header.strip(),

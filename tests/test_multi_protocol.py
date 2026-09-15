@@ -367,3 +367,77 @@ class TestVersionGate:
     def test_absent_version_against_a_versioned_binding_is_an_error(self) -> None:
         """Stripping the field must not silently disable the gate."""
         assert "did not send" in self._gate(_server(), "status", b"demo.Beta.v1", None)
+
+
+class TestStreamIsolation:
+    """A stream's continuation cannot be replayed against another protocol.
+
+    The protocol is bound into the AAD of both the cursor and call tokens
+    rather than compared in application code, so a cross-protocol
+    continuation fails the AEAD tag check -- rejected as an invalid token,
+    which is what a client presenting a token for the wrong endpoint is.
+    """
+
+    @staticmethod
+    def _aads(protocol: str) -> tuple[bytes, bytes]:
+        from vgi_rpc.http.server._state_token import _compute_aad, _compute_call_aad
+
+        return (
+            _compute_aad(None, protocol=protocol),
+            _compute_call_aad(None, protocol=protocol),
+        )
+
+    def test_cursor_token_does_not_open_under_another_protocol(self) -> None:
+        """The cache-hit path's guard: the cursor is always opened first."""
+        import pytest
+
+        from vgi_rpc.http.server._state_token import _open_cursor_token, _seal_cursor_token
+
+        key = b"\x11" * 32
+        call_id = b"\x22" * 16
+        token = _seal_cursor_token(b"state", call_id, key, self._aads("demo.Alpha.v1")[0], 1000)
+
+        assert _open_cursor_token(token, key, self._aads("demo.Alpha.v1")[0]) == (b"state", call_id)
+        with pytest.raises(Exception, match="verification failed"):
+            _open_cursor_token(token, key, self._aads("demo.Beta.v1")[0])
+
+    def test_call_token_does_not_open_under_another_protocol(self) -> None:
+        """The cache-miss path's guard, for a node that never saw ``/init``."""
+        import pytest
+
+        from vgi_rpc.http.server._state_token import _open_call_token, _seal_call_token
+
+        key = b"\x33" * 32
+        call_id = b"\x44" * 16
+        token = _seal_call_token(b"c", "T", b"sch", b"in", call_id, "sid", key, self._aads("demo.Alpha.v1")[1], 1000)
+
+        assert _open_call_token(token, key, self._aads("demo.Alpha.v1")[1])[4] == call_id
+        with pytest.raises(Exception, match="verification failed"):
+            _open_call_token(token, key, self._aads("demo.Beta.v1")[1])
+
+    def test_server_scoped_tokens_are_not_protocol_tokens(self) -> None:
+        """A session token is server-scoped; its AAD must not match any protocol.
+
+        ``SERVER_SCOPE`` leads with a NUL, which the protocol-name grammar
+        forbids, so no protocol can ever collide with it.
+        """
+        from vgi_rpc.http.server._state_token import SERVER_SCOPE
+
+        assert SERVER_SCOPE.startswith("\x00")
+        assert self._aads(SERVER_SCOPE)[0] != self._aads("demo.Alpha.v1")[0]
+
+    def test_state_types_are_keyed_per_binding(self) -> None:
+        """Two protocols may each declare a stream of the same name.
+
+        Union state tags are positional, so resolving one protocol's stream
+        against the other's state info mints a mis-tagged cursor rather than
+        failing -- which is why the key is the pair, not the method name.
+        """
+        srv = _server()
+        assert all(isinstance(k, tuple) and len(k) == 2 for k in _state_types(srv))
+
+
+def _state_types(srv: RpcServer) -> dict[tuple[str, str], object]:
+    from vgi_rpc.http.server._state_token import _resolve_state_types
+
+    return dict(_resolve_state_types(srv))

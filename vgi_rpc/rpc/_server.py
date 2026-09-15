@@ -809,6 +809,15 @@ class RpcServer:
         """Return method metadata for this server's protocol."""
         return self._methods
 
+    @property
+    def bindings(self) -> Mapping[str, _ProtocolBinding]:
+        """The protocols this server hosts, keyed by wire name, primary first.
+
+        Framework-internal: dispatch, state-type resolution and telemetry read
+        it.  Ordinary callers want ``methods`` or ``implementation_for``.
+        """
+        return self._bindings
+
     def implementation_for(self, info: RpcMethodInfo) -> object:
         """Return the implementation that owns *info*'s method.
 
@@ -994,19 +1003,38 @@ class RpcServer:
         ``transport_kind`` unset and the next request re-fires the hook
         rather than silently skipping it.
 
-        Hook exceptions are logged via ``_logger.exception`` and propagate.
+        Fires on every binding's implementation, deduplicated by object
+        identity: one object may implement several protocols, and it should
+        get one startup call rather than one per protocol it happens to serve.
+        Order is binding-registration order, primary first.
+
+        Hook exceptions are logged via ``_logger.exception`` and propagate, so
+        one binding's failed startup aborts the serve rather than leaving the
+        server half-initialised.  Implementations whose hook already ran are
+        not rolled back — a hook is expected to be idempotent for the retry
+        the un-committed bind state invites.
         """
         with self._transport_lock:
             if self._transport_kind == kind and self._transport_capabilities == capabilities:
                 return
-            hook = getattr(self._impl, "on_serve_start", None)
-            if callable(hook):
+            seen: set[int] = set()
+            for binding in self._bindings.values():
+                if id(binding.impl) in seen:
+                    continue
+                seen.add(id(binding.impl))
+                hook = getattr(binding.impl, "on_serve_start", None)
+                if not callable(hook):
+                    continue
                 try:
                     hook(kind)
                 except Exception:
                     _logger.exception(
                         "on_serve_start hook raised; aborting serve",
-                        extra={"server_id": self._server_id, "transport_kind": kind.value},
+                        extra={
+                            "server_id": self._server_id,
+                            "transport_kind": kind.value,
+                            "protocol": binding.name,
+                        },
                     )
                     raise
             self._transport_kind = kind

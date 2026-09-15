@@ -27,7 +27,7 @@ from pyarrow import ipc
 
 from tests._aiomock import CallbackResult, aiointercept
 from tests._aiomock import mock_aiohttp as aiointercept_ctx
-from tests._paths import fixture_path
+from tests._paths import FIXTURE, fixture_path
 from vgi_rpc.external import (
     ExternalLocationConfig,
     UploadUrl,
@@ -663,11 +663,14 @@ class TestStateTokenStateEncoding:
         old_time = int(time.time()) - 7200
         # The cursor token is opened first, so its TTL is what a stale
         # continuation trips on — before the call token is ever consulted.
+        # Sealed under the protocol this request actually addresses: the AAD
+        # binds the two, so any other name here would fail the tag check first
+        # and the test would never reach the expiry it is about.
         token = _seal_cursor_token(
             state_bytes=b"",
             call_id=b"\x00" * 16,
             token_key=key,
-            aad=_compute_aad(None),
+            aad=_compute_aad(None, protocol=FIXTURE),
             created_at=old_time,
         )
 
@@ -709,7 +712,7 @@ class TestStateTokenStateEncoding:
             state_bytes=_EMPTY_SCHEMA.serialize().to_pybytes(),
             call_id=b"\x00" * 16,
             token_key=key,
-            aad=_compute_aad(None),
+            aad=_compute_aad(None, protocol="TestProto"),
             created_at=old_time,
         )
 
@@ -750,7 +753,7 @@ class TestStateTokenStateEncoding:
             state_bytes=b"\x00\xff\xfe",
             call_id=b"\x01" * 16,
             token_key=b"\x03" * 32,
-            aad=_compute_aad(None),
+            aad=_compute_aad(None, protocol="TestProto"),
             created_at=0,
         )
         call = _seal_call_token(
@@ -761,7 +764,7 @@ class TestStateTokenStateEncoding:
             call_id=b"\x01" * 16,
             stream_id="abc",
             token_key=b"\x03" * 32,
-            aad=_compute_call_aad(None),
+            aad=_compute_call_aad(None, protocol="TestProto"),
             created_at=0,
         )
         # Tokens must be valid UTF-8 (base64 produces only ASCII)
@@ -782,9 +785,9 @@ class TestStateTokenStateEncoding:
         key = b"\x04" * 32
         call_id = b"\x0f" * 16
 
-        cursor = _seal_cursor_token(b"test-state-data", call_id, key, _compute_aad(None), 1000)
+        cursor = _seal_cursor_token(b"test-state-data", call_id, key, _compute_aad(None, protocol="TestProto"), 1000)
         cursor.decode("utf-8")  # valid UTF-8
-        state, recovered_call_id = _open_cursor_token(cursor, key, _compute_aad(None))
+        state, recovered_call_id = _open_cursor_token(cursor, key, _compute_aad(None, protocol="TestProto"))
         assert state == b"test-state-data"
         assert recovered_call_id == call_id
 
@@ -796,11 +799,11 @@ class TestStateTokenStateEncoding:
             call_id,
             "sid-1",
             key,
-            _compute_call_aad(None),
+            _compute_call_aad(None, protocol="TestProto"),
             1000,
         )
         call.decode("utf-8")  # valid UTF-8
-        assert _open_call_token(call, key, _compute_call_aad(None)) == (
+        assert _open_call_token(call, key, _compute_call_aad(None, protocol="TestProto")) == (
             b"test-call-state",
             "MyCallState",
             b"test-schema-data",
@@ -828,13 +831,15 @@ class TestStateTokenStateEncoding:
 
         key = b"\x0a" * 32
         call_id = b"\x0b" * 16
-        cursor = _seal_cursor_token(b"s", call_id, key, _compute_aad(None), 1000)
-        call = _seal_call_token(b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(None), 1000)
+        cursor = _seal_cursor_token(b"s", call_id, key, _compute_aad(None, protocol="TestProto"), 1000)
+        call = _seal_call_token(
+            b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(None, protocol="TestProto"), 1000
+        )
 
         with pytest.raises(Exception, match="verification failed"):
-            _open_call_token(cursor, key, _compute_call_aad(None))
+            _open_call_token(cursor, key, _compute_call_aad(None, protocol="TestProto"))
         with pytest.raises(Exception, match="verification failed"):
-            _open_cursor_token(call, key, _compute_aad(None))
+            _open_cursor_token(call, key, _compute_aad(None, protocol="TestProto"))
 
     def test_tampered_nonce_fails_decrypt(self) -> None:
         """Flipping a byte in the nonce makes AEAD authentication fail."""
@@ -847,7 +852,7 @@ class TestStateTokenStateEncoding:
         )
 
         key = b"\x05" * 32
-        aad = _compute_aad(None)
+        aad = _compute_aad(None, protocol="TestProto")
         token = _seal_cursor_token(b"s", b"\x00" * 16, key, aad, 1000)
 
         raw = bytearray(base64.b64decode(token))
@@ -869,7 +874,7 @@ class TestStateTokenStateEncoding:
         )
 
         key = b"\x06" * 32
-        aad = _compute_aad(None)
+        aad = _compute_aad(None, protocol="TestProto")
         token = _seal_cursor_token(b"state", b"\x00" * 16, key, aad, 1000)
 
         raw = bytearray(base64.b64decode(token))
@@ -897,25 +902,27 @@ class TestStateTokenStateEncoding:
         alice = AuthContext(domain="d", authenticated=True, principal="alice")
         bob = AuthContext(domain="d", authenticated=True, principal="bob")
 
-        token = _seal_cursor_token(b"s", call_id, key, _compute_aad(alice), 1000)
+        token = _seal_cursor_token(b"s", call_id, key, _compute_aad(alice, protocol="TestProto"), 1000)
 
         # Alice's own AAD round-trips fine.
-        assert _open_cursor_token(token, key, _compute_aad(alice)) == (b"s", call_id)
+        assert _open_cursor_token(token, key, _compute_aad(alice, protocol="TestProto")) == (b"s", call_id)
 
         # Bob cannot open Alice's token (same domain, different principal).
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_cursor_token(token, key, _compute_aad(bob))
+            _open_cursor_token(token, key, _compute_aad(bob, protocol="TestProto"))
 
         # Authenticated identity cannot impersonate anonymous either.
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_cursor_token(token, key, _compute_aad(None))
+            _open_cursor_token(token, key, _compute_aad(None, protocol="TestProto"))
 
         # The call token is bound the same way — this is what stops a
         # cross-principal cache probe from ever reaching a lookup.
-        call = _seal_call_token(b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(alice), 1000)
-        assert _open_call_token(call, key, _compute_call_aad(alice))[4] == call_id
+        call = _seal_call_token(
+            b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(alice, protocol="TestProto"), 1000
+        )
+        assert _open_call_token(call, key, _compute_call_aad(alice, protocol="TestProto"))[4] == call_id
         with pytest.raises(Exception, match="verification failed"):
-            _open_call_token(call, key, _compute_call_aad(bob))
+            _open_call_token(call, key, _compute_call_aad(bob, protocol="TestProto"))
 
     def test_malformed_base64_returns_400(self) -> None:
         """A token whose body is not valid base64 surfaces as 400."""
@@ -923,7 +930,7 @@ class TestStateTokenStateEncoding:
 
         # ``!`` is not part of the standard base64 alphabet.
         with pytest.raises(Exception, match="Malformed state token"):
-            _open_cursor_token(b"!!!!not-base64!!!!", b"\x08" * 32, _compute_aad(None))
+            _open_cursor_token(b"!!!!not-base64!!!!", b"\x08" * 32, _compute_aad(None, protocol="TestProto"))
 
     def test_too_short_token_returns_400(self) -> None:
         """A token shorter than the minimum envelope size surfaces as 400.
@@ -938,7 +945,7 @@ class TestStateTokenStateEncoding:
 
         too_short = base64.b64encode(b"\x05short")
         with pytest.raises(Exception, match="signature verification failed"):
-            _open_cursor_token(too_short, b"\x09" * 32, _compute_aad(None))
+            _open_cursor_token(too_short, b"\x09" * 32, _compute_aad(None, protocol="TestProto"))
 
 
 # ---------------------------------------------------------------------------
@@ -1053,7 +1060,7 @@ class TestTokenPayloadCompression:
             call_id=b"\x0c" * 16,
             stream_id="sid-compress",
             token_key=b"\x0d" * 32,
-            aad=_compute_call_aad(None),
+            aad=_compute_call_aad(None, protocol="TestProto"),
             created_at=1000,
         )
         assert len(token) < len(call_state) // 4, (

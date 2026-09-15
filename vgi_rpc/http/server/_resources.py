@@ -314,7 +314,7 @@ class _ExchangeResource:
                         TypeError(f"Method '{method}' does not support /exchange"),
                         status_code=HTTPStatus.BAD_REQUEST,
                     )
-                result_stream = self._app._stream_exchange_sync(method, _get_request_stream(req))
+                result_stream = self._app._stream_exchange_sync(info, _get_request_stream(req))
                 if _current_response_status.get() == HTTPStatus.OK:
                     result_stream, oversized = _strict_response_stream(
                         result_stream,
