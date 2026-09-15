@@ -223,6 +223,13 @@ def main() -> None:
                 shape.append(f"{method}: params {port.params_schema} vs {ref.params_schema}")
             elif port.has_return and port.result_schema != ref.result_schema:
                 shape.append(f"{method}: result {port.result_schema} vs {ref.result_schema}")
+            elif port.has_header != ref.has_header:
+                shape.append(f"{method}: has_header {port.has_header} vs {ref.has_header}")
+            elif port.has_header and port.header_schema != ref.header_schema:
+                # Header schemas are in the hash preimage, so a tool that does
+                # not compare them reports "shapes agree" beside a hash mismatch
+                # and sends the reader looking in the wrong place.
+                shape.append(f"{method}: header {port.header_schema} vs {ref.header_schema}")
         if shape:
             failed = True
             print()
