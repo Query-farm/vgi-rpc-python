@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import inspect
 import logging
 import sys
@@ -740,6 +741,17 @@ class RpcServer:
                     f"`protocol_name: ClassVar[str]` on one of them."
                 )
             self._bindings[binding.name] = binding
+
+        # Reflection is registered after the application protocols and before
+        # anything reads `_bindings`, so it appears in its own output without
+        # being special-cased -- and so `primary` below is still the first
+        # *application* protocol, which is what the single-protocol attributes
+        # are expected to report.
+        if enable_describe:
+            from ._reflection import Reflection, ReflectionImpl
+
+            reflection = self._build_binding(Reflection, ReflectionImpl(self), allow_reserved=True)
+            self._bindings[reflection.name] = dataclasses.replace(reflection, version_exempt=True)
 
         primary = next(iter(self._bindings.values()))
         self._protocol_version: str | None = primary.version
