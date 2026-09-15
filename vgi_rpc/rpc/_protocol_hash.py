@@ -21,9 +21,15 @@ hardest rule -- number canonicalisation, and the likeliest place for six ports
 to diverge -- never applies.  Keep it that way.
 
 **What is in the preimage.**  The protocol's wire name, and for each method
-(sorted by name) its name, method type, the three shape booleans, and its
+(sorted by name) its name, method type, ``has_return``, ``has_header``, and its
 parameter, result and header schemas as ordered field lists.  Field order
 within a schema is declaration order and is significant.
+
+**Not** whether a stream is an exchange.  That is an *implementation* property,
+not visible on the Protocol, so one port can determine it and another cannot --
+and a field one port knows and another does not cannot be part of a
+cross-language contract.  It still reaches clients, as ``stream_kind`` on the
+description, where "unknown" is a sayable answer; a hash has no such option.
 
 **What is not.**  Server identity, docstrings, parameter defaults, Python type
 names, and the framework's own ``REQUEST_VERSION`` / ``DESCRIBE_VERSION``.
@@ -103,7 +109,6 @@ def _method_entry(
     *,
     has_return: bool,
     has_header: bool,
-    is_exchange: bool,
     params_schema: pa.Schema,
     result_schema: pa.Schema | None,
     header_schema: pa.Schema | None,
@@ -114,7 +119,6 @@ def _method_entry(
         "type": method_type,
         "has_return": has_return,
         "has_header": has_header,
-        "is_exchange": is_exchange,
         "params": schema_tokens(params_schema),
     }
     # Absent and empty are different: a method returning nothing is not a
@@ -149,7 +153,6 @@ def protocol_description(protocol_name: str, methods: Mapping[str, Any]) -> dict
                 info.method_type.value,
                 has_return=bool(info.has_return),
                 has_header=info.header_type is not None,
-                is_exchange=bool(info.is_exchange),
                 params_schema=info.params_schema,
                 result_schema=info.result_schema if info.has_return else None,
                 header_schema=info.header_type.ARROW_SCHEMA if info.header_type is not None else None,
