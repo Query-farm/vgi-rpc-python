@@ -60,12 +60,26 @@ refuses.
 ## 2. Constants — identical in every port
 
 ```
-MAX_TOKEN_CHARS      = 4096
+MAX_TOKEN_BYTES      = 4096   # UTF-8 BYTES -- see below
 JWS_SHAPED regex     = ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$
 default introspect_rate_limit = 20      (per caller, per 1.0s window)
 default max_auth_age          = 900.0   seconds
 IdentityUnavailableError.retry_after default = 5
 ```
+
+### The cap is measured in UTF-8 BYTES
+
+The ports reached for three different units: codepoints (Python, Rust), UTF-16
+code units (Java, C#, TypeScript), and bytes (Go, C++). All four agree for an
+ASCII credential -- which every real bearer token is -- so this is invisible
+today and matters only for a multibyte one.
+
+It is pinned anyway, because "approximately the same limit" is how every other
+divergence in this document started, and each turned out to be a hole once
+somebody measured it. Bytes is the unit the purpose implies (what a resolver
+would have to handle) and the most conservative of the three, so standardising
+on it can only refuse earlier. Python renamed the constant to `MAX_TOKEN_BYTES`
+so the unit is not left to the reader.
 
 ## 3. Error taxonomy — `error_kind` strings are the wire contract
 
@@ -91,6 +105,52 @@ the end of the chain, restarting every session in the fleet over a 30-second bli
 Find the equivalent hazard in your port and avoid it.
 
 ## 4. Guards — order is load-bearing
+
+### The JWS shape test runs on the TRIMMED credential (decided after C++ hit it)
+
+Trim leading/trailing whitespace from the credential, run the shape test on the
+trimmed form, and pass the **untrimmed original** to the resolver.
+
+Anchor semantics are the least portable corner of seven regex dialects and the
+ports split three ways on `"a.b.c\n"`: Python's `$` matched before a single
+trailing newline and refused it; Go's `\A..\z` and JavaScript's unflagged `$`
+matched strictly and routed it **to the resolver** -- the one outcome this guard
+exists to prevent. Python was not self-consistent either, refusing one trailing
+newline and admitting two.
+
+So do not replicate any dialect's anchor behaviour. Trimming first can only add
+refusals, never remove one, and it means the same thing everywhere -- including
+where the matcher is hand-rolled because the standard regex engine backtracks on
+attacker-controlled input.
+
+A whitespace-only credential is refused: it is not a credential.
+
+**The trim set is enumerated, not delegated to the language.** "Whitespace" is
+itself a divergence one layer down -- measured, not assumed:
+
+| codepoint | Python | Go | C# | JS/TS | Java | C++ (ASCII) |
+|---|---|---|---|---|---|---|
+| `U+0009`-`U+000D`, `U+0020` | yes | yes | yes | yes | yes | yes |
+| `U+0085` NEL | yes | yes | yes | **no** | **no** | **no** |
+| `U+00A0` NBSP | yes | yes | yes | yes | yes | **no** |
+
+A port trimming a narrower set **routes a padded JWS that another port
+refuses**, which is the same hole one level down. So every port MUST trim at
+least:
+
+```
+U+0009 U+000A U+000B U+000C U+000D U+0020 U+0085 U+00A0
+```
+
+A port MAY trim more (Python, Go and Rust trim the full Unicode `White_Space`
+property). Trimming wider can only add refusals, so a wider set is a safe
+difference; a narrower one is a leak. Do not reach for
+`Character.isWhitespace`, `isspace()`, or an ASCII-only literal without
+checking it against the table above -- `Character.isWhitespace` excludes NBSP
+by design, and `isSpaceChar` excludes NEL.
+
+Trim for the shape test **only**. Rewriting a credential before resolving it
+would make the worker answer about a string the caller never sent.
 
 ### `introspect_token`
 
@@ -160,6 +220,28 @@ growing a credential-to-identity oracle on every existing worker. If neither hoo
 is configured, the protocol is not registered at all.
 
 The per-method guard in §4 step 1 is the belt to this braces — both exist.
+
+## 5a. Zero values vs. absent values (decided after Go hit it first)
+
+`ttl_seconds` defaults to 300 and `token_name`/`grant_id` default to `""`. Those
+are **decode-side defaults for an absent column**, not coercions to apply to a
+value a hook actually supplied.
+
+Several ports have a zero value where Python has "field omitted" -- a Go struct
+literal, a Rust `Default`, a C# `default(T)` -- so a hook that names no TTL
+produces `0` rather than an absent column. The tempting fix is to normalise
+`ttl_seconds <= 0` up to 300. **Do not.**
+
+`ttl_seconds` is how long the caller may cache the answer, which for any path the
+asker serves without re-presenting the credential is an authorization window and
+therefore the revocation lag. Coercing `0` to `300` silently converts a resolver
+saying *"do not cache this"* into five minutes of continued access after
+revocation. A port that honours `0` and is handed one by accident fails the other
+way: more introspection traffic, no extended window.
+
+So: **honour what the hook returned, including `0`.** Where the language permits,
+offer a constructor or builder that supplies 300 so the omission case still lands
+on the documented default -- but never override a value that was actually set.
 
 ## 6. Hygiene
 
