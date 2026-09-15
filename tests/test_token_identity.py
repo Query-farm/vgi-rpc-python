@@ -377,6 +377,25 @@ class TestJwsShapeTestSurvivesTranslation:
         with pytest.raises(TokenUnresolvedError):
             reject_jws_shaped(token)
 
+    @pytest.mark.parametrize(
+        "codepoint",
+        [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0],
+        ids=["tab", "lf", "vt", "ff", "cr", "space", "nel", "nbsp"],
+    )
+    def test_the_enumerated_trim_set_is_covered(self, codepoint: int) -> None:
+        """Every port must trim at least these eight, so pin them here.
+
+        "Whitespace" is itself a divergence one layer down: JavaScript and
+        Java's ``Character.isWhitespace`` both exclude ``U+0085``, and Java's
+        ``isSpaceChar`` excludes it too, so a port delegating to the language
+        routes a padded JWS that another port refuses -- the same hole one
+        level down.  Python trims the full Unicode ``White_Space`` property,
+        which is a superset; this pins the agreed floor rather than what
+        ``str.strip`` happens to do.
+        """
+        with pytest.raises(TokenUnresolvedError):
+            reject_jws_shaped("aaa.bbb.ccc" + chr(codepoint))
+
     @pytest.mark.parametrize("token", ["", "   ", "\n", "\t\r\n"])
     def test_a_blank_credential_is_not_a_credential(self, token: str) -> None:
         """Whitespace-only never reaches a resolver either."""
@@ -387,6 +406,19 @@ class TestJwsShapeTestSurvivesTranslation:
     def test_an_opaque_credential_still_reaches_the_resolver(self, token: str) -> None:
         """Trimming tightens the JWS test; it must not refuse ordinary tokens."""
         reject_jws_shaped(token)
+
+    def test_the_length_check_runs_on_the_untrimmed_credential(self) -> None:
+        """Padding must not be talked down into the allowance.
+
+        Splitting "trim for the shape test" from "measure the original"
+        creates a new way to get this wrong, and nothing else would catch it:
+        what arrived is what a resolver would have to handle, so that is what
+        the cap applies to.
+        """
+        padded = "x" + " " * (MAX_TOKEN_CHARS * 2)
+        assert len(padded.strip()) < MAX_TOKEN_CHARS < len(padded)
+        with pytest.raises(TokenUnresolvedError):
+            reject_jws_shaped(padded)
 
     def test_the_resolver_receives_the_credential_unmodified(self) -> None:
         """Trimming is for the shape test only -- never for what is resolved.
