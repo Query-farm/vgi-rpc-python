@@ -322,3 +322,46 @@ class TestGeneratedTypes:
         elif cls is MethodInfo:
             value = impl.describe("demo.App.v1").methods[0]
         assert type(value).deserialize_from_bytes(value.serialize_to_bytes()) == value
+
+
+class TestDescribeIsRetiredNotMerelyAbsent:
+    """A stale ``__describe__`` caller is told where introspection went.
+
+    "Retired" and "this server opted out of introspection" are
+    indistinguishable from the caller's side, and they need different fixes:
+    one is a client to update, the other a server to reconfigure. The C++ port
+    spent a while on the first while reading an error that described the
+    second.
+    """
+
+    def test_the_refusal_names_the_replacement(self) -> None:
+        """The message must carry the protocol and both entry points."""
+        from vgi_rpc.rpc._common import MethodNotImplementedError
+        from vgi_rpc.rpc._server import _RETIRED_DESCRIBE_METHOD
+
+        srv = _server()
+        with pytest.raises(MethodNotImplementedError) as excinfo:
+            srv._resolve(_RETIRED_DESCRIBE_METHOD)
+        message = str(excinfo.value)
+        assert "retired" in message.lower()
+        assert Reflection.protocol_name in message
+        assert "list_protocols" in message and "describe" in message
+
+    def test_another_reserved_name_keeps_the_generic_answer(self) -> None:
+        """Only describe is special-cased; the rest are plain capability answers."""
+        from vgi_rpc.rpc._common import MethodNotImplementedError
+
+        with pytest.raises(MethodNotImplementedError) as excinfo:
+            _server()._resolve("__not_a_thing__")
+        assert "retired" not in str(excinfo.value).lower()
+
+    def test_the_spelled_constant_tracks_the_protocol_class(self) -> None:
+        """The name is duplicated to avoid a circular import, so pin the pair.
+
+        ``_reflection`` imports ``_server``, so the server cannot import the
+        Protocol class to read its name. A silent divergence would make the
+        refusal point at a protocol that does not exist.
+        """
+        from vgi_rpc.rpc._server import _REFLECTION_PROTOCOL_NAME
+
+        assert Reflection.protocol_name == _REFLECTION_PROTOCOL_NAME

@@ -478,6 +478,13 @@ class _ConnectionShm:
 # ---------------------------------------------------------------------------
 # RpcServer
 # ---------------------------------------------------------------------------
+#: Retired in the 2.0 revamp, kept only so the refusal can say where
+#: introspection went. A stale client told merely "no such method" cannot tell
+#: "retired" from "this server opted out", and those need different fixes.
+_RETIRED_DESCRIBE_METHOD = "__describe__"
+
+#: Spelled here rather than imported: ``_reflection`` imports this module.
+_REFLECTION_PROTOCOL_NAME = "vgi_rpc.Reflection.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,8 +570,9 @@ class RpcServer:
         and drops the field land silently on whichever protocol happens to be
         first, rather than being told.
 
-        Framework built-ins (``__describe__``, ``__transport_options__``) are
-        resolved before this and never reach it.
+        Framework built-ins (``__transport_options__``) are resolved before
+        this and never reach it. ``__describe__`` is retired and answered there
+        with a message naming its replacement.
 
         Raises:
             ProtocolNotSpecifiedError: No routing key on the request.
@@ -575,19 +583,31 @@ class RpcServer:
 
         """
         # Framework built-ins are server-level, not owned by any protocol, and
-        # are resolved before routing. `__describe__` in particular is the
-        # diagnostic path a mismatched client uses to find out *what*
-        # mismatched, so requiring it to name a protocol first would remove the
-        # tool exactly when it is needed.
+        # are resolved before routing: they belong to the server rather than to
+        # any protocol, so requiring one to name a protocol would be asking the
+        # caller to route a thing that is not routed. Reflection took over the
+        # diagnostic role `__describe__` used to serve, and is an ordinary
+        # protocol reached the ordinary way.
         if method_name.startswith("__") and method_name.endswith("__"):
             builtin = self._methods.get(method_name)
             if builtin is not None:
                 return builtin
-            # A reserved name this server does not offer — e.g. __describe__ on
-            # a server built with enable_describe=False. The answer is "no such
+            # A reserved name this server does not offer. The answer is "no such
             # method", not "you failed to name a protocol": the caller did
             # nothing wrong with routing, and a client probing for optional
             # introspection needs the capability answer.
+            #
+            # `__describe__` is named explicitly because it is *retired* rather
+            # than merely absent, and the two are indistinguishable from the
+            # caller's side. A stale client told only "no such method" has no
+            # way to learn that introspection moved to a protocol; one told
+            # where it went can be fixed without reading our changelog.
+            if method_name == _RETIRED_DESCRIBE_METHOD:
+                raise MethodNotImplementedError(
+                    f"{_RETIRED_DESCRIBE_METHOD!r} was retired. Introspection is now the "
+                    f"'{_REFLECTION_PROTOCOL_NAME}' protocol: call 'list_protocols' for what this "
+                    f"server hosts, then 'describe' for one protocol's methods."
+                )
             raise MethodNotImplementedError(f"This server does not implement the reserved method {method_name!r}.")
 
         md = _current_request_metadata.get()
