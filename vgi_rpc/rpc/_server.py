@@ -885,6 +885,40 @@ class RpcServer:
         """
         return self._protocol_version
 
+    def check_protocol_agreement(self, info: RpcMethodInfo) -> None:
+        """Require the request's routing metadata to agree with *info*.
+
+        On HTTP the protocol rides twice: in ``vgi_rpc.protocol`` and as a path
+        segment.  The metadata field is canonical -- it is the only carrier on
+        the stdio, unix and named-pipe transports -- and the path segment is a
+        required faithful projection, present so an edge device can act on the
+        protocol without an Arrow parser.
+
+        Left unchecked, the two may disagree, and then edge policy is applied
+        to one protocol while the worker runs another: the
+        Content-Length/Transfer-Encoding shape.  Mirrors the ``vgi_rpc.method``
+        check the HTTP dispatchers already make.
+
+        A no-op where the metadata carries no routing key, which is the
+        single-carrier case: the caller resolved from that key to begin with.
+
+        Raises:
+            ProtocolNotSupportedError: The two carriers name different
+                protocols.
+
+        """
+        md = _current_request_metadata.get()
+        raw = md.get(PROTOCOL_KEY) if md is not None else None
+        if not raw:
+            return
+        declared = raw.decode(errors="replace")
+        if declared != info.protocol_name:
+            raise ProtocolNotSupportedError(
+                f"Protocol mismatch: the request path resolved to {info.protocol_name!r} but "
+                f"the Arrow IPC custom_metadata 'vgi_rpc.protocol' says {declared!r}. "
+                f"These must agree."
+            )
+
     def gate_version(self, info: RpcMethodInfo) -> None:
         """Enforce the declared protocol_version of the binding ``info`` belongs to.
 

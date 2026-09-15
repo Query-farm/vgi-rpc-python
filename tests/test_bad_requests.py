@@ -22,7 +22,7 @@ from vgi_rpc.http import (
     _SyncTestClient,
     make_sync_client,
 )
-from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+from vgi_rpc.metadata import PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
 from vgi_rpc.rpc import RpcError, RpcServer, _dispatch_log_or_error, _drain_stream
 from vgi_rpc.utils import IpcValidation, ValidatedReader, empty_batch
 
@@ -85,11 +85,14 @@ def _craft_request(
     version: bytes = REQUEST_VERSION,
     include_method: bool = True,
     include_version: bool = True,
+    protocol: str | None = None,
 ) -> bytes:
     """Build a raw IPC request stream with full control over metadata."""
     md: dict[bytes, bytes] = {}
     if include_method:
         md[RPC_METHOD_KEY] = method.encode()
+    if protocol is not None:
+        md[PROTOCOL_KEY] = protocol.encode()
     if include_version:
         md[REQUEST_VERSION_KEY] = version
     cm = pa.KeyValueMetadata(md) if md else None
@@ -173,6 +176,29 @@ class TestBadMethodNames:
         assert status == 400
         err = _extract_error(content)
         assert "mismatch" in err.error_message.lower()
+
+    def test_protocol_metadata_disagreeing_with_the_path_is_rejected(self, client: _SyncTestClient) -> None:
+        """The path is a projection of the metadata; disagreement is a 400.
+
+        Left unchecked, edge policy would be applied to the protocol named in
+        the path while the worker dispatched the one named in the metadata.
+        """
+        schema = pa.schema([pa.field("a", pa.float64(), nullable=False), pa.field("b", pa.float64(), nullable=False)])
+        batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=schema)
+        body = _craft_request("add", schema, batch, protocol="SomeOtherService")
+        status, content = _post(client, "/add", body)
+        assert status == 400
+        err = _extract_error(content)
+        assert "SomeOtherService" in err.error_message
+        assert _PROTOCOL in err.error_message
+
+    def test_protocol_metadata_agreeing_with_the_path_is_accepted(self, client: _SyncTestClient) -> None:
+        """The ordinary case a real client produces: both carriers agree."""
+        schema = pa.schema([pa.field("a", pa.float64(), nullable=False), pa.field("b", pa.float64(), nullable=False)])
+        batch = pa.RecordBatch.from_pydict({"a": [1.0], "b": [2.0]}, schema=schema)
+        body = _craft_request("add", schema, batch, protocol=_PROTOCOL)
+        status, _ = _post(client, "/add", body)
+        assert status == 200
 
     def test_unknown_method_url(self, client: _SyncTestClient) -> None:
         """Non-existent method in URL returns 404."""

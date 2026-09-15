@@ -36,6 +36,7 @@ from vgi_rpc.rpc import (
 from vgi_rpc.rpc._common import (
     CallStatistics,
     HookToken,
+    ProtocolError,
     _current_call_stats,
     _DispatchHook,
     _record_output,
@@ -87,6 +88,11 @@ def _run_unary_sync(
             # Application-protocol-version gate, against the binding that owns the
             # resolved method. The HTTP transport dispatches directly here rather
             # than through serve_one, so the gate is wired in independently.
+            # The path resolved this call; the metadata must say the same. The
+            # metadata is canonical and the path is its projection, so a
+            # disagreement means edge policy and worker dispatch saw different
+            # protocols.
+            app._server.check_protocol_agreement(info)
             app._server.gate_version(info)
             try:
                 _deserialize_params(kwargs, info.param_types, app._server.ipc_validation)
@@ -101,7 +107,7 @@ def _run_unary_sync(
             # is the method's own and gets the ordinary error path.
             _validate_call_signature(info.name, kwargs, info.param_types, info.param_defaults, info.params_schema)
             _validate_params(info.name, kwargs, info.param_types)
-        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+        except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError, ProtocolError) as exc:
             raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
         except Exception as exc:
             # Resolving an ExternalLocation is part of reading the request but

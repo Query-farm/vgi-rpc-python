@@ -26,7 +26,7 @@ from vgi_rpc.rpc import (
     _truncate_error_message,
     _write_error_batch,
 )
-from vgi_rpc.rpc._common import CookieSpec, _current_body_precompressed, _current_response_cookies
+from vgi_rpc.rpc._common import CookieSpec, ProtocolError, _current_body_precompressed, _current_response_cookies
 from vgi_rpc.rpc._types import PROTOCOL_NAME_RE
 from vgi_rpc.utils import new_ipc_stream
 
@@ -360,7 +360,7 @@ class _UploadUrlResource:
                 ipc_method, kwargs = _read_request(_get_request_stream(req), self._app._server.ipc_validation)
                 if ipc_method != _UPLOAD_URL_METHOD:
                     raise TypeError(f"Method mismatch: expected '{_UPLOAD_URL_METHOD}', got '{ipc_method}'")
-            except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError) as exc:
+            except (pa.ArrowInvalid, TypeError, StopIteration, RpcError, VersionError, ProtocolError) as exc:
                 raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
             except Exception as exc:
                 # Same reasoning as the unary/stream guards: an unclassified

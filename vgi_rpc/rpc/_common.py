@@ -729,7 +729,17 @@ class MethodNotImplementedError(AttributeError):
     error_kind: ClassVar[str] = "method_not_implemented"
 
 
-class ProtocolNotSpecifiedError(ValueError):
+class ProtocolError(ValueError):
+    """A request's protocol routing key is missing, unknown, or inconsistent.
+
+    Subclasses ``ValueError`` so the existing dispatch shells, which already
+    classify ``ValueError`` as a caller problem, keep working -- and is named
+    so the HTTP shells can catch the whole family in their bad-request tuple
+    rather than letting a routing failure reach the generic 500 branch.
+    """
+
+
+class ProtocolNotSpecifiedError(ProtocolError):
     """The request named no protocol.
 
     Required on every request, including against a server hosting exactly one
@@ -746,7 +756,7 @@ class ProtocolNotSpecifiedError(ValueError):
     error_kind: ClassVar[str] = "protocol_not_specified"
 
 
-class ProtocolNotSupportedError(ValueError):
+class ProtocolNotSupportedError(ProtocolError):
     """The named protocol is not hosted by this server.
 
     Deliberately distinct from ``MethodNotImplementedError``: "I do not speak
