@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from io import BytesIO
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -74,6 +75,7 @@ from vgi_rpc.rpc._types import (
     RpcMethodInfo,
     Stream,
     StreamState,
+    _protocol_wire_name,
     _validate_implementation,
     rpc_methods,
 )
@@ -474,10 +476,45 @@ class _ConnectionShm:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _ProtocolBinding:
+    """One protocol hosted by a server, with everything dispatch needs.
+
+    Built once in ``RpcServer.__init__``. Five of these fields are constant for
+    the life of a protocol, so resolving a call is a dict lookup rather than
+    the assembly of a per-request record.
+
+    Attributes:
+        protocol: The Protocol class.
+        name: Wire identity — the declared ``protocol_name`` ClassVar, or the
+            class name. This is the routing key.
+        impl: The object implementing this protocol's methods. A single object
+            may implement several protocols, so bindings can share one.
+        methods: Method table for this protocol alone.
+        version: Declared ``protocol_version``, or ``None``.
+        version_parts: Parsed ``version`` for the dispatch-boundary gate.
+        protocol_hash: Fingerprint of this protocol's wire surface.
+        ctx_methods: Names whose implementation accepts a ``ctx`` argument.
+            Per binding because a method taking ``ctx`` on one protocol must
+            not grant it to a same-named method on another.
+
+    """
+
+    protocol: type
+    name: str
+    impl: object
+    methods: Mapping[str, RpcMethodInfo]
+    version: str | None
+    version_parts: tuple[int, int, int] | None
+    protocol_hash: str
+    ctx_methods: frozenset[str]
+
+
 class RpcServer:
     """Dispatches RPC requests to an implementation over IO-stream transports."""
 
     __slots__ = (
+        "_bindings",
         "_ctx_methods",
         "_describe_batch",
         "_describe_metadata",
@@ -497,11 +534,66 @@ class RpcServer:
         "_transport_lock",
     )
 
+    @staticmethod
+    def _ctx_methods_for(impl: object, methods: Mapping[str, RpcMethodInfo]) -> frozenset[str]:
+        """Names whose *implementation* declares a ``ctx`` parameter.
+
+        Keyed per binding: two protocols may define the same method name, and
+        only one of them may want a ``CallContext``.
+        """
+        return frozenset(
+            name
+            for name in methods
+            if (method := getattr(impl, name, None)) is not None and "ctx" in inspect.signature(method).parameters
+        )
+
+    def _describe_payload_for(self, binding: _ProtocolBinding) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
+        """Build one protocol's ``__describe__`` batch and metadata."""
+        from vgi_rpc.introspect import build_describe_batch
+
+        return build_describe_batch(binding.name, binding.methods, self._server_id, binding.version)
+
+    def _build_binding(self, proto: type, impl: object) -> _ProtocolBinding:
+        """Validate one protocol/implementation pair and freeze it into a binding."""
+        from vgi_rpc.metadata import PROTOCOL_HASH_KEY
+
+        # vars() not getattr(): a subclass that does not redeclare must not
+        # inherit its base's version, or it silently claims compatibility it
+        # was never checked for.
+        raw_version = vars(proto).get("protocol_version")
+        if raw_version is None:
+            version: str | None = None
+            version_parts: tuple[int, int, int] | None = None
+        else:
+            if not isinstance(raw_version, str):
+                raise TypeError(f"{proto.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
+            version = raw_version
+            version_parts = parse_version(raw_version)
+
+        methods = rpc_methods(proto)
+        _validate_implementation(proto, impl, methods)
+        name = _protocol_wire_name(proto)
+
+        from vgi_rpc.introspect import build_describe_batch
+
+        _, md = build_describe_batch(name, methods, self._server_id, version)
+        return _ProtocolBinding(
+            protocol=proto,
+            name=name,
+            impl=impl,
+            methods=methods,
+            version=version,
+            version_parts=version_parts,
+            protocol_hash=md.get(PROTOCOL_HASH_KEY, b"").decode(),
+            ctx_methods=self._ctx_methods_for(impl, methods),
+        )
+
     def __init__(
         self,
         protocol: type,
         implementation: object,
         *,
+        extra_protocols: Sequence[tuple[type, object]] = (),
         external_location: ExternalLocationConfig | None = None,
         server_id: str | None = None,
         server_version: str = "",
@@ -517,6 +609,18 @@ class RpcServer:
                 exact major+minor match on every dispatched request. See
                 ``_check_protocol_version`` for the comparison rule.
             implementation: Object implementing all methods from *protocol*.
+            extra_protocols: Additional ``(protocol, implementation)`` pairs to
+                host alongside the primary one. Each is versioned and dispatched
+                independently, so a worker protocol and a shared identity
+                protocol can live in one process. Method names may repeat across
+                protocols — calls resolve on ``(protocol, method)``. Protocol
+                *names* may not repeat; a duplicate raises. One object may
+                implement several protocols.
+
+                *protocol* stays the primary: it is what ``protocol_name``,
+                ``protocol_hash`` and ``implementation`` report, what the
+                landing page titles, and what framework endpoints with no owning
+                protocol log against. It is never a routing fallback.
             external_location: Optional ExternalLocation configuration.
             server_id: Optional server identifier; auto-generated if ``None``.
             server_version: Build version string included in access log entries.
@@ -534,38 +638,56 @@ class RpcServer:
         self._protocol = protocol
         self._impl = implementation
         self._server_version = server_version
-        # Read protocol_version directly from the Protocol class's own dict
-        # (vars, not getattr) so subclasses that don't redeclare it get None.
-        # When None, the dispatch-boundary check no-ops — opt-in by declaration.
-        raw_version = vars(protocol).get("protocol_version")
-        if raw_version is None:
-            self._protocol_version: str | None = None
-            self._protocol_version_parts: tuple[int, int, int] | None = None
-        else:
-            if not isinstance(raw_version, str):
-                raise TypeError(f"{protocol.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
-            self._protocol_version = raw_version
-            self._protocol_version_parts = parse_version(raw_version)
         self._ipc_validation = IpcValidation.from_env() if ipc_validation is None else ipc_validation
-        self._methods = rpc_methods(protocol)
         self._external_config = external_location
         self._server_id = server_id if server_id is not None else uuid.uuid4().hex[:12]
         self._dispatch_hook: _DispatchHook | None = None
         self._transport_kind: TransportKind | None = None
         self._transport_capabilities: frozenset[str] = frozenset()
         self._transport_lock = threading.Lock()
-        _validate_implementation(protocol, implementation, self._methods)
 
-        # Compute protocol_hash regardless of describe flag — it is needed for
-        # access-log records on every dispatch.
-        from vgi_rpc.introspect import build_describe_batch
+        # Build one binding per hosted protocol. The primary comes first so its
+        # values remain what the single-protocol attributes report.
+        self._bindings: dict[str, _ProtocolBinding] = {}
+        for proto, impl in ((protocol, implementation), *extra_protocols):
+            binding = self._build_binding(proto, impl)
+            existing = self._bindings.get(binding.name)
+            if existing is not None:
+                raise ValueError(
+                    f"Two protocols are hosted under the same name {binding.name!r}: "
+                    f"{existing.protocol.__name__} and {proto.__name__}. The name is the "
+                    f"routing key, so it must be unique. Declare a distinct "
+                    f"`protocol_name: ClassVar[str]` on one of them."
+                )
+            self._bindings[binding.name] = binding
 
-        _hash_batch, _hash_md = build_describe_batch(
-            protocol.__name__, self._methods, self._server_id, self._protocol_version
-        )
-        from vgi_rpc.metadata import PROTOCOL_HASH_KEY
+        primary = next(iter(self._bindings.values()))
+        self._protocol_version: str | None = primary.version
+        self._protocol_version_parts: tuple[int, int, int] | None = primary.version_parts
+        self._methods = primary.methods
+        self._protocol_hash: str = primary.protocol_hash
 
-        self._protocol_hash: str = _hash_md.get(PROTOCOL_HASH_KEY, b"").decode()
+        # Legal, and the whole point of namespacing — but an operator should
+        # learn about the ambiguity at startup rather than from a dashboard that
+        # merges two protocols' traffic under one method name.
+        if len(self._bindings) > 1:
+            seen: dict[str, str] = {}
+            for b in self._bindings.values():
+                for method_name in b.methods:
+                    owner = seen.setdefault(method_name, b.name)
+                    if owner != b.name:
+                        _logger.warning(
+                            "Method name %r is defined by both %s and %s. Calls resolve "
+                            "correctly on (protocol, method), but anything keyed on the "
+                            "bare method name — dashboards, alerts, proxy policy — will "
+                            "merge them.",
+                            method_name,
+                            owner,
+                            b.name,
+                            extra={"server_id": self._server_id, "method": method_name},
+                        )
+
+        _hash_batch, _hash_md = self._describe_payload_for(primary)
 
         if enable_describe:
             from vgi_rpc.introspect import DESCRIBE_METHOD_NAME
@@ -589,13 +711,10 @@ class RpcServer:
             self._describe_batch = None
             self._describe_metadata = None
 
-        # Detect which impl methods accept a `ctx` parameter.
-        self._ctx_methods: frozenset[str] = frozenset(
-            name
-            for name in self._methods
-            if (method := getattr(implementation, name, None)) is not None
-            and "ctx" in inspect.signature(method).parameters
-        )
+        # Primary's, for the single-protocol attribute. Dispatch uses the
+        # binding's own set so a method taking `ctx` on one protocol does not
+        # grant it to a same-named method on another.
+        self._ctx_methods: frozenset[str] = primary.ctx_methods
 
         _logger.info(
             "RpcServer created for %s (server_id=%s, methods=%d)",
@@ -622,6 +741,18 @@ class RpcServer:
         """Return method metadata for this server's protocol."""
         return self._methods
 
+    def implementation_for(self, info: RpcMethodInfo) -> object:
+        """Return the implementation that owns *info*'s method.
+
+        ``implementation`` keeps returning the primary, because ~9 call sites
+        read it and silently changing its meaning is worse than either leaving
+        it or replacing it. Dispatch and stream rehydration use this instead, so
+        a second protocol's state is never rehydrated against the first
+        protocol's object.
+        """
+        binding = self._bindings.get(info.protocol_name)
+        return binding.impl if binding is not None else self._impl
+
     @property
     def implementation(self) -> object:
         """The implementation object."""
@@ -639,8 +770,14 @@ class RpcServer:
 
     @property
     def protocol_name(self) -> str:
-        """Name of the Protocol class this server implements."""
-        return self._protocol.__name__
+        """Wire name of the primary protocol.
+
+        The declared ``protocol_name`` ClassVar when there is one, otherwise the
+        class name — so this is the routing key, not a Python identifier that
+        merely resembles it. A server hosting several protocols reports the
+        primary here; per-call labelling reads ``RpcMethodInfo.protocol_name``.
+        """
+        return next(iter(self._bindings.values())).name
 
     @property
     def server_version(self) -> str:
