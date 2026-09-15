@@ -59,7 +59,7 @@ __all__ = [
     "GrantRefusedError",
     "IdentityUnavailableError",
     "IntrospectionRefusedError",
-    "MAX_TOKEN_CHARS",
+    "MAX_TOKEN_BYTES",
     "RateLimiter",
     "StaleAuthError",
     "TokenUnresolvedError",
@@ -78,7 +78,15 @@ _JWS_SHAPED = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$")
 
 #: Cap on a credential we will even attempt to resolve.  Anything longer is not
 #: a bearer token; refusing early keeps a resolver from being handed megabytes.
-MAX_TOKEN_CHARS = 4096
+#:
+#: Measured in **UTF-8 bytes**, which is the unit the purpose implies -- what is
+#: being bounded is what a resolver would have to handle.  Spelling it out
+#: because the ports reached for three different units: codepoints here and in
+#: Rust, UTF-16 code units in Java, C# and TypeScript, bytes in Go and C++.  All
+#: four agree for an ASCII credential, which every real bearer token is, so this
+#: only bites on a multibyte one -- but "approximately the same limit" is how the
+#: rest of this module's divergences started.
+MAX_TOKEN_BYTES = 4096
 
 
 def token_digest(token: str) -> str:
@@ -247,7 +255,7 @@ def reject_jws_shaped(token: str) -> None:
     into seven regex dialects, because it does not depend on any of them.
     """
     candidate = token.strip()
-    if not candidate or len(token) > MAX_TOKEN_CHARS or _JWS_SHAPED.match(candidate):
+    if not candidate or len(token.encode("utf-8")) > MAX_TOKEN_BYTES or _JWS_SHAPED.match(candidate):
         raise TokenUnresolvedError("unresolved")
 
 

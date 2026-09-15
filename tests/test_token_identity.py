@@ -16,7 +16,7 @@ import pytest
 
 from vgi_rpc.rpc import AuthContext, CallContext, RpcServer
 from vgi_rpc.rpc._token_identity import (
-    MAX_TOKEN_CHARS,
+    MAX_TOKEN_BYTES,
     GrantRefusedError,
     Identity,
     IdentityImpl,
@@ -140,7 +140,7 @@ class TestIntrospectionIsLockedDown:
             impl.introspect_token("secret", _ctx(_auth("mallory")))
         assert seen == [], "the resolver must not see a credential from an unauthorized caller"
 
-    @pytest.mark.parametrize("token", ["", "unknown", "x" * (MAX_TOKEN_CHARS + 1)])
+    @pytest.mark.parametrize("token", ["", "unknown", "x" * (MAX_TOKEN_BYTES + 1)])
     def test_rejections_are_uniform(self, token: str) -> None:
         """Unknown, malformed and over-long are one answer.
 
@@ -415,10 +415,23 @@ class TestJwsShapeTestSurvivesTranslation:
         what arrived is what a resolver would have to handle, so that is what
         the cap applies to.
         """
-        padded = "x" + " " * (MAX_TOKEN_CHARS * 2)
-        assert len(padded.strip()) < MAX_TOKEN_CHARS < len(padded)
+        padded = "x" + " " * (MAX_TOKEN_BYTES * 2)
+        assert len(padded.strip()) < MAX_TOKEN_BYTES < len(padded)
         with pytest.raises(TokenUnresolvedError):
             reject_jws_shaped(padded)
+
+    def test_the_cap_is_measured_in_utf8_bytes(self) -> None:
+        """A multibyte credential is bounded by what a resolver would handle.
+
+        The ports reached for three different units -- codepoints, UTF-16 code
+        units, and bytes -- which agree for an ASCII credential and diverge for
+        anything else.  Bytes is the unit the purpose implies, and it is the
+        most conservative of the three.
+        """
+        multibyte = "\u00e9" * (MAX_TOKEN_BYTES // 2 + 1)  # 2 bytes each
+        assert len(multibyte) < MAX_TOKEN_BYTES < len(multibyte.encode("utf-8"))
+        with pytest.raises(TokenUnresolvedError):
+            reject_jws_shaped(multibyte)
 
     def test_the_resolver_receives_the_credential_unmodified(self) -> None:
         """Trimming is for the shape test only -- never for what is resolved.
