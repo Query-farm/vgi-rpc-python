@@ -53,6 +53,20 @@ from vgi_rpc.conformance._external_pytest import (
     TestExternalInputRoutes,  # noqa: F401
     TestExternalStorageUrlPair,  # noqa: F401
 )
+from vgi_rpc.conformance._identity_pytest import (  # noqa: F401
+    TestErrorKindsReachTheWire,
+    TestGrantFreshness,
+    TestGrantIssuance,
+    TestIdentityAbsentByDefault,
+    TestIdentityNarrowing,
+    TestIdentityWireShape,
+    TestIntrospectionAuthorization,
+    TestIntrospectionHappyPath,
+    TestRejectionsAreUniform,
+    TestTheCredentialSizeCap,
+    TestTheJwsTrap,
+    TestUnavailableIsTransient,
+)
 from vgi_rpc.conformance._lifecycle_tests import (
     assert_cancel_before_exchange_once,
     assert_cancel_close_ordering_safe,

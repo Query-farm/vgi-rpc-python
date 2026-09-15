@@ -892,6 +892,21 @@ class RpcServer:
         binding = self._bindings.get(info.protocol_name)
         return binding.impl if binding is not None else self._impl
 
+    def wants_ctx(self, info: RpcMethodInfo) -> bool:
+        """Whether *info*'s owning implementation declares a ``ctx`` parameter.
+
+        Resolved against the binding that owns the method rather than against
+        the primary's set.  ``ctx_methods`` is per binding precisely because
+        two protocols may define the same method name and only one may want a
+        :class:`CallContext` -- but every dispatch path read the *primary's*
+        set, so a secondary protocol whose methods all take ``ctx`` got none of
+        them.  ``vgi_rpc.Identity.v1`` is exactly that shape: both its methods
+        need the caller's :class:`AuthContext` to apply their guards, and
+        neither could be called at all until this looked at the right binding.
+        """
+        binding = self._bindings.get(info.protocol_name)
+        return info.name in (binding.ctx_methods if binding is not None else self._ctx_methods)
+
     def protocol_hash_for(self, info: RpcMethodInfo | None) -> str:
         """Return the canonical hash of the protocol that owns *info*'s method.
 
@@ -1437,14 +1452,17 @@ class RpcServer:
         """Create a log sink + read auth; wire a :class:`CallContext` into *kwargs* if the method accepts ``ctx``."""
         sink = _ClientLogSink(server_id=self._server_id)
         auth, transport_metadata = _get_auth_and_metadata()
-        if info.name in self._ctx_methods:
+        if self.wants_ctx(info):
             kwargs["ctx"] = CallContext(
                 auth=auth,
                 emit_client_log=sink,
                 transport_metadata=transport_metadata,
                 server_id=self._server_id,
                 method_name=info.name,
-                protocol_name=self.protocol_name,
+                # The protocol that owns the method, not the server's primary:
+                # a ctx labelled with the wrong protocol is a plausible-looking
+                # wrong answer everywhere it is read.
+                protocol_name=info.protocol_name or self.protocol_name,
                 kind=self._transport_kind,
                 implementation=self.implementation_for(info),
             )

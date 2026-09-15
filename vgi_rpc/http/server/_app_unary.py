@@ -123,7 +123,7 @@ def _run_unary_sync(
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         response_budget = _current_response_budget.get()
-        if method_name in app._server.ctx_methods:
+        if app._server.wants_ctx(info):
             kwargs["ctx"] = CallContext(
                 auth=auth,
                 emit_client_log=sink,

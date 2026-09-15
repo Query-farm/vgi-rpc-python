@@ -269,7 +269,7 @@ def _run_stream_init_sync(
         protocol_name = info.protocol_name or app._server.protocol_name
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
-        if method_name in app._server.ctx_methods:
+        if app._server.wants_ctx(info):
             kwargs["ctx"] = CallContext(
                 auth=auth,
                 emit_client_log=sink,

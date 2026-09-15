@@ -10,11 +10,13 @@ to be locked down; issuance is always about the caller and therefore is not.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
 
-from vgi_rpc.rpc import AuthContext, CallContext, RpcServer
+from vgi_rpc.rpc import AuthContext, CallContext, PipeTransport, RpcError, RpcServer, make_pipe_pair
+from vgi_rpc.rpc._client import RpcConnection
 from vgi_rpc.rpc._token_identity import (
     MAX_TOKEN_BYTES,
     GrantRefusedError,
@@ -311,6 +313,79 @@ class TestAbsentHooks:
         impl = IdentityImpl(resolve_token=_resolver, introspect_principals=["proxy"])
         with pytest.raises(GrantRefusedError, match="does not mint"):
             impl.issue_grant("p", [], 60, _ctx(_auth("alice", auth_time=time.time())))
+
+
+class TestDispatchOverARawTransport:
+    """The guards need a ``CallContext``, which dispatch has to actually supply.
+
+    Everything else in this file calls :class:`IdentityImpl` directly and hands
+    it a context it built itself, so none of it can see whether *dispatch*
+    supplies one.  It did not: ``ctx`` injection consulted the **primary**
+    binding's set of ctx-taking methods, so a secondary protocol whose methods
+    all take ``ctx`` -- which is exactly this one -- received none of them and
+    could not be called at all over any transport.  Nothing noticed, because
+    identity had no end-to-end test anywhere.
+
+    The shared conformance group covers the HTTP dispatch path.  This covers
+    the raw-transport one, which is a different call site in a different
+    module and was broken in the same way.
+    """
+
+    @staticmethod
+    def _serve(impl: IdentityImpl, auth: AuthContext) -> tuple[PipeTransport, threading.Thread]:
+        """Serve *impl* alongside an application protocol, over a pipe."""
+        from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
+
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), identity=impl)
+        client_transport, server_transport = make_pipe_pair()
+        thread = threading.Thread(target=server.serve, args=(server_transport,), kwargs={"auth": auth}, daemon=True)
+        thread.start()
+        return client_transport, thread
+
+    def test_introspection_dispatches_and_resolves(self) -> None:
+        """A co-hosted secondary protocol's method receives its caller identity."""
+        impl = IdentityImpl(resolve_token=_resolver, introspect_principals=["proxy"])
+        transport, thread = self._serve(impl, _auth("proxy"))
+        try:
+            with RpcConnection(Identity, transport) as svc:
+                assert svc.introspect_token(token="good").principal == "bob"
+        finally:
+            transport.close()
+            thread.join(timeout=5)
+
+    def test_the_allowlist_is_applied_to_the_dispatched_caller(self) -> None:
+        """The refusal must come from *this* connection's principal.
+
+        A dispatch path that supplied no context at all would fail loudly; one
+        that supplied an empty or anonymous context would refuse *every* call,
+        which looks identical to a working allowlist until an authorized caller
+        tries. The previous case is the half that catches that.
+        """
+        impl = IdentityImpl(resolve_token=_resolver, introspect_principals=["proxy"])
+        transport, thread = self._serve(impl, _auth("someone-else"))
+        try:
+            with RpcConnection(Identity, transport) as svc, pytest.raises(RpcError, match="not an introspector"):
+                svc.introspect_token(token="good")
+        finally:
+            transport.close()
+            thread.join(timeout=5)
+
+    def test_a_raw_transport_with_no_principal_cannot_mint(self) -> None:
+        """Subprocess and unix fail closed for free.
+
+        There is no authenticated principal on those transports, so the
+        freshness guard refuses before any policy runs -- but only if dispatch
+        hands the guard the connection's real (anonymous) context rather than
+        skipping the guard.
+        """
+        impl = IdentityImpl(mint_grant=_minter)
+        transport, thread = self._serve(impl, AuthContext(domain=None, authenticated=False))
+        try:
+            with RpcConnection(Identity, transport) as svc, pytest.raises(RpcError, match="not authenticated"):
+                svc.issue_grant(purpose="p", scopes=[], ttl_seconds=60)
+        finally:
+            transport.close()
+            thread.join(timeout=5)
 
 
 class TestDiagnostics:

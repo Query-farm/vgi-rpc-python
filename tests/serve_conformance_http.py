@@ -25,16 +25,25 @@ from urllib.parse import urlparse
 import falcon
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.identity_fixture import (
+    AUTH_TIME_HEADER,
+    INTROSPECT_RATE_LIMIT,
+    INTROSPECTOR_PRINCIPAL,
+    MAX_AUTH_AGE,
+    PRINCIPAL_HEADER,
+    conformance_mint_grant,
+    conformance_resolve_token,
+)
 from vgi_rpc.external import Compression, ExternalLocationConfig, FetchConfig
 from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
 from vgi_rpc.rpc import AuthContext, RpcServer
-from vgi_rpc.rpc._token_identity import IdentityImpl, TokenIdentity
+from vgi_rpc.rpc._token_identity import IdentityImpl
 
 # Header the sticky principal-binding conformance fixture reads to decide
 # which principal a request belongs to.  Documented in
 # ``docs/sticky-sessions-spec.md`` §9 so cross-language ports can boot an
 # equivalent fixture; the value is arbitrary, only the convention matters.
-_PRINCIPAL_HEADER = "X-Conformance-Principal"
+_PRINCIPAL_HEADER = PRINCIPAL_HEADER
 
 
 def _principal_from_header(req: falcon.Request) -> AuthContext:
@@ -42,33 +51,29 @@ def _principal_from_header(req: falcon.Request) -> AuthContext:
 
     Requests without the header stay anonymous so unauthenticated probes
     (``GET /health``, ``OPTIONS /__capabilities__``) keep working.
+
+    ``X-Conformance-Auth-Time`` rides along as the ``auth_time`` claim, which
+    is what ``vgi_rpc.Identity.v1``'s freshness guard reads.  The value is
+    placed in the claim map **verbatim and unparsed**: parsing it here and
+    dropping what will not parse would collapse "carries an unusable
+    auth_time" into "carries no auth_time", and the guard would then be
+    refusing for a reason the test did not ask for.
+
+    .. warning::
+
+       Trivially spoofable by anyone who can reach the port.  This exists so
+       six language ports can produce a deterministic authenticated caller
+       without an identity provider, and must never be deployed.
+
     """
     principal = req.get_header(_PRINCIPAL_HEADER)
     if not principal:
         return AuthContext(domain=None, authenticated=False, principal=None)
-    return AuthContext(domain="conformance", authenticated=True, principal=principal)
-
-
-#: Fixed conformance values for the token-introspection group.  A port
-#: supplying ``conformance_http_introspect_port`` MUST configure exactly these,
-#: since the shared tests post the subject credential and assert the principal.
-CONFORMANCE_INTROSPECTOR = "conformance-introspector"
-CONFORMANCE_SUBJECT_TOKEN = "conformance-opaque-subject-token"
-CONFORMANCE_SUBJECT_PRINCIPAL = "subject@conformance.example"
-CONFORMANCE_SUBJECT_TOKEN_NAME = "conformance-subject"
-CONFORMANCE_SUBJECT_TTL = 300
-#: A JWS-shaped credential the resolver *would* resolve.  Deliberately
-#: resolvable: if the fixture only offered an unknown JWS, a port with no shape
-#: guard would reject it as unknown and pass the test for the wrong reason.
-#: Made resolvable, the guard becomes observable -- a port that fails to reject
-#: JWS shapes answers 200 and fails.
-CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
-
-#: The credential the resolver reports as *unknowable* rather than unknown. The
-#: shared suite posts it to check that a backing-store outage surfaces as a
-#: transient 503 and not as the endpoint's own definitive 404 — which a caller
-#: may negative-cache, turning a brief outage into a remembered bad credential.
-CONFORMANCE_UNAVAILABLE_TOKEN = "conformance-unavailable-token"
+    claims: dict[str, object] = {}
+    auth_time = req.get_header(AUTH_TIME_HEADER)
+    if auth_time is not None:
+        claims["auth_time"] = auth_time
+    return AuthContext(domain="conformance", authenticated=True, principal=principal, claims=claims)
 
 
 class _FailServeStartOnce(ConformanceServiceImpl):
@@ -106,38 +111,6 @@ def _maybe_access_log(server: RpcServer, path: str | None) -> None:
         max_record_bytes=1_048_576,
         server_id=server.server_id,
     )
-
-
-def _conformance_resolver(token: str) -> TokenIdentity | None:
-    """Resolve the fixed credentials the shared tests post.
-
-    Three answers, deliberately: an identity, ``None`` for "does not resolve",
-    and ``AuthUnavailableError`` for "I could not find out". The third is not a
-    flavour of the second — a caller may negative-cache ``None``'s 404, so an
-    outage reported that way is remembered as a bad credential.
-
-    Args:
-        token: The opaque credential posted to the endpoint.
-
-    Returns:
-        The identity, or ``None`` when the credential does not resolve.
-
-    Raises:
-        AuthUnavailableError: For ``CONFORMANCE_UNAVAILABLE_TOKEN``, standing in
-            for a backing store that cannot be reached.
-
-    """
-    if token == CONFORMANCE_UNAVAILABLE_TOKEN:
-        from vgi_rpc.http import AuthUnavailableError
-
-        raise AuthUnavailableError("conformance: mapping store unreachable")
-    if token in (CONFORMANCE_SUBJECT_TOKEN, CONFORMANCE_JWS_TRAP_TOKEN):
-        return TokenIdentity(
-            principal=CONFORMANCE_SUBJECT_PRINCIPAL,
-            token_name=CONFORMANCE_SUBJECT_TOKEN_NAME,
-            ttl_seconds=CONFORMANCE_SUBJECT_TTL,
-        )
-    return None
 
 
 class _TestDrainResource:
@@ -332,12 +305,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--introspect",
-        action="store_true",
+        "--identity",
+        choices=("off", "both", "introspect-only"),
+        default="off",
         help=(
-            "Host vgi_rpc.Identity.v1 with the fixed conformance resolver and "
-            "a single-principal introspector allowlist. Implies principal-header "
-            "auth so the allowlist has something to check."
+            "Host vgi_rpc.Identity.v1 under the fixed conformance policy in "
+            "vgi_rpc.conformance.identity_fixture. 'both' configures the "
+            "resolve and mint hooks; 'introspect-only' configures only the "
+            "resolver, so the binding -- and its protocol_hash -- narrows to "
+            "one method. Implies principal-header auth so the allowlist and "
+            "the freshness guard have something to read."
         ),
     )
     parser.add_argument(
@@ -363,9 +340,19 @@ def main() -> None:
     # configured on the server rather than on the WSGI app -- and is therefore
     # available on every transport rather than only this one.
     identity = (
-        IdentityImpl(resolve_token=_conformance_resolver, introspect_principals=[CONFORMANCE_INTROSPECTOR])
-        if args.introspect
-        else None
+        None
+        if args.identity == "off"
+        else IdentityImpl(
+            resolve_token=conformance_resolve_token,
+            # Absent for 'introspect-only', which is what narrows the binding
+            # to one method.  A method whose hook the deployment did not
+            # configure is not hosted at all -- absent beats
+            # routed-and-refusing, and the protocol_hash narrows with it.
+            mint_grant=conformance_mint_grant if args.identity == "both" else None,
+            introspect_principals=[INTROSPECTOR_PRINCIPAL],
+            introspect_rate_limit=INTROSPECT_RATE_LIMIT,
+            max_auth_age=MAX_AUTH_AGE,
+        )
     )
     enable_sticky = not args.no_sticky
     # Fixed marker the canonical TestSticky::test_echo_header_round_trip
@@ -379,7 +366,7 @@ def main() -> None:
 
     compression_level = None if args.no_compression else 1
     token_key = bytes.fromhex(args.token_key) if args.token_key else None
-    authenticate = _principal_from_header if (args.sticky_auth or args.introspect) else None
+    authenticate = _principal_from_header if (args.sticky_auth or args.identity != "off") else None
     # Mirror make_wsgi_app's own default so the plain worker keeps shipping
     # the documented value in VGI-Sticky-Default-TTL.
     sticky_default_ttl: float = 300.0 if args.sticky_ttl is None else float(args.sticky_ttl)

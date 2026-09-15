@@ -692,15 +692,33 @@ def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Ite
         yield port, log_path
 
 
-@pytest.fixture(scope="class")
-def conformance_http_introspect_port() -> Iterator[int]:
-    """Spawn a conformance HTTP worker with token introspection enabled.
+@pytest.fixture(scope="session")
+def conformance_http_identity_port() -> Iterator[int]:
+    """Spawn a conformance HTTP worker hosting ``vgi_rpc.Identity.v1``, both methods.
 
-    Backs the shared ``TestTokenIntrospection`` group.  It needs its own
-    worker because the route is absent unless explicitly enabled -- which
-    ``TestTokenIntrospectionOffMode`` asserts against the default worker.
+    Backs the shared ``TestIdentity`` group.  It needs its own worker because
+    the protocol is not hosted unless a deployment configures a hook -- which
+    ``TestIdentityAbsentByDefault`` asserts against the plain worker -- and
+    because every guard in it reads deployment policy that has to be a known
+    value for any cross-port assertion to exist.  That policy lives in
+    :mod:`vgi_rpc.conformance.identity_fixture`.
     """
-    with _spawn_conformance_http("--introspect") as port:
+    with _spawn_conformance_http("--identity", "both") as port:
+        yield port
+
+
+@pytest.fixture(scope="session")
+def conformance_http_identity_introspect_only_port() -> Iterator[int]:
+    """Spawn a conformance HTTP worker hosting only ``introspect_token``.
+
+    The same binary with the mint hook left unconfigured.  A second worker is
+    the only way to observe method-level narrowing: that a method whose hook
+    the deployment did not supply is *absent* rather than hosted-and-refusing,
+    and that the binding's ``protocol_hash`` narrows with it.  The two
+    single-method digests in the spec exist for exactly this and cannot be
+    checked against a worker that hosts both.
+    """
+    with _spawn_conformance_http("--identity", "introspect-only") as port:
         yield port
 
 
