@@ -20,6 +20,7 @@ Run: ``uv run python describe_diff.py``
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import subprocess
 import sys
@@ -146,6 +147,12 @@ def get_subprocess_description(name: str, config: dict[str, str | list[str] | Pa
         proc.wait(timeout=5)
 
 
+def _render(value: object) -> str:
+    """One-line rendering, so a multi-field schema does not swamp the report."""
+    text = str(value).replace("\n", " ")
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
 def main() -> None:
     """Describe every port, then compare -- hash first."""
     descriptions: dict[str, ServiceDescription | str] = {}
@@ -218,25 +225,34 @@ def main() -> None:
 
         shape: list[str] = []
         for method in sorted(set(reference.methods) & set(desc.methods)):
+            # Every field of the description, by reflection over the dataclass
+            # rather than a hand-written list.
+            #
+            # This comparison has been wrong three times, each time the same
+            # way: it checked the fields someone remembered to add, reported
+            # "shapes agree" beside a hash mismatch, and sent the reader looking
+            # in the wrong place. Header schemas, protocol names and stream kind
+            # were each missed that way. Enumerating the fields removes the
+            # class of mistake rather than its latest instance -- a new field on
+            # MethodDescription is compared the day it is added.
+            #
             # Named in the same order as the heading above: this port first,
             # then the reference. Getting that backwards sends a reader to fix
             # the wrong side.
             port, ref = desc.methods[method], reference.methods[method]
-            if port.method_type != ref.method_type:
-                shape.append(f"{method}: method_type {port.method_type.value} vs {ref.method_type.value}")
-            elif port.has_return != ref.has_return:
-                shape.append(f"{method}: has_return {port.has_return} vs {ref.has_return}")
-            elif port.params_schema != ref.params_schema:
-                shape.append(f"{method}: params {port.params_schema} vs {ref.params_schema}")
-            elif port.has_return and port.result_schema != ref.result_schema:
-                shape.append(f"{method}: result {port.result_schema} vs {ref.result_schema}")
-            elif port.has_header != ref.has_header:
-                shape.append(f"{method}: has_header {port.has_header} vs {ref.has_header}")
-            elif port.has_header and port.header_schema != ref.header_schema:
-                # Header schemas are in the hash preimage, so a tool that does
-                # not compare them reports "shapes agree" beside a hash mismatch
-                # and sends the reader looking in the wrong place.
-                shape.append(f"{method}: header {port.header_schema} vs {ref.header_schema}")
+            for f in dataclasses.fields(ref):
+                pv, rv = getattr(port, f.name), getattr(ref, f.name)
+                if pv == rv:
+                    continue
+                # A result or header schema is meaningless when the flag that
+                # governs it is false, and the flag itself is reported above --
+                # so do not also report the schema nobody looks at.
+                if f.name == "result_schema" and not (port.has_return and ref.has_return):
+                    continue
+                if f.name == "header_schema" and not (port.has_header and ref.has_header):
+                    continue
+                shape.append(f"{method}: {f.name} {_render(pv)} vs {_render(rv)}")
+
         if shape:
             failed = True
             print()
