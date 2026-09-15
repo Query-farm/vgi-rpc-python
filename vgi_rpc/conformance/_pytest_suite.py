@@ -2232,6 +2232,13 @@ def _unary_request_body(method_name: str, **kwargs: object) -> bytes:
     ``Accept-Encoding``.  The protocol version is read off the protocol
     class exactly as :class:`RpcClient` does — the server rejects a
     request that omits it.
+
+    The routing key rides too.  ``vgi_rpc.protocol`` is required on every
+    request, including against a server hosting exactly one protocol: the
+    metadata field is canonical and the path segment is a projection, so a
+    request carrying only the path is one whose rewriting by an intermediary
+    would be undetectable.  A hand-built request that omits it is testing a
+    shape no conformant client emits.
     """
     from io import BytesIO
 
@@ -2247,6 +2254,7 @@ def _unary_request_body(method_name: str, **kwargs: object) -> bytes:
         method_name,
         info.params_schema,
         kwargs,
+        protocol=vars(ConformanceService).get("protocol_name") or ConformanceService.__name__,
         protocol_version=version if isinstance(version, str) else None,
     )
     return buf.getvalue()

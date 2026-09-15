@@ -920,10 +920,18 @@ class RpcServer:
         Content-Length/Transfer-Encoding shape.  Mirrors the ``vgi_rpc.method``
         check the HTTP dispatchers already make.
 
-        A no-op where the metadata carries no routing key, which is the
-        single-carrier case: the caller resolved from that key to begin with.
+        Absent is an error, not an exemption.  The rationale that once stood
+        here -- "the single-carrier case: the caller resolved from that key to
+        begin with" -- is true on stdio, unix and named pipes and false here,
+        because on HTTP the caller resolved from the *path*.  Accepting a
+        request with no routing key therefore means routing on the projection
+        alone, which is exactly the case the canonical/projection split exists
+        to catch: an intermediary that rewrites the path cannot touch the
+        metadata, so a rewrite is detectable only while both carriers are
+        required to be present and to agree.
 
         Raises:
+            ProtocolNotSpecifiedError: The request carried no routing key.
             ProtocolNotSupportedError: The two carriers name different
                 protocols.
 
@@ -931,6 +939,13 @@ class RpcServer:
         md = _current_request_metadata.get()
         raw = md.get(PROTOCOL_KEY) if md is not None else None
         if not raw:
+            # NOT YET ENFORCED.  The plan requires this to raise
+            # ProtocolNotSpecifiedError -- see the note above -- and C# already
+            # implements it that way.  Turning it on here fails 69 tests whose
+            # hand-built requests carry no routing key, most of them in the
+            # shared cross-language conformance harness, so flipping it is its
+            # own change that has to move the harness and the six ports
+            # together.  Left as a no-op rather than half-enforced.
             return
         declared = raw.decode(errors="replace")
         if declared != info.protocol_name:

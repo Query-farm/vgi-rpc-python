@@ -1601,7 +1601,7 @@ class _HttpProxy:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug("HTTP unary call: %s/%s", url_prefix, info.name)
             req_buf = BytesIO()
-            _send_request(req_buf, info, kwargs, protocol_version=protocol_version)
+            _send_request(req_buf, info, kwargs, protocol=info.protocol_name, protocol_version=protocol_version)
             body = maybe_externalize(req_buf.getvalue())
 
             # RPC implementations may have side effects. A gateway can lose
@@ -1673,7 +1673,7 @@ class _HttpProxy:
                 wire_http_logger.debug("HTTP stream init: %s/%s/init", url_prefix, info.name)
             # Send init request
             req_buf = BytesIO()
-            _send_request(req_buf, info, kwargs, protocol_version=protocol_version)
+            _send_request(req_buf, info, kwargs, protocol=info.protocol_name, protocol_version=protocol_version)
             body = maybe_externalize(req_buf.getvalue())
 
             resp = _post_bounded(
