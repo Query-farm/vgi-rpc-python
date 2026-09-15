@@ -27,8 +27,8 @@ import falcon
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
 from vgi_rpc.external import Compression, ExternalLocationConfig, FetchConfig
 from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
-from vgi_rpc.http.server._introspect import TokenIdentity
 from vgi_rpc.rpc import AuthContext, RpcServer
+from vgi_rpc.rpc._token_identity import IdentityImpl, TokenIdentity
 
 # Header the sticky principal-binding conformance fixture reads to decide
 # which principal a request belongs to.  Documented in
@@ -335,10 +335,9 @@ def main() -> None:
         "--introspect",
         action="store_true",
         help=(
-            "Enable POST /__introspect_token__ with the fixed conformance "
-            "resolver and a single-principal introspector allowlist. Backs the "
-            "shared TestTokenIntrospection group; implies principal-header auth "
-            "so the allowlist has something to check."
+            "Host vgi_rpc.Identity.v1 with the fixed conformance resolver and "
+            "a single-principal introspector allowlist. Implies principal-header "
+            "auth so the allowlist has something to check."
         ),
     )
     parser.add_argument(
@@ -360,8 +359,14 @@ def main() -> None:
     args = parser.parse_args()
 
     call_state_cache_entries = 0 if args.no_call_state_cache else 4096
-    introspect_resolver = _conformance_resolver if args.introspect else None
-    introspect_principals = [CONFORMANCE_INTROSPECTOR] if args.introspect else None
+    # Identity is a co-hosted protocol now, not an HTTP JSON route, so it is
+    # configured on the server rather than on the WSGI app -- and is therefore
+    # available on every transport rather than only this one.
+    identity = (
+        IdentityImpl(resolve_token=_conformance_resolver, introspect_principals=[CONFORMANCE_INTROSPECTOR])
+        if args.introspect
+        else None
+    )
     enable_sticky = not args.no_sticky
     # Fixed marker the canonical TestSticky::test_echo_header_round_trip
     # captures + replays. Operators wiring up real deployments use
@@ -386,6 +391,7 @@ def main() -> None:
             ConformanceService,
             impl,
             enable_describe=args.describe,
+            identity=identity,
         )
         _maybe_access_log(server, args.access_log)
         if not enable_sticky:
@@ -418,8 +424,6 @@ def main() -> None:
             sticky_default_ttl=sticky_default_ttl,
             call_state_cache_entries=call_state_cache_entries,
             cors_origins=args.cors_origin,
-            introspect_resolver=introspect_resolver,
-            introspect_principals=introspect_principals,
         )
         # Test-only admin endpoint so canonical conformance tests can
         # trigger drain over the wire without sending SIGTERM.
@@ -465,6 +469,7 @@ def main() -> None:
         impl,
         enable_describe=args.describe,
         external_location=external_location,
+        identity=identity,
     )
     _maybe_access_log(server, args.access_log)
 
@@ -481,8 +486,6 @@ def main() -> None:
         enable_sticky=enable_sticky,
         sticky_echo_headers=sticky_echo_headers,
         cors_origins=args.cors_origin,
-        introspect_resolver=introspect_resolver,
-        introspect_principals=introspect_principals,
     )
     # Test-only admin endpoint (see _TestDrainResource for rationale).
     app.add_route("/__test_drain__", _TestDrainResource(drain_handle(app)))

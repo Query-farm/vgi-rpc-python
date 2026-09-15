@@ -19,7 +19,6 @@ import falcon
 from vgi_rpc.rpc import AuthContext, RpcServer
 
 from ._factory import make_wsgi_app
-from ._introspect import TokenResolver
 from ._sticky import drain_handle
 
 _logger = logging.getLogger("vgi_rpc.http")
@@ -78,9 +77,6 @@ def serve_http(
     cors_origins: str | Iterable[str] | None = None,
     cors_max_age: int | None = 7200,
     cors_resource_policy: str | None = "cross-origin",
-    introspect_resolver: TokenResolver | None = None,
-    introspect_principals: Iterable[str] | None = None,
-    introspect_rate_limit: int = 20,
 ) -> None:
     """Serve an ``RpcServer`` over HTTP using waitress.
 
@@ -163,12 +159,6 @@ def serve_http(
         cors_resource_policy: ``Cross-Origin-Resource-Policy`` value; needed
             by callers under ``Cross-Origin-Embedder-Policy: require-corp``.
             See :func:`make_wsgi_app`.
-        introspect_resolver: Enables the token-introspection endpoint.  Absent
-            by default.  See :func:`make_wsgi_app`.
-        introspect_principals: Principals permitted to introspect; required
-            alongside ``introspect_resolver``.  See :func:`make_wsgi_app`.
-        introspect_rate_limit: Introspection requests per caller per second.
-            See :func:`make_wsgi_app`.
 
     """
     if max_stream_response_bytes is not None:
@@ -211,9 +201,6 @@ def serve_http(
         cors_origins=cors_origins,
         cors_max_age=cors_max_age,
         cors_resource_policy=cors_resource_policy,
-        introspect_resolver=introspect_resolver,
-        introspect_principals=introspect_principals,
-        introspect_rate_limit=introspect_rate_limit,
     )
 
     if install_signal_handlers and enable_sticky:

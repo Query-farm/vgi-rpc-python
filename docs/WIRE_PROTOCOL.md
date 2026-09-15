@@ -661,7 +661,6 @@ A GET to a two-segment path whose first segment cannot be a protocol name is
 |----------|-------------|-------------|
 | `{prefix}/health` | GET, HEAD, OPTIONS | Health check + **capability discovery**. JSON body on GET; capability headers on all three. |
 | `{prefix}/__session__` | DELETE | Sticky-session teardown (only when sticky sessions are enabled). See [Section 17](#17-sticky-sessions-http-optional). |
-| `{prefix}/__introspect_token__` | POST | Token introspection (JSON). See [Section 16](#16-token-introspection-post-prefix__introspect_token__). Always routed; definitively refuses when disabled. |
 
 **Optional, human- and IdP-facing** — present by default in the reference but
 carrying no wire contract; a port may omit them entirely:
@@ -1561,7 +1560,7 @@ remain `400`.
 > stream containing an error batch. The exceptions are 401 (JSON or HTML, per
 > [`docs/unauthorized-spec.md`](unauthorized-spec.md)), 415 (framework default
 > response), and the non-Arrow framework endpoints in
-> [Section 16](#16-token-introspection-post-prefix__introspect_token__) and
+> [Section 16](#16-identity-vgi_rpcidentityv1) and
 > [Section 17](#17-sticky-sessions-http-optional).
 
 ---
@@ -1828,55 +1827,123 @@ treat the zero-row pointer as empty input.
 
 ---
 
-## 16. Token Introspection (`POST {prefix}/__introspect_token__`)
+## 16. Identity (`vgi_rpc.Identity.v1`)
 
-**HTTP-only. Optional. Absent unless explicitly enabled.**
+Two methods, optional and independently so, hosted as an ordinary co-hosted
+protocol. It was previously an HTTP JSON route, `POST
+{prefix}/__introspect_token__`, which meant it existed on one transport only and
+had to be hand-written in every port.
 
-Resolves an **opaque bearer credential** to a **principal**, for a reverse proxy that terminates the only public listener and must know which principal a credential authenticates as before it can authorize. Not part of the Arrow RPC surface: it is JSON in and JSON out, because its consumer is an authorization layer, not an Arrow client.
-
-### Request
-
-```http
-POST {prefix}/__introspect_token__
-Authorization: Bearer <introspector credential>
-Content-Type: application/json
-
-{"token": "<opaque subject credential>"}
+```
+introspect_token(token: utf8) -> TokenIdentity
+issue_grant(purpose: utf8, scopes: list<utf8>, ttl_seconds: int64) -> IssuedGrant
 ```
 
-The body carries exactly one key. Implementations MUST cap it — the only legitimate content is one credential, and the generic request-size cap would otherwise admit megabytes into a JSON parse.
+**A method whose hook the deployment did not configure is not hosted**, and the
+binding's method set — and therefore its `protocol_hash` — narrows accordingly.
+A worker that resolves credentials but does not mint grants hosts
+`introspect_token` alone, and a client learns that from reflection rather than
+by calling and reading an error. Absent beats routed-and-refusing: it is what
+keeps a dependency upgrade from growing a credential-to-identity oracle on every
+existing worker.
 
-### Response
+### `introspect_token` — an oracle, and guarded as one
 
-| Status | Meaning | Caller behaviour |
+Resolves an opaque bearer credential to the principal it authenticates as, for a
+reverse proxy that terminates the only public listener and must know the
+caller's identity before it can authorize anything.
+
+The answer is an identity assertion made by the thing being protected, which the
+asker then acts on using credentials the worker does not hold — storage
+credentials, entitlement lookups, policy-tier selection. "Trust it as much as
+you trust the worker" is the wrong frame: it must be trusted *more*. Hence four
+guards, all normative:
+
+- **An introspector allowlist with no permissive default.** A server whose
+  resolver is configured without one MUST refuse to start. Authentication and
+  introspection are different capabilities: "any authenticated caller" lets any
+  user test guesses of any other user's credential at unlimited rate, and
+  resolve a stolen one to its owner.
+- **Authorization is checked before the credential is touched**, so an
+  unauthorized caller learns nothing about it — including how long looking at it
+  took.
+- **Rejections are uniform.** Unknown, expired, malformed and over-long are one
+  answer. Distinguishing them confirms that a guessed credential exists.
+- **A JWS-shaped subject is refused before the resolver runs.** Three
+  dot-separated base64url segments are validated locally against a key set;
+  routing one onward hands a third party a token the asker may itself have
+  rejected for being expired or wrong-audience.
+
+Rate limiting (default 20/caller/second) **bounds, rather than closes**, the
+oracle an allowlisted-but-compromised caller still has.
+
+`TokenIdentity` carries `principal`, `token_name` and `ttl_seconds`, and
+**never claims**. A pass-through claims field would let a worker choose its
+caller's tenant routing, row scope and policy branch; the asker derives what it
+needs from the principal alone. `ttl_seconds` is how long the answer may be
+cached — treat it as an authorization window, and therefore as the revocation
+lag.
+
+### `issue_grant` — not an oracle, so not guarded as one
+
+Mints a standing delegation credential for the *calling* user. OAuth cannot
+express durable delegation: it fuses the grant, the credential and the session
+into one refresh token, so an IdP shortening session lifetime shortens the
+grant. This is the durable record — minted while the user is present, presented
+later by unattended automation as an ordinary bearer.
+
+**There is no subject parameter.** The subject is always the caller's
+authenticated principal, so cross-subject minting is closed by construction
+rather than by a check one of six ports can forget. That is also why this method
+needs no allowlist and no rate limit while `introspect_token` has both.
+
+**A credential with no verifiable `auth_time` cannot mint.** That single rule is
+what stops a grant being used to mint another grant and escaping the identity
+provider permanently — a grant is not IdP-issued, so it carries no `auth_time` —
+and it makes subprocess and unix transports fail closed for free, since there is
+no authenticated principal there at all. A static bearer proves a machine holds
+a secret, never that a human just authenticated, so it is refused here too.
+
+> `auth_time` is an OIDC claim meaning *when this session began*, which can be
+> arbitrarily old while still present and cryptographically valid. Requiring it
+> is not the same as requiring a recent login: the deployment must send
+> `max_age` (or an appropriate `acr`) at the authorize endpoint for this guard
+> to mean what it says.
+
+Unlike the introspection rejections, these are deliberately **actionable**: they
+are always about the caller themselves, so naming the reason leaks nothing, and
+it is the only way a console learns to re-prompt.
+
+`IssuedGrant` carries `token`, `expires_at` and `grant_id`. **The token format
+is the worker's entirely** — a sealed envelope, a database row, or a credential
+brokered from the IdP are equally valid and equally invisible here. It is never
+parsed and never logged. `expires_at` is required *because* the framework cannot
+enforce it: the real lifetime lives inside the opaque token, so this is a
+declaration, and a worker that must state a lifetime has thought about one.
+
+### Error kinds
+
+These were an HTTP route whose callers classified definitive-versus-transient on
+the status code (404 vs 503). As protocol methods every handler exception
+surfaces the same way, so `error_kind` carries the whole distinction and is
+load-bearing rather than decorative:
+
+| `error_kind` | Meaning | Caller |
 |---|---|---|
-| `200` | Resolved. Body below. | Cache for `ttl_seconds`. |
-| `401` / `403` / `404` | **Definitive** — refused, or did not resolve. | MAY negative-cache. |
-| `5xx`, transport failure | **Transient** — could not answer. | MUST NOT cache; retry. |
+| `introspection_refused` | The caller may not introspect. | Definitive; MAY cache. |
+| `token_unresolved` | The subject credential did not resolve. | Definitive; MAY cache. |
+| `stale_auth` | The caller has not authenticated recently enough to mint. | Definitive, and actionable — re-prompt. |
+| `grant_refused` | The worker declined to mint. | Definitive. |
+| `identity_unavailable` | The answer is not *knowable* — a store is down. | **Transient**; MUST NOT negative-cache. |
 
-```json
-{"principal": "alice@example.com", "token_name": "laptop", "ttl_seconds": 300}
-```
+A caller that negative-caches a transient failure locks out valid users; one
+that retries a definitive rejection hammers the worker. `identity_unavailable`
+is deliberately **not** a `ValueError` in the reference, because
+`chain_authenticate` advances to the next authenticator on `ValueError` — a
+sidecar outage raised as one is read as "not my credential, try the next" and
+ends up a 401 from the end of the chain, restarting every session in the fleet
+over a thirty-second blip.
 
-Exactly three keys. **A `claims` field MUST NEVER be returned** — see the porting guide for why this is the constraint the whole feature rests on. `ttl_seconds` MUST be finite and positive; `NaN` silently disables a caller's cache and turns every request into a round trip.
-
-The definitive/transient split is **normative**. A caller's negative cache depends on it: cache an outage and a worker restart takes the fleet down for the cache's lifetime; retry a rejection and the worker is hammered. A worker that has *not* enabled introspection MUST still answer definitively — `404` in the reference — rather than letting the path fall through to a generic route whose status a caller reads as transient.
-
-### Guards
-
-Normative for any implementation that enables the route:
-
-- The route is **absent** (or definitively refusing) unless explicitly enabled.
-- An **introspector-principal allowlist** with no permissive default. Authentication is not the same capability as introspection.
-- **JWS-shaped subjects are rejected without being resolved.**
-- **Uniform rejection**: unknown, expired and malformed are byte-identical answers.
-- A resolver that **cannot answer** (its backing store is down) MUST surface as `503` with `Retry-After`, never as the definitive `404`. This is the same distinction as the table above, on the axis the resolver controls: `404` is the one answer a caller is entitled to negative-cache, so a store blip returned as `404` is cached as "this credential is bad".
-- The credential appears in **no** response, error message, log record, or span. Digest it (SHA-256) for diagnostics.
-- `VGI-Token-Introspection: true` on `/health` when enabled, absent otherwise.
-
-Conformance group: `TestTokenIntrospection` (optional fixture) and `TestTokenIntrospectionOffMode` (ungated).
-
----
 
 ## 17. Sticky Sessions (HTTP, optional)
 

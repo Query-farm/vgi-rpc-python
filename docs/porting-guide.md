@@ -305,49 +305,27 @@ This is the same gap the CORS work turned up twice — the suite asserted `X-Req
 
 ## HTTP token introspection
 
-**Optional, and off unless explicitly enabled.** A port that does not implement it MUST still answer `POST {prefix}/__introspect_token__` with a status a caller treats as **definitive** — `401`, `403` or `404`. That requirement is not decoration: a caller classifying anything else as transient will retry forever against a worker that is never going to support the feature, so a `415` from a generic catch-all route turns a misconfiguration into an infinite loop instead of a preflight failure. The reference answers `404 {"error": "not_enabled"}`.
+**Optional, and each method independently so.** Identity is
+`vgi_rpc.Identity.v1` ([WIRE_PROTOCOL §16](WIRE_PROTOCOL.md)), an ordinary
+co-hosted protocol — not, any longer, an HTTP JSON route. A port that does not
+implement it simply does not host it, and a caller gets the same
+`protocol_not_supported` it gets for any protocol a server does not speak. There
+is nothing extra to route and nothing to refuse.
 
-The endpoint resolves an **opaque bearer credential** to a **principal**, for a reverse proxy that terminates the only public listener and must know which principal a credential authenticates as before it can authorize anything.
+Three things in that section are normative and are the ones a port is most
+likely to get subtly wrong:
 
-```
-POST {prefix}/__introspect_token__
-Authorization: Bearer <introspector credential>
-Content-Type: application/json
-{"token": "<opaque subject credential>"}
-
-200  {"principal": "...", "token_name": "...", "ttl_seconds": 300}
-401/403/404  definitive   — the caller may cache this
-5xx / transport failure   — the caller MUST NOT cache this
-```
-
-### Why the guards are hard requirements
-
-The response is **an identity assertion made by the thing being protected**, and the asker acts on it using credentials the worker does not hold — storage credentials on a data-plane host, service-credential attachments in an entitlement resolver, policy-tier selection. "Trust it as much as you trust the worker" is the wrong frame: it must be trusted *more*, because it steers privileges the worker never has.
-
-1. **Never return claims.** The response is a closed set: `principal`, `token_name`, `ttl_seconds`. A pass-through claims field would let a worker choose its caller's tenant routing, its row scope, and its policy branch — the single most dangerous thing this feature could grow. Askers derive what they need from the principal alone.
-2. **The route is absent unless explicitly enabled.** No worker grows a credential-to-identity oracle by upgrading a dependency.
-3. **The introspector allowlist has no permissive default.** Authentication and introspection are different capabilities. A deployment where *any* valid credential may introspect lets any user test guesses of any other user's credential at unlimited rate, and resolve a stolen one to its owner. A port that checks only authentication passes every other test in the group — `test_non_introspector_refused` is the one that catches it.
-4. **Reject JWS-shaped subjects without resolving them.** A JWS is validated locally against a key set; routing one here hands a third party a bearer token the asker may itself have rejected, and an expired access token is still live at its issuer for other resources.
-5. **Uniform rejection.** Unknown, expired and malformed are one answer, byte for byte. Reporting which confirms that a guessed credential exists.
-6. **Never log the credential.** Digest it (SHA-256) for diagnostics. The conformance group asserts the credential is absent from responses; the reference asserts it against captured log output too, and a port should do the same locally.
-7. **Advertise on `/health`.** `VGI-Token-Introspection: true` when enabled, absent otherwise, so a proxy preflights at boot rather than at first login.
-
-Do **not** implement this by replaying the credential through the worker's own authenticate chain. It is the attractive design and it breaks four ways: a precondition gate wrapping the chain makes the replay unimplementable; it runs the worker's independently-configured audience/issuer set, so a credential the asker *rejected* could be accepted; cookie- and mTLS/IP-derived identity cannot be replayed at all, and a synthesized request carries the proxy's own address — silently elevating any address-allowlist member rather than failing cleanly; and it invents a fake-request contract every future authenticator must honour with no type to enforce it. Take a narrow `resolve(credential) -> principal | None` callable instead.
-
-### Definitive vs transient is normative
-
-"The credential is bad" and "I could not find out whether the credential is bad" are different answers, and a caller's cache depends on telling them apart. A rejection may be negative-cached; an outage must not be, or a worker restart takes the fleet down for the cache's lifetime. The reference adds `AuthUnavailableError`, which is deliberately **not** a `ValueError` so that `chain_authenticate` — which advances on `ValueError` — propagates it instead of reading it as "not my credential, try the next" and emerging as a 401 from the end of the chain. It surfaces as `503` with `Retry-After`. A port needs the equivalent distinction in whatever its chaining primitive is.
-
-The same distinction binds the **resolver**, and it is easier to get wrong there: the endpoint's own "did not resolve" is `404`, which is exactly the answer a caller may negative-cache, so a resolver whose backing store is down must not borrow it. In the reference the resolver raises the same `AuthUnavailableError` and the endpoint converts it to `503` + `Retry-After` — not through the uniform-rejection path, which is for definitive answers and carries `Cache-Control: no-store` instead.
-
-### Conformance
-
-Supply an optional `conformance_http_introspect_port` fixture: a worker with introspection enabled, configured with the exact constants in `_pytest_suite.py` (`_INTROSPECTOR`, `_SUBJECT_TOKEN`, `_SUBJECT_PRINCIPAL`, `_JWS_TRAP_TOKEN`, `_UNAVAILABLE_TOKEN`). Omit it and `TestTokenIntrospection` skips; `TestTokenIntrospectionOffMode` runs everywhere regardless, because "off unless enabled" binds every port.
-
-Two of those constants are traps, and both exist because the obvious implementation passes without them:
-
-- `_JWS_TRAP_TOKEN` must be **resolvable** by your fixture's resolver. Against an unknown JWS a port with no shape guard rejects it as unknown and passes for the wrong reason; resolvable, the shape guard is the only thing that can produce a rejection.
-- `_UNAVAILABLE_TOKEN` must make your resolver signal **"I could not find out"** — whatever your language's equivalent of the reference's `AuthUnavailableError` is. Your fixture therefore needs a resolver with *three* answers, not two: an identity, "does not resolve", and "unknowable". A port that folds the third into the second answers `404`, which a caller may negative-cache — so a briefly unreachable backing store is remembered as a bad credential for the cache's lifetime.
+- **The introspector allowlist has no permissive default**, and a server whose
+  resolver is configured without one must refuse to start. "Any authenticated
+  caller" is precisely the configuration that turns introspection into an open
+  oracle, so it must not be reachable by omission.
+- **`issue_grant` takes no subject.** The subject is the caller's authenticated
+  principal. That closes cross-subject minting by construction rather than by a
+  check, which is the point: a check is something one of six ports forgets.
+- **`error_kind` carries the definitive-versus-transient distinction**, because
+  as protocol methods every rejection surfaces the same way. A caller that
+  negative-caches `identity_unavailable` locks out valid users when a store
+  blips.
 
 ## HTTP proxy proof
 

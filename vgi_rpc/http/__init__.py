@@ -123,7 +123,7 @@ from vgi_rpc.http._unauthorized import (
     declare_proxy_headers,
     proxy_headers_of,
 )
-from vgi_rpc.http.server import TokenIdentity, TokenResolver, make_wsgi_app, serve_http
+from vgi_rpc.http.server import make_wsgi_app, serve_http
 from vgi_rpc.http.server._sticky import DrainHandle, drain_handle
 
 with contextlib.suppress(ImportError):
@@ -228,8 +228,6 @@ __all__ = [
     "select_device_code_client",
     "make_wsgi_app",
     "serve_http",
-    "TokenIdentity",
-    "TokenResolver",
     "request_upload_urls",
     "XfccElement",
     "mtls_authenticate_xfcc",

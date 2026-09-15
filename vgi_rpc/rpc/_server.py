@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from types import MappingProxyType
@@ -621,8 +621,31 @@ class RpcServer:
             )
         return info
 
-    def _build_binding(self, proto: type, impl: object, *, allow_reserved: bool = False) -> _ProtocolBinding:
-        """Validate one protocol/implementation pair and freeze it into a binding."""
+    def _build_binding(
+        self,
+        proto: type,
+        impl: object,
+        *,
+        allow_reserved: bool = False,
+        only: Collection[str] | None = None,
+    ) -> _ProtocolBinding:
+        """Validate one protocol/implementation pair and freeze it into a binding.
+
+        Args:
+            proto: The Protocol class.
+            impl: The object implementing it.
+            allow_reserved: Permit the reserved ``vgi_rpc.`` name prefix.  Set
+                only where the framework registers its own protocols.
+            only: Host just these method names.  For a protocol whose methods
+                are individually optional: a method the worker cannot answer is
+                better *absent* than routed-and-refusing, because then what the
+                server hosts describes what it actually does, and a client
+                learns it from reflection rather than by calling and reading an
+                error.  Narrowing the method set narrows the protocol hash with
+                it, which is correct -- a server offering half the methods is
+                not offering the same surface.
+
+        """
         # vars() not getattr(): a subclass that does not redeclare must not
         # inherit its base's version, or it silently claims compatibility it
         # was never checked for.
@@ -637,6 +660,8 @@ class RpcServer:
             version_parts = parse_version(raw_version)
 
         methods = rpc_methods(proto)
+        if only is not None:
+            methods = {name: info for name, info in methods.items() if name in only}
         _validate_implementation(proto, impl, methods)
         name = _protocol_wire_name(proto)
         try:
@@ -663,6 +688,7 @@ class RpcServer:
         implementation: object,
         *,
         extra_protocols: Sequence[tuple[type, object]] = (),
+        identity: object | None = None,
         external_location: ExternalLocationConfig | None = None,
         server_id: str | None = None,
         server_version: str = "",
@@ -690,6 +716,11 @@ class RpcServer:
                 ``protocol_hash`` and ``implementation`` report, what the
                 landing page titles, and what framework endpoints with no owning
                 protocol log against. It is never a routing fallback.
+            identity: An :class:`~vgi_rpc.rpc._identity.IdentityImpl` to host
+                ``vgi_rpc.Identity.v1``.  Absent by default, and absent rather
+                than routed-and-refusing when omitted: that is what keeps a
+                dependency upgrade from growing a credential-to-identity oracle
+                on every existing worker.
             external_location: Optional ExternalLocation configuration.
             server_id: Optional server identifier; auto-generated if ``None``.
             server_version: Build version string included in access log entries.
@@ -740,6 +771,20 @@ class RpcServer:
 
             reflection = self._build_binding(Reflection, ReflectionImpl(self), allow_reserved=True)
             self._bindings[reflection.name] = dataclasses.replace(reflection, version_exempt=True)
+
+        # Identity, when the deployment configured it.  Registered after
+        # reflection so it appears in reflection's output, and with only the
+        # methods whose hooks exist -- see `_build_binding(only=...)`.
+        if identity is not None:
+            from ._token_identity import Identity, IdentityImpl
+
+            if not isinstance(identity, IdentityImpl):
+                raise TypeError(f"identity must be an IdentityImpl, got {type(identity).__name__}")
+            offered = identity.offered_methods()
+            if offered:
+                self._bindings[Identity.protocol_name] = self._build_binding(
+                    Identity, identity, allow_reserved=True, only=offered
+                )
 
         primary = next(iter(self._bindings.values()))
         self._protocol_version: str | None = primary.version
