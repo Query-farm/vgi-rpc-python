@@ -69,6 +69,18 @@ _METADATA_MUTATIONS = (
     "non_utf8_method",
 )
 
+#: Refused on raw transports, **accepted** on HTTP -- so it cannot live in the
+#: shared tuple above, every member of which is rejected on both.
+#:
+#: The asymmetry is deliberate and is spelled out in the multi-service spec: on
+#: stdio, unix and named pipes the metadata field is the only carrier, so absent
+#: really is unroutable; on HTTP the path segment already resolved the binding.
+#: Two ports got this wrong in opposite directions -- one enforced the strict
+#: reading everywhere and could not pass conformance, another reached the
+#: permissive reading independently -- which is why both halves are pinned
+#: rather than left to be inferred.
+_ROUTING_KEY_MUTATION = "missing_protocol"
+
 
 def _request_body(
     method_name: str,
@@ -275,6 +287,31 @@ class TestAdversarialHttpRequestContract:
             method_name,
             _metadata_mutation_body(method_name, mutation),
             suffix=suffix,
+        )
+
+    def test_an_absent_routing_key_is_accepted_over_http(self, conformance_http_port: int) -> None:
+        """On HTTP the path already resolved the binding, so absent is not an error.
+
+        The counterpart on raw transports refuses it, where the metadata field
+        is the only carrier. Pinning the permissive half matters as much as the
+        strict one: a worker that rejects this is not conformant, however
+        defensible the reasoning, and it fails in a way that looks like
+        correctness.
+        """
+        import httpx2
+
+        from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
+
+        resp = httpx2.post(
+            f"http://127.0.0.1:{conformance_http_port}/ConformanceService/add_floats",
+            content=_metadata_mutation_body("add_floats", _ROUTING_KEY_MUTATION),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+            timeout=10.0,
+        )
+        assert resp.status_code == 200, (
+            f"a namespaced request carrying no 'vgi_rpc.protocol' was refused "
+            f"({resp.status_code}). On HTTP the path segment resolves the binding, so "
+            f"absent is the single-carrier case, not an error."
         )
 
     @pytest.mark.parametrize(

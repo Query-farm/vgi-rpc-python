@@ -17,6 +17,7 @@ from pyarrow import ipc
 
 from vgi_rpc.conformance._adversarial_http import (
     _METADATA_MUTATIONS,
+    _ROUTING_KEY_MUTATION,
     _SCHEMA_MUTATIONS,
     _metadata_mutation_body,
     _schema_mutation_body,
@@ -77,6 +78,18 @@ class TestAdversarialRawRequestContract:
         """Required dispatch metadata is enforced on raw transports too."""
         with conformance_raw_conn() as proxy:
             _assert_rejected_and_reusable(proxy, _metadata_mutation_body("add_floats", mutation))
+
+    def test_an_absent_routing_key_is_refused(self, conformance_raw_conn: Any) -> None:
+        """Here the metadata field is the only carrier, so absent is unroutable.
+
+        The HTTP counterpart *accepts* this, because the path segment resolves
+        the binding there. Both halves are pinned because the asymmetry is the
+        contract -- a port enforcing the strict reading on HTTP fails
+        conformance, and one relaxing it here lets a request land on whichever
+        protocol the dispatcher reaches first.
+        """
+        with conformance_raw_conn() as proxy:
+            _assert_rejected_and_reusable(proxy, _metadata_mutation_body("add_floats", _ROUTING_KEY_MUTATION))
 
 
 __all__ = ["TestAdversarialRawRequestContract"]
