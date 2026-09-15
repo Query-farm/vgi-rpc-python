@@ -32,9 +32,9 @@ These fields MUST appear in every record, regardless of method type or status.
 | Field | Type | Notes |
 |---|---|---|
 | `server_id` | string | Stable identifier for the server instance (12-char hex by default). Same value attached to every record from the same process lifetime. |
-| `protocol` | string | The Protocol class name being served, e.g. `"ConformanceService"`. |
-| `protocol_hash` | string | SHA-256 hex digest of the canonical `__describe__` payload. 64 lowercase hex characters. Stable across processes/builds that expose the same Protocol; changes whenever any wire-relevant detail of the Protocol changes. Use as the registry key when decoding archived records. |
-| `method` | string | The RPC method name. For built-ins, the leading double-underscore is preserved (e.g. `"__describe__"`). |
+| `protocol` | string | The **wire name of the protocol that owns the dispatched method**, e.g. `"ConformanceService"` or `"vgi_rpc.Reflection.v1"` — not a server-wide default. A server may host several protocols; a record labelled with the wrong one produces plausible-looking dashboards rather than an error, which is why this is the field most worth getting right. Framework endpoints that belong to no protocol log the server's primary. |
+| `protocol_hash` | string | SHA-256 hex digest of the protocol's canonical description. 64 lowercase hex characters. Stable across processes, builds **and language ports** that expose the same Protocol; changes whenever any wire-relevant detail changes. Use as the registry key when decoding archived records. Defined in [WIRE_PROTOCOL.md §14](WIRE_PROTOCOL.md). |
+| `method` | string | The RPC method name. For framework built-ins, the leading double-underscore is preserved (e.g. `"__transport_options__"`). Method names may collide across protocols, so anything aggregating on this field alone — a dashboard, an alert, a proxy policy — must group by `(protocol, method)` or it silently merges two protocols' traffic. |
 | `method_type` | string | One of `"unary"` or `"stream"`. |
 | `principal` | string | Authenticated principal, or empty string when anonymous. |
 | `auth_domain` | string | Auth scheme/realm, or empty string when anonymous. |

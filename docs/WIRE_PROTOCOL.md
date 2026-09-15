@@ -63,6 +63,7 @@ where they appear, and their semantics:
 | Key (bytes) | Value | Description |
 |-------------|-------|-------------|
 | `vgi_rpc.method` | UTF-8 method name | Target RPC method to invoke. **Required.** |
+| `vgi_rpc.protocol` | UTF-8 protocol name | Which protocol the method belongs to — the routing key. **Required**, including against a server hosting exactly one protocol. See [Section 3.1](#31-protocol-routing). |
 | `vgi_rpc.request_version` | `"1"` (ASCII `0x31`) | Wire protocol version. **Required.** |
 | `vgi_rpc.protocol_version` | Canonical semver `MAJOR.MINOR.PATCH` | Application protocol surface version. **Required when the peer Protocol declares one**, absent otherwise. See [Section 13](#protocol-version-negotiation). |
 | `vgi_rpc.request_id` | UTF-8 string (16-char hex) | Per-request correlation ID. Optional; if absent, the server generates a new 16-char hex ID. |
@@ -125,6 +126,87 @@ table below.
 | `vgi_rpc.server_id` | UTF-8 string | Server instance identifier. |
 
 ---
+
+### 3.1 Protocol routing
+
+A server hosts one or more **protocols**. Every request names the one it
+addresses, and dispatch resolves the pair `(protocol, method)`. Method names may
+collide across protocols — that is what lets protocols be authored
+independently, and a port that merges them into one namespace is not conformant.
+
+#### Names
+
+A protocol name is an identifier, optionally dot-qualified:
+
+```
+name  ::= [A-Za-z_] [A-Za-z0-9_.]*
+```
+
+At most **255 bytes** UTF-8. The `vgi_rpc.` prefix is **reserved** for protocols
+the framework itself defines; a server MUST refuse to register an application
+protocol claiming it, because an application that could claim
+`vgi_rpc.Reflection.v1` could shadow the one surface a client trusts before it
+knows anything else about the server.
+
+**The major version is part of the name** — `vgi.Identity.v1`,
+`vgi_rpc.Reflection.v1` — following gRPC (AIP-185), Kubernetes API groups and
+D-Bus. Two consequences, both deliberate:
+
+- An incompatible major is a *different protocol*, so addressing it is a routing
+  failure (`protocol_not_supported`, HTTP 404). Every proxy, WAF and load
+  balancer understands that answer without an Arrow parser.
+- `.v1` and `.v2` can be served **side by side** while clients migrate. That is
+  what makes a major change rollable rather than a flag day.
+
+#### Carriage
+
+On HTTP the protocol rides twice: in `vgi_rpc.protocol` and as a path segment,
+`{prefix}/{protocol}/{method}`.
+
+**The metadata field is canonical.** It is the only carrier on the stdio, unix
+and named-pipe transports. The path segment is a required *faithful projection*,
+present so an edge device can act on the protocol without parsing Arrow.
+
+A server MUST reject a request whose two carriers disagree
+(`protocol_not_supported`, HTTP 400). Unspecified, this is the
+Content-Length/Transfer-Encoding shape: the edge applies policy to one protocol
+while the worker dispatches another.
+
+Two further rules close that gap:
+
+- **A `%` anywhere in the protocol path segment is rejected without decoding**
+  (HTTP 404). The name charset never requires percent-encoding, so a percent
+  sign is a bug or an attempt to make the edge and the worker read different
+  strings. Compare raw bytes; never compare decoded-against-raw.
+- **Stream continuations re-verify.** A continuation (`/exchange`, cancel) must
+  stay on the protocol its stream started on. Implementations bind the protocol
+  into the AEAD associated data of the cursor and call tokens, so a
+  cross-protocol continuation fails the tag check and is rejected exactly as an
+  invalid token. Binding it into the *cursor* token is what covers the
+  call-state cache-hit path, where the call token is never opened at all.
+
+A name that cannot match the grammar is rejected **before** it is looked up, so
+a request-supplied string never reaches an error message, a log field or a
+metric label.
+
+#### Required, with no single-protocol exemption
+
+`vgi_rpc.protocol` is required even when the server hosts exactly one protocol.
+An exemption would let an intermediary that rebuilds a request and drops the
+field land silently on whichever protocol happened to be first, rather than
+being told. The three answers are distinct and a client depends on the
+difference:
+
+| Condition | Answer | `error_kind` |
+|---|---|---|
+| No routing key on the request | refuse | `protocol_not_specified` |
+| Named protocol not hosted here | 404 | `protocol_not_supported` |
+| Protocol hosted, method absent | 404 | `method_not_implemented` |
+
+The last is the documented capability-probe signal: a client testing for an
+optional method must be able to tell "you do not speak this protocol" from "you
+speak it but lack this method".
+
 
 ## 4. Type Mapping
 
@@ -348,10 +430,19 @@ unclassified error rather than rejecting the batch. Well-known values:
 
 | Value | Meaning |
 |-------|---------|
-| `method_not_implemented` | The server has no handler for the requested method (old server vs. new client, or a method that was removed). The intended signal for capability detection with fallback. |
-| `protocol_version_mismatch` | The client's `vgi_rpc.protocol_version` is incompatible with the server's (see [Section 13](#protocol-version-negotiation)). |
+| `method_not_implemented` | The named protocol is hosted but has no such method (old server vs. new client, or a method that was removed). The intended signal for capability detection with fallback. |
+| `protocol_not_specified` | The request carried no `vgi_rpc.protocol` routing key. Required even against a single-protocol server — see [Section 3.1](#31-protocol-routing). |
+| `protocol_not_supported` | This server does not host the named protocol, or the path and the metadata named different ones. Also the answer for an incompatible **major**, since the major is part of the name. |
+| `protocol_version_mismatch` | The client's `vgi_rpc.protocol_version` is incompatible with the server's for **the protocol the resolved method belongs to** (see [Section 13](#protocol-version-negotiation)). |
 | `session_lost` | An HTTP sticky-session token could not be honoured — expired, evicted, misrouted, or presented under a different principal (see [Section 17](#17-sticky-sessions-http-optional)). |
 | `server_draining` | The server is shutting down and refuses new sticky-session opens. |
+
+**Normative client behaviour on `protocol_not_supported`:** a client SHOULD
+call `vgi_rpc.Reflection.v1/list_protocols` to learn what the server does host,
+and MUST surface both what it asked for and what it was told. Unspecified, six
+ports invent six answers to the same question, and the one thing a user needs
+in that moment — the two names side by side — is the thing most likely to be
+dropped.
 
 A batch carrying `error_kind` is otherwise an ordinary EXCEPTION batch: the
 key adds classification and removes nothing. Implementations that do not emit
@@ -546,11 +637,23 @@ Given a configurable URL prefix (default `/vgi`):
 
 | Endpoint | HTTP Method | Description |
 |----------|-------------|-------------|
-| `{prefix}/{method}` | POST | Unary RPC call |
-| `{prefix}/{method}/init` | POST | Stream initialization (producer and exchange) |
-| `{prefix}/{method}/exchange` | POST | Stream continuation / exchange / cancel |
-| `{prefix}/__describe__` | POST | Introspection (unary; a synthetic method on the generic route) |
+| `{prefix}/{protocol}/{method}` | POST | Unary RPC call |
+| `{prefix}/{protocol}/{method}/init` | POST | Stream initialization (producer and exchange) |
+| `{prefix}/{protocol}/{method}/exchange` | POST | Stream continuation / exchange / cancel |
 | `{prefix}/__upload_url__/init` | POST | Upload URL generation (only when an upload-URL provider is configured) |
+
+RPC paths are namespaced by protocol; see [Section 3.1](#31-protocol-routing)
+for the name grammar, the `%` ban, and the rule that the path must agree with
+`vgi_rpc.protocol`. Introspection is not a special path — it is
+`{prefix}/vgi_rpc.Reflection.v1/list_protocols` and
+`{prefix}/vgi_rpc.Reflection.v1/describe`, reached the same way as anything
+else. Reserved framework endpoints below are **not** namespaced: they belong to
+the server rather than to any one protocol.
+
+A GET to a two-segment path whose first segment cannot be a protocol name is
+**404**, not 405. Without that rule any unrelated two-segment path — a
+`/.well-known/...` document among them — matches the RPC route and is answered
+"method not allowed" by it.
 
 **Framework endpoints** — not Arrow IPC:
 
@@ -716,7 +819,7 @@ Nothing is stamped for `identity`: an untransformed body is just a body.
 ### Unary call (HTTP)
 
 ```
-POST {prefix}/{method}
+POST {prefix}/{protocol}/{method}
 
 Request body:  IPC stream (params_schema, 1 request row, EOS)
 Response body: IPC stream (result_schema, 0..N log batches, 1 result/error batch, EOS)
@@ -739,7 +842,7 @@ the request batch's custom metadata. A mismatch is a 400 error.
 ### Stream initialization (HTTP)
 
 ```
-POST {prefix}/{method}/init
+POST {prefix}/{protocol}/{method}/init
 
 Request body:  IPC stream (params_schema, 1 request row, EOS)
 ```
@@ -806,7 +909,7 @@ carries the frozen schemas and the call id that binds the pair.
 ### Stream exchange (HTTP)
 
 ```
-POST {prefix}/{method}/exchange
+POST {prefix}/{protocol}/{method}/exchange
 
 Request body:  IPC stream (input_schema, 1 input batch with state token in metadata, EOS)
 Response body: IPC stream (output_schema, 0..N log batches, 1 data batch with updated state token, EOS)
@@ -1300,6 +1403,42 @@ dispatches log batches, and returns the data batch.
 
 ## 13. Version Negotiation & Error Handling
 
+### Three mechanisms, three failures
+
+Three independent things can be skewed between a client and a worker, and each
+has its own mechanism. None substitutes for another, and a port that implements
+two of the three has a silent failure mode:
+
+| Skew | Caught by | Answer |
+|---|---|---|
+| Incompatible **major** version | **routing** — the major is part of the protocol name, so this is a different protocol | `protocol_not_supported`, HTTP 404 |
+| Method **absent** on the server | method resolution within the named protocol | `method_not_implemented`, HTTP 404 |
+| **Signature changed** under an unchanged method name | the `protocol_version` gate | `ProtocolVersionError` |
+
+The third row is the one nothing else covers, and it is why the gate exists
+despite no mainstream RPC framework having one. That advice reasons by analogy
+to protobuf's forgiving evolution: field numbers and unknown-field semantics
+make a renamed or retyped field self-detecting. **Arrow has neither.** A
+parameter renamed between releases, or retyped under the same name, produces a
+request the server will happily coerce through its *own* declared type and act
+on. The gate is what turns that into a directional error.
+
+Two supporting rules make the gate meaningful rather than decorative:
+
+- **A server MUST reject a request carrying a parameter its protocol does not
+  declare**, naming the declared set. A strict version gate sitting on a
+  lenient deserializer is two policies in one codepath.
+- **The gate is per binding.** A server hosting several protocols has a version
+  per protocol and no single "server version"; gating against the primary
+  rejects correct callers of a secondary and names the wrong protocol when it
+  does. The error message MUST name the protocol — with N bindings,
+  `Server: 1.0.0` alone does not say which server.
+
+The reflection protocol is **exempt** from the gate. It is what a
+version-mismatched client calls to learn *what* mismatched, and gating it would
+deny the client the diagnosis it came for. The exemption is a property of the
+binding, not of a method name.
+
 ### Version checking
 
 Every request batch MUST carry `vgi_rpc.request_version` in its custom
@@ -1386,8 +1525,12 @@ batch.
 | `protocol_version` mismatch | 400 Bad Request |
 | Expired, tampered, or unresolvable state token | 400 Bad Request |
 | Request body fails to decompress | 400 Bad Request |
+| Path and `vgi_rpc.protocol` name different protocols | 400 Bad Request |
 | Authentication failure (including proxy proof) | 401 Unauthorized |
-| Unknown method | 404 Not Found |
+| Unknown method on a hosted protocol | 404 Not Found |
+| Protocol not hosted, or a path segment that cannot be a protocol name | 404 Not Found |
+| `%` anywhere in the protocol path segment | 404 Not Found |
+| GET to a two-segment path that is not a protocol route | 404 Not Found |
 | Request body exceeds `VGI-Max-Request-Bytes` | 413 Payload Too Large |
 | Wrong `Content-Type`, or unsupported `Content-Encoding` | 415 Unsupported Media Type |
 | **Any error raised by the method implementation** | **200 OK** + `X-VGI-RPC-Error: true` |
@@ -1423,51 +1566,210 @@ remain `400`.
 
 ---
 
-## 14. Introspection (`__describe__`)
+## 14. Introspection (`vgi_rpc.Reflection.v1`)
 
-The `__describe__` method is a built-in synthetic unary method that returns
-machine-readable metadata about all methods exposed by the server. It is
-optional for implementors.
+Introspection is an ordinary co-hosted protocol, not a special method name.
+That is what lets every port *generate* it from the same pipeline as any other
+method rather than hand-maintain a bespoke format — which is how the six ports
+drifted before.
 
-### Request
+A server that offers introspection hosts `vgi_rpc.Reflection.v1` and it appears
+in that protocol's own output. A server that does not simply does not host it,
+and a client asking gets the ordinary `protocol_not_supported` — not a bespoke
+"introspection is disabled" to special-case.
 
-Standard unary request with:
-- `vgi_rpc.method` = `"__describe__"`
-- Empty params schema (zero fields, one row)
+### Methods
 
-### Response
+```
+list_protocols() -> ProtocolList
+describe(protocol: utf8) -> ServiceDescription
+```
 
-A single IPC stream with one row per method. The response batch carries
-custom metadata:
+`list_protocols` is the cheap question — what is here, and has it changed — and
+is the only one a client needs on a warm path, because `protocol_hash` answers
+"has it changed" without transferring any schema. `describe` is the expensive
+one, asked once. A client that does not already know a protocol name needs both,
+in that order.
 
-- `vgi_rpc.protocol_name` — Protocol class name
-- `vgi_rpc.request_version` — Wire protocol version (`"1"`)
-- `vgi_rpc.describe_version` — Introspection format version (`"4"`)
-- `vgi_rpc.protocol_hash` — SHA-256 hex digest over the canonical describe payload
-- `vgi_rpc.server_id` — Server instance identifier
+Both are ordinary unary methods: they carry `vgi_rpc.protocol` =
+`"vgi_rpc.Reflection.v1"`, their replies ride as serialized bytes in a single
+`result` column, and a server that externalizes payloads externalizes these too.
 
-### Response batch schema
+### Payload
 
-The schema is deliberately language-neutral (`describe_version` `"4"`). Python-flavoured
-fields present in earlier versions (`doc`, `param_types_json`, `param_defaults_json`,
-`param_docs_json`) were **dropped in v4** — human-readable type names, defaults, and
-docstrings live in the Protocol source class, not on the wire.
+`ProtocolList`:
 
-| Column | Arrow type | Nullable | Description |
-|--------|-----------|----------|-------------|
-| `name` | `utf8` | No | Method name |
-| `method_type` | `utf8` | No | `"unary"` or `"stream"` |
-| `has_return` | `bool` | No | Whether the unary method returns a value |
-| `params_schema_ipc` | `binary` | No | Serialized `pa.Schema` for request parameters |
-| `result_schema_ipc` | `binary` | No | Serialized `pa.Schema` for unary response |
-| `has_header` | `bool` | No | Whether the stream method has a header type |
-| `header_schema_ipc` | `binary` | Yes | Serialized `pa.Schema` for the header (null if no header) |
-| `is_exchange` | `bool` | Yes | For streams: `true` = exchange (bidi), `false` = producer; `null` for unary |
+| Field | Type | Notes |
+|---|---|---|
+| `server_id` | `utf8` | Server instance identifier. |
+| `server_version` | `utf8` | Build version string. |
+| `request_version` | `utf8` | The framing version from Section 3. |
+| `protocols` | `list<ProtocolSummary>` | Every hosted protocol, reflection included. |
 
-The `params_schema_ipc`, `result_schema_ipc`, and `header_schema_ipc`
-columns contain Arrow schemas serialized via `pa.Schema.serialize()`.
+`ProtocolSummary`:
 
----
+| Field | Type | Notes |
+|---|---|---|
+| `protocol` | `utf8` | Wire name — the routing key. |
+| `protocol_version` | `utf8` | Declared semver, or `""` when the protocol opts out. |
+| `protocol_hash` | `utf8` | 64 lowercase hex. See below. |
+| `deprecated` | `bool` | Whether callers should migrate off. |
+| `deprecation_message` | `utf8` | What to migrate to. Empty unless `deprecated`. |
+| `features` | `list<utf8>` | Open set of capability tokens. |
+
+`ServiceDescription` is `ProtocolSummary`'s fields plus `methods:
+list<MethodInfo>`, sorted by name. It deliberately carries **no server
+identity**: two processes serving one protocol must describe it identically, or
+the description is not a property of the protocol. Server identity lives on
+`ProtocolList`, which is a statement about a server.
+
+`MethodInfo`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | `utf8` | |
+| `method_type` | `utf8` | `"unary"` or `"stream"`. |
+| `has_return` | `bool` | |
+| `has_header` | `bool` | |
+| `stream_kind` | `utf8` | `""` for unary; otherwise `unknown` / `producer` / `exchange`. |
+| `params_schema_ipc` | `binary` | Arrow IPC. |
+| `result_schema_ipc` | `binary` | Arrow IPC; empty when `has_return` is false. |
+| `header_schema_ipc` | `binary` | Arrow IPC; empty when `has_header` is false. |
+| `idempotency` | `utf8` | `unknown` / `no_side_effects` / `idempotent`. |
+| `deprecated` | `bool` | |
+| `deprecation_message` | `utf8` | |
+
+Schemas travel as serialized Arrow IPC rather than as a structural description:
+a client's whole purpose in asking is to get a schema it can hand to its own
+Arrow implementation, and IPC is the one representation every port already
+reads. The *hash* is what compares across ports, and it is defined over the
+decoded structure precisely so these bytes need not match.
+
+`stream_kind` is a string rather than a nullable bool because the state is
+genuinely three-valued: whether a stream is an exchange is an *implementation*
+property, not visible on the Protocol, so `unknown` is often the honest answer
+and should be said rather than encoded as absence. An absent schema is empty
+bytes rather than null, so no port pays a null check on a value it will only
+ever treat as absent.
+
+`idempotency` follows gRPC's `idempotency_level`. With an HTTP transport and a
+policy proxy in the path, retries *will* happen; without this nothing on the
+wire says what is safe to retry. `unknown` is the default and means a caller
+must assume the worst.
+
+### Decoding is tolerant — normative
+
+A decoder MUST:
+
+- read fields **by name**, not by position;
+- **ignore** columns it does not know;
+- **default** columns that are absent and have a default.
+
+This is what makes minor skew survivable in both directions, and it is load
+bearing: a strict decoder fails at exactly the moment a client most needs a good
+answer, which is when it is talking to a server it does not fully understand.
+Conformance asserts it against a deliberately extended schema.
+
+A decoder MUST NOT default a field that has no default — it errors instead.
+Silently zero-filling a required field hands a client a description that is
+wrong rather than absent. One rule follows, and it binds every port: **a field
+added in a minor version MUST carry a default**, or the addition is a breaking
+change wearing a minor version number.
+
+### `protocol_hash` — normative
+
+The hash is a fingerprint of a protocol's wire surface, so a client and a
+worker can say which one they have without transferring the whole description.
+It is defined over **what Arrow decodes to, not what an encoder emits**: each
+language's Arrow implementation may legitimately produce different bytes for the
+same logical schema, so a hash over `schema.serialize()` is comparable only
+against itself.
+
+```
+protocol_hash = lowercase_hex(sha256(b"vgi_rpc.protocol_hash.v1|" + canonical_json(description)))
+```
+
+**Canonicalisation profile: RFC 8785 (JCS)**, chosen for its published test
+vectors. The structure is restricted to objects, arrays, strings and booleans.
+Every numeric parameter is folded into a type token (below), so the preimage
+contains **no numbers** and JCS's number-canonicalisation rule — its hardest and
+the likeliest place for six ports to diverge — never applies. Keep it that way.
+
+The preimage:
+
+```json
+{"protocol":"vgi.Identity.v1","methods":[
+  {"name":"introspect_token","type":"unary","has_return":true,
+   "has_header":false,"is_exchange":false,
+   "params":[{"name":"token","nullable":false,"type":"utf8"}],
+   "result":[{"name":"result","nullable":false,"type":"binary"}]}]}
+```
+
+- Methods are **sorted by name**; a port iterating a hash map must still produce
+  this order.
+- Field order **within** a schema is declaration order and is significant.
+- `result` and `header` are **omitted** when the method has none. Absent and
+  empty must not hash alike: a method returning nothing is not a method
+  returning an empty struct.
+- Server identity, docstrings, parameter defaults, language-specific type names,
+  and `request_version` are **not** in the preimage. They vary across processes,
+  builds and ports without changing what is on the wire, and folding the framing
+  version in would rotate every protocol's hash on a framework release that
+  changed no protocol.
+- The `v1` in the domain tag is the only version the hash carries, and it moves
+  only when the *hash definition* moves.
+
+Conformance asserts that **every port produces the identical hash for the
+conformance service**, and ships the canonical preimage as a test vector beside
+the digest so a failing port diffs JSON rather than guessing.
+
+#### Type tokens
+
+A type appears in the preimage as a lowercase ASCII token. Parameters go in
+parentheses; children in angle brackets. A child is `name:token` when
+non-nullable and `name?:token` when nullable.
+
+| Arrow type | Token |
+|---|---|
+| null, bool | `null`, `bool` |
+| signed ints | `int8` `int16` `int32` `int64` |
+| unsigned ints | `uint8` `uint16` `uint32` `uint64` |
+| floats | `float16` `float32` `float64` |
+| decimal | `decimal128(p,s)`, `decimal256(p,s)` |
+| string | `utf8`, `large_utf8`, `utf8_view` |
+| binary | `binary`, `large_binary`, `binary_view`, `fixed_size_binary(n)` |
+| date | `date32`, `date64` |
+| time | `time32(unit)`, `time64(unit)` |
+| timestamp | `timestamp(unit)`, `timestamp(unit,tz=Z)` |
+| duration | `duration(unit)` |
+| interval | `interval_months`, `interval_day_time`, `interval_month_day_nano` |
+| list | `list<item?:T>`, `large_list<…>`, `list_view<…>`, `large_list_view<…>`, `fixed_size_list(n)<…>` |
+| struct | `struct<a:T,b?:U>` |
+| map | `map<key:K,value?:V>`, with `,keys_sorted` appended when set |
+| union | `dense_union<code=name?:T,…>`, `sparse_union<…>` |
+| dictionary | `dictionary<index:T,value:U>`, with `,ordered` appended when set |
+| run-end encoded | `run_end_encoded<run_ends:T,values:U>` |
+| extension | `extension(name)<storage>` |
+
+`unit` is Arrow's own spelling: `s`, `ms`, `us`, `ns`. A timezone is carried
+**verbatim** — `UTC` and `+00:00` are distinct Arrow types and must not
+collapse.
+
+**What is normalised, and why.** Arrow's own type equality ignores the *name* of
+a list's child field and of a map's key/value fields. pyarrow names the list
+child `item`; some Parquet producers name it `element`. Those names are
+normalised to `item` / `key` / `value`, because keeping them would give two
+ports different hashes for a protocol Arrow itself calls identical — exactly the
+divergence the canonical preimage exists to prevent. Everything Arrow *does*
+treat as part of the type is kept: child nullability, struct field names, union
+child names and type codes, dictionary index/value types and orderedness, and
+`keys_sorted`.
+
+A type with no token in this table MUST raise rather than fall back to the Arrow
+implementation's own `to_string`, whose output differs between ports and across
+Arrow releases. Adding a token is a change every port makes at once: a one-sided
+addition changes only that port's hash.
+
 
 ## 15. Transport Capability Negotiation (`__transport_options__`)
 

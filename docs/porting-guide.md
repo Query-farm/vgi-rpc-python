@@ -12,10 +12,16 @@ See [`WIRE_PROTOCOL.md`](WIRE_PROTOCOL.md). Concretely:
 
 - Read Arrow IPC streams from stdin (or accept an HTTP request, or accept a Unix socket connection — pick the transports you support).
 - Validate `vgi_rpc.request_version` custom metadata against the constant declared in the spec.
-- Dispatch by `vgi_rpc.method` custom metadata.
+- **Dispatch by the pair `(vgi_rpc.protocol, vgi_rpc.method)`, never by method name alone.** A server hosts one or more protocols and method names may collide across them — that is what lets protocols be authored independently. The routing key is required on every request, including against a single-protocol server. See [WIRE_PROTOCOL §3.1](WIRE_PROTOCOL.md) for the name grammar, the reserved `vgi_rpc.` prefix, and the rules that keep the HTTP path segment and the metadata from disagreeing. Getting this wrong does not fail loudly: it merges two protocols' traffic and produces plausible-looking output.
 - Reply with one IPC stream containing zero-row log batches followed by one result batch (unary), or interleaved log/data batches terminated by EOS (stream).
 - Encode errors as a zero-row batch with `vgi_rpc.error_*` metadata keys.
-- Handle the two built-in synthetic methods before normal dispatch: `__describe__` (introspection; [WIRE_PROTOCOL §14](WIRE_PROTOCOL.md)) and `__transport_options__` (transport capability negotiation; [§15](WIRE_PROTOCOL.md)). A worker that does **not** implement SHM can omit `__transport_options__` entirely — the standard `method_not_implemented` error makes clients fall back to the pipe. A worker that **does** implement SHM MUST answer it, reporting `vgi_rpc.transport.shm = "true"`, or clients will not use SHM with it.
+- Handle `__transport_options__` (transport capability negotiation; [§15](WIRE_PROTOCOL.md)) as a reserved, un-namespaced method before normal dispatch. A worker that does **not** implement SHM can omit it entirely — the standard `method_not_implemented` error makes clients fall back to the pipe. A worker that **does** implement SHM MUST answer it, reporting `vgi_rpc.transport.shm = "true"`, or clients will not use SHM with it.
+- **Introspection is a protocol, not a method name.** Host `vgi_rpc.Reflection.v1` with `list_protocols` and `describe` ([§14](WIRE_PROTOCOL.md)). Three things in that section are normative and easy to miss:
+    - **Decoding is tolerant**: read fields by name, ignore unknown columns, default absent ones that have defaults — and error on an absent field that has none. That last rule is why any field added in a minor version must carry a default.
+    - **The `protocol_hash` is a cross-language contract.** It is defined over canonical JSON of the *decoded* description, not over encoder bytes, precisely so your Arrow implementation's output need not match anyone else's. Conformance asserts every port produces the same digest for the conformance service, and ships the preimage beside it so a mismatch is a JSON diff rather than a guess.
+    - **The type-token table is exhaustive on purpose.** A type not in it must raise, never fall back to your Arrow binding's `to_string` — that output differs between ports and across Arrow releases, and a silent fallback is a one-sided hash divergence that surfaces as an unexplained mismatch at somebody else's client.
+- **Exempt reflection from the `protocol_version` gate**, and gate every other protocol against *its own* declared version rather than a server-wide one. Reflection is what a mismatched client calls to find out what mismatched.
+- **Reject a parameter the protocol does not declare**, naming the declared set. A strict version gate on a lenient deserializer is two policies in one codepath.
 
 ### 2. The CLI surface
 
@@ -94,7 +100,7 @@ rule was still wrong.
 
 In order, smallest-blast-radius first:
 
-1. **Wire protocol round-trip.** Get a single unary `__describe__` call working end-to-end. `vgi-rpc-test --filter scalar_echo*` is the quickest first goal.
+1. **Wire protocol round-trip.** Get a single unary `vgi_rpc.Reflection.v1/list_protocols` call working end-to-end. `vgi-rpc-test --filter scalar_echo*` is the quickest first goal.
 2. **Conformance service implementation.** Translate the protocol class. Run the full unary test set.
 3. **Streaming.** Producer streams first (no client input), then exchange streams.
 4. **HTTP transport.** State-token signing and replay protection.
