@@ -423,6 +423,8 @@ class _UploadUrlResource:
                 error_type,
                 http_status=http_status.value,
                 server_version=self._app._server.server_version,
+                # A framework endpoint owned by no protocol: the spec says these
+                # log the server's primary, so this one is correct as-is.
                 protocol_hash=self._app._server.protocol_hash,
                 error_message=_truncate_error_message(_upload_exc),
             )

@@ -1001,3 +1001,60 @@ class TestPortingGuideMatchesSchema:
         assert stated == {len(structured)}, (
             f"porting guide says {sorted(stated)} always-required fields, schema has {len(structured)}"
         )
+
+
+class TestPerBindingIdentity:
+    """A record must name the protocol that owns the method -- and its hash.
+
+    ``access-log-spec.md`` makes ``protocol`` the owning protocol's wire name
+    and ``protocol_hash`` "the registry key when decoding archived records".
+    The name was already per-binding; the hash was the server's primary at
+    every emit site, so a reflection call produced a record naming one protocol
+    and carrying another's digest.
+
+    That is the failure the plan ranks highest, because nothing about it looks
+    wrong: the record is well-formed, passes the schema, and decodes against
+    the wrong description.  Only a call to a *secondary* protocol can catch it,
+    which is why the conformance validator -- asserting
+    ``protocol == "ConformanceService"`` -- never did.
+    """
+
+    def _capture(self, fn: Any) -> list[dict[str, Any]]:
+        return TestLiveCapture()._capture(fn)
+
+    def test_the_two_bindings_do_not_share_a_digest(self) -> None:
+        """The precondition that makes the rest of this class meaningful.
+
+        If reflection and the application hashed the same, logging the primary
+        everywhere would be invisible *and* harmless, and none of these tests
+        would prove anything.
+        """
+        from vgi_rpc.rpc._reflection import Reflection
+
+        srv = RpcServer(_Svc, _Impl(), enable_describe=True)
+        assert srv.bindings[Reflection.protocol_name].protocol_hash != srv.protocol_hash
+
+    def test_the_hash_accessor_returns_the_owning_bindings_digest(self) -> None:
+        """The unit-level property, which holds on every transport.
+
+        Asserted directly as well as end-to-end because the emit sites are
+        spread across both HTTP dispatchers, the stream resource and three
+        raw-transport paths, and a future site added in one of them would
+        otherwise reintroduce the bug with the suite still green.
+        """
+        from vgi_rpc.rpc._reflection import Reflection
+
+        srv = RpcServer(_Svc, _Impl(), enable_describe=True)
+        reflection_methods = srv.bindings[Reflection.protocol_name].methods
+        info = next(iter(reflection_methods.values()))
+        assert srv.protocol_hash_for(info) == srv.bindings[Reflection.protocol_name].protocol_hash
+        assert srv.protocol_hash_for(info) != srv.protocol_hash
+
+    def test_an_unowned_framework_endpoint_falls_back_to_the_primary(self) -> None:
+        """``__transport_options__`` and ``__upload_url__`` belong to no protocol.
+
+        The spec prescribes the server's primary for those, so the fallback is
+        the specified behaviour rather than a gap in it.
+        """
+        srv = RpcServer(_Svc, _Impl(), enable_describe=True)
+        assert srv.protocol_hash_for(None) == srv.protocol_hash

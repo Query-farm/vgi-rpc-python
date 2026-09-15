@@ -242,7 +242,7 @@ def _run_unary_sync(
                 http_status=http_status.value,
                 stats=stats,
                 server_version=app._server.server_version,
-                protocol_hash=app._server.protocol_hash,
+                protocol_hash=app._server.protocol_hash_for(info),
                 error_message=_truncate_error_message(_hook_exc),
             )
             if hook is not None:

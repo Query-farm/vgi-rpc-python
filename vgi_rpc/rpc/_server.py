@@ -863,6 +863,25 @@ class RpcServer:
         binding = self._bindings.get(info.protocol_name)
         return binding.impl if binding is not None else self._impl
 
+    def protocol_hash_for(self, info: RpcMethodInfo | None) -> str:
+        """Return the canonical hash of the protocol that owns *info*'s method.
+
+        Pairs with the ``protocol`` field, which is already per-binding.  The
+        hash was not, and the two disagreeing is worse than either being wrong
+        alone: ``access-log-spec.md`` makes ``protocol_hash`` the registry key
+        for decoding archived records, so a record naming one protocol and
+        carrying another's digest is decoded against the wrong description --
+        and nothing about it looks wrong.
+
+        Falls back to the primary for a framework endpoint that belongs to no
+        protocol, which is what the spec prescribes for those -- and for an
+        unresolved method, where there is no owner to name.
+        """
+        if info is None:
+            return self._protocol_hash
+        binding = self._bindings.get(info.protocol_name)
+        return binding.protocol_hash if binding is not None else self._protocol_hash
+
     @property
     def implementation(self) -> object:
         """The implementation object."""
@@ -1467,7 +1486,7 @@ class RpcServer:
                 error_message=error_message,
                 stats=stats,
                 server_version=self._server_version,
-                protocol_hash=self._protocol_hash,
+                protocol_hash=self.protocol_hash_for(info),
             )
             if hook is not None:
                 try:
@@ -1542,7 +1561,7 @@ class RpcServer:
                     error_message=error_message,
                     stats=stats,
                     server_version=self._server_version,
-                    protocol_hash=self._protocol_hash,
+                    protocol_hash=self.protocol_hash_for(info),
                 )
                 if hook is not None:
                     try:
@@ -1676,7 +1695,7 @@ class RpcServer:
                 error_message=error_message,
                 stats=stats,
                 server_version=self._server_version,
-                protocol_hash=self._protocol_hash,
+                protocol_hash=self.protocol_hash_for(info),
                 cancelled=cancelled,
             )
             if hook is not None:
