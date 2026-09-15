@@ -3411,8 +3411,6 @@ class TestRequestId:
         import json
         import time
 
-        import httpx2
-
         try:
             port, log_path = request.getfixturevalue("conformance_http_access_log")
         except pytest.FixtureLookupError:
@@ -3422,24 +3420,28 @@ class TestRequestId:
         if log_path.exists():
             before = len([ln for ln in log_path.read_text().splitlines() if ln.strip()])
 
-        # Built with the suite's own helper rather than by hand: it stamps the
-        # protocol AND the protocol_version, and a request missing the latter is
-        # refused by the version gate.
-        body = _unary_request_body("produce_n", count=3)
+        # The whole stream is consumed through the reference client, not by
+        # POSTing /init by hand.  An init-only probe cannot tell a port that
+        # logs every turn from one that logs only the first: with a single
+        # record, "these records share a stream_id" is trivially true.  That
+        # made this assertion vacuous against the first port it was run on.
+        from vgi_rpc.http import http_connect
+        from vgi_rpc.rpc import MethodNotImplementedError
 
-        init = None
-        for prefix in ("", "/vgi"):
-            init = httpx2.post(
-                f"http://127.0.0.1:{port}{prefix}/ConformanceService/produce_n/init",
-                content=body,
-                headers={"content-type": "application/vnd.apache.arrow.stream"},
-                timeout=10.0,
-            )
-            if init.status_code == 200:
-                break
-        assert init is not None
-        if init.status_code != 200:
-            pytest.skip(f"worker does not serve streams over HTTP ({init.status_code})")
+        # Only a *routing* failure means "this worker has no HTTP streams" and
+        # earns a skip.  Anything else is a real failure and must surface as
+        # one: a broad ``except Exception: skip`` here turned a genuine bug in
+        # this very test into a silent pass, which is the failure mode the test
+        # exists to catch.
+        try:
+            with http_connect(ConformanceService, f"http://127.0.0.1:{port}") as proxy:
+                batches = list(proxy.produce_n(count=_STREAM_TURNS))
+        except MethodNotImplementedError as exc:
+            pytest.skip(f"worker does not serve produce_n over HTTP: {exc}")
+        assert len(batches) == _STREAM_TURNS, (
+            f"produce_n({_STREAM_TURNS}) yielded {len(batches)} batches; the stream must run "
+            f"several turns for this test to distinguish per-turn logging from init-only"
+        )
 
         deadline = time.time() + 10.0
         stream_records: list[dict[str, Any]] = []
@@ -3457,10 +3459,15 @@ class TestRequestId:
             time.sleep(0.2)
 
         assert stream_records, (
-            "a stream init succeeded over HTTP but produced no access record. One record per "
+            "a stream succeeded over HTTP but produced no access record. One record per "
             "RPC call includes the init and every continuation of a stream; a transport that "
             "logs unary calls and not streams loses the calls that run longest and carry the "
             "most data."
+        )
+        assert len(stream_records) > 1, (
+            f"a {_STREAM_TURNS}-batch stream produced {len(stream_records)} access record(s). "
+            f"Every turn is an RPC call and gets a record -- logging only the init hides the "
+            f"turns where a long stream spends its time."
         )
 
         for rec in stream_records:
@@ -3484,6 +3491,11 @@ class TestRequestId:
 
 #: Origin the CORS conformance worker must allow. A runner supplying
 #: ``conformance_http_cors_port`` configures its worker with exactly this.
+#: Batches to request from ``produce_n`` when exercising stream access records.
+#: Must be >1 so a port logging only the init is distinguishable from one
+#: logging every turn.
+_STREAM_TURNS = 4
+
 _CORS_ORIGIN = "https://conformance.example"
 
 #: Headers that MUST be exposed even though nothing advertises them, because
