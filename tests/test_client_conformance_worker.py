@@ -270,7 +270,7 @@ def test_strict_http_worker_rejects_inferred_all_null_schema() -> None:
         "WSGIEnvironment",
         {
             "REQUEST_METHOD": "POST",
-            "PATH_INFO": "/typed_exchange/exchange",
+            "PATH_INFO": "/ClientConformanceService/typed_exchange/exchange",
             "CONTENT_LENGTH": str(len(body.getvalue())),
             "wsgi.input": BytesIO(body.getvalue()),
         },
@@ -313,7 +313,7 @@ def test_schema_guard_malformed_body_repeats_response_budget_support() -> None:
         "WSGIEnvironment",
         {
             "REQUEST_METHOD": "POST",
-            "PATH_INFO": "/typed_exchange/exchange",
+            "PATH_INFO": "/ClientConformanceService/typed_exchange/exchange",
             "CONTENT_LENGTH": str(len(body)),
             "wsgi.input": BytesIO(body),
         },
@@ -405,7 +405,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
         _wait_ready(base_url, prefix="/vgi")
         with httpx2.Client(base_url=base_url, trust_env=False) as client:
             init = client.post(
-                "/vgi/producer_sequence/init",
+                "/vgi/ClientConformanceService/producer_sequence/init",
                 content=_request_body(
                     "producer_sequence",
                     _params("producer_sequence", count=2, payload_bytes=4),
@@ -429,7 +429,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
 
             tick = pa.RecordBatch.from_pylist([], schema=pa.schema([]))
             resumed = client.post(
-                "/vgi/producer_sequence/exchange",
+                "/vgi/ClientConformanceService/producer_sequence/exchange",
                 content=_request_body(
                     "producer_sequence",
                     tick,
@@ -448,7 +448,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
             assert next_md.get(CALL_STATE_KEY) is None, "call-state token is issued only on init"
 
             terminal = client.post(
-                "/vgi/producer_sequence/exchange",
+                "/vgi/ClientConformanceService/producer_sequence/exchange",
                 content=_request_body(
                     "producer_sequence",
                     tick,
@@ -460,7 +460,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
             assert _read_batches(terminal.content) == []
 
             zero_init = client.post(
-                "/vgi/producer_zero_row_then_value/init",
+                "/vgi/ClientConformanceService/producer_zero_row_then_value/init",
                 content=_request_body(
                     "producer_zero_row_then_value",
                     _params("producer_zero_row_then_value"),
@@ -480,7 +480,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
             assert zero_call_state is not None
 
             zero_resumed = client.post(
-                "/vgi/producer_zero_row_then_value/exchange",
+                "/vgi/ClientConformanceService/producer_zero_row_then_value/exchange",
                 content=_request_body(
                     "producer_zero_row_then_value",
                     tick,
@@ -498,7 +498,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
             assert zero_next_cursor is not None
 
             zero_terminal = client.post(
-                "/vgi/producer_zero_row_then_value/exchange",
+                "/vgi/ClientConformanceService/producer_zero_row_then_value/exchange",
                 content=_request_body(
                     "producer_zero_row_then_value",
                     tick,
@@ -510,7 +510,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
             assert _read_batches(zero_terminal.content) == []
 
             finished = client.post(
-                "/vgi/producer_emit_and_finish/init",
+                "/vgi/ClientConformanceService/producer_emit_and_finish/init",
                 content=_request_body("producer_emit_and_finish", _params("producer_emit_and_finish")),
                 headers=headers,
             )
@@ -521,7 +521,7 @@ def test_producer_cursor_contract_init_resume_zero_row_and_terminal() -> None:
             assert finished_batches[0][1] is None or finished_batches[0][1].get(STATE_KEY) is None
 
             empty = client.post(
-                "/vgi/producer_empty/init",
+                "/vgi/ClientConformanceService/producer_empty/init",
                 content=_request_body("producer_empty", _params("producer_empty")),
                 headers=headers,
             )
@@ -536,7 +536,7 @@ def test_response_cap_preserves_one_transition_per_producer_request() -> None:
     with _running_worker("--prefix", "/vgi", "--producer-turn-bytes", "65536") as (base_url, _ca):
         _wait_ready(base_url, prefix="/vgi")
         response = httpx2.post(
-            f"{base_url}/vgi/producer_sequence/init",
+            f"{base_url}/vgi/ClientConformanceService/producer_sequence/init",
             content=_request_body(
                 "producer_sequence",
                 _params("producer_sequence", count=100, payload_bytes=1024),
@@ -599,7 +599,7 @@ def test_external_worker_mode_covers_response_pointer_and_client_upload_flow() -
         assert capabilities.max_request_bytes == 4096
 
         raw = httpx2.post(
-            f"{base_url}/vgi/large_response",
+            f"{base_url}/vgi/ClientConformanceService/large_response",
             content=_request_body("large_response", _params("large_response", size=len(expected))),
             headers={"Content-Type": "application/vnd.apache.arrow.stream"},
         )
@@ -631,7 +631,7 @@ def test_tls_worker_mode_publishes_ca_and_requires_trust() -> None:
         trusted_context = ssl.create_default_context(cafile=ca_path)
         _wait_ready(base_url, prefix="/vgi", verify=trusted_context)
         with httpx2.Client(trust_env=False) as untrusted, pytest.raises(httpx2.TransportError):
-            untrusted.get(f"{base_url}/vgi/health", timeout=1)
+            untrusted.get(f"{base_url}/vgi/ClientConformanceService/health", timeout=1)
         with httpx2.Client(base_url=base_url, verify=trusted_context, trust_env=False) as trusted:
             description = http_introspect(client=trusted, prefix="/vgi")
             assert description.protocol_name == "ClientConformanceService"

@@ -187,7 +187,7 @@ class TestExternalInputRoutes:
         original = _request_body("echo_string", value="external unary input")
         pointer = _external_pointer_body(conformance_fake_storage, original)
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            assert _result_value(_post(client, "/echo_string", pointer)) == "external unary input"
+            assert _result_value(_post(client, "/ConformanceService/echo_string", pointer)) == "external unary input"
 
     def test_stream_init_resolves_external_input(
         self,
@@ -201,7 +201,7 @@ class TestExternalInputRoutes:
         original = _request_body("produce_n", count=2)
         pointer = _external_pointer_body(conformance_fake_storage, original)
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            batches = _response_batches(_post(client, "/produce_n/init", pointer))
+            batches = _response_batches(_post(client, "/ConformanceService/produce_n/init", pointer))
         assert any(batch.num_rows == 1 and batch.column("value")[0].as_py() == 0 for batch, _ in batches)
         assert any(metadata is not None and metadata.get(STATE_KEY) is not None for _, metadata in batches)
 
@@ -216,7 +216,7 @@ class TestExternalInputRoutes:
         base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
             cursor, call = _state_tokens(
-                _post(client, "/exchange_scale/init", _request_body("exchange_scale", factor=3.0))
+                _post(client, "/ConformanceService/exchange_scale/init", _request_body("exchange_scale", factor=3.0))
             )
             input_batch = pa.RecordBatch.from_pydict(
                 {"value": [1.5, 2.0]},
@@ -224,7 +224,7 @@ class TestExternalInputRoutes:
             )
             inline_exchange = _exchange_body(input_batch, cursor, call)
             pointer_exchange = _external_pointer_body(conformance_fake_storage, inline_exchange)
-            batches = _response_batches(_post(client, "/exchange_scale/exchange", pointer_exchange))
+            batches = _response_batches(_post(client, "/ConformanceService/exchange_scale/exchange", pointer_exchange))
         data = [batch for batch, _ in batches if batch.num_rows > 0]
         assert len(data) == 1
         assert data[0].column("value").to_pylist() == pytest.approx([4.5, 6.0])
@@ -266,8 +266,8 @@ class TestExternalFetchFailures:
         original = _request_body("echo_int", value=7)
         pointer = _pointer_body(original, f"{conformance_fake_storage}/download/conformance-missing")
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            _assert_rpc_error_response(_post(client, "/echo_int", pointer))
-            assert _result_value(_post(client, "/echo_int", original)) == 7
+            _assert_rpc_error_response(_post(client, "/ConformanceService/echo_int", pointer))
+            assert _result_value(_post(client, "/ConformanceService/echo_int", original)) == 7
 
     def test_exchange_404_is_error_not_empty_dispatch(
         self,
@@ -280,7 +280,7 @@ class TestExternalFetchFailures:
         base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
             cursor, call = _state_tokens(
-                _post(client, "/exchange_scale/init", _request_body("exchange_scale", factor=2.0))
+                _post(client, "/ConformanceService/exchange_scale/init", _request_body("exchange_scale", factor=2.0))
             )
             input_batch = pa.RecordBatch.from_pydict(
                 {"value": [3.0]},
@@ -291,8 +291,10 @@ class TestExternalFetchFailures:
                 inline_exchange,
                 f"{conformance_fake_storage}/download/conformance-missing-exchange",
             )
-            _assert_rpc_error_response(_post(client, "/exchange_scale/exchange", pointer))
-            assert _result_value(_post(client, "/echo_int", _request_body("echo_int", value=13))) == 13
+            _assert_rpc_error_response(_post(client, "/ConformanceService/exchange_scale/exchange", pointer))
+            assert (
+                _result_value(_post(client, "/ConformanceService/echo_int", _request_body("echo_int", value=13))) == 13
+            )
 
     def test_checksum_mismatch_is_rpc_error_and_server_remains_reusable(
         self,
@@ -307,8 +309,8 @@ class TestExternalFetchFailures:
         download_url, _checksum = _upload_body(conformance_fake_storage, original)
         pointer = _pointer_body(original, download_url, sha256="0" * 64)
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            _assert_rpc_error_response(_post(client, "/echo_int", pointer), match="checksum")
-            assert _result_value(_post(client, "/echo_int", original)) == 11
+            _assert_rpc_error_response(_post(client, "/ConformanceService/echo_int", pointer), match="checksum")
+            assert _result_value(_post(client, "/ConformanceService/echo_int", original)) == 11
 
 
 class TestExternalFetchSecurity:
@@ -327,7 +329,7 @@ class TestExternalFetchSecurity:
         pointer = _pointer_body(original, _redirect_url(download_url, "redirect"), sha256=checksum)
         base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            assert _result_value(_post(client, "/echo_int", pointer)) == 23
+            assert _result_value(_post(client, "/ConformanceService/echo_int", pointer)) == 23
 
     def test_disallowed_redirect_hop_is_not_fetched(
         self,
@@ -343,8 +345,8 @@ class TestExternalFetchSecurity:
         before = _storage_stats(conformance_fake_storage).get("download_requests", 0)
         base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            _assert_rpc_error_response(_post(client, "/echo_int", pointer), match="URL rejected")
-            assert _result_value(_post(client, "/echo_int", original)) == 29
+            _assert_rpc_error_response(_post(client, "/ConformanceService/echo_int", pointer), match="URL rejected")
+            assert _result_value(_post(client, "/ConformanceService/echo_int", original)) == 29
         after = _storage_stats(conformance_fake_storage).get("download_requests", 0)
         assert after == before, "the rejected localhost redirect target was fetched"
 
@@ -361,7 +363,7 @@ class TestExternalFetchSecurity:
         pointer = _pointer_body(original, _redirect_url(download_url, "redirect-loop"), sha256=checksum)
         base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            _assert_rpc_error_response(_post(client, "/echo_int", pointer), match="redirect limit")
+            _assert_rpc_error_response(_post(client, "/ConformanceService/echo_int", pointer), match="redirect limit")
 
     def test_encoded_body_cap_is_independent(
         self,
@@ -378,7 +380,9 @@ class TestExternalFetchSecurity:
         pointer = _pointer_body(original, download_url, sha256=checksum)
         base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            _assert_rpc_error_response(_post(client, "/echo_string", pointer), match="max_fetch_bytes")
+            _assert_rpc_error_response(
+                _post(client, "/ConformanceService/echo_string", pointer), match="max_fetch_bytes"
+            )
 
     def test_decoded_zstd_cap_is_independent(
         self,
@@ -401,7 +405,9 @@ class TestExternalFetchSecurity:
         pointer = _pointer_body(original, download_url, sha256=hashlib.sha256(original).hexdigest())
         base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            _assert_rpc_error_response(_post(client, "/echo_string", pointer), match="max_decompressed_bytes")
+            _assert_rpc_error_response(
+                _post(client, "/ConformanceService/echo_string", pointer), match="max_decompressed_bytes"
+            )
 
     def test_signed_query_is_redacted_from_rpc_error(
         self,
@@ -420,7 +426,7 @@ class TestExternalFetchSecurity:
         pointer = _pointer_body(original, location)
         base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            response = _post(client, "/echo_int", pointer)
+            response = _post(client, "/ConformanceService/echo_int", pointer)
         assert secret.encode() not in response.content
         assert b"X-Amz-Credential" not in response.content
         _assert_rpc_error_response(response)

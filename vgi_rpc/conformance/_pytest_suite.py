@@ -1669,7 +1669,7 @@ class TestHealth:
         # endpoint — wherever it lives — is refused, and that neither is served.
         candidates = {
             path: httpx2.post(f"{url}{path}", content=b"", timeout=5.0).status_code
-            for path in ("/echo_int", "/vgi/echo_int")
+            for path in ("/ConformanceService/echo_int", "/vgi/ConformanceService/echo_int")
         }
         assert 200 not in candidates.values(), f"RPC must not be served unauthenticated: {candidates}"
         assert 401 in candidates.values(), f"expected an RPC endpoint to require auth, got {candidates}"
@@ -1716,7 +1716,7 @@ class TestUnauthorized:
             headers[_CONFORMANCE_REASON_HEADER] = want_reason
         body = _unary_request_body("echo_int", value=1)
         last: Any = None
-        for path in ("/echo_int", "/vgi/echo_int"):
+        for path in ("/ConformanceService/echo_int", "/vgi/ConformanceService/echo_int"):
             last = httpx2.post(f"http://127.0.0.1:{port}{path}", content=body, headers=headers, timeout=5.0)
             if last.status_code == 401:
                 return last
@@ -2197,7 +2197,7 @@ class TestProxyProofOffMode:
         import httpx2
 
         resp = httpx2.post(
-            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            f"http://127.0.0.1:{conformance_http_port}/ConformanceService/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"content-type": "application/vnd.apache.arrow.stream"},
             timeout=5.0,
@@ -2213,7 +2213,7 @@ class TestProxyProofOffMode:
         import httpx2
 
         resp = httpx2.post(
-            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            f"http://127.0.0.1:{conformance_http_port}/ConformanceService/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={
                 "content-type": "application/vnd.apache.arrow.stream",
@@ -2313,7 +2313,7 @@ class TestHttpCompressionNegotiationConformance:
 
         body = _unary_request_body("echo_string", value=self.PAYLOAD)
         resp = httpx2.post(
-            f"http://127.0.0.1:{port}/echo_string",
+            f"http://127.0.0.1:{port}/ConformanceService/echo_string",
             content=body,
             headers={"Content-Type": _ARROW_CONTENT_TYPE, **headers},
             timeout=30.0,
@@ -2335,7 +2335,7 @@ class TestHttpCompressionNegotiationConformance:
 
         body = compress(Encoding(codec), _unary_request_body("echo_string", value=self.PAYLOAD))
         return httpx2.post(
-            f"http://127.0.0.1:{port}/echo_string",
+            f"http://127.0.0.1:{port}/ConformanceService/echo_string",
             content=body,
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -2952,7 +2952,7 @@ class TestCallTokenSplit:
         from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
         resp = httpx2.post(
-            f"http://127.0.0.1:{port}/{method}/init",
+            f"http://127.0.0.1:{port}/ConformanceService/{method}/init",
             content=_unary_request_body(method, **params),
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -3012,7 +3012,7 @@ class TestCallTokenSplit:
                 custom_metadata=pa.KeyValueMetadata({STATE_KEY: init[STATE_KEY], CALL_STATE_KEY: init[CALL_STATE_KEY]}),
             )
         resp = httpx2.post(
-            f"http://127.0.0.1:{conformance_http_port}/produce_n/exchange",
+            f"http://127.0.0.1:{conformance_http_port}/ConformanceService/produce_n/exchange",
             content=req.getvalue(),
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -3123,7 +3123,7 @@ class TestErrorHeader:
         """POST a unary call, returning the raw response."""
         import httpx2
 
-        for path in (f"/{method}", f"/vgi/{method}"):
+        for path in (f"/ConformanceService/{method}", f"/vgi/ConformanceService/{method}"):
             resp = httpx2.post(
                 f"http://127.0.0.1:{port}{path}",
                 content=_unary_request_body(method, **kwargs),
@@ -3214,7 +3214,7 @@ class TestRequestId:
         headers = {"content-type": "application/vnd.apache.arrow.stream"}
         if request_id is not None:
             headers[_REQUEST_ID_HEADER] = request_id
-        for path in ("/echo_int", "/vgi/echo_int"):
+        for path in ("/ConformanceService/echo_int", "/vgi/ConformanceService/echo_int"):
             resp = httpx2.post(
                 f"http://127.0.0.1:{port}{path}",
                 content=_unary_request_body("echo_int", value=1),
@@ -3594,7 +3594,7 @@ class TestCors:
         return port
 
     @staticmethod
-    def _preflight(port: int, path: str = "/echo_int") -> Any:
+    def _preflight(port: int, path: str = "/ConformanceService/echo_int") -> Any:
         """Send a CORS preflight for an RPC call, as a browser would."""
         import httpx2
 
@@ -3672,7 +3672,7 @@ class TestCors:
 
         port = self._port(request)
         resp = httpx2.options(
-            f"http://127.0.0.1:{port}/echo_int",
+            f"http://127.0.0.1:{port}/ConformanceService/echo_int",
             headers={
                 "Origin": _CORS_ORIGIN,
                 "Access-Control-Request-Method": "POST",
@@ -3697,7 +3697,7 @@ class TestCors:
 
         port = self._port(request)
         resp = httpx2.post(
-            f"http://127.0.0.1:{port}/echo_int",
+            f"http://127.0.0.1:{port}/ConformanceService/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
             timeout=5.0,
@@ -3780,7 +3780,7 @@ class TestCors:
 
         port = self._port(request)
         resp = httpx2.post(
-            f"http://127.0.0.1:{port}/echo_int",
+            f"http://127.0.0.1:{port}/ConformanceService/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
             timeout=5.0,
@@ -3840,7 +3840,7 @@ class TestCorsOffMode:
         import httpx2
 
         resp = httpx2.options(
-            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            f"http://127.0.0.1:{conformance_http_port}/ConformanceService/echo_int",
             headers={"Origin": _CORS_ORIGIN, "Access-Control-Request-Method": "POST"},
             timeout=5.0,
         )
@@ -3859,7 +3859,7 @@ class TestCorsOffMode:
         import httpx2
 
         resp = httpx2.post(
-            f"http://127.0.0.1:{conformance_http_port}/echo_int",
+            f"http://127.0.0.1:{conformance_http_port}/ConformanceService/echo_int",
             content=_unary_request_body("echo_int", value=1),
             headers={"Content-Type": "application/vnd.apache.arrow.stream", "Origin": _CORS_ORIGIN},
             timeout=5.0,

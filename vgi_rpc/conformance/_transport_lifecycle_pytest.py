@@ -65,7 +65,7 @@ class TestServeStartLifecycle:
         import httpx2
 
         body = _valid_request("add_floats")
-        url = f"http://127.0.0.1:{port}/add_floats"
+        url = f"http://127.0.0.1:{port}/ConformanceService/add_floats"
         headers = {"Content-Type": _ARROW_CONTENT_TYPE, "Accept-Encoding": "identity"}
         with httpx2.Client(timeout=5.0) as client:
             failed = client.post(url, content=body, headers=headers)

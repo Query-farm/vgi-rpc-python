@@ -158,7 +158,7 @@ def _dispatch_telemetry(
     # `info` is None on paths that are not regular dispatch (cancel); those
     # keep the server's primary name. Where a method resolved, its own
     # protocol owns the record.
-    protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
+    protocol_name = (info.protocol_name if info is not None else "") or app._server.protocol_name
     outcome = _DispatchOutcome()
     start = time.monotonic()
     hook: _DispatchHook | None = app._server._dispatch_hook if info is not None else None
@@ -264,7 +264,7 @@ def _run_stream_init_sync(
         server_id = app._server.server_id
         # Follows the protocol that owns the resolved method — a wrong protocol
         # label in an access record looks plausible rather than failing.
-        protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
+        protocol_name = info.protocol_name or app._server.protocol_name
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in app._server.ctx_methods:
@@ -461,7 +461,7 @@ def _run_http_exchange_init(
     server_id = app._server.server_id
     # Follows the protocol that owns the resolved method — a wrong protocol
     # label in an access record looks plausible rather than failing.
-    protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
+    protocol_name = info.protocol_name or app._server.protocol_name
     try:
         state = result.state
         output_schema = result.output_schema

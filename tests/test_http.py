@@ -27,6 +27,7 @@ from pyarrow import ipc
 
 from tests._aiomock import CallbackResult, aiointercept
 from tests._aiomock import mock_aiohttp as aiointercept_ctx
+from tests._paths import fixture_path
 from vgi_rpc.external import (
     ExternalLocationConfig,
     UploadUrl,
@@ -146,7 +147,7 @@ class TestHttpErrorCases:
     def test_unknown_method_404(self, client: _SyncTestClient) -> None:
         """Unknown method returns 404 with a parseable Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/nonexistent",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/nonexistent",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -163,7 +164,7 @@ class TestHttpErrorCases:
     def test_non_stream_on_init_endpoint_400(self, client: _SyncTestClient) -> None:
         """Non-stream method on the /init endpoint returns 400 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/add/init",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/add/init",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -175,7 +176,7 @@ class TestHttpErrorCases:
     def test_malformed_body_stream_init_400(self, client: _SyncTestClient) -> None:
         """Garbage bytes on a stream init endpoint return 400 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/transform/init",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/transform/init",
             content=b"garbage bytes",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -186,7 +187,7 @@ class TestHttpErrorCases:
     def test_malformed_body_stream_exchange_400(self, client: _SyncTestClient) -> None:
         """Garbage bytes on a stream exchange endpoint return 400."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/transform/exchange",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/transform/exchange",
             content=b"garbage bytes",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -197,7 +198,7 @@ class TestHttpErrorCases:
     def test_wrong_content_type_415(self, client: _SyncTestClient) -> None:
         """Wrong Content-Type returns 415 with Arrow IPC error."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/add",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/add",
             content=b"hello",
             headers={"Content-Type": "text/plain"},
         )
@@ -209,7 +210,7 @@ class TestHttpErrorCases:
     def test_unary_on_exchange_400(self, client: _SyncTestClient) -> None:
         """Unary method on /exchange endpoint returns 400."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/add/exchange",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/add/exchange",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -234,7 +235,7 @@ class TestServerErrorHeader:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
 
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/fail_unary",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/fail_unary",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -258,7 +259,7 @@ class TestServerErrorHeader:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
 
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/fail_stream_init_with_header/init",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/fail_stream_init_with_header/init",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -295,7 +296,7 @@ class TestServerErrorHeader:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
 
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/fail_stream_first_turn/init",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/fail_stream_first_turn/init",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -328,7 +329,7 @@ class TestServerErrorHeader:
     def test_400_errors_do_not_get_error_header(self, client: _SyncTestClient) -> None:
         """Client errors (400) still return 400 without X-VGI-RPC-Error header."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/add/init",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/add/init",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -364,7 +365,7 @@ class TestServerErrorHeader:
                     custom_metadata=init_md,
                 )
             init_resp = cap_client.post(
-                f"{_BASE_URL}/transform/init",
+                f"{_BASE_URL}/RpcFixtureService/transform/init",
                 content=init_req.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
@@ -383,7 +384,7 @@ class TestServerErrorHeader:
             with ipc.new_stream(ex_req, ex_schema) as writer:
                 writer.write_batch(big_batch, custom_metadata=ex_md)
             ex_resp = cap_client.post(
-                f"{_BASE_URL}/transform/exchange",
+                f"{_BASE_URL}/RpcFixtureService/transform/exchange",
                 content=ex_req.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
@@ -481,7 +482,7 @@ class TestResumableServerStream:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
         resp = resumable_client.post(
-            f"{_BASE_URL}{resumable_client.prefix}/generate/exchange",
+            f"{_BASE_URL}{resumable_client.prefix}/RpcFixtureService/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -516,7 +517,7 @@ class TestResumableServerStream:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=state_md)
 
         resp = resumable_client.post(
-            f"{_BASE_URL}{resumable_client.prefix}/generate/exchange",
+            f"{_BASE_URL}{resumable_client.prefix}/RpcFixtureService/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -682,7 +683,7 @@ class TestStateTokenStateEncoding:
             token_ttl=3600,
         )
         resp = c.post(
-            f"{_BASE_URL}/generate/exchange",
+            f"{_BASE_URL}/RpcFixtureService/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -724,7 +725,7 @@ class TestStateTokenStateEncoding:
             token_ttl=0,
         )
         resp = c.post(
-            f"{_BASE_URL}/generate/exchange",
+            f"{_BASE_URL}/RpcFixtureService/generate/exchange",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1647,7 +1648,7 @@ class TestAuthentication:
         )
         tc = falcon.testing.TestClient(app)
         # Simulate a CORS preflight — no Authorization header
-        resp = tc.simulate_options("/whoami", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options("/_AuthService/whoami", headers={"Origin": "http://example.com"})
         assert resp.status != "401 Unauthorized"
         assert resp.headers.get("access-control-allow-origin") == "*"
 
@@ -1665,7 +1666,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-allow-origin") == "*"
 
     def test_cors_specific_origin(self) -> None:
@@ -1673,7 +1674,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test", cors_origins="http://example.com")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-allow-origin") == "http://example.com"
 
     def test_cors_exposes_standard_headers(self) -> None:
@@ -1681,7 +1682,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         expose = resp.headers.get("access-control-expose-headers", "")
         assert "WWW-Authenticate" in expose
         assert "X-Request-ID" in expose
@@ -1693,7 +1694,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         assert "access-control-allow-origin" not in resp.headers
 
     def test_cors_max_age_default(self) -> None:
@@ -1701,7 +1702,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test", cors_origins="*")
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-max-age") == "7200"
 
     def test_cors_max_age_custom(self) -> None:
@@ -1709,7 +1710,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test", cors_origins="*", cors_max_age=3600)
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         assert resp.headers.get("access-control-max-age") == "3600"
 
     def test_cors_max_age_none_omits_header(self) -> None:
@@ -1717,7 +1718,7 @@ class TestCors:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test", cors_origins="*", cors_max_age=None)
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         assert "access-control-max-age" not in resp.headers
 
     def test_resource_policy_default(self) -> None:
@@ -1777,7 +1778,7 @@ class TestMaxRequestBytes:
             max_request_bytes=10_000_000,
         )
         resp = client.post(
-            f"{_BASE_URL}/add",
+            f"{_BASE_URL}/RpcFixtureService/add",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1792,7 +1793,7 @@ class TestMaxRequestBytes:
             token_key=b"test",
         )
         resp = client.post(
-            f"{_BASE_URL}/add",
+            f"{_BASE_URL}/RpcFixtureService/add",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1816,7 +1817,7 @@ class TestMaxRequestBytes:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         app = make_wsgi_app(server, token_key=b"test", cors_origins="*", max_request_bytes=1_000_000)
         tc = falcon.testing.TestClient(app)
-        resp = tc.simulate_options("/add", headers={"Origin": "http://example.com"})
+        resp = tc.simulate_options(fixture_path("add"), headers={"Origin": "http://example.com"})
         expose = resp.headers.get("access-control-expose-headers", "")
         assert MAX_REQUEST_BYTES_HEADER in expose
 
@@ -2048,7 +2049,7 @@ class TestRequestId:
         )
         _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/add",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/add",
             content=buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -2069,7 +2070,7 @@ class TestRequestId:
         )
         _write_request(buf, "add", schema, {"a": 1.0, "b": 2.0})
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/add",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/add",
             content=buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "X-Request-ID": "my-custom-req-id"},
         )
@@ -2079,7 +2080,7 @@ class TestRequestId:
     def test_request_id_on_error_response(self, client: _SyncTestClient) -> None:
         """X-Request-ID is present on error responses."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/nonexistent",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/nonexistent",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -2244,7 +2245,7 @@ class TestZstdCompression:
 
         # Send with Accept-Encoding: zstd to trigger response compression
         result = falcon_client.simulate_post(
-            "/greet",
+            fixture_path("greet"),
             body=req_buf.getvalue(),
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -2489,7 +2490,7 @@ class TestCompressionNegotiation:
         gz_body = co.compress(req_buf.getvalue()) + co.flush(zlib.Z_FINISH)
 
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/greet",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/greet",
             content=gz_body,
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -2511,7 +2512,7 @@ class TestCompressionNegotiation:
             compression_level=3,
         )
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/greet",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/greet",
             content=b"\x42\x5a\x68\x39",  # 'BZh9' — bzip2 magic, but we don't speak it
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "Content-Encoding": "bzip2"},
         )
@@ -2556,7 +2557,7 @@ class TestCompressionNegotiation:
         # A zstd-encoded request should now be rejected as unsupported.
         zs_body = zstandard.ZstdCompressor(level=3).compress(b"some bytes")
         post_resp = client.post(
-            f"{_BASE_URL}{client.prefix}/greet",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/greet",
             content=zs_body,
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "Content-Encoding": "zstd"},
         )
@@ -2586,7 +2587,7 @@ class TestCompressionNegotiation:
         with ipc.new_stream(req_buf, _EMPTY_SCHEMA) as writer:
             writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=md)
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/greet",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/greet",
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "Accept-Encoding": "br"},
         )
@@ -2660,7 +2661,7 @@ class TestCompressionNegotiation:
 
         body = zstandard.ZstdCompressor(level=3).compress(self._greet_request_body("Compressed"))
         result = falcon_client.simulate_post(
-            "/greet",
+            fixture_path("greet"),
             body=body,
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -2687,7 +2688,7 @@ class TestCompressionNegotiation:
         raw = self._greet_request_body("Gzipped")
         body = co.compress(raw) + co.flush(zlib.Z_FINISH)
         result = falcon_client.simulate_post(
-            "/greet",
+            fixture_path("greet"),
             body=body,
             headers={
                 "Content-Type": _ARROW_CONTENT_TYPE,
@@ -2706,7 +2707,7 @@ class TestCompressionNegotiation:
         falcon_client = falcon.testing.TestClient(app)
 
         result = falcon_client.simulate_post(
-            "/greet",
+            fixture_path("greet"),
             body=b"\x42\x5a\x68\x39",  # 'BZh9' — bzip2 magic
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "Content-Encoding": "bzip2"},
         )
@@ -2774,7 +2775,7 @@ class TestNotFoundHtmlPage:
     def test_existing_method_404_still_arrow_ipc(self, client: _SyncTestClient) -> None:
         """Unknown method on a matched route still returns Arrow IPC 404 (not HTML)."""
         resp = client.post(
-            f"{_BASE_URL}{client.prefix}/nonexistent",
+            f"{_BASE_URL}{client.prefix}/RpcFixtureService/nonexistent",
             content=b"",
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -3001,7 +3002,9 @@ class TestDescribeHtmlPage:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True)
         c = make_sync_client(server, token_key=b"test-key", enable_describe_page=False)
         resp = c._client.simulate_get("/describe")
-        # Falls through to {prefix}/{method} route which only has on_post → 405
+        # Falls through to the flat {prefix}/{protocol} route, which carries only
+        # POST responders (it exists for reserved server-level methods), so a GET
+        # is 405 rather than 404.
         assert resp.status_code == 405
         c.close()
 
@@ -3015,7 +3018,9 @@ class TestDescribeHtmlPage:
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         c = make_sync_client(server, token_key=b"test-key")
         resp = c._client.simulate_get("/describe")
-        # Falls through to {prefix}/{method} route which only has on_post → 405
+        # Falls through to the flat {prefix}/{protocol} route, which carries only
+        # POST responders (it exists for reserved server-level methods), so a GET
+        # is 405 rather than 404.
         assert resp.status_code == 405
         c.close()
 
@@ -3096,7 +3101,7 @@ class TestPageBranding:
             authenticate=reject,
         )
         try:
-            resp = c.post(f"{_BASE_URL}/echo_int", content=b"", headers={"Accept": "text/html"})
+            resp = c.post(f"{_BASE_URL}/RpcFixtureService/echo_int", content=b"", headers={"Accept": "text/html"})
             assert resp.status_code == 401
             body = resp.content.decode()
             assert "vgi-rpc-python.query.farm/assets/logo-hero.png" in body
@@ -3177,7 +3182,9 @@ class TestHealthEndpoint:
             enable_health_endpoint=False,
         )
         resp = c._client.simulate_get("/health")
-        # Falls through to {prefix}/{method} route which only has on_post → 405
+        # Falls through to the flat {prefix}/{protocol} route, which carries only
+        # POST responders (it exists for reserved server-level methods), so a GET
+        # is 405 rather than 404.
         assert resp.status_code == 405
         c.close()
 
@@ -3368,7 +3375,7 @@ class TestCookiesServerSide:
             writer.write_batch(batch, custom_metadata=md)
 
         r = tc.simulate_post(
-            "/set_sid_secure",
+            "/_CookieService/set_sid_secure",
             body=buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -3385,7 +3392,7 @@ class TestCookiesServerSide:
         """ctx.delete_cookie emits a Set-Cookie with zero/past expiry."""
         tc = falcon.testing.TestClient(_cookie_app())
         r = tc.simulate_post(
-            "/delete_sid",
+            "/_CookieService/delete_sid",
             body=_build_unary_request("delete_sid"),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -3399,7 +3406,7 @@ class TestCookiesServerSide:
         """Cookies queued before an exception are still emitted on the error response."""
         tc = falcon.testing.TestClient(_cookie_app())
         r = tc.simulate_post(
-            "/fail_after_set",
+            "/_CookieService/fail_after_set",
             body=_build_unary_request("fail_after_set"),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -3414,7 +3421,7 @@ class TestCookiesServerSide:
         """Two ctx.set_cookie calls produce two distinct Set-Cookie headers."""
         tc = falcon.testing.TestClient(_cookie_app())
         r = tc.simulate_post(
-            "/set_many",
+            "/_CookieService/set_many",
             body=_build_unary_request("set_many"),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -3701,7 +3708,7 @@ class TestEmitAndFinishSameTick:
 
         client = make_sync_client(RpcServer(RpcFixtureService, RpcFixtureServiceImpl()), token_key=b"test-key")
         resp = client.post(
-            f"{_BASE_URL}/emit_and_finish/init",
+            f"{_BASE_URL}/RpcFixtureService/emit_and_finish/init",
             content=self._init_request(4),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -3755,7 +3762,7 @@ class TestEmitAndFinishSameTick:
             max_response_bytes=8 * 1024 * 1024,
         )
         resp = client.post(
-            f"{_BASE_URL}/emit_and_finish/init",
+            f"{_BASE_URL}/RpcFixtureService/emit_and_finish/init",
             content=self._init_request(50_000),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -3883,7 +3890,7 @@ class TestProducerTickMetadata:
                     custom_metadata=init_md,
                 )
             init_resp = client.post(
-                f"{_BASE_URL}/tick_meta/init",
+                f"{_BASE_URL}/_TickMetaService/tick_meta/init",
                 content=init_req.getvalue(),
                 headers={"Content-Type": _ARROW_CONTENT_TYPE},
             )
@@ -3914,7 +3921,7 @@ class TestProducerTickMetadata:
                 with ipc.new_stream(ex_req, _EMPTY_SCHEMA) as writer:
                     writer.write_batch(empty_batch(_EMPTY_SCHEMA), custom_metadata=ex_md)
                 ex_resp = client.post(
-                    f"{_BASE_URL}/tick_meta/exchange",
+                    f"{_BASE_URL}/_TickMetaService/tick_meta/exchange",
                     content=ex_req.getvalue(),
                     headers={"Content-Type": _ARROW_CONTENT_TYPE},
                 )

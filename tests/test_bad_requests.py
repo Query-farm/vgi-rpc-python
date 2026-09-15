@@ -32,6 +32,7 @@ from .test_rpc import RpcFixtureService, RpcFixtureServiceImpl
 # Helpers
 # ---------------------------------------------------------------------------
 
+_PROTOCOL = "RpcFixtureService"
 _BASE_URL = "http://test"
 _CT = {"Content-Type": _ARROW_CONTENT_TYPE}
 
@@ -47,7 +48,16 @@ def client() -> Iterator[_SyncTestClient]:
 def _post(
     client: _SyncTestClient, path: str, body: bytes, *, content_type: str = _ARROW_CONTENT_TYPE
 ) -> tuple[int, bytes]:
-    """Send a POST and return (status_code, body)."""
+    """Send a POST and return (status_code, body).
+
+    RPC paths are namespaced ``/{protocol}/{method}``; server-level endpoints
+    (health, describe, reserved ``__name__`` routes) are not. Tests pass the
+    bare method path and this fills in the routing segment, so each case stays
+    about the malformed request it is actually probing.
+    """
+    head = path.lstrip("/").split("/", 1)[0]
+    if head and head not in {"health", "describe"} and not head.startswith("__"):
+        path = f"/{_PROTOCOL}{path}"
     resp = client.post(f"{_BASE_URL}{path}", content=body, headers={"Content-Type": content_type})
     return resp.status_code, resp.content
 

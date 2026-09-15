@@ -23,7 +23,9 @@ import falcon
 import pyarrow as pa
 
 from vgi_rpc.external import UploadUrlProvider
+from vgi_rpc.http.server._resources import _RESERVED_PROTOCOL
 from vgi_rpc.rpc import MethodNotImplementedError, RpcMethodInfo, RpcServer
+from vgi_rpc.rpc._common import ProtocolNotSpecifiedError, ProtocolNotSupportedError
 
 from .._common import _RpcHttpError
 from ._responses import _check_content_type
@@ -118,28 +120,69 @@ class _HttpRpcApp:
             ttl=float(token_ttl) if token_ttl > 0 else 3600.0,
         )
 
-    def _resolve_method(self, req: falcon.Request, method: str) -> RpcMethodInfo:
-        """Validate content type and resolve method info.
+    def _resolve_method(self, req: falcon.Request, protocol: str, method: str) -> RpcMethodInfo:
+        """Validate content type and resolve ``(protocol, method)`` from the path.
+
+        The path segment is rejected outright if it contains ``%``. The charset
+        never needs percent-encoding, so a percent sign is a bug or an attempt
+        to have the edge and the worker read different strings — the
+        Content-Length/Transfer-Encoding shape. Compare raw; never
+        decoded-against-raw.
 
         Args:
             req: The incoming Falcon request.
+            protocol: The routing key from the request path.
             method: The RPC method name from the request path.
 
         Returns:
-            The resolved ``RpcMethodInfo`` for the requested method.
+            The resolved ``RpcMethodInfo``.
 
         Raises:
-            _RpcHttpError: If content type is wrong or method is unknown.
+            _RpcHttpError: Wrong content type (415), unroutable protocol (404),
+                or unknown method (404).
 
         """
-        _check_content_type(req)
-        info = self._server.methods.get(method)
-        if info is None:
-            available = sorted(self._server.methods.keys())
+        # Routing before content type. A request naming a protocol this server
+        # does not host is unroutable whatever its body is, and 404 is the
+        # answer a caller can act on — 415 reads as "fix your header and retry",
+        # which would loop forever against a path that will never resolve.
+        if "%" in protocol:
             raise _RpcHttpError(
-                MethodNotImplementedError(f"Unknown method: '{method}'. Available methods: {available}"),
+                ProtocolNotSpecifiedError(
+                    f"Protocol path segment {protocol!r} contains a percent sign. The protocol "
+                    f"charset never requires encoding, so this is rejected rather than decoded."
+                ),
                 status_code=HTTPStatus.NOT_FOUND,
             )
+        if protocol == _RESERVED_PROTOCOL:
+            # Server-level reserved name: resolve against the built-in table,
+            # never against a protocol's methods.
+            reserved = self._server.methods.get(method)
+            if reserved is None:
+                raise _RpcHttpError(
+                    MethodNotImplementedError(f"This server does not implement the reserved method {method!r}."),
+                    status_code=HTTPStatus.NOT_FOUND,
+                )
+            _check_content_type(req)
+            return reserved
+
+        binding = self._server._bindings.get(protocol)
+        if binding is None:
+            raise _RpcHttpError(
+                ProtocolNotSupportedError(
+                    f"This server does not host protocol {protocol!r}. Hosted: {sorted(self._server._bindings)}."
+                ),
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        info = binding.methods.get(method)
+        if info is None:
+            raise _RpcHttpError(
+                MethodNotImplementedError(
+                    f"Protocol {protocol!r} has no method {method!r}. Available: {sorted(binding.methods)}."
+                ),
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        _check_content_type(req)
         return info
 
     def _unary_sync(

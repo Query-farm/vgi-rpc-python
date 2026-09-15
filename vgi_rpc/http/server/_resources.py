@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from http import HTTPStatus
 from io import BytesIO
@@ -129,13 +130,25 @@ def _apply_cookies_to_response(resp: falcon.Response, cookies: list[CookieSpec])
             )
 
 
+#: Sentinel protocol for the flat reserved-method route. Reserved names
+#: (``__describe__``) are server-level and owned by no protocol.
+_RESERVED_PROTOCOL = "\x00reserved"
+
+#: Protocol names are identifiers, optionally dot-qualified (``vgi.Identity.v1``).
+#: A path segment that cannot be one was never addressed to this server, so it is
+#: 404 rather than 405 — otherwise unrelated two-segment paths such as
+#: ``/.well-known/oauth-protected-resource`` would be answered
+#: "method not allowed" by the RPC route they happen to match.
+_PROTOCOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+
+
 class _RpcResource:
     """Falcon resource for unary calls: ``POST {prefix}/{method}``."""
 
     def __init__(self, app: _HttpRpcApp) -> None:
         self._app = app
 
-    def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
+    def on_post(self, req: falcon.Request, resp: falcon.Response, protocol: str, method: str) -> None:
         """Handle unary and __describe__ RPC calls."""
         cookies: list[CookieSpec] = []
         cookie_token = _current_response_cookies.set(cookies)
@@ -154,7 +167,7 @@ class _RpcResource:
         budget_token = _current_response_budget.set(budget)
         try:
             try:
-                info = self._app._resolve_method(req, method)
+                info = self._app._resolve_method(req, protocol, method)
                 if info.method_type == MethodType.STREAM:
                     raise _RpcHttpError(
                         TypeError(f"Stream method '{method}' requires /init and /exchange endpoints"),
@@ -187,6 +200,32 @@ class _RpcResource:
             _current_response_budget.reset(budget_token)
             _current_response_cookies.reset(cookie_token)
 
+    def on_get(self, req: falcon.Request, resp: falcon.Response, protocol: str, method: str = "") -> None:
+        """RPC endpoints are POST-only; say 404 when the path was never one.
+
+        Falcon would otherwise answer 405 for any two-segment GET that happens
+        to match this route, including paths belonging to other features.
+        """
+        del req, resp, method
+        if not _PROTOCOL_NAME.match(protocol) or protocol not in self._app._server._bindings:
+            raise falcon.HTTPNotFound
+        raise falcon.HTTPMethodNotAllowed(allowed_methods=["POST"])
+
+    def on_post_reserved(self, req: falcon.Request, resp: falcon.Response, protocol: str) -> None:
+        """Handle a flat, server-level reserved method such as ``__describe__``.
+
+        Routed at ``{prefix}/{method}`` rather than ``{prefix}/{protocol}/{method}``
+        because these belong to no protocol. Anything that is not a reserved
+        name 404s here rather than falling through to a protocol lookup — the
+        flat route is not a catch-all.
+        """
+        # Falcon hands us the segment under the shared field name `protocol`;
+        # on this route it is a reserved *method* name.
+        method = protocol
+        if not (method.startswith("__") and method.endswith("__")):
+            raise falcon.HTTPNotFound
+        self.on_post(req, resp, _RESERVED_PROTOCOL, method)
+
 
 class _StreamInitResource:
     """Falcon resource for stream init: ``POST {prefix}/{method}/init``."""
@@ -194,7 +233,7 @@ class _StreamInitResource:
     def __init__(self, app: _HttpRpcApp) -> None:
         self._app = app
 
-    def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
+    def on_post(self, req: falcon.Request, resp: falcon.Response, protocol: str, method: str) -> None:
         """Handle stream initialization (both producer and exchange)."""
         try:
             budget = _resolve_response_budget(
@@ -211,7 +250,7 @@ class _StreamInitResource:
         status_token = _current_response_status.set(HTTPStatus.OK)
         try:
             try:
-                info = self._app._resolve_method(req, method)
+                info = self._app._resolve_method(req, protocol, method)
                 if info.method_type != MethodType.STREAM:
                     raise _RpcHttpError(
                         TypeError(f"Method '{method}' is not a stream"),
@@ -252,7 +291,7 @@ class _ExchangeResource:
     def __init__(self, app: _HttpRpcApp) -> None:
         self._app = app
 
-    def on_post(self, req: falcon.Request, resp: falcon.Response, method: str) -> None:
+    def on_post(self, req: falcon.Request, resp: falcon.Response, protocol: str, method: str) -> None:
         """Handle stream exchange or producer continuation."""
         try:
             budget = _resolve_response_budget(
@@ -269,7 +308,7 @@ class _ExchangeResource:
         status_token = _current_response_status.set(HTTPStatus.OK)
         try:
             try:
-                info = self._app._resolve_method(req, method)
+                info = self._app._resolve_method(req, protocol, method)
                 if info.method_type != MethodType.STREAM:
                     raise _RpcHttpError(
                         TypeError(f"Method '{method}' does not support /exchange"),

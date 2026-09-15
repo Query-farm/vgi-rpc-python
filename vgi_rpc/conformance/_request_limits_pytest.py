@@ -98,13 +98,13 @@ class TestCompressedHttpRequestCap:
                 "Accept-Encoding": "identity",
                 "X-VGI-Accept-Encoding": "identity",
             }
-            rejected = client.post("/echo_string", content=encoded, headers=headers)
+            rejected = client.post("/ConformanceService/echo_string", content=encoded, headers=headers)
             assert rejected.status_code == 413, (
                 f"{codec} decoded expansion must be 413, got {rejected.status_code}: {rejected.content[:200]!r}"
             )
 
             control = client.post(
-                "/echo_int",
+                "/ConformanceService/echo_int",
                 content=_request_body("echo_int", value=41),
                 headers={
                     "Content-Type": _ARROW_CONTENT_TYPE,

@@ -792,9 +792,23 @@ def make_wsgi_app(
         if prefix and prefix != "/":
             app.add_route(f"/.well-known/oauth-protected-resource{prefix}", well_known)
 
-    app.add_route(f"{prefix}/{{method}}", _RpcResource(app_handler))
-    app.add_route(f"{prefix}/{{method}}/init", _StreamInitResource(app_handler))
-    app.add_route(f"{prefix}/{{method}}/exchange", _ExchangeResource(app_handler))
+    # {protocol}/{method}. The protocol segment is what lets a proxy, WAF or
+    # load balancer allow, deny, route and rate-limit by protocol without
+    # parsing Arrow, and keeps path-keyed logs meaningful when two protocols
+    # share a method name. The routing key also rides in request metadata —
+    # the only carrier on stdio, unix and named-pipe — and the two must agree.
+    # Reserved server-level methods keep a flat route. They are not owned by any
+    # protocol — __describe__ in particular is the diagnostic path a mismatched
+    # client uses to find out *what* mismatched, so requiring it to name a
+    # protocol first would remove the tool exactly when it is needed. Removing
+    # the old flat {method} catch-all orphaned these, so they are explicit now.
+    # Falcon requires the same field name at a given path level, so this shares
+    # `{protocol}` with the namespaced route below even though the segment
+    # carries a reserved *method* name here.
+    app.add_route(f"{prefix}/{{protocol}}", _RpcResource(app_handler), suffix="reserved")
+    app.add_route(f"{prefix}/{{protocol}}/{{method}}", _RpcResource(app_handler))
+    app.add_route(f"{prefix}/{{protocol}}/{{method}}/init", _StreamInitResource(app_handler))
+    app.add_route(f"{prefix}/{{protocol}}/{{method}}/exchange", _ExchangeResource(app_handler))
     if upload_url_provider is not None:
         app.add_route(f"{prefix}/__upload_url__/init", _UploadUrlResource(app_handler))
     if enable_sticky:

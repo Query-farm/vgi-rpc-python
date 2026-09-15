@@ -36,6 +36,7 @@ import pyarrow as pa
 import typer
 from pyarrow import ipc
 
+from vgi_rpc.http._common import rpc_path
 from vgi_rpc.introspect import MethodDescription, ServiceDescription, introspect
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import (
@@ -1031,7 +1032,14 @@ def _call_unary_pipe(
     protocol_version: str | None = None,
 ) -> None:
     """Call a unary method over pipe/unix transport."""
-    _write_request(transport.writer, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version)
+    _write_request(
+        transport.writer,
+        method.name,
+        method.params_schema,
+        kwargs,
+        protocol=protocol,
+        protocol_version=protocol_version,
+    )
     reader = ValidatedReader(ipc.open_stream(transport.reader), IpcValidation.FULL)
     try:
         ab = _read_batch_with_log_check(reader, on_log)
@@ -1052,7 +1060,14 @@ def _call_stream_pipe(
     protocol_version: str | None = None,
 ) -> None:
     """Call a stream method over pipe/unix transport."""
-    _write_request(transport.writer, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version)
+    _write_request(
+        transport.writer,
+        method.name,
+        method.params_schema,
+        kwargs,
+        protocol=protocol,
+        protocol_version=protocol_version,
+    )
     header_batch: pa.RecordBatch | None = None
     if method.has_header:
         header_batch = _read_raw_stream_header(transport.reader, IpcValidation.FULL, on_log)
@@ -1085,12 +1100,14 @@ def _call_unary_http(
     from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
     req_buf = BytesIO()
-    _write_request(req_buf, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version)
+    _write_request(
+        req_buf, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version
+    )
 
     client = httpx2.Client(base_url=url, follow_redirects=True)
     try:
         resp = client.post(
-            f"{prefix}/{method.name}",
+            rpc_path(protocol or "", method.name, prefix=prefix),
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1123,12 +1140,14 @@ def _call_stream_http(
     from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
 
     req_buf = BytesIO()
-    _write_request(req_buf, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version)
+    _write_request(
+        req_buf, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version
+    )
 
     client = httpx2.Client(base_url=url, follow_redirects=True)
     try:
         resp = client.post(
-            f"{prefix}/{method.name}/init",
+            rpc_path(protocol or "", method.name, prefix=prefix, suffix="/init"),
             content=req_buf.getvalue(),
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
@@ -1144,7 +1163,10 @@ def _call_stream_http(
         # header_batch is a raw RecordBatch, not passed to the session.
         session = _init_http_stream_session(
             client=client,
-            url_prefix=prefix,
+            # Continuations go to {prefix}/{protocol}/{method}/exchange; the
+            # server-level base is kept separately for capability probing.
+            url_prefix=f"{prefix}/{protocol}",
+            base_prefix=prefix,
             method_name=method.name,
             reader=reader,
             on_log=on_log,
@@ -1238,16 +1260,27 @@ def call(
             # Reuse the transport from introspect for the call
             assert transport is not None
             if md.method_type == MethodType.UNARY:
-                _call_unary_pipe(transport, md, merged, on_log, config, protocol=protocol, protocol_version=protocol_version)
+                _call_unary_pipe(
+                    transport, md, merged, on_log, config, protocol=protocol, protocol_version=protocol_version
+                )
             else:
-                _call_stream_pipe(transport, md, merged, on_log, config, protocol=protocol, protocol_version=protocol_version)
+                _call_stream_pipe(
+                    transport, md, merged, on_log, config, protocol=protocol, protocol_version=protocol_version
+                )
         elif config.url:
             if transport is not None:
                 transport.close()
                 transport = None
             if md.method_type == MethodType.UNARY:
                 _call_unary_http(
-                    config.url, config.prefix, md, merged, on_log, config, protocol_version=protocol_version
+                    config.url,
+                    config.prefix,
+                    md,
+                    merged,
+                    on_log,
+                    config,
+                    protocol=protocol,
+                    protocol_version=protocol_version,
                 )
             else:
                 _call_stream_http(

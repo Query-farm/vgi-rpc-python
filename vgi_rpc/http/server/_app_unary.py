@@ -146,7 +146,7 @@ def _run_unary_sync(
         server_id = app._server.server_id
         # Follows the protocol that owns the resolved method — a wrong protocol
         # label in an access record looks plausible rather than failing.
-        protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
+        protocol_name = info.protocol_name or app._server.protocol_name
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         response_budget = _current_response_budget.get()

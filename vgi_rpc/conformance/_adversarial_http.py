@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.timeout(5)
 
+#: Routing key of the conformance service — its class name, since it
+#: declares no explicit protocol_name.
+_CONFORMANCE_PROTOCOL = "ConformanceService"
 _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 _PROTOCOL_VERSION = vars(ConformanceService)["protocol_version"]
 
@@ -170,7 +173,7 @@ def _post(port: int, method_name: str, body: bytes, *, suffix: str = "") -> http
     response = None
     for prefix in ("", "/vgi"):
         response = httpx2.post(
-            f"http://127.0.0.1:{port}{prefix}/{method_name}{suffix}",
+            f"http://127.0.0.1:{port}{prefix}/{_CONFORMANCE_PROTOCOL}/{method_name}{suffix}",
             content=body,
             headers={"Content-Type": _ARROW_CONTENT_TYPE, "Accept-Encoding": "identity"},
             timeout=5.0,

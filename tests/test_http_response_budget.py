@@ -117,7 +117,7 @@ def test_capability_is_on_options_errors_and_cors_preflight() -> None:
     assert missing.headers[ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER.lower()] == "true"
 
     preflight = client.simulate_options(
-        "/observe",
+        "/_BudgetProtocol/observe",
         headers={
             "Origin": "https://caller.example",
             "Access-Control-Request-Method": "POST",
@@ -340,7 +340,7 @@ def test_malformed_client_limit_is_400_before_dispatch(bad: str) -> None:
     client = make_sync_client(RpcServer(_BudgetProtocol, impl), token_key=b"budget-key")
     body = _request_body("observe", pa.schema([]), {})
     response = client.post(
-        "/observe",
+        "/_BudgetProtocol/observe",
         content=body,
         headers={"Content-Type": _ARROW_CONTENT_TYPE, ACCEPT_MAX_RESPONSE_BYTES_HEADER: bad},
     )
@@ -358,7 +358,7 @@ def test_authentication_precedes_budget_header_validation() -> None:
 
     client = make_sync_client(RpcServer(_BudgetProtocol, impl), token_key=b"budget-key", authenticate=reject)
     response = client.post(
-        "/observe",
+        "/_BudgetProtocol/observe",
         content=_request_body("observe", pa.schema([]), {}),
         headers={"Content-Type": _ARROW_CONTENT_TYPE, ACCEPT_MAX_RESPONSE_BYTES_HEADER: "invalid"},
     )

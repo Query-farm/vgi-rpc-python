@@ -53,6 +53,7 @@ from vgi_rpc.rpc import (
     rpc_methods,
 )
 from vgi_rpc.rpc._debug import fmt_batch, wire_http_logger
+from vgi_rpc.rpc._types import _protocol_wire_name
 from vgi_rpc.rpc._wire import _read_stream_header
 from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch, new_ipc_stream
 
@@ -80,6 +81,7 @@ from ._common import (
     Encoding,
     available_encodings,
     parse_encoding_list,
+    rpc_path_from_prefix,
 )
 from ._common import (
     compress as _compress_with_encoding,
@@ -413,6 +415,7 @@ class HttpStreamSession:
 
     __slots__ = (
         "_accepted_max_response_bytes",
+        "_base_prefix",
         "_call_state_bytes",
         "_capabilities",
         "_client",
@@ -449,10 +452,14 @@ class HttpStreamSession:
         compression_level: int | None = None,
         accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
         capabilities: HttpServerCapabilities | None = None,
+        base_prefix: str | None = None,
     ) -> None:
         """Initialize with HTTP client, method details, and initial state."""
         self._client = client
         self._url_prefix = url_prefix
+        # Server-level endpoints (capabilities, session) are mounted at the
+        # un-namespaced prefix; RPC paths are {prefix}/{protocol}/{method}.
+        self._base_prefix = base_prefix if base_prefix is not None else url_prefix
         self._method = method
         self._state_bytes = state_bytes
         # The stream's call token: handed over once by /init and echoed on
@@ -491,7 +498,7 @@ class HttpStreamSession:
         if self._capabilities is None:
             self._capabilities = http_capabilities(
                 client=self._client,
-                prefix=self._url_prefix,
+                prefix=self._base_prefix,
                 retry=self._retry_config,
                 accepted_max_response_bytes=self._accepted_max_response_bytes,
             )
@@ -499,7 +506,8 @@ class HttpStreamSession:
         return _externalize_via_upload_url(
             body,
             client=self._client,
-            url_prefix=self._url_prefix,
+            # __upload_url__ is server-level, not protocol-scoped.
+            url_prefix=self._base_prefix,
             url_validator=validator,
             retry_config=self._retry_config,
             capabilities=self._capabilities,
@@ -540,7 +548,7 @@ class HttpStreamSession:
         """
         self._capabilities = _require_response_budget_support(
             client=self._client,
-            prefix=self._url_prefix,
+            prefix=self._base_prefix,
             retry=self._retry_config,
             accepted_max_response_bytes=self._accepted_max_response_bytes,
             capabilities=self._capabilities,
@@ -628,7 +636,7 @@ class HttpStreamSession:
         # cause duplicate execution.  Only init/unary/continuation are retried.
         resp = _post_bounded(
             self._client,
-            f"{self._url_prefix}/{self._method}/exchange",
+            rpc_path_from_prefix(self._url_prefix, self._method, suffix="/exchange"),
             content=self._prepare_body(body),
             headers=self._build_headers(),
             response_limit_bytes=self._accepted_max_response_bytes,
@@ -637,7 +645,7 @@ class HttpStreamSession:
             body = self._externalize_request_body(body)
             resp = _post_bounded(
                 self._client,
-                f"{self._url_prefix}/{self._method}/exchange",
+                rpc_path_from_prefix(self._url_prefix, self._method, suffix="/exchange"),
                 content=self._prepare_body(body),
                 headers=self._build_headers(),
                 response_limit_bytes=self._accepted_max_response_bytes,
@@ -687,7 +695,7 @@ class HttpStreamSession:
         # side effects, so RPC dispatches are deliberately single-attempt.
         resp = _post_bounded(
             self._client,
-            f"{self._url_prefix}/{self._method}/exchange",
+            rpc_path_from_prefix(self._url_prefix, self._method, suffix="/exchange"),
             content=self._prepare_body(req_buf.getvalue()),
             headers=self._build_headers(),
             response_limit_bytes=self._accepted_max_response_bytes,
@@ -916,7 +924,7 @@ class HttpStreamSession:
         try:
             resp = _post_bounded(
                 self._client,
-                f"{self._url_prefix}/{self._method}/exchange",
+                rpc_path_from_prefix(self._url_prefix, self._method, suffix="/exchange"),
                 content=self._prepare_body(req_buf.getvalue()),
                 headers=self._build_headers(),
                 response_limit_bytes=self._accepted_max_response_bytes,
@@ -1124,6 +1132,7 @@ def _init_http_stream_session(
     compression_level: int | None = None,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
     capabilities: HttpServerCapabilities | None = None,
+    base_prefix: str | None = None,
 ) -> HttpStreamSession:
     """Parse an init response and return an ``HttpStreamSession``.
 
@@ -1133,7 +1142,7 @@ def _init_http_stream_session(
 
     Args:
         client: HTTP client for subsequent exchange requests.
-        url_prefix: URL path prefix (e.g. ``/vgi``).
+        url_prefix: Protocol-namespaced path prefix (e.g. ``/vgi/MyService``).
         method_name: RPC method name.
         reader: ``ValidatedReader`` opened from the init response.
         on_log: Optional log callback.
@@ -1146,6 +1155,9 @@ def _init_http_stream_session(
             stream requests.
         capabilities: Already-discovered capabilities inherited from the
             initiating proxy, avoiding a second mandatory preflight.
+        base_prefix: Un-namespaced prefix, for the server-level endpoints
+            (``__upload_url__``) that are not scoped to a protocol.  Defaults
+            to ``url_prefix``.
 
     Returns:
         A configured ``HttpStreamSession`` ready for iteration or exchange.
@@ -1203,6 +1215,7 @@ def _init_http_stream_session(
     return HttpStreamSession(
         client=client,
         url_prefix=url_prefix,
+        base_prefix=base_prefix,
         method=method_name,
         state_bytes=state_bytes,
         output_schema=output_schema,
@@ -1238,7 +1251,13 @@ class _HttpProxy:
     ) -> None:
         self._protocol = protocol
         self._client = client
-        self._url_prefix = url_prefix
+        # Every RPC path is {prefix}/{protocol}/{method}[/init|/exchange]. The
+        # protocol is folded in here so each call site stays `{_url_prefix}/{method}`
+        # and there is one place the routing key can be wrong. `_base_prefix`
+        # keeps the un-namespaced form for endpoints that are server-level
+        # rather than protocol-scoped (health, describe, upload-url).
+        self._base_prefix = url_prefix
+        self._url_prefix = f"{url_prefix}/{_protocol_wire_name(protocol)}"
         self._methods = rpc_methods(protocol)
         self._on_log = on_log
         self._external_config = external_config
@@ -1280,7 +1299,7 @@ class _HttpProxy:
             return caps
         self._capabilities = http_capabilities(
             client=self._client,
-            prefix=self._url_prefix,
+            prefix=self._base_prefix,
             retry=self._retry_config,
             accepted_max_response_bytes=self._accepted_max_response_bytes,
         )
@@ -1315,7 +1334,8 @@ class _HttpProxy:
         return _externalize_via_upload_url(
             body,
             client=self._client,
-            url_prefix=self._url_prefix,
+            # __upload_url__ is server-level, not protocol-scoped.
+            url_prefix=self._base_prefix,
             url_validator=validator,
             retry_config=self._retry_config,
             capabilities=self._capabilities,
@@ -1331,7 +1351,7 @@ class _HttpProxy:
         """
         self._capabilities = _require_response_budget_support(
             client=self._client,
-            prefix=self._url_prefix,
+            prefix=self._base_prefix,
             retry=self._retry_config,
             accepted_max_response_bytes=self._accepted_max_response_bytes,
             capabilities=self._capabilities,
@@ -1426,6 +1446,7 @@ class _HttpProxy:
         return HttpStreamSession(
             client=self._client,
             url_prefix=self._url_prefix,
+            base_prefix=self._base_prefix,
             method=method_name,
             state_bytes=state_bytes,
             output_schema=output_schema if output_schema is not None else _EMPTY_SCHEMA,
@@ -1514,7 +1535,7 @@ class _HttpProxy:
         """
         try:
             self._client.delete(
-                f"{self._url_prefix}/{_SESSION_ENDPOINT}",
+                f"{self._base_prefix}/{_SESSION_ENDPOINT}",
                 headers={SESSION_HEADER: token},
             )
         except Exception:
@@ -1595,6 +1616,7 @@ class _HttpProxy:
     def _make_stream_caller(self, info: RpcMethodInfo) -> Callable[..., HttpStreamSession]:
         client = self._client
         url_prefix = self._url_prefix
+        base_prefix = self._base_prefix
         on_log = self._on_log
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
@@ -1618,7 +1640,7 @@ class _HttpProxy:
 
             resp = _post_bounded(
                 client,
-                f"{url_prefix}/{info.name}/init",
+                rpc_path_from_prefix(url_prefix, info.name, suffix="/init"),
                 content=prepare_body(body),
                 headers=build_headers(),
                 response_limit_bytes=self._accepted_max_response_bytes,
@@ -1626,7 +1648,7 @@ class _HttpProxy:
             if resp.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE and refresh_supported(resp) is not None:
                 resp = _post_bounded(
                     client,
-                    f"{url_prefix}/{info.name}/init",
+                    rpc_path_from_prefix(url_prefix, info.name, suffix="/init"),
                     content=prepare_body(body),
                     headers=build_headers(),
                     response_limit_bytes=self._accepted_max_response_bytes,
@@ -1635,7 +1657,7 @@ class _HttpProxy:
                 body = externalize(body)
                 resp = _post_bounded(
                     client,
-                    f"{url_prefix}/{info.name}/init",
+                    rpc_path_from_prefix(url_prefix, info.name, suffix="/init"),
                     content=prepare_body(body),
                     headers=build_headers(),
                     response_limit_bytes=self._accepted_max_response_bytes,
@@ -1665,6 +1687,7 @@ class _HttpProxy:
             return _init_http_stream_session(
                 client=client,
                 url_prefix=url_prefix,
+                base_prefix=base_prefix,
                 method_name=info.name,
                 reader=reader,
                 on_log=on_log,
@@ -1833,7 +1856,7 @@ class _SessionView:
         self._proxy = _HttpProxy(
             outer._protocol,
             cast("httpx2.Client | _SyncTestClient", self._tracking_client),
-            outer._url_prefix,
+            outer._base_prefix,  # _HttpProxy re-namespaces; passing _url_prefix would double it
             outer._on_log,
             external_config=outer._external_config,
             ipc_validation=outer._ipc_validation,

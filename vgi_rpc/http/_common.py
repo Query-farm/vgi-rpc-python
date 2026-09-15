@@ -204,3 +204,44 @@ class _RpcHttpError(Exception):
         self.cause = cause
         self.status_code = status_code
         self.schema = schema
+
+
+def rpc_path(protocol: str, method: str, *, prefix: str = "", suffix: str = "") -> str:
+    """Build the HTTP path for one RPC call.
+
+    The single source of truth for the route shape, so a change to it is one
+    edit rather than a search across every caller. Before this existed the
+    shape was duplicated across the client, the CLI, the conformance harness
+    and ~100 test sites, and moving it cost a change at each one.
+
+    Args:
+        protocol: Routing key of the hosted protocol (``vgi.Identity.v1``).
+        method: RPC method name.
+        prefix: Server mount prefix (``""`` or ``"/vgi"``).
+        suffix: ``"/init"`` or ``"/exchange"`` for stream endpoints.
+
+    Returns:
+        The path, e.g. ``/vgi/vgi.Identity.v1/introspect_token/init``.
+
+    """
+    return f"{prefix}/{protocol}/{method}{suffix}"
+
+
+def reserved_path(method: str, *, prefix: str = "") -> str:
+    """Build the path for a server-level reserved method such as ``__describe__``.
+
+    Reserved names are owned by no protocol and stay flat. Kept beside
+    :func:`rpc_path` so the distinction is visible at the point of use rather
+    than being something each caller has to remember.
+    """
+    return f"{prefix}/{method}"
+
+
+def rpc_path_from_prefix(namespaced_prefix: str, method: str, *, suffix: str = "") -> str:
+    """Build an RPC path from an already-namespaced ``{prefix}/{protocol}``.
+
+    The client folds the protocol into its prefix once at construction, so this
+    is the form its call sites need. Kept alongside :func:`rpc_path` so both
+    spellings of the route shape live in one file.
+    """
+    return f"{namespaced_prefix}/{method}{suffix}"

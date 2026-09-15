@@ -293,7 +293,9 @@ class StrictExchangeSchemaMiddleware:
     def __call__(self, environ: WSGIEnvironment, start_response: StartResponse) -> object:
         """Inspect typed-exchange input before the framework performs safe casts."""
         path = str(environ.get("PATH_INFO", ""))
-        if str(environ.get("REQUEST_METHOD", "")).upper() != "POST" or not path.endswith("/typed_exchange/exchange"):
+        if str(environ.get("REQUEST_METHOD", "")).upper() != "POST" or not path.endswith(
+            "/ClientConformanceService/typed_exchange/exchange"
+        ):
             return self._app(environ, start_response)
 
         try:

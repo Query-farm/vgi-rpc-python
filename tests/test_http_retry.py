@@ -18,6 +18,7 @@ import httpx2
 import pyarrow as pa
 import pytest
 
+from tests._paths import fixture_path
 from vgi_rpc.http import (
     _SyncTestClient,
     _SyncTestResponse,
@@ -389,7 +390,7 @@ class TestPostWithRetry:
         wrapper = _TransientFailureClient(real_client, failure_status=502, failures=0)
         resp = _post_with_retry(
             wrapper,  # type: ignore[arg-type]
-            "/add",
+            fixture_path("add"),
             content=b"",
             headers={"Content-Type": "application/octet-stream"},
             config=None,
@@ -401,7 +402,7 @@ class TestPostWithRetry:
         wrapper = _TransientFailureClient(real_client, failure_status=502, failures=2)
         resp = _post_with_retry(
             wrapper,  # type: ignore[arg-type]
-            "/add",
+            fixture_path("add"),
             content=_make_add_request(),
             headers={"Content-Type": "application/vnd.apache.arrow.stream"},
             config=HttpRetryConfig(max_retries=3, backoff_base=0.001),
@@ -416,7 +417,7 @@ class TestPostWithRetry:
         with pytest.raises(HttpTransientError) as exc_info:
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=2, backoff_base=0.001),
@@ -430,7 +431,7 @@ class TestPostWithRetry:
         wrapper = _TransientFailureClient(real_client, failure_status=400, failures=5)
         resp = _post_with_retry(
             wrapper,  # type: ignore[arg-type]
-            "/add",
+            fixture_path("add"),
             content=b"data",
             headers={"Content-Type": "application/octet-stream"},
             config=HttpRetryConfig(max_retries=3, backoff_base=0.001),
@@ -445,7 +446,7 @@ class TestPostWithRetry:
         with pytest.raises(HttpTransientError) as exc_info:
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=0),
@@ -460,7 +461,7 @@ class TestPostWithRetry:
         with pytest.raises(HttpTransientError) as exc_info:
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=1, backoff_base=0.001),
@@ -475,7 +476,7 @@ class TestPostWithRetry:
         # 500 is not in default retryable set — should NOT retry
         resp = _post_with_retry(
             wrapper,  # type: ignore[arg-type]
-            "/add",
+            fixture_path("add"),
             content=b"data",
             headers={"Content-Type": "application/octet-stream"},
             config=HttpRetryConfig(max_retries=3, backoff_base=0.001),
@@ -489,7 +490,7 @@ class TestPostWithRetry:
         with pytest.raises(HttpTransientError):
             _post_with_retry(
                 wrapper2,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=2, retryable_status_codes=frozenset({500}), backoff_base=0.001),
@@ -503,7 +504,7 @@ class TestPostWithRetry:
             wrapper = _TransientFailureClient(real_client, failure_status=code, failures=1)
             resp = _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=_make_add_request(),
                 headers={"Content-Type": "application/vnd.apache.arrow.stream"},
                 config=HttpRetryConfig(max_retries=3, backoff_base=0.001),
@@ -519,7 +520,7 @@ class TestPostWithRetry:
         with pytest.raises(HttpTransientError):
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=2, backoff_base=1.0, backoff_max=100.0),
@@ -537,7 +538,7 @@ class TestConnectionErrorRetry:
         wrapper = _ConnectionErrorClient(real_client, failures=2)
         resp = _post_with_retry(
             wrapper,  # type: ignore[arg-type]
-            "/add",
+            fixture_path("add"),
             content=_make_add_request(),
             headers={"Content-Type": "application/vnd.apache.arrow.stream"},
             config=HttpRetryConfig(max_retries=3, backoff_base=0.001),
@@ -552,7 +553,7 @@ class TestConnectionErrorRetry:
         with pytest.raises(httpx2.ConnectError):
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=2, backoff_base=0.001),
@@ -566,7 +567,7 @@ class TestConnectionErrorRetry:
         with pytest.raises(httpx2.ConnectError):
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=3, retry_on_connection_error=False, backoff_base=0.001),
@@ -579,7 +580,7 @@ class TestConnectionErrorRetry:
         wrapper = _TimeoutErrorClient(real_client, failures=1)
         resp = _post_with_retry(
             wrapper,  # type: ignore[arg-type]
-            "/add",
+            fixture_path("add"),
             content=_make_add_request(),
             headers={"Content-Type": "application/vnd.apache.arrow.stream"},
             config=HttpRetryConfig(max_retries=3, backoff_base=0.001),
@@ -594,7 +595,7 @@ class TestConnectionErrorRetry:
         with pytest.raises(httpx2.ReadTimeout):
             _post_with_retry(
                 wrapper,  # type: ignore[arg-type]
-                "/add",
+                fixture_path("add"),
                 content=b"data",
                 headers={"Content-Type": "application/octet-stream"},
                 config=HttpRetryConfig(max_retries=3, retry_on_connection_error=False, backoff_base=0.001),

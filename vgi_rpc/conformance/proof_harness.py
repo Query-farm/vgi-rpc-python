@@ -19,6 +19,12 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 
+from vgi_rpc.http._common import rpc_path
+
+#: Routing key of the conformance service — its class name, since it declares
+#: no explicit protocol_name.
+_CONFORMANCE_PROTOCOL = "ConformanceService"
+
 __all__ = [
     "CONFORMANCE_KID",
     "CONFORMANCE_ORIGIN",
@@ -110,7 +116,7 @@ class ProofWorker:
 
     def rpc_url(self, method: str) -> str:
         """URL of one RPC method on this worker."""
-        return f"{self.base_url}{self.prefix}/{method}"
+        return f"{self.base_url}{rpc_path(_CONFORMANCE_PROTOCOL, method, prefix=self.prefix)}"
 
     @property
     def health_url(self) -> str:
