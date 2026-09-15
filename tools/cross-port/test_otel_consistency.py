@@ -9,6 +9,7 @@ Run: uv run pytest test_otel_consistency.py -v --timeout=120
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -59,13 +60,15 @@ def _normalize_go_spans(path: Path) -> list[NormalizedSpan]:
                 attrs[attr["Key"]] = str(attr["Value"]["Value"])
             status = d.get("Status", {})
             status_ok = status.get("Code", "") != "Error"
-            spans.append(NormalizedSpan(
-                name=d["Name"],
-                method=attrs.get("rpc.method", ""),
-                method_type=attrs.get("rpc.vgi_rpc.method_type", ""),
-                status_ok=status_ok,
-                attributes=attrs,
-            ))
+            spans.append(
+                NormalizedSpan(
+                    name=d["Name"],
+                    method=attrs.get("rpc.method", ""),
+                    method_type=attrs.get("rpc.vgi_rpc.method_type", ""),
+                    status_ok=status_ok,
+                    attributes=attrs,
+                )
+            )
     return spans
 
 
@@ -77,13 +80,15 @@ def _normalize_ts_spans(path: Path) -> list[NormalizedSpan]:
     for s in d.get("spans", []):
         attrs = {k: str(v) for k, v in s.get("attributes", {}).items()}
         status_code = s.get("status", {}).get("code", 0)
-        spans.append(NormalizedSpan(
-            name=s["name"],
-            method=attrs.get("rpc.method", ""),
-            method_type=attrs.get("rpc.vgi_rpc.method_type", ""),
-            status_ok=(status_code != 2),
-            attributes=attrs,
-        ))
+        spans.append(
+            NormalizedSpan(
+                name=s["name"],
+                method=attrs.get("rpc.method", ""),
+                method_type=attrs.get("rpc.vgi_rpc.method_type", ""),
+                status_ok=(status_code != 2),
+                attributes=attrs,
+            )
+        )
     return spans
 
 
@@ -94,13 +99,15 @@ def _normalize_python_spans(exporter) -> list[NormalizedSpan]:
     spans = []
     for s in exporter.get_finished_spans():
         attrs = {k: str(v) for k, v in (s.attributes or {}).items()}
-        spans.append(NormalizedSpan(
-            name=s.name,
-            method=attrs.get("rpc.method", ""),
-            method_type=attrs.get("rpc.vgi_rpc.method_type", ""),
-            status_ok=(s.status.status_code != StatusCode.ERROR),
-            attributes=attrs,
-        ))
+        spans.append(
+            NormalizedSpan(
+                name=s.name,
+                method=attrs.get("rpc.method", ""),
+                method_type=attrs.get("rpc.vgi_rpc.method_type", ""),
+                status_ok=(s.status.status_code != StatusCode.ERROR),
+                attributes=attrs,
+            )
+        )
     return spans
 
 
@@ -177,7 +184,8 @@ def go_spans() -> list[NormalizedSpan]:
     if not worker.exists():
         result = subprocess.run(
             ["go", "build", "-o", "conformance-worker", "./conformance/cmd/vgi-rpc-conformance-go"],
-            cwd=GO_REPO, capture_output=True,
+            cwd=GO_REPO,
+            capture_output=True,
         )
         if result.returncode != 0:
             pytest.skip("Go conformance worker build failed")
@@ -188,7 +196,9 @@ def go_spans() -> list[NormalizedSpan]:
     try:
         proc = subprocess.Popen(
             [str(worker), "--http", "--otel-export", export_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=GO_REPO,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=GO_REPO,
         )
         assert proc.stdout is not None
         line = proc.stdout.readline().decode().strip()
@@ -206,10 +216,8 @@ def go_spans() -> list[NormalizedSpan]:
 
         return _normalize_go_spans(Path(export_path))
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(export_path)
-        except OSError:
-            pass
 
 
 @pytest.fixture(scope="module")
@@ -222,8 +230,10 @@ def ts_spans() -> list[NormalizedSpan]:
         env = {**os.environ, "VGI_OTEL_FILE": export_path}
         proc = subprocess.Popen(
             ["bun", "run", "examples/conformance-http.ts"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, cwd=str(TS_REPO),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=str(TS_REPO),
         )
         assert proc.stdout is not None
         line = proc.stdout.readline().decode().strip()
@@ -245,10 +255,8 @@ def ts_spans() -> list[NormalizedSpan]:
 
         return _normalize_ts_spans(Path(export_path))
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(export_path)
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +293,10 @@ class TestSpanCoverage:
         assert len(methods) >= 40, f"TS produced spans for only {len(methods)} methods (expected 40+)"
 
     def test_same_method_set(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
+        self,
+        python_spans: list[NormalizedSpan],
+        go_spans: list[NormalizedSpan],
+        ts_spans: list[NormalizedSpan],
     ) -> None:
         """All three should produce spans for the same set of methods."""
         py = {s.method for s in python_spans}
@@ -311,14 +322,20 @@ class TestSpanNameFormat:
     """Verify span name format is consistent across all implementations."""
 
     def test_all_use_vgi_rpc_prefix(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
+        self,
+        python_spans: list[NormalizedSpan],
+        go_spans: list[NormalizedSpan],
+        ts_spans: list[NormalizedSpan],
     ) -> None:
         for spans, lang in [(python_spans, "python"), (go_spans, "go"), (ts_spans, "typescript")]:
             for s in spans:
                 assert s.name.startswith("vgi_rpc/"), f"{lang}: span '{s.name}' doesn't use vgi_rpc/ prefix"
 
     def test_span_name_matches_method(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
+        self,
+        python_spans: list[NormalizedSpan],
+        go_spans: list[NormalizedSpan],
+        ts_spans: list[NormalizedSpan],
     ) -> None:
         """Span name should be vgi_rpc/{method_name}."""
         for spans, lang in [(python_spans, "python"), (go_spans, "go"), (ts_spans, "typescript")]:
@@ -331,7 +348,10 @@ class TestCoreAttributes:
     """Verify core attributes are present and consistent on every span."""
 
     def test_core_attrs_present(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
+        self,
+        python_spans: list[NormalizedSpan],
+        go_spans: list[NormalizedSpan],
+        ts_spans: list[NormalizedSpan],
     ) -> None:
         for spans, lang in [(python_spans, "python"), (go_spans, "go"), (ts_spans, "typescript")]:
             for s in spans:
@@ -339,14 +359,22 @@ class TestCoreAttributes:
                 assert not missing, f"{lang} span {s.method} missing: {missing}"
 
     def test_rpc_system_is_vgi_rpc(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
+        self,
+        python_spans: list[NormalizedSpan],
+        go_spans: list[NormalizedSpan],
+        ts_spans: list[NormalizedSpan],
     ) -> None:
         for spans, lang in [(python_spans, "python"), (go_spans, "go"), (ts_spans, "typescript")]:
             for s in spans:
-                assert s.attributes["rpc.system"] == "vgi_rpc", f"{lang} {s.method}: rpc.system={s.attributes['rpc.system']}"
+                assert s.attributes["rpc.system"] == "vgi_rpc", (
+                    f"{lang} {s.method}: rpc.system={s.attributes['rpc.system']}"
+                )
 
     def test_method_type_consistent(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
+        self,
+        python_spans: list[NormalizedSpan],
+        go_spans: list[NormalizedSpan],
+        ts_spans: list[NormalizedSpan],
     ) -> None:
         """The same method should have the same method_type across all implementations."""
         py_map = _span_map(python_spans)
@@ -362,7 +390,7 @@ class TestCoreAttributes:
             if not (py_type == go_type == ts_type):
                 mismatches.append(f"  {method}: python={py_type}, go={go_type}, ts={ts_type}")
 
-        assert not mismatches, f"Method type mismatches:\n" + "\n".join(mismatches)
+        assert not mismatches, "Method type mismatches:\n" + "\n".join(mismatches)
 
 
 class TestErrorSpans:
@@ -387,7 +415,10 @@ class TestErrorSpans:
             assert not spans[-1].status_ok, f"TS: {method} should have error status"
 
     def test_error_type_attr_all(
-        self, python_spans: list[NormalizedSpan], go_spans: list[NormalizedSpan], ts_spans: list[NormalizedSpan],
+        self,
+        python_spans: list[NormalizedSpan],
+        go_spans: list[NormalizedSpan],
+        ts_spans: list[NormalizedSpan],
     ) -> None:
         """All error spans should have error_type attribute."""
         for spans, lang in [(python_spans, "python"), (go_spans, "go"), (ts_spans, "typescript")]:

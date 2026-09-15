@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import os
 import subprocess
 import sys
 import threading
@@ -54,7 +55,16 @@ from vgi_rpc.rpc._reflection import MethodInfo, ProtocolList, ServiceDescription
 from vgi_rpc.rpc._transport import make_pipe_pair
 from vgi_rpc.utils import IpcValidation
 
-REPOS_DIR = Path.home() / "Development"
+#: Where the sibling port checkouts live.  Derived from this file's own
+#: location -- ``<repos>/vgi-rpc-python/tools/cross-port/`` -- rather than
+#: hardcoded, and overridable with ``VGI_RPC_REPOS``.
+#:
+#: A machine-specific absolute path baked into a committed script is exactly
+#: what let several ports test against a stale reference for weeks without
+#: anyone noticing, so this one derives and announces instead.
+REPOS_DIR = (
+    Path(os.environ["VGI_RPC_REPOS"]) if os.environ.get("VGI_RPC_REPOS") else Path(__file__).resolve().parents[3]
+)
 
 #: Every port, and how to get a conformance worker speaking on stdio from it.
 #: A port whose repo is absent, or whose worker does not build, is reported as
@@ -90,8 +100,7 @@ SUBPROCESS_WORKERS: dict[str, dict[str, str | list[str] | Path]] = {
         "cmd": ["./artifacts/conformance-worker/QueryFarm.VgiRpc.ConformanceWorker"],
         "cwd": REPOS_DIR / "vgi-rpc-csharp",
         "build": (
-            "dotnet publish conformance/QueryFarm.VgiRpc.ConformanceWorker "
-            "-c Release -o artifacts/conformance-worker"
+            "dotnet publish conformance/QueryFarm.VgiRpc.ConformanceWorker -c Release -o artifacts/conformance-worker"
         ),
     },
     "cpp": {
@@ -153,7 +162,7 @@ def describe_everything(transport: object) -> PortReport:
                     IpcValidation.FULL,
                 )
             )
-        except Exception as e:  # noqa: BLE001 - reported, not raised
+        except Exception as e:
             described[summary.protocol] = f"describe failed: {str(e).splitlines()[0][:160]}"
 
     return PortReport(listing=listing, protocols=described)
@@ -170,7 +179,7 @@ def get_python_report() -> PortReport | str:
             return describe_everything(client_transport)
         finally:
             client_transport.close()
-    except Exception as e:  # noqa: BLE001 - reported, not raised
+    except Exception as e:
         return f"failed: {e}"
 
 
@@ -206,12 +215,12 @@ def get_subprocess_report(name: str, config: dict[str, str | list[str] | Path]) 
         reader = io.BufferedReader(io.FileIO(proc.stdout.fileno(), closefd=False))
         writer = proc.stdin
         transport = PipeTransport(reader, writer)  # type: ignore[arg-type]
-    except Exception as e:  # noqa: BLE001 - reported, not raised
+    except Exception as e:
         return f"failed to spawn: {e}"
 
     try:
         return describe_everything(transport)
-    except Exception as e:  # noqa: BLE001 - reported, not raised
+    except Exception as e:
         # A worker still on the old protocol answers by listing every method it
         # *does* have, which is ~90 names and buries the one fact that matters.
         detail = str(e)

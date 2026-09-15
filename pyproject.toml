@@ -84,6 +84,25 @@ ignore = [
   "RUF022", # __all__ is intentionally grouped by category, not sorted
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# tools/cross-port/ holds the cross-implementation tooling: the protocol drift
+# guard, the identity invariant audit, the OTel consistency runner and the
+# porting-prompt generator. It moved here from its own repository, where it was
+# linted less strictly.
+#
+# The correctness rules (E, F, B, SIM, RET, RUF, ISC, ...) apply and are clean.
+# Only two families are relaxed, both deliberately:
+#
+#   D101/D102/D103 -- the missing-docstring rules exist for this package's
+#   public API, which these scripts are not part of and are not importable as.
+#   Forcing a docstring onto every helper in a prompt generator buys nothing.
+#
+#   PERF401 -- four loops that build a list conditionally. The comprehension
+#   ruff wants is slower to read and these run once per invocation, against
+#   seven subprocesses. Legibility wins over a micro-optimisation in a tool
+#   whose whole job is to be trusted when it reports drift.
+"tools/cross-port/*" = ["D101", "D102", "D103", "PERF401"]
+
 [tool.ruff.format]
 quote-style = "double"
 # ruff >=0.16 formats Python code blocks embedded in Markdown. Our docs use
@@ -264,6 +283,11 @@ docs = [
     "pymdown-extensions>=10.21.2",
 ]
 dev = [
+    # Used only by tools/cross-port/. Those tools predate their move into this
+    # repo and speak httpx; the package's own suite uses httpx2. Two clients is
+    # mildly redundant, and cheaper than rewriting working cross-port tooling
+    # to chase it.
+    "httpx>=0.27",
     "aiointercept>=0.1.7",
     "joserfc>=1.0",
     "boto3>=1.28",

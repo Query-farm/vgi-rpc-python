@@ -74,7 +74,7 @@ make test-unit
 # Run conformance (requires Python CLI)
 make test-conformance
 
-# Also verify with describe_diff.py from vgi-rpc-sync:
-cd ~/Development/vgi-rpc-sync && uv run python describe_diff.py
+# Also verify with describe_diff.py from vgi-rpc-python/tools/cross-port:
+cd ~/Development/vgi-rpc-python/tools/cross-port && uv run python describe_diff.py
 # Should show: typescript 48 methods, describe v3
 ```

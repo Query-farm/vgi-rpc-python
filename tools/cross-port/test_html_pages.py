@@ -9,7 +9,6 @@ Run: uv run pytest test_html_pages.py -v
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import time
@@ -39,8 +38,9 @@ def extract_method_names(html: str) -> set[str]:
     for match in re.finditer(r'["\s>]([a-z_]+(?:_[a-z]+)*)[<"\s]', html):
         candidate = match.group(1)
         # Filter to known conformance method patterns
-        if candidate.startswith(("echo_", "void_", "add_", "concatenate", "with_defaults",
-                                  "raise_", "produce_", "exchange_", "inspect_")):
+        if candidate.startswith(
+            ("echo_", "void_", "add_", "concatenate", "with_defaults", "raise_", "produce_", "exchange_", "inspect_")
+        ):
             names.add(candidate)
     return names
 
@@ -48,7 +48,7 @@ def extract_method_names(html: str) -> set[str]:
 def extract_badges(html: str) -> set[str]:
     """Extract method type badges from a describe page HTML (case-insensitive)."""
     badges: set[str] = set()
-    for match in re.finditer(r'badge[^>]*>([a-zA-Z]+)<', html):
+    for match in re.finditer(r"badge[^>]*>([a-zA-Z]+)<", html):
         badge = match.group(1).lower()
         if badge in ("unary", "stream", "producer", "exchange", "header"):
             badges.add(badge)
@@ -60,14 +60,14 @@ def extract_method_badges(html: str) -> dict[str, list[str]]:
     cards: dict[str, list[str]] = {}
     for m in re.finditer(r'class="method-name">([^<]+)</span>(.*?)</div>', html, re.DOTALL):
         method = m.group(1).strip()
-        badges = sorted(b.lower() for b in re.findall(r'badge[^>]*>([^<]+)<', m.group(2)))
+        badges = sorted(b.lower() for b in re.findall(r"badge[^>]*>([^<]+)<", m.group(2)))
         cards[method] = badges
     return cards
 
 
 def extract_table_columns(html: str) -> list[str]:
     """Extract unique table column headers from HTML."""
-    headers = re.findall(r'<th>([^<]+)</th>', html)
+    headers = re.findall(r"<th>([^<]+)</th>", html)
     return list(dict.fromkeys(headers))
 
 
@@ -94,10 +94,11 @@ def extract_params_for_method(html: str, method_name: str) -> list[str] | None:
 def python_client():
     """Create a Falcon test client for the Python conformance server."""
     try:
+        import falcon.testing
+        from vgi_rpc.http._server import make_wsgi_app
+
         from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
         from vgi_rpc.rpc import RpcServer
-        from vgi_rpc.http._server import make_wsgi_app
-        import falcon.testing
     except ImportError:
         pytest.skip("vgi-rpc[http] not installed")
 
@@ -423,7 +424,7 @@ class TestContentParity:
         for m in sorted(common):
             if py_badges[m] != ts_badges[m]:
                 diffs.append(f"  {m}: python={py_badges[m]} ts={ts_badges[m]}")
-        assert not diffs, f"Badge differences:\n" + "\n".join(diffs)
+        assert not diffs, "Badge differences:\n" + "\n".join(diffs)
 
     def test_ts_columns_match_python(self, python_client, ts_http: str) -> None:
         """TypeScript table columns should match Python (Name, Type, Default, Description)."""
@@ -453,7 +454,7 @@ class TestContentParity:
         for m in sorted(common):
             if py_badges[m] != go_badges[m]:
                 diffs.append(f"  {m}: python={py_badges[m]} go={go_badges[m]}")
-        assert not diffs, f"Badge differences:\n" + "\n".join(diffs)
+        assert not diffs, "Badge differences:\n" + "\n".join(diffs)
 
     def test_go_columns_match_python(self, python_client, go_http: str) -> None:
         """Go table columns should match Python (Name, Type, Default, Description)."""

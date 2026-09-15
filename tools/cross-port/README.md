@@ -1,4 +1,4 @@
-# vgi-rpc-sync
+# vgi-rpc-python/tools/cross-port
 
 Keeps the [vgi-rpc](https://vgi-rpc.query.farm) implementations in sync:
 

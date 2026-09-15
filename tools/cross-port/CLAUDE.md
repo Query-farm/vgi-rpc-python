@@ -1,4 +1,4 @@
-# vgi-rpc-sync
+# vgi-rpc-python/tools/cross-port
 
 Lightweight sync tool across the vgi-rpc implementations (Python, Go, TypeScript, Rust, Java, C#, C++).
 

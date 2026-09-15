@@ -27,11 +27,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
-DEV = Path.home() / "Development"
+#: Where the sibling port checkouts live.  Derived from this file's own
+#: location -- ``<repos>/vgi-rpc-python/tools/cross-port/`` -- rather than
+#: hardcoded, and overridable with ``VGI_RPC_REPOS``.
+#:
+#: A machine-specific absolute path baked into a committed script is exactly
+#: what let several ports test against a stale reference for weeks without
+#: anyone noticing, so this one derives and announces instead.
+DEV = Path(os.environ["VGI_RPC_REPOS"]) if os.environ.get("VGI_RPC_REPOS") else Path(__file__).resolve().parents[3]
 
 #: Where each port keeps source.  Identity files are found by content, not by
 #: name, because the ports do not agree on naming and should not have to.
@@ -42,76 +50,129 @@ PORTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "rust": ("vgi-rpc-rust", ("vgi-rpc/**/*.rs", "vgi-rpc-macros/**/*.rs", "tests/**/*.rs")),
     "java": ("vgi-rpc-java", ("vgirpc/src/**/*.java",)),
     "csharp": ("vgi-rpc-csharp", ("src/**/*.cs", "tests/**/*.cs", "test/**/*.cs")),
-    "cpp": ("vgi-rpc-c++", ("src/**/*.cpp", "src/**/*.hpp", "src/**/*.h", "include/**/*.hpp",
-                            "include/**/*.h", "test/**/*.cpp", "tests/**/*.cpp")),
+    "cpp": (
+        "vgi-rpc-c++",
+        (
+            "src/**/*.cpp",
+            "src/**/*.hpp",
+            "src/**/*.h",
+            "include/**/*.hpp",
+            "include/**/*.h",
+            "test/**/*.cpp",
+            "tests/**/*.cpp",
+        ),
+    ),
 }
 
 #: (label, regex, why it matters if it differs)
 CHECKS: tuple[tuple[str, str, str], ...] = (
     # --- wire shape: proves the port actually verified the digests ---
-    ("hash:both", r"8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5",
-     "the both-methods digest is not asserted anywhere, so the wire shape is unverified"),
-    ("hash:introspect-only", r"27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385",
-     "method-level narrowing is not pinned: hosting a refusing method would pass"),
-    ("hash:grant-only", r"c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8",
-     "method-level narrowing is not pinned in the other direction"),
-
+    (
+        "hash:both",
+        r"8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5",
+        "the both-methods digest is not asserted anywhere, so the wire shape is unverified",
+    ),
+    (
+        "hash:introspect-only",
+        r"27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385",
+        "method-level narrowing is not pinned: hosting a refusing method would pass",
+    ),
+    (
+        "hash:grant-only",
+        r"c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8",
+        "method-level narrowing is not pinned in the other direction",
+    ),
     # --- constants: a different value is a different security posture ---
-    ("cap value 4096", r"max[_a-z]*token[_a-z]*(chars|len|size|bytes)\D{0,40}4096|4096\D{0,40}token",
-     "the cap on a credential we will attempt to resolve differs"),
-    ("rate limit 20/s", r"(rate.?limit|per.?window|introspect)\D{0,60}\b20\b",
-     "the introspection oracle is bounded differently"),
-    ("max_auth_age 900", r"max.?auth.?age\D{0,40}900|900(\.0)?\D{0,40}auth.?age",
-     "the ceiling on how stale a login may be and still mint a grant differs"),
-    ("grant ttl default 300", r"ttl[_a-z]*(seconds)?\s*[:=]\s*300\b|\b300\b\D{0,30}ttl",
-     "the default cache window -- and so the revocation lag -- differs"),
-    ("retry_after 5", r"retry.?after\D{0,30}\b5\b",
-     "a transient failure does not tell the caller how long to wait"),
-
+    (
+        "cap value 4096",
+        r"max[_a-z]*token[_a-z]*(chars|len|size|bytes)\D{0,40}4096|4096\D{0,40}token",
+        "the cap on a credential we will attempt to resolve differs",
+    ),
+    (
+        "rate limit 20/s",
+        r"(rate.?limit|per.?window|introspect)\D{0,60}\b20\b",
+        "the introspection oracle is bounded differently",
+    ),
+    (
+        "max_auth_age 900",
+        r"max.?auth.?age\D{0,40}900|900(\.0)?\D{0,40}auth.?age",
+        "the ceiling on how stale a login may be and still mint a grant differs",
+    ),
+    (
+        "grant ttl default 300",
+        r"ttl[_a-z]*(seconds)?\s*[:=]\s*300\b|\b300\b\D{0,30}ttl",
+        "the default cache window -- and so the revocation lag -- differs",
+    ),
+    ("retry_after 5", r"retry.?after\D{0,30}\b5\b", "a transient failure does not tell the caller how long to wait"),
     # --- the four divergences the port exercise found, none hash-visible ---
-    ("cap named in BYTES", r"MAX_TOKEN_BYTES|MaxTokenBytes|kMaxTokenBytes",
-     "the cap's unit is left to the reader; the ports used three different ones"),
-    ("trims before shape test", r"trim\w*\s*\(|Trimmed\(|strip\(\)",
-     "the shape test runs on the raw credential, so padding smuggles a JWS past it"),
-    ("U+0085 pinned by test", r"0085|u\{85\}|x85|\\u0085",
-     "the NEL floor is not pinned by a test; the port may cover it today and regress silently"),
-    ("U+00A0 pinned by test", r"00A0|00a0|u\{a0\}|xa0|\\u00a0",
-     "the NBSP floor is not pinned by a test; the port may cover it today and regress silently"),
-
+    (
+        "cap named in BYTES",
+        r"MAX_TOKEN_BYTES|MaxTokenBytes|kMaxTokenBytes",
+        "the cap's unit is left to the reader; the ports used three different ones",
+    ),
+    (
+        "trims before shape test",
+        r"trim\w*\s*\(|Trimmed\(|strip\(\)",
+        "the shape test runs on the raw credential, so padding smuggles a JWS past it",
+    ),
+    (
+        "U+0085 pinned by test",
+        r"0085|u\{85\}|x85|\\u0085",
+        "the NEL floor is not pinned by a test; the port may cover it today and regress silently",
+    ),
+    (
+        "U+00A0 pinned by test",
+        r"00A0|00a0|u\{a0\}|xa0|\\u00a0",
+        "the NBSP floor is not pinned by a test; the port may cover it today and regress silently",
+    ),
     # --- the JWS refusal: routing one onward hands a third party a token ---
     # Matches a regex literal OR a hand-rolled matcher: C++ and Rust hand-roll
     # deliberately, because a backtracking engine on attacker-controlled input
     # is its own hazard.  Keying on the regex spelling marked those correct
     # ports as failures.
-    ("JWS matcher present", r"A-Za-z0-9_-|base64url|jws.?shaped|is.?jws",
-     "no JWS shape test is discoverable; a JWS-shaped subject may reach the resolver"),
-
+    (
+        "JWS matcher present",
+        r"A-Za-z0-9_-|base64url|jws.?shaped|is.?jws",
+        "no JWS shape test is discoverable; a JWS-shaped subject may reach the resolver",
+    ),
     # --- error taxonomy: the only definitive-vs-transient signal a caller has ---
     ("kind:introspection_refused", r"introspection_refused", "error_kind absent or misspelled"),
     ("kind:token_unresolved", r"token_unresolved", "error_kind absent or misspelled"),
     ("kind:stale_auth", r"stale_auth", "error_kind absent or misspelled"),
     ("kind:grant_refused", r"grant_refused", "error_kind absent or misspelled"),
     ("kind:identity_unavailable", r"identity_unavailable", "error_kind absent or misspelled"),
-
     # --- guard messages: uniform rejection, and the one actionable exception ---
-    ("uniform rejection", r'"unresolved"|\bunresolved\b',
-     "rejections may distinguish unknown from expired from malformed"),
-    ("auth_time required", r"auth_time",
-     "a grant could mint another grant and escape the identity provider"),
-    ("allowlist required", r"at least one principal|introspect_principals must",
-     "the allowlist may be reachable by omission -- an open oracle"),
-
+    (
+        "uniform rejection",
+        r'"unresolved"|\bunresolved\b',
+        "rejections may distinguish unknown from expired from malformed",
+    ),
+    ("auth_time required", r"auth_time", "a grant could mint another grant and escape the identity provider"),
+    (
+        "allowlist required",
+        r"at least one principal|introspect_principals must",
+        "the allowlist may be reachable by omission -- an open oracle",
+    ),
     # --- things that must NOT be there ---
-    ("token_digest present", r"token.?digest|sha256.*token|TokenDigest",
-     "no way to correlate a credential's failures without logging the credential"),
+    (
+        "token_digest present",
+        r"token.?digest|sha256.*token|TokenDigest",
+        "no way to correlate a credential's failures without logging the credential",
+    ),
 )
 
 #: Checks whose absence is the point -- inverted.
 FORBIDDEN: tuple[tuple[str, str, str], ...] = (
-    ("no subject param", r"issue_grant\s*\([^)]*\bsubject\b",
-     "issue_grant takes a subject: cross-subject minting is open"),
-    ("no claims passthrough", r"(class|struct|record|interface)\s+TokenIdentity[\s\S]{0,400}?\bclaims\b\s*[:=<]",
-     "TokenIdentity carries claims: the worker can choose its caller's policy branch"),
+    (
+        "no subject param",
+        r"issue_grant\s*\([^)]*\bsubject\b",
+        "issue_grant takes a subject: cross-subject minting is open",
+    ),
+    (
+        "no claims passthrough",
+        r"(class|struct|record|interface)\s+TokenIdentity[\s\S]{0,400}?\bclaims\b\s*[:=<]",
+        "TokenIdentity carries claims: the worker can choose its caller's policy branch",
+    ),
 )
 
 

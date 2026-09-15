@@ -69,7 +69,7 @@ preimage, so `describe` precedes `list_protocols`.
 ## Verify
 
 ```
-cd ~/Development/vgi-rpc-python && uv run python ~/Development/vgi-rpc-sync/describe_diff.py
+cd ~/Development/vgi-rpc-python && uv run python ~/Development/vgi-rpc-python/tools/cross-port/describe_diff.py
 ```
 
 must report `vgi_rpc.Reflection.v1  7/7 ports  AGREED` at `3c7db4ca…`, with

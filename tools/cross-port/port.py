@@ -23,10 +23,10 @@ def find_python_source(feature: str) -> list[Path]:
     repo = REPOS["python"]
     candidates = [
         repo / "vgi_rpc" / f"{feature}.py",
-        repo / "vgi_rpc" / feature,                      # directory (e.g., http/, rpc/)
-        repo / "vgi_rpc" / "http" / f"_{feature}.py",    # http submodule
+        repo / "vgi_rpc" / feature,  # directory (e.g., http/, rpc/)
+        repo / "vgi_rpc" / "http" / f"_{feature}.py",  # http submodule
         repo / "vgi_rpc" / "http" / f"{feature}.py",
-        repo / "vgi_rpc" / "rpc" / f"_{feature}.py",     # rpc submodule
+        repo / "vgi_rpc" / "rpc" / f"_{feature}.py",  # rpc submodule
         repo / "vgi_rpc" / "rpc" / f"{feature}.py",
     ]
     found = []
@@ -53,10 +53,7 @@ def generate_prompt(feature: str, target: str, source_override: str | None) -> s
     target_claude = target_repo / "CLAUDE.md"
 
     # Find source files
-    if source_override:
-        sources = [Path(source_override).expanduser().resolve()]
-    else:
-        sources = find_python_source(feature)
+    sources = [Path(source_override).expanduser().resolve()] if source_override else find_python_source(feature)
 
     tests = find_python_tests(feature)
 
@@ -91,28 +88,34 @@ def generate_prompt(feature: str, target: str, source_override: str | None) -> s
             lines.append(f"File: {t}")
         lines.append("")
 
-    lines.extend([
-        "## Target Repository",
-        str(target_repo),
-        "",
-    ])
+    lines.extend(
+        [
+            "## Target Repository",
+            str(target_repo),
+            "",
+        ]
+    )
 
     if target_claude.is_file():
-        lines.extend([
-            "## Target Conventions",
-            target_claude.read_text().strip(),
-            "",
-        ])
+        lines.extend(
+            [
+                "## Target Conventions",
+                target_claude.read_text().strip(),
+                "",
+            ]
+        )
 
-    lines.extend([
-        "## Instructions",
-        "- Read the Python source and tests to understand the feature",
-        f"- Implement the equivalent in {target.title()} following the patterns in the target repo",
-        "- The implementation should pass the same logical test cases as the Python version",
-        "- Follow the coding conventions in the target repo's CLAUDE.md",
-        "- Write tests for the new implementation",
-        "",
-    ])
+    lines.extend(
+        [
+            "## Instructions",
+            "- Read the Python source and tests to understand the feature",
+            f"- Implement the equivalent in {target.title()} following the patterns in the target repo",
+            "- The implementation should pass the same logical test cases as the Python version",
+            "- Follow the coding conventions in the target repo's CLAUDE.md",
+            "- Write tests for the new implementation",
+            "",
+        ]
+    )
 
     return "\n".join(lines)
 

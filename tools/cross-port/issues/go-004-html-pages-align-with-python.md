@@ -46,6 +46,6 @@ go test ./vgirpc/
 make test
 
 # Cross-impl test:
-cd ~/Development/vgi-rpc-sync && uv run pytest test_html_pages.py -v
+cd ~/Development/vgi-rpc-python/tools/cross-port && uv run pytest test_html_pages.py -v
 # Go xfail tests should now pass
 ```
