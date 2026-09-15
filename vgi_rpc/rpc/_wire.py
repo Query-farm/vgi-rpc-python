@@ -703,7 +703,32 @@ def _deserialize_params(
 
     Handles ArrowSerializableDataclass (bytes), Enum (str→member),
     dict (list of tuples→dict), and frozenset (list→frozenset).
+
+    Rejects parameters the protocol does not declare. ``kwargs`` is built from
+    the *caller's* columns, so an undeclared name means the two sides disagree
+    about the method's signature. Skipping it — the previous behaviour — leaves
+    three outcomes depending on the implementation: a late
+    ``TypeError: unexpected keyword argument`` from the call itself, silence
+    when the implementation accepts ``**kwargs``, or a value quietly dropped.
+    None of those is a usable answer, and tolerating unknown fields is at odds
+    with a protocol that gates on an exact major+minor version match.
+
+    Raises:
+        TypeError: If ``kwargs`` carries a name the protocol does not declare.
+            Matches ``_validate_params``, so every dispatch path already
+            classifies it as a bad request rather than a server fault.
+
     """
+    # Checked before the loop below, which skips ``None`` values early and
+    # would therefore let an undeclared parameter carrying null slip through.
+    unknown = sorted(name for name in kwargs if name not in param_types)
+    if unknown:
+        declared = ", ".join(sorted(param_types)) or "<no parameters>"
+        raise TypeError(
+            f"Request carries parameter(s) this protocol does not declare: {', '.join(unknown)}. "
+            f"Declared: {declared}. The caller and this worker disagree about the method "
+            f"signature — check their protocol versions."
+        )
     for name, value in kwargs.items():
         if value is None:
             continue

@@ -536,11 +536,29 @@ class TestDeserializeParams:
         _deserialize_params(kwargs, {"x": dict[str, int]})
         assert kwargs["x"] is None
 
-    def test_unknown_param_skipped(self) -> None:
-        """Params not in param_types are left unchanged."""
+    def test_unknown_param_rejected(self) -> None:
+        """A parameter the protocol does not declare is refused, not ignored.
+
+        kwargs are built from the *caller's* columns, so an undeclared name
+        means the two sides disagree about the signature. Skipping it used to
+        produce one of three unhelpful outcomes depending on the
+        implementation: a late ``TypeError`` from the call, silence when the
+        implementation accepted ``**kwargs``, or a value quietly dropped.
+        """
         kwargs: dict[str, object] = {"unknown": [("a", 1)]}
-        _deserialize_params(kwargs, {})
-        assert kwargs["unknown"] == [("a", 1)]
+        with pytest.raises(TypeError, match="does not declare"):
+            _deserialize_params(kwargs, {})
+
+    def test_unknown_param_rejected_even_when_null(self) -> None:
+        """The check precedes the ``None`` fast-path, which would otherwise hide it."""
+        kwargs: dict[str, object] = {"declared": "x", "unknown": None}
+        with pytest.raises(TypeError, match="unknown"):
+            _deserialize_params(kwargs, {"declared": str})
+
+    def test_rejection_names_the_declared_set(self) -> None:
+        """The message has to be actionable: say what this worker does accept."""
+        with pytest.raises(TypeError, match="Declared: alpha, beta"):
+            _deserialize_params({"stray": 1}, {"alpha": str, "beta": int})
 
 
 class TestValidateParams:

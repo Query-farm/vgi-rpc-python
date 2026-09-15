@@ -542,6 +542,7 @@ class TestSentryOtelCoexistence:
 def _fake_method_info(name: str, method_type: str = "unary") -> MagicMock:
     """Build a MagicMock that quacks like an RpcMethodInfo for hook unit tests."""
     info = MagicMock()
+    info.protocol_name = "TestService"
     info.name = name
     info.method_type.value = method_type
     return info
@@ -904,6 +905,7 @@ class TestCompositeDispatchHook:
 
         composite = _CompositeDispatchHook([hook_a, hook_b])
         info = MagicMock()
+        info.protocol_name = "TestService"
         auth = AuthContext.anonymous()
         token = composite.on_dispatch_start(info, auth, {}, {})
 
@@ -923,6 +925,7 @@ class TestCompositeDispatchHook:
 
         composite = _CompositeDispatchHook([hook_a, hook_b])
         info = MagicMock()
+        info.protocol_name = "TestService"
         auth = AuthContext.anonymous()
 
         # Should not raise
@@ -945,6 +948,7 @@ class TestCompositeDispatchHook:
 
         composite = _CompositeDispatchHook([hook_a, hook_b])
         info = MagicMock()
+        info.protocol_name = "TestService"
         auth = AuthContext.anonymous()
         token = composite.on_dispatch_start(info, auth, {}, {})
         composite.on_dispatch_end(token, info, None)
@@ -1333,6 +1337,7 @@ class TestWellKnownAutoTagging:
     def _make_info(self, name: str = "test_method") -> MagicMock:
         """Build a minimal RpcMethodInfo stand-in for hook invocation."""
         info = MagicMock()
+        info.protocol_name = "TestService"
         info.name = name
         info.method_type.value = "unary"
         return info

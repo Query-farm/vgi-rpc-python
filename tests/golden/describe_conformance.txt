@@ -1,0 +1,887 @@
+# Golden describe payload — see tests/test_describe_golden.py
+protocol: ConformanceService
+protocol_hash: 4928a0630c1e28e11809341e0d7636e39df4a963254ac467a34a166ecf01d94f
+method_count: 87
+
+add_floats
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      a: double not null
+      b: double not null
+  result:
+      result: double not null
+
+cancel_probe_counters
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      result: list<item: int64> not null
+
+cancellable_exchange
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+cancellable_producer
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+close_counter
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      result: int64 not null
+
+concatenate
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      prefix: string not null
+      suffix: string not null
+      separator: string not null
+  result:
+      result: string not null
+
+echo_all_types
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      data: binary not null
+  result:
+      result: binary not null
+
+echo_annotated_optional_int
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: int32
+  result:
+      result: int32
+
+echo_bool
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: bool not null
+  result:
+      result: bool not null
+
+echo_bounding_box
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      box: binary not null
+  result:
+      result: binary not null
+
+echo_bytes
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      data: binary not null
+  result:
+      result: binary not null
+
+echo_container_wide_types
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      data: binary not null
+  result:
+      result: binary not null
+
+echo_date
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: date32[day] not null
+  result:
+      result: date32[day] not null
+
+echo_decimal
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: decimal128(20, 4) not null
+  result:
+      result: decimal128(20, 4) not null
+
+echo_deep_nested
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      data: binary not null
+  result:
+      result: binary not null
+
+echo_dict
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      mapping: map<string, int64> not null
+  result:
+      result: map<string, int64> not null
+
+echo_dict_encoded_string
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: dictionary<values=string, indices=int16, ordered=0> not null
+  result:
+      result: dictionary<values=string, indices=int16, ordered=0> not null
+
+echo_duration
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: duration[us] not null
+  result:
+      result: duration[us] not null
+
+echo_embedded_arrow
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      data: binary not null
+  result:
+      result: binary not null
+
+echo_enum
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      status: dictionary<values=string, indices=int16, ordered=0> not null
+  result:
+      result: dictionary<values=string, indices=int16, ordered=0> not null
+
+echo_fixed_binary
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: fixed_size_binary[8] not null
+  result:
+      result: fixed_size_binary[8] not null
+
+echo_float
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: double not null
+  result:
+      result: double not null
+
+echo_float32
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: float not null
+  result:
+      result: float not null
+
+echo_int
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: int64 not null
+  result:
+      result: int64 not null
+
+echo_int16
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: int16 not null
+  result:
+      result: int16 not null
+
+echo_int32
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: int32 not null
+  result:
+      result: int32 not null
+
+echo_int8
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: int8 not null
+  result:
+      result: int8 not null
+
+echo_large_binary
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: large_binary not null
+  result:
+      result: large_binary not null
+
+echo_large_string
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: large_string not null
+  result:
+      result: large_string not null
+
+echo_list
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      values: list<item: string> not null
+  result:
+      result: list<item: string> not null
+
+echo_nested_list
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      matrix: list<item: list<item: int64>> not null
+  result:
+      result: list<item: list<item: int64>> not null
+
+echo_optional_int
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: int64
+  result:
+      result: int64
+
+echo_optional_point
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      point: binary
+  result:
+      result: binary
+
+echo_optional_string
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: string
+  result:
+      result: string
+
+echo_outer_optional_non_null
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: int32 not null
+  result:
+      result: int32 not null
+
+echo_point
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      point: binary not null
+  result:
+      result: binary not null
+
+echo_status_list
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      statuses: list<item: dictionary<values=string, indices=int16, ordered=0>> not null
+  result:
+      result: list<item: dictionary<values=string, indices=int16, ordered=0>> not null
+
+echo_string
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: string not null
+  result:
+      result: string not null
+
+echo_time
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: time64[us] not null
+  result:
+      result: time64[us] not null
+
+echo_timestamp
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: timestamp[us] not null
+  result:
+      result: timestamp[us] not null
+
+echo_timestamp_utc
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: timestamp[us, tz=UTC] not null
+  result:
+      result: timestamp[us, tz=UTC] not null
+
+echo_uint16
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: uint16 not null
+  result:
+      result: uint16 not null
+
+echo_uint32
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: uint32 not null
+  result:
+      result: uint32 not null
+
+echo_uint64
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: uint64 not null
+  result:
+      result: uint64 not null
+
+echo_uint8
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: uint8 not null
+  result:
+      result: uint8 not null
+
+echo_wide_types
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      data: binary not null
+  result:
+      result: binary not null
+
+echo_with_all_log_levels
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: string not null
+  result:
+      result: string not null
+
+echo_with_info_log
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: string not null
+  result:
+      result: string not null
+
+echo_with_log_extras
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: string not null
+  result:
+      result: string not null
+
+echo_with_multi_logs
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      value: string not null
+  result:
+      result: string not null
+
+exchange_accumulate
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+exchange_cast_compatible
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+exchange_error_on_init
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+exchange_error_on_nth
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      fail_on: int64 not null
+  result:
+      (empty)
+
+exchange_oversized
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      rows_per_batch: int64 not null
+  result:
+      (empty)
+
+exchange_scale
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      factor: double not null
+  result:
+      (empty)
+
+exchange_session_counter
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+exchange_with_header
+  method_type: stream
+  has_return: False
+  has_header: True
+  is_exchange: None
+  params:
+      factor: double not null
+  result:
+      (empty)
+
+exchange_with_logs
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+exchange_with_rich_header
+  method_type: stream
+  has_return: False
+  has_header: True
+  is_exchange: None
+  params:
+      seed: int64 not null
+      factor: double not null
+  result:
+      (empty)
+
+exchange_zero_columns
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+increment_counter
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      by: int64 not null
+  result:
+      result: int64 not null
+
+inspect_point
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      point: binary not null
+  result:
+      result: string not null
+
+open_counter
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      initial: int64 not null
+  result:
+      result: int64 not null
+
+oversized_unary
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      target_bytes: int64 not null
+  result:
+      result: binary not null
+
+pack_nested_containers
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      statuses: list<item: dictionary<values=string, indices=int16, ordered=0>> not null
+      points: list<item: struct<x: double not null, y: double not null>> not null
+      status_by_name: map<string, dictionary<values=string, indices=int16, ordered=0>> not null
+  result:
+      result: binary not null
+
+produce_dynamic_schema
+  method_type: stream
+  has_return: False
+  has_header: True
+  is_exchange: None
+  params:
+      seed: int64 not null
+      count: int64 not null
+      include_strings: bool not null
+      include_floats: bool not null
+  result:
+      (empty)
+
+produce_empty
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+produce_error_mid_stream
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      emit_before_error: int64 not null
+  result:
+      (empty)
+
+produce_error_on_init
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+produce_large_batches
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      rows_per_batch: int64 not null
+      batch_count: int64 not null
+  result:
+      (empty)
+
+produce_n
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      count: int64 not null
+  result:
+      (empty)
+
+produce_oversized_batch
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      rows_per_batch: int64 not null
+  result:
+      (empty)
+
+produce_single
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+produce_tick_metadata
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      count: int64 not null
+  result:
+      (empty)
+
+produce_with_header
+  method_type: stream
+  has_return: False
+  has_header: True
+  is_exchange: None
+  params:
+      count: int64 not null
+  result:
+      (empty)
+
+produce_with_header_and_logs
+  method_type: stream
+  has_return: False
+  has_header: True
+  is_exchange: None
+  params:
+      count: int64 not null
+  result:
+      (empty)
+
+produce_with_logs
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      count: int64 not null
+  result:
+      (empty)
+
+produce_with_rich_header
+  method_type: stream
+  has_return: False
+  has_header: True
+  is_exchange: None
+  params:
+      seed: int64 not null
+      count: int64 not null
+  result:
+      (empty)
+
+raise_runtime_error
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      message: string not null
+  result:
+      result: string not null
+
+raise_type_error
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      message: string not null
+  result:
+      result: string not null
+
+raise_value_error
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      message: string not null
+  result:
+      result: string not null
+
+reset_cancel_probe
+  method_type: unary
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+stream_session_counter
+  method_type: stream
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      count: int64 not null
+  result:
+      (empty)
+
+void_noop
+  method_type: unary
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      (empty)
+  result:
+      (empty)
+
+void_with_param
+  method_type: unary
+  has_return: False
+  has_header: False
+  is_exchange: None
+  params:
+      value: int64 not null
+  result:
+      (empty)
+
+with_defaults
+  method_type: unary
+  has_return: True
+  has_header: False
+  is_exchange: None
+  params:
+      required: int64 not null
+      optional_str: string not null
+      optional_int: int64 not null
+  result:
+      result: string not null

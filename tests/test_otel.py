@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Protocol, cast
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
@@ -35,7 +36,7 @@ from vgi_rpc.external import (
 )
 from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.http import http_connect, make_sync_client
-from vgi_rpc.otel import OtelConfig, instrument_server
+from vgi_rpc.otel import OtelConfig, _OtelDispatchHook, _OtelHookToken, instrument_server
 from vgi_rpc.rpc import (
     AuthContext,
     CallContext,
@@ -1362,3 +1363,41 @@ class TestOtelDispatchHookContextLeak:
 
         # Restore so any other test sharing the tracer provider isn't affected.
         token.span.end = original_end  # type: ignore[method-assign]
+
+
+class TestServiceLabelFollowsResolvedProtocol:
+    """``rpc.service`` names the protocol that owns the resolved method.
+
+    A server may host several protocols, so a name captured when the hook was
+    registered would label every span with whichever protocol happened to be
+    primary — quietly misattributing all of a secondary protocol's traffic.
+    These pin the label to ``info.protocol_name``.
+    """
+
+    @staticmethod
+    def _info(name: str, protocol_name: str) -> MagicMock:
+        info = MagicMock()
+        info.name = name
+        info.protocol_name = protocol_name
+        info.method_type.value = "unary"
+        return info
+
+    def test_span_uses_the_methods_own_protocol(self) -> None:
+        """Not the name baked in at registration."""
+        hook = _OtelDispatchHook(OtelConfig(), "PrimaryProtocol", "srv-1")
+        info = self._info("introspect_token", "vgi.Identity.v1")
+        token = cast("_OtelHookToken", hook.on_dispatch_start(info, AuthContext.anonymous(), {}, {}))
+        try:
+            assert token.service == "vgi.Identity.v1"
+        finally:
+            hook.on_dispatch_end(token, info, None, stats=None)
+
+    def test_falls_back_for_synthetic_methods(self) -> None:
+        """``__describe__`` and friends carry no protocol_name; the server's stands in."""
+        hook = _OtelDispatchHook(OtelConfig(), "PrimaryProtocol", "srv-1")
+        info = self._info("__describe__", "")
+        token = cast("_OtelHookToken", hook.on_dispatch_start(info, AuthContext.anonymous(), {}, {}))
+        try:
+            assert token.service == "PrimaryProtocol"
+        finally:
+            hook.on_dispatch_end(token, info, None, stats=None)

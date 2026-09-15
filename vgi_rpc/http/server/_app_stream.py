@@ -155,7 +155,10 @@ def _dispatch_telemetry(
     ``None`` (the default) when no kwargs are available (cancel paths).
     """
     server_id = app._server.server_id
-    protocol_name = app._server.protocol_name
+    # `info` is None on paths that are not regular dispatch (cancel); those
+    # keep the server's primary name. Where a method resolved, its own
+    # protocol owns the record.
+    protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
     outcome = _DispatchOutcome()
     start = time.monotonic()
     hook: _DispatchHook | None = app._server._dispatch_hook if info is not None else None
@@ -259,7 +262,9 @@ def _run_stream_init_sync(
 
         # Inject ctx if the implementation accepts it
         server_id = app._server.server_id
-        protocol_name = app._server.protocol_name
+        # Follows the protocol that owns the resolved method — a wrong protocol
+        # label in an access record looks plausible rather than failing.
+        protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         if method_name in app._server.ctx_methods:
@@ -454,7 +459,9 @@ def _run_http_exchange_init(
     token is refreshed in the responses that follow.
     """
     server_id = app._server.server_id
-    protocol_name = app._server.protocol_name
+    # Follows the protocol that owns the resolved method — a wrong protocol
+    # label in an access record looks plausible rather than failing.
+    protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
     try:
         state = result.state
         output_schema = result.output_schema
@@ -727,6 +734,9 @@ def _run_http_exchange_turn(
     them via the ``hook_exc`` path.
     """
     server_id = app._server.server_id
+    # Continuation paths carry no `info`; the protocol is recovered from the
+    # sealed call token instead (PR 2). Until then this labels with the
+    # server's primary protocol, which is correct for a single-protocol server.
     protocol_name = app._server.protocol_name
 
     # External-location resolution on inbound input.  Failures pre-date
@@ -969,6 +979,9 @@ def _run_http_producer_turn(
 
     """
     server_id = app._server.server_id
+    # Continuation paths carry no `info`; the protocol is recovered from the
+    # sealed call token instead (PR 2). Until then this labels with the
+    # server's primary protocol, which is correct for a single-protocol server.
     protocol_name = app._server.protocol_name
     # Native sink — see the note in this function's docstring. `tell()` (used for
     # the max_bytes check below) is supported; `seek()` is not needed on a

@@ -468,7 +468,7 @@ class _SentryDispatchHook:
         span = sentry_sdk.get_current_span()
         if span is not None:
             span.set_data("rpc.system", "vgi_rpc")
-            span.set_data("rpc.service", self._protocol_name)
+            span.set_data("rpc.service", info.protocol_name or self._protocol_name)
             span.set_data("rpc.method", info.name)
             span.set_data("rpc.method_type", info.method_type.value)
             stream_id = _current_stream_id.get()
@@ -497,7 +497,7 @@ class _SentryDispatchHook:
                 {
                     "method": info.name,
                     "method_type": info.method_type.value,
-                    "service": self._protocol_name,
+                    "service": info.protocol_name or self._protocol_name,
                     "server_id": self._server_id,
                 },
             )
@@ -570,7 +570,7 @@ class _SentryDispatchHook:
         return _SentryHookToken(
             transaction=transaction,
             method_name=info.name,
-            service=self._protocol_name,
+            service=info.protocol_name or self._protocol_name,
         )
 
     def on_dispatch_end(

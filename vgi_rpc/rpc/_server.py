@@ -1091,7 +1091,7 @@ class RpcServer:
                 writer.write_batch(self._describe_batch, custom_metadata=self._describe_metadata)
             auth, transport_md = _get_auth_and_metadata()
             _emit_access_log(
-                self.protocol_name,
+                info.protocol_name or self.protocol_name,
                 info.name,
                 info.method_type.value,
                 self._server_id,
@@ -1107,7 +1107,11 @@ class RpcServer:
 
         schema = info.result_schema
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
-        protocol_name = self.protocol_name
+        # The protocol that owns the *resolved* method, not a server-wide
+        # default. Access records are the one place a wrong protocol label
+        # produces plausible-looking output rather than an error, so it has
+        # to follow `info`. Synthetic methods carry no name and fall back.
+        protocol_name = info.protocol_name or self.protocol_name
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
@@ -1176,7 +1180,11 @@ class RpcServer:
     ) -> None:
         _current_stream_id.set(uuid.uuid4().hex)
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
-        protocol_name = self.protocol_name
+        # The protocol that owns the *resolved* method, not a server-wide
+        # default. Access records are the one place a wrong protocol label
+        # produces plausible-looking output rather than an error, so it has
+        # to follow `info`. Synthetic methods carry no name and fall back.
+        protocol_name = info.protocol_name or self.protocol_name
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""

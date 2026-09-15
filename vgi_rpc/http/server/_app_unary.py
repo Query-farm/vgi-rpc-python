@@ -128,7 +128,7 @@ def _run_unary_sync(
             resp_buf.seek(0)
             auth, transport_metadata = _get_auth_and_metadata()
             _emit_access_log(
-                app._server.protocol_name,
+                info.protocol_name or app._server.protocol_name,
                 method_name,
                 info.method_type.value,
                 app._server.server_id,
@@ -144,7 +144,9 @@ def _run_unary_sync(
             return resp_buf, HTTPStatus.OK
 
         server_id = app._server.server_id
-        protocol_name = app._server.protocol_name
+        # Follows the protocol that owns the resolved method — a wrong protocol
+        # label in an access record looks plausible rather than failing.
+        protocol_name = (info.protocol_name if info else "") or app._server.protocol_name
         sink = _ClientLogSink(server_id=server_id)
         auth, transport_metadata = _get_auth_and_metadata()
         response_budget = _current_response_budget.get()

@@ -705,6 +705,12 @@ class RpcMethodInfo:
             if it extends ``ProducerState`` (server-initiated), ``None``
             if the state class uses raw ``StreamState`` (unknown).
             Always ``None`` for unary methods.
+        protocol_name: Name of the Protocol this method belongs to. Makes an
+            ``RpcMethodInfo`` self-describing, so a server hosting several
+            protocols can label access-log records, spans and errors with the
+            protocol that owns the *resolved* method rather than a
+            server-wide default. Empty string when the info was built outside
+            ``rpc_methods`` (e.g. a synthetic method).
 
     """
 
@@ -720,6 +726,7 @@ class RpcMethodInfo:
     param_docs: dict[str, str] = field(default_factory=dict)
     header_type: type[ArrowSerializableDataclass] | None = None
     is_exchange: bool | None = None
+    protocol_name: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +862,31 @@ def _get_param_defaults(protocol: type, method_name: str) -> dict[str, object]:
     return defaults
 
 
+def _protocol_wire_name(protocol: type) -> str:
+    """Return the protocol's wire identity.
+
+    Read from ``vars(protocol)`` rather than ``getattr`` so a subclass does not
+    silently inherit its base's identity — the same reason ``protocol_version``
+    is read that way (see ``tests/test_protocol_version.py``). A Protocol that
+    subclasses another and forgets to redeclare would otherwise share a routing
+    key with it.
+
+    Falls back to the class name when no ``protocol_name`` is declared, which
+    preserves today's behaviour for every existing Protocol.
+
+    Args:
+        protocol: The Protocol class.
+
+    Returns:
+        The declared wire name, or the class name.
+
+    """
+    declared = vars(protocol).get("protocol_name")
+    if isinstance(declared, str) and declared:
+        return declared
+    return protocol.__name__
+
+
 @functools.lru_cache(maxsize=64)
 def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
     """Introspect a Protocol class and return RpcMethodInfo for each method.
@@ -922,6 +954,7 @@ def rpc_methods(protocol: type) -> Mapping[str, RpcMethodInfo]:
             param_docs=param_docs,
             header_type=header_type,
             is_exchange=is_exchange,
+            protocol_name=_protocol_wire_name(protocol),
         )
 
     return MappingProxyType(result)

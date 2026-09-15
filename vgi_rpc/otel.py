@@ -263,9 +263,14 @@ class _OtelDispatchHook:
             if trace_headers:
                 parent_ctx = propagate.extract(trace_headers)
 
+            # Prefer the protocol that owns the *resolved* method. A server may
+            # host several, so a name baked in at hook-registration time would
+            # label every span with whichever protocol happened to be primary.
+            # Synthetic methods (e.g. __describe__) carry no protocol_name and
+            # fall back to the server's.
             attrs: dict[str, str] = {
                 "rpc.system": "vgi_rpc",
-                "rpc.service": self._protocol_name,
+                "rpc.service": info.protocol_name or self._protocol_name,
                 "rpc.method": info.name,
                 "rpc.vgi_rpc.method_type": info.method_type.value,
                 "rpc.vgi_rpc.server_id": self._server_id,
@@ -316,7 +321,7 @@ class _OtelDispatchHook:
             start_time=start_time,
             method_name=info.name,
             method_type=info.method_type.value,
-            service=self._protocol_name,
+            service=info.protocol_name or self._protocol_name,
             auth_domain=auth.domain,
             peer_identity_status=peer_identity_status,
             peer_identity_sources=peer_identity_sources,
