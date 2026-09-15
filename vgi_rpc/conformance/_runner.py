@@ -2015,10 +2015,34 @@ def _test_desc_has_header_false(desc: ServiceDescription) -> None:
         assert desc.methods[name].has_header is False, f"{name} should have has_header=False"
 
 
-@_describe_test(category="describe_stream_properties", name="is_exchange_none")
-def _test_desc_is_exchange_none(desc: ServiceDescription) -> None:
+#: Stream methods whose Protocol declares an ``ExchangeState``. The rest of
+#: ``_STREAM_METHODS`` declare a ``ProducerState``.
+_EXCHANGE_METHODS = frozenset(n for n in _STREAM_METHODS if "exchange" in n)
+
+
+@_describe_test(category="describe_stream_properties", name="stream_kind_is_stated")
+def _test_desc_stream_kind_is_stated(desc: ServiceDescription) -> None:
+    """Report a stream's kind rather than leaving it unknown.
+
+    This is the only field in a description that says whether a stream accepts
+    input: the description carries parameter, result and header schemas, but a
+    stream's *input* schema arrives at init time. So a client, a code
+    generator, or a human reading a describe page has exactly one place to
+    learn whether a method is send-and-receive or receive-only.
+
+    The predecessor of this test asserted the opposite -- that every stream
+    reported ``None`` -- which codified a fixture that declared the base
+    ``StreamState`` everywhere rather than the specific state class. That made
+    the one discoverability signal useless and made it look correct.
+    """
     for name in sorted(_STREAM_METHODS):
-        assert desc.methods[name].is_exchange is None, f"{name} should have is_exchange=None"
+        expected = name in _EXCHANGE_METHODS
+        actual = desc.methods[name].is_exchange
+        assert actual is not None, (
+            f"{name}: stream kind is unknown. A port that can determine it must state it -- "
+            f"this is the only signal a client has about whether the stream accepts input."
+        )
+        assert actual == expected, f"{name}: reported is_exchange={actual}, expected {expected}"
 
 
 # ---------------------------------------------------------------------------

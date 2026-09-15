@@ -17,7 +17,7 @@ from typing import Annotated, ClassVar, Protocol
 
 import pyarrow as pa
 
-from vgi_rpc.rpc import Stream, StreamState
+from vgi_rpc.rpc import ExchangeState, ProducerState, Stream
 from vgi_rpc.utils import ArrowType
 
 from ._types import (
@@ -357,39 +357,39 @@ class ConformanceService(Protocol):
     # Producer Streams
     # ------------------------------------------------------------------
 
-    def produce_n(self, count: int) -> Stream[StreamState]:
+    def produce_n(self, count: int) -> Stream[ProducerState]:
         """Produce count batches with {index, value}."""
         ...
 
-    def produce_tick_metadata(self, count: int) -> Stream[StreamState]:
+    def produce_tick_metadata(self, count: int) -> Stream[ProducerState]:
         """Report application metadata received on each producer tick."""
         ...
 
-    def produce_empty(self) -> Stream[StreamState]:
+    def produce_empty(self) -> Stream[ProducerState]:
         """Produce zero batches (finish immediately)."""
         ...
 
-    def produce_single(self) -> Stream[StreamState]:
+    def produce_single(self) -> Stream[ProducerState]:
         """Produce exactly one batch."""
         ...
 
-    def produce_large_batches(self, rows_per_batch: int, batch_count: int) -> Stream[StreamState]:
+    def produce_large_batches(self, rows_per_batch: int, batch_count: int) -> Stream[ProducerState]:
         """Produce batch_count batches of rows_per_batch rows each."""
         ...
 
-    def produce_with_logs(self, count: int) -> Stream[StreamState]:
+    def produce_with_logs(self, count: int) -> Stream[ProducerState]:
         """Produce batches with an INFO log before each."""
         ...
 
-    def produce_error_mid_stream(self, emit_before_error: int) -> Stream[StreamState]:
+    def produce_error_mid_stream(self, emit_before_error: int) -> Stream[ProducerState]:
         """Raise after emitting emit_before_error batches."""
         ...
 
-    def produce_error_on_init(self) -> Stream[StreamState]:
+    def produce_error_on_init(self) -> Stream[ProducerState]:
         """Raise during stream initialization."""
         ...
 
-    def produce_oversized_batch(self, rows_per_batch: int) -> Stream[StreamState]:
+    def produce_oversized_batch(self, rows_per_batch: int) -> Stream[ProducerState]:
         """Emit one batch of ``rows_per_batch`` int64 rows, then finish.
 
         Used by HTTP-only conformance tests to deliberately overshoot the
@@ -405,11 +405,11 @@ class ConformanceService(Protocol):
     # Producer Streams With Headers
     # ------------------------------------------------------------------
 
-    def produce_with_header(self, count: int) -> Stream[StreamState, ConformanceHeader]:
+    def produce_with_header(self, count: int) -> Stream[ProducerState, ConformanceHeader]:
         """Produce batches with a stream header."""
         ...
 
-    def produce_with_header_and_logs(self, count: int) -> Stream[StreamState, ConformanceHeader]:
+    def produce_with_header_and_logs(self, count: int) -> Stream[ProducerState, ConformanceHeader]:
         """Produce batches with a header and INFO logs."""
         ...
 
@@ -417,31 +417,31 @@ class ConformanceService(Protocol):
     # Exchange Streams
     # ------------------------------------------------------------------
 
-    def exchange_scale(self, factor: float) -> Stream[StreamState]:
+    def exchange_scale(self, factor: float) -> Stream[ExchangeState]:
         """Multiply input values by factor."""
         ...
 
-    def exchange_accumulate(self) -> Stream[StreamState]:
+    def exchange_accumulate(self) -> Stream[ExchangeState]:
         """Accumulate running sum and exchange count across exchanges."""
         ...
 
-    def exchange_with_logs(self) -> Stream[StreamState]:
+    def exchange_with_logs(self) -> Stream[ExchangeState]:
         """Exchange with INFO + DEBUG logs per exchange."""
         ...
 
-    def exchange_error_on_nth(self, fail_on: int) -> Stream[StreamState]:
+    def exchange_error_on_nth(self, fail_on: int) -> Stream[ExchangeState]:
         """Raise on the Nth exchange (1-indexed)."""
         ...
 
-    def exchange_zero_columns(self) -> Stream[StreamState]:
+    def exchange_zero_columns(self) -> Stream[ExchangeState]:
         """Exchange stream with zero-column input and output."""
         ...
 
-    def exchange_error_on_init(self) -> Stream[StreamState]:
+    def exchange_error_on_init(self) -> Stream[ExchangeState]:
         """Raise during exchange stream initialization."""
         ...
 
-    def exchange_oversized(self, rows_per_batch: int) -> Stream[StreamState]:
+    def exchange_oversized(self, rows_per_batch: int) -> Stream[ExchangeState]:
         """Exchange that emits an oversized output batch for any input.
 
         Companion to :meth:`produce_oversized_batch` for the lockstep
@@ -456,7 +456,7 @@ class ConformanceService(Protocol):
     # Exchange Streams With Headers
     # ------------------------------------------------------------------
 
-    def exchange_with_header(self, factor: float) -> Stream[StreamState, ConformanceHeader]:
+    def exchange_with_header(self, factor: float) -> Stream[ExchangeState, ConformanceHeader]:
         """Exchange stream with a header."""
         ...
 
@@ -464,11 +464,11 @@ class ConformanceService(Protocol):
     # Cancellation
     # ------------------------------------------------------------------
 
-    def cancellable_producer(self) -> Stream[StreamState]:
+    def cancellable_producer(self) -> Stream[ProducerState]:
         """Produce one batch per tick forever — designed to be cancelled by the client."""
         ...
 
-    def cancellable_exchange(self) -> Stream[StreamState]:
+    def cancellable_exchange(self) -> Stream[ExchangeState]:
         """Echo each input batch — designed to be cancelled by the client."""
         ...
 
@@ -484,7 +484,7 @@ class ConformanceService(Protocol):
     # Dynamic Streams With Rich Multi-Type Headers
     # ------------------------------------------------------------------
 
-    def produce_with_rich_header(self, seed: int, count: int) -> Stream[StreamState, RichHeader]:
+    def produce_with_rich_header(self, seed: int, count: int) -> Stream[ProducerState, RichHeader]:
         """Produce batches with a rich multi-type stream header.
 
         Args:
@@ -500,7 +500,7 @@ class ConformanceService(Protocol):
 
     def produce_dynamic_schema(
         self, seed: int, count: int, include_strings: bool, include_floats: bool
-    ) -> Stream[StreamState, RichHeader]:
+    ) -> Stream[ProducerState, RichHeader]:
         """Produce batches with a dynamic output schema and rich header.
 
         The output schema changes based on ``include_strings`` and
@@ -519,11 +519,11 @@ class ConformanceService(Protocol):
         """
         ...
 
-    def exchange_cast_compatible(self) -> Stream[StreamState]:
+    def exchange_cast_compatible(self) -> Stream[ExchangeState]:
         """Exchange expecting float64 input — tests server-side cast for compatible schemas."""
         ...
 
-    def exchange_with_rich_header(self, seed: int, factor: float) -> Stream[StreamState, RichHeader]:
+    def exchange_with_rich_header(self, seed: int, factor: float) -> Stream[ExchangeState, RichHeader]:
         """Exchange stream with a rich multi-type header.
 
         Args:
@@ -581,7 +581,7 @@ class ConformanceService(Protocol):
     # turn — proving the session contract holds across the multi-request
     # shape of streaming RPCs (not just unary calls).
 
-    def stream_session_counter(self, count: int) -> Stream[StreamState]:
+    def stream_session_counter(self, count: int) -> Stream[ProducerState]:
         """Emit ``count`` increments of the sticky session counter via a producer stream.
 
         Each emitted batch carries the post-increment value of the
@@ -590,7 +590,7 @@ class ConformanceService(Protocol):
         """
         ...
 
-    def exchange_session_counter(self) -> Stream[StreamState]:
+    def exchange_session_counter(self) -> Stream[ExchangeState]:
         """Exchange stream adding each input ``by`` column to the sticky session counter.
 
         Each turn emits a single one-row batch with the post-update

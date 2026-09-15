@@ -31,7 +31,7 @@ cancellable_exchange
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       (empty)
@@ -42,7 +42,7 @@ cancellable_producer
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       (empty)
@@ -561,7 +561,7 @@ exchange_accumulate
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       (empty)
@@ -572,7 +572,7 @@ exchange_cast_compatible
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       (empty)
@@ -583,7 +583,7 @@ exchange_error_on_init
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       (empty)
@@ -594,7 +594,7 @@ exchange_error_on_nth
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       fail_on: int64 not null
@@ -605,7 +605,7 @@ exchange_oversized
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       rows_per_batch: int64 not null
@@ -616,7 +616,7 @@ exchange_scale
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       factor: double not null
@@ -627,7 +627,7 @@ exchange_session_counter
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       (empty)
@@ -638,7 +638,7 @@ exchange_with_header
   method_type: stream
   has_return: False
   has_header: True
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       factor: double not null
@@ -649,7 +649,7 @@ exchange_with_logs
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       (empty)
@@ -660,7 +660,7 @@ exchange_with_rich_header
   method_type: stream
   has_return: False
   has_header: True
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       seed: int64 not null
@@ -672,7 +672,7 @@ exchange_zero_columns
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: exchange
   idempotency: unknown
   params:
       (empty)
@@ -740,7 +740,7 @@ produce_dynamic_schema
   method_type: stream
   has_return: False
   has_header: True
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       seed: int64 not null
@@ -754,7 +754,7 @@ produce_empty
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       (empty)
@@ -765,7 +765,7 @@ produce_error_mid_stream
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       emit_before_error: int64 not null
@@ -776,7 +776,7 @@ produce_error_on_init
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       (empty)
@@ -787,7 +787,7 @@ produce_large_batches
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       rows_per_batch: int64 not null
@@ -799,7 +799,7 @@ produce_n
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       count: int64 not null
@@ -810,7 +810,7 @@ produce_oversized_batch
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       rows_per_batch: int64 not null
@@ -821,7 +821,7 @@ produce_single
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       (empty)
@@ -832,7 +832,7 @@ produce_tick_metadata
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       count: int64 not null
@@ -843,7 +843,7 @@ produce_with_header
   method_type: stream
   has_return: False
   has_header: True
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       count: int64 not null
@@ -854,7 +854,7 @@ produce_with_header_and_logs
   method_type: stream
   has_return: False
   has_header: True
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       count: int64 not null
@@ -865,7 +865,7 @@ produce_with_logs
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       count: int64 not null
@@ -876,7 +876,7 @@ produce_with_rich_header
   method_type: stream
   has_return: False
   has_header: True
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       seed: int64 not null
@@ -932,7 +932,7 @@ stream_session_counter
   method_type: stream
   has_return: False
   has_header: False
-  stream_kind: unknown
+  stream_kind: producer
   idempotency: unknown
   params:
       count: int64 not null
