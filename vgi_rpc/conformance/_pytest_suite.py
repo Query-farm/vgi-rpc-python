@@ -3305,6 +3305,93 @@ class TestRequestId:
             f"carries that request_id (saw {ids[-5:]}); header and log must name the same request"
         )
 
+    def test_a_secondary_protocols_record_carries_its_own_identity(self, request: pytest.FixtureRequest) -> None:
+        """``protocol`` and ``protocol_hash`` name the protocol that owns the method.
+
+        ``access-log-spec.md`` §3 makes ``protocol`` the owning protocol's wire
+        name, "not a server-wide default", and ``protocol_hash`` the registry
+        key for decoding archived records.
+
+        Only a call to a *secondary* protocol can test that.  For an
+        application method the primary IS the owning binding, so a server that
+        labels every record with its primary passes every other assertion in
+        this suite -- which is how three ports shipped exactly that.  The
+        failure is silent by construction: the record is well-formed, passes
+        the schema, and produces a plausible dashboard while a consumer keying
+        on ``protocol_hash`` decodes it against the wrong description.
+
+        Reflection is used as the secondary because every conformant server
+        hosts it.  Skips where the runner exposes no access log, and where the
+        worker does not host reflection over HTTP.
+        """
+        import json
+        import time
+        from io import BytesIO
+
+        import httpx2
+
+        from vgi_rpc.rpc._wire import _write_request
+
+        try:
+            port, log_path = request.getfixturevalue("conformance_http_access_log")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_access_log")
+
+        reflection = "vgi_rpc.Reflection.v1"
+        buf = BytesIO()
+        _write_request(buf, "list_protocols", pa.schema([]), {}, protocol=reflection)
+        body = buf.getvalue()
+
+        resp = None
+        for prefix in ("", "/vgi"):
+            resp = httpx2.post(
+                f"http://127.0.0.1:{port}{prefix}/{reflection}/list_protocols",
+                content=body,
+                headers={"content-type": "application/vnd.apache.arrow.stream"},
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                break
+        assert resp is not None
+        if resp.status_code != 200:
+            pytest.skip(f"worker does not host {reflection} over HTTP ({resp.status_code})")
+
+        deadline = time.time() + 10.0
+        records: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            if log_path.exists():
+                records = [
+                    rec
+                    for line in log_path.read_text().splitlines()
+                    if line.strip()
+                    for rec in [json.loads(line)]
+                    if rec.get("logger") == "vgi_rpc.access"
+                ]
+                if any(r.get("method") == "list_protocols" for r in records):
+                    break
+            time.sleep(0.2)
+
+        mine = [r for r in records if r.get("method") == "list_protocols"]
+        assert mine, (
+            f"a {reflection} call succeeded but produced no access record naming it; "
+            f"methods seen: {sorted({str(r.get('method')) for r in records})[-8:]}"
+        )
+        app = [r for r in records if r.get("method") == "echo_int"]
+
+        for rec in mine:
+            assert rec.get("protocol") == reflection, (
+                f"a {reflection} call logged protocol={rec.get('protocol')!r}. The record must "
+                f"name the protocol that owns the dispatched method, not the server's primary: "
+                f"anything aggregating on it otherwise merges two protocols' traffic silently."
+            )
+            if app:
+                assert rec.get("protocol_hash") != app[0].get("protocol_hash"), (
+                    f"a {reflection} record carries the application protocol's digest. "
+                    f"protocol_hash is the registry key for decoding archived records, so a "
+                    f"record naming one protocol and carrying another's is decoded against the "
+                    f"wrong description -- and nothing about it looks wrong."
+                )
+
 
 # ---------------------------------------------------------------------------
 # CORS conformance (HTTP-only)
