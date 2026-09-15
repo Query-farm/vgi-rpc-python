@@ -50,6 +50,7 @@ from vgi_rpc.rpc import (
     _dispatch_log_or_error,
     _drain_stream,
 )
+from vgi_rpc.rpc._protocol_hash import compute_protocol_hash as _compute_protocol_hash
 from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
 
 __all__ = [
@@ -259,7 +260,10 @@ def build_describe_batch(
         schema=_DESCRIBE_SCHEMA,
     )
 
-    protocol_hash = compute_protocol_hash(protocol_name, batch)
+    # Over the decoded description, not this batch's bytes: each port's Arrow
+    # implementation may emit different bytes for the same logical schema, so a
+    # hash over encoder output is comparable only against itself.
+    protocol_hash = compute_protocol_hash(protocol_name, methods)
 
     md_dict: dict[bytes, bytes] = {
         PROTOCOL_NAME_KEY: protocol_name.encode(),
@@ -279,70 +283,11 @@ def build_describe_batch(
 # ---------------------------------------------------------------------------
 
 
-def compute_protocol_hash(protocol_name: str, batch: pa.RecordBatch) -> str:
-    """Return the SHA-256 hex digest of the canonical describe payload.
-
-    The hash covers only language-neutral wire fields: ``protocol_name``,
-    ``request_version``, ``describe_version``, and for each method (sorted
-    by name) ``name``, ``method_type``, ``has_return``, ``has_header``,
-    ``is_exchange``, ``params_schema_ipc``, ``result_schema_ipc``, and
-    ``header_schema_ipc``.  Server identity, docstrings, parameter type
-    names, parameter defaults, and parameter docstrings are *not* part of
-    the hash — they vary across processes/builds without changing protocol
-    semantics.
-
-    The hash is reproducible across language ports that produce the same
-    Arrow schema bytes for the same Protocol.
-
-    Args:
-        protocol_name: Name of the Protocol class.
-        batch: A ``__describe__`` response batch built by
-            :func:`build_describe_batch` (rows sorted by name).
-
-    Returns:
-        Lowercase 64-character hex SHA-256 digest.
-
-    """
-    import hashlib
-
-    h = hashlib.sha256()
-    h.update(b"vgi_rpc.describe.v")
-    h.update(DESCRIBE_VERSION.encode())
-    h.update(b"|")
-    h.update(REQUEST_VERSION)
-    h.update(b"|")
-    h.update(protocol_name.encode())
-    h.update(b"|")
-    n = batch.num_rows
-    name_col = batch.column("name")
-    method_type_col = batch.column("method_type")
-    has_return_col = batch.column("has_return")
-    params_col = batch.column("params_schema_ipc")
-    result_col = batch.column("result_schema_ipc")
-    has_header_col = batch.column("has_header")
-    header_col = batch.column("header_schema_ipc")
-    is_exchange_col = batch.column("is_exchange")
-    for i in range(n):
-        h.update(b"\x1f")
-        h.update(name_col[i].as_py().encode())
-        h.update(b"\x1e")
-        h.update(method_type_col[i].as_py().encode())
-        h.update(b"\x1e")
-        h.update(b"1" if has_return_col[i].as_py() else b"0")
-        h.update(b"\x1e")
-        h.update(b"1" if has_header_col[i].as_py() else b"0")
-        h.update(b"\x1e")
-        is_exchange = is_exchange_col[i].as_py()
-        h.update(b"-" if is_exchange is None else (b"1" if is_exchange else b"0"))
-        h.update(b"\x1e")
-        h.update(params_col[i].as_py())
-        h.update(b"\x1e")
-        h.update(result_col[i].as_py())
-        h.update(b"\x1e")
-        header_bytes = header_col[i].as_py()
-        if header_bytes is not None:
-            h.update(header_bytes)
-    return h.hexdigest()
+#: Re-exported so ``vgi_rpc.introspect.compute_protocol_hash`` keeps working.
+#: The definition lives in ``rpc/_protocol_hash.py`` because it is taken over
+#: the decoded description rather than over a describe *batch* -- the batch is
+#: one encoding of that description, and not the same one in every port.
+compute_protocol_hash = _compute_protocol_hash
 
 
 # ---------------------------------------------------------------------------

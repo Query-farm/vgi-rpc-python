@@ -255,28 +255,26 @@ class TestBuildDescribeBatch:
 
 
 class TestProtocolHash:
-    """Tests for compute_protocol_hash."""
+    """Tests for compute_protocol_hash.
+
+    It takes a method table rather than a describe batch: the batch is one
+    *encoding* of the description, and not the same encoding in every port.
+    See ``tests/test_protocol_hash.py`` for the canonical-form properties.
+    """
 
     def test_stable_across_calls(self) -> None:
-        """Same protocol → same hash, regardless of server_id."""
+        """Same protocol, same hash -- server identity is not in the preimage."""
         methods = rpc_methods(_TestProto)
-        b1, _ = build_describe_batch("TestProto", methods, "srv-a")
-        b2, _ = build_describe_batch("TestProto", methods, "srv-zzz")
-        assert compute_protocol_hash("TestProto", b1) == compute_protocol_hash("TestProto", b2)
+        assert compute_protocol_hash("TestProto", methods) == compute_protocol_hash("TestProto", methods)
 
     def test_changes_with_protocol_name(self) -> None:
-        """Different protocol_name → different hash, even for same methods."""
+        """Different protocol_name, different hash, even for the same methods."""
         methods = rpc_methods(_TestProto)
-        b, _ = build_describe_batch("TestProto", methods, "srv-a")
-        h1 = compute_protocol_hash("TestProto", b)
-        h2 = compute_protocol_hash("Renamed", b)
-        assert h1 != h2
+        assert compute_protocol_hash("TestProto", methods) != compute_protocol_hash("Renamed", methods)
 
     def test_hex_format(self) -> None:
         """Hash is 64 lowercase hex characters."""
-        methods = rpc_methods(_TestProto)
-        b, _ = build_describe_batch("TestProto", methods, "srv-a")
-        h = compute_protocol_hash("TestProto", b)
+        h = compute_protocol_hash("TestProto", rpc_methods(_TestProto))
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
 
@@ -329,7 +327,7 @@ class TestParseDescribeBatch:
         batch, cm = build_describe_batch("TestProto", methods, "srv123")
         desc = parse_describe_batch(batch, cm)
         assert len(desc.protocol_hash) == 64
-        assert desc.protocol_hash == compute_protocol_hash("TestProto", batch)
+        assert desc.protocol_hash == compute_protocol_hash("TestProto", methods)
 
     def test_empty_protocol_round_trip(self) -> None:
         """Empty protocol round-trips correctly."""

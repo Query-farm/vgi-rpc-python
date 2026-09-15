@@ -1,6 +1,6 @@
 # Golden describe payload — see tests/test_describe_golden.py
 protocol: ConformanceService
-protocol_hash: 4928a0630c1e28e11809341e0d7636e39df4a963254ac467a34a166ecf01d94f
+protocol_hash: be0a74ec68ca84582e690afa83469a000d2e05cbe2a8d8956c98d8fbf84a96c4
 method_count: 87
 
 add_floats
