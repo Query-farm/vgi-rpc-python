@@ -243,6 +243,30 @@ So: **honour what the hook returned, including `0`.** Where the language permits
 offer a constructor or builder that supplies 300 so the omission case still lands
 on the documented default -- but never override a value that was actually set.
 
+## 5b. Testing guards behind uniform rejections (the vacuity trap)
+
+Rejections are deliberately uniform -- unknown, expired, malformed and
+over-long are one answer. That makes the obvious guard test **prove nothing**.
+
+An over-long credential is also an unknown one, so probing `introspect_token`
+with a credential the resolver does not know cannot distinguish *"the cap
+refused it"* from *"the cap let it through and the resolver refused it"*.
+Delete the length check from the dispatch path and such a test stays green.
+This was found in two ports independently, and the reference had it too: its
+`test_rejections_are_uniform` covers the over-long case and passes with the cap
+removed, because it is a test about uniformity and never was a test that the cap
+fires.
+
+**The resolvable-probe form.** Use a hook that resolves *anything*, so a
+rejection can only have come from the guard, and assert the hook was never
+reached. That second assertion is the half that fails when the guard is skipped.
+
+**Mutation-check every guard test.** Break the guard on purpose and confirm the
+test goes red. A guard test that passes against a deliberately broken guard is
+worse than no test, because it is counted as coverage. Every port should do this
+for the JWS trap, the length cap, the allowlist, the rate limit and the freshness
+check.
+
 ## 6. Hygiene
 
 - The credential must never reach a log, a span, or an error message. Provide a
