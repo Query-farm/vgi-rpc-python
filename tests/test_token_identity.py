@@ -149,6 +149,31 @@ class TestIntrospectionIsLockedDown:
         with pytest.raises(TokenUnresolvedError):
             self._impl().introspect_token(token, _ctx(_auth("proxy")))
 
+    def test_the_cap_is_enforced_on_the_dispatch_path_not_only_in_the_guard(self) -> None:
+        """Pin that ``introspect_token`` actually calls the length check.
+
+        Uniform rejections make the obvious test vacuous: an over-long
+        credential is also an unknown one, so probing with a credential the
+        resolver does not know cannot tell "the cap refused it" from "the cap
+        let it through and the resolver refused it".  Delete the length check
+        from the dispatch path and such a test still passes.
+
+        The fix is a credential the resolver *would* resolve, so a refusal can
+        only have come from the cap -- plus the assertion that the resolver was
+        never reached, which is the part that fails if the guard is skipped.
+        """
+        seen: list[str] = []
+        oversized = "x" * (MAX_TOKEN_BYTES + 1)
+
+        def resolves_anything(token: str) -> TokenIdentity:
+            seen.append(token)
+            return TokenIdentity(principal="bob")
+
+        impl = IdentityImpl(resolve_token=resolves_anything, introspect_principals=["proxy"])
+        with pytest.raises(TokenUnresolvedError):
+            impl.introspect_token(oversized, _ctx(_auth("proxy")))
+        assert seen == [], "an over-long credential must never reach the resolver"
+
     def test_a_jws_never_reaches_the_resolver(self) -> None:
         """Routing one onward hands a third party a token the asker may have rejected.
 
