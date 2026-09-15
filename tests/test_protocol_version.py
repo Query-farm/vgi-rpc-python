@@ -2,7 +2,7 @@
 
 Covers:
 - ``parse_version`` regex + edge cases.
-- ``RpcServer._check_protocol_version`` comparison matrix (exact major+minor,
+- ``RpcServer.gate_version`` comparison matrix (exact major+minor,
   patch ignored; directional error messages on mismatch).
 - ``vars()`` vs ``getattr`` inheritance semantics — subclasses must not
   silently inherit a parent Protocol's ``protocol_version``.
@@ -19,11 +19,13 @@ import io
 import threading
 from typing import ClassVar, Protocol
 
+import pyarrow as pa
 import pytest
 
-from vgi_rpc.metadata import SEMVER_REGEX, parse_version
+from vgi_rpc.metadata import PROTOCOL_VERSION_KEY, SEMVER_REGEX, parse_version
 from vgi_rpc.rpc import ProtocolVersionError, RpcError, RpcServer, VersionError
 from vgi_rpc.rpc._client import _RpcProxy
+from vgi_rpc.rpc._common import _current_request_metadata
 from vgi_rpc.rpc._transport import make_pipe_pair
 
 
@@ -192,7 +194,7 @@ class TestConstructionValidation:
 
 
 class TestComparisonRule:
-    """RpcServer._check_protocol_version: exact major+minor, patch ignored."""
+    """RpcServer.gate_version: exact major+minor, patch ignored."""
 
     def _server(self, version: str) -> RpcServer:
         """Build an RpcServer whose Protocol declares protocol_version=*version*."""
@@ -204,22 +206,37 @@ class TestComparisonRule:
 
         return RpcServer(_Proto, _Impl())
 
+    def _gate(self, srv: RpcServer, client_version: bytes | None) -> None:
+        """Run the gate for *srv*'s one method with *client_version* on the wire.
+
+        ``gate_version`` reads the client's declared version off the ambient
+        request metadata rather than taking it as an argument, because it gates
+        the binding that owns the resolved method -- so the test has to stage
+        the metadata the way a real request would.
+        """
+        pairs = {} if client_version is None else {PROTOCOL_VERSION_KEY: client_version}
+        token = _current_request_metadata.set(pa.KeyValueMetadata(pairs))
+        try:
+            srv.gate_version(srv.methods["greet"])
+        finally:
+            _current_request_metadata.reset(token)
+
     def test_exact_match_passes(self) -> None:
         """Identical client/server semver strings -> no raise."""
         srv = self._server("1.2.3")
-        srv._check_protocol_version(b"1.2.3")
+        self._gate(srv, b"1.2.3")
 
     def test_patch_ignored(self) -> None:
         """Patch component is ignored — any matching major+minor passes."""
         srv = self._server("1.2.3")
-        srv._check_protocol_version(b"1.2.0")
-        srv._check_protocol_version(b"1.2.99")
+        self._gate(srv, b"1.2.0")
+        self._gate(srv, b"1.2.99")
 
     def test_minor_mismatch_rejected_with_direction_client_too_old(self) -> None:
         """Client minor < server minor -> 'upgrade the client' directive."""
         srv = self._server("1.5.0")
         with pytest.raises(ProtocolVersionError) as exc_info:
-            srv._check_protocol_version(b"1.2.0")
+            self._gate(srv, b"1.2.0")
         msg = str(exc_info.value)
         assert "Client: 1.2.0" in msg
         assert "Server: 1.5.0" in msg
@@ -229,7 +246,7 @@ class TestComparisonRule:
         """Client minor > server minor -> 'upgrade the worker' directive."""
         srv = self._server("1.2.0")
         with pytest.raises(ProtocolVersionError) as exc_info:
-            srv._check_protocol_version(b"1.5.0")
+            self._gate(srv, b"1.5.0")
         msg = str(exc_info.value)
         assert "Client: 1.5.0" in msg
         assert "Server: 1.2.0" in msg
@@ -239,39 +256,39 @@ class TestComparisonRule:
         """Client major < server major -> 'upgrade the client'."""
         srv = self._server("2.0.0")
         with pytest.raises(ProtocolVersionError) as exc_info:
-            srv._check_protocol_version(b"1.9.9")
+            self._gate(srv, b"1.9.9")
         assert "upgrade the VGI extension/client" in str(exc_info.value)
 
     def test_major_mismatch_server_too_old(self) -> None:
         """Client major > server major -> 'upgrade the worker'."""
         srv = self._server("1.2.0")
         with pytest.raises(ProtocolVersionError) as exc_info:
-            srv._check_protocol_version(b"2.0.0")
+            self._gate(srv, b"2.0.0")
         assert "upgrade the VGI worker" in str(exc_info.value)
 
     def test_malformed_client_version_rejected(self) -> None:
         """Non-semver client metadata raises ProtocolVersionError with a 'malformed' hint."""
         srv = self._server("1.2.0")
         with pytest.raises(ProtocolVersionError, match="malformed protocol_version"):
-            srv._check_protocol_version(b"banana")
+            self._gate(srv, b"banana")
 
     def test_missing_client_version_rejected(self) -> None:
         """A versioned server rejects requests with no protocol_version metadata key."""
         srv = self._server("1.2.0")
         with pytest.raises(ProtocolVersionError, match="did not send"):
-            srv._check_protocol_version(None)
+            self._gate(srv, None)
 
     def test_undecodable_bytes_rejected(self) -> None:
         """Non-UTF-8 client metadata raises ProtocolVersionError with a clear hint."""
         srv = self._server("1.2.0")
         with pytest.raises(ProtocolVersionError, match="non-UTF-8"):
-            srv._check_protocol_version(b"\xff\xfe")
+            self._gate(srv, b"\xff\xfe")
 
     def test_protocol_version_error_is_version_error_subclass(self) -> None:
         """Existing catch sites for VersionError must keep working (subclass relationship)."""
         srv = self._server("1.2.0")
         with pytest.raises(VersionError):
-            srv._check_protocol_version(None)
+            self._gate(srv, None)
 
 
 # --- Wire-level smoke tests --------------------------------------------------

@@ -500,6 +500,10 @@ class _ProtocolBinding:
         ctx_methods: Names whose implementation accepts a ``ctx`` argument.
             Per binding because a method taking ``ctx`` on one protocol must
             not grant it to a same-named method on another.
+        version_exempt: Skip the ``protocol_version`` gate for this binding.
+            Set for the reflection protocol, which is what a version-mismatched
+            client calls to learn *what* mismatched -- gating it would deny the
+            client the diagnosis it came for.
 
     """
 
@@ -511,6 +515,7 @@ class _ProtocolBinding:
     version_parts: tuple[int, int, int] | None
     protocol_hash: str
     ctx_methods: frozenset[str]
+    version_exempt: bool = False
 
 
 class RpcServer:
@@ -859,24 +864,38 @@ class RpcServer:
         """
         return self._protocol_version
 
-    def _check_protocol_version(
-        self,
-        client_version_bytes: bytes | None,
-    ) -> None:
-        """Validate a client's declared protocol_version against the server's.
+    def gate_version(self, info: RpcMethodInfo) -> None:
+        """Enforce the declared protocol_version of the binding ``info`` belongs to.
 
-        Raises ``ProtocolVersionError`` with a directional message telling
-        the reader which side to upgrade. Caller is responsible for invoking
-        only when ``self._protocol_version_parts is not None``.
+        A server hosting several protocols has a version per binding, so the
+        gate has to read the resolved method's, not the primary's.  Silently
+        gating a secondary protocol against the primary's version is the shape
+        of bug that produces a confusing mismatch message pointing at the wrong
+        protocol.
 
-        Comparison rule (see plan §2.4): exact major+minor match; patch ignored.
+        No-op when the binding's Protocol declares no ``protocol_version``, and
+        for a binding marked version-exempt (reflection): that is the
+        diagnostic path a mismatched client uses to find out *what* mismatched,
+        so gating it would deny the client its own diagnosis.
+
+        Raises:
+            ProtocolVersionError: On a major or minor mismatch, with a
+                directional message naming which side to upgrade.
+
         """
-        server_parts = self._protocol_version_parts
-        server_version = self._protocol_version
-        assert server_parts is not None and server_version is not None
+        binding = self._bindings.get(info.protocol_name)
+        if binding is None or binding.version_exempt:
+            return
+        server_parts = binding.version_parts
+        server_version = binding.version
+        if server_parts is None or server_version is None:
+            return
+        md = _current_request_metadata.get()
+        client_version_bytes = md.get(PROTOCOL_VERSION_KEY) if md is not None else None
+        protocol_name = binding.name
         if client_version_bytes is None:
             raise ProtocolVersionError(
-                f"VGI client/worker protocol_version mismatch.\n"
+                f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
                 f"  Client: <not declared>\n"
                 f"  Server: {server_version}\n"
                 f"  Direction: the client did not send a vgi_rpc.protocol_version "
@@ -887,7 +906,7 @@ class RpcServer:
             client_version = client_version_bytes.decode()
         except UnicodeDecodeError as exc:
             raise ProtocolVersionError(
-                f"VGI client/worker protocol_version mismatch.\n"
+                f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
                 f"  Client: <undecodable bytes>\n"
                 f"  Server: {server_version}\n"
                 f"  Direction: client sent non-UTF-8 protocol_version metadata."
@@ -896,7 +915,7 @@ class RpcServer:
             client_parts = parse_version(client_version)
         except ValueError as exc:
             raise ProtocolVersionError(
-                f"VGI client/worker protocol_version mismatch.\n"
+                f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
                 f"  Client: {client_version}\n"
                 f"  Server: {server_version}\n"
                 f"  Direction: client sent a malformed protocol_version. "
@@ -915,7 +934,7 @@ class RpcServer:
                 f"server is too old; upgrade the VGI worker to a version supporting protocol_version {client_version}."
             )
         raise ProtocolVersionError(
-            f"VGI client/worker protocol_version mismatch.\n"
+            f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
             f"  Client: {client_version}\n"
             f"  Server: {server_version}\n"
             f"  Direction: {direction}"
@@ -1173,19 +1192,15 @@ class RpcServer:
                 _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
                 return
 
-            # Application-protocol-version gate. Fires only when the Protocol
-            # declared a ``protocol_version`` ClassVar. ``__describe__`` is
-            # exempt: it is the diagnostic path a mismatched client uses to
-            # introspect the server's version. Failure here writes a typed
-            # error stream and returns so the serve loop continues.
-            if self._protocol_version_parts is not None and method_name != "__describe__":
-                try:
-                    md = _current_request_metadata.get()
-                    self._check_protocol_version(md.get(PROTOCOL_VERSION_KEY) if md is not None else None)
-                except ProtocolVersionError as exc:
-                    err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
-                    _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
-                    return
+            # Application-protocol-version gate, against the binding that owns
+            # the resolved method. Failure writes a typed error stream and
+            # returns, so the serve loop continues.
+            try:
+                self.gate_version(info)
+            except ProtocolVersionError as exc:
+                err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
+                _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
+                return
 
             # Request validation. Both steps are answered with a typed error
             # stream rather than allowed to propagate: an exception escaping

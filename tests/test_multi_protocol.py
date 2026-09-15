@@ -294,3 +294,76 @@ class TestRouting:
         """Not 'you failed to route' — the caller's routing was never the problem."""
         out = self._resolve(RpcServer(Alpha, AlphaImpl()), "__describe__", None)
         assert "does not implement the reserved method" in out
+
+
+class TestVersionGate:
+    """The gate reads the version of the binding that owns the resolved method.
+
+    A server hosting two independently-versioned protocols has no single
+    "server version" to compare against, so gating every call against the
+    primary's would reject correct callers of the secondary and produce a
+    mismatch message naming the wrong protocol.
+    """
+
+    @staticmethod
+    def _gate(srv: RpcServer, method: str, protocol: bytes, version: bytes | None) -> str:
+        """Resolve and gate one call; return ``"ok"`` or the error text."""
+        import pyarrow as pa
+
+        from vgi_rpc.metadata import (
+            PROTOCOL_KEY,
+            PROTOCOL_VERSION_KEY,
+            REQUEST_VERSION,
+            REQUEST_VERSION_KEY,
+            RPC_METHOD_KEY,
+        )
+        from vgi_rpc.rpc._common import _current_request_metadata
+
+        md: dict[bytes, bytes] = {
+            RPC_METHOD_KEY: method.encode(),
+            REQUEST_VERSION_KEY: REQUEST_VERSION,
+            PROTOCOL_KEY: protocol,
+        }
+        if version is not None:
+            md[PROTOCOL_VERSION_KEY] = version
+        token = _current_request_metadata.set(pa.KeyValueMetadata(md))
+        try:
+            srv.gate_version(srv._resolve(method))
+            return "ok"
+        except Exception as exc:
+            return str(exc)
+        finally:
+            _current_request_metadata.reset(token)
+
+    def test_each_binding_gates_on_its_own_version(self) -> None:
+        """Alpha is 1.0.0 and Beta is 2.3.0; each caller declares its own."""
+        srv = _server()
+        assert self._gate(srv, "status", b"demo.Alpha.v1", b"1.0.0") == "ok"
+        assert self._gate(srv, "status", b"demo.Beta.v1", b"2.3.0") == "ok"
+
+    def test_mismatch_on_one_protocol_leaves_the_other_callable(self) -> None:
+        """The isolation property: a stale Alpha client does not break Beta."""
+        srv = _server()
+        assert "mismatch" in self._gate(srv, "status", b"demo.Alpha.v1", b"1.4.0")
+        assert self._gate(srv, "status", b"demo.Beta.v1", b"2.3.0") == "ok"
+
+    def test_the_other_protocols_version_is_not_accepted(self) -> None:
+        """Beta's version against Alpha is a mismatch, not a pass.
+
+        This is the failure a single shared gate would have let through in one
+        direction and produced a misleading message for in the other.
+        """
+        assert "mismatch" in self._gate(_server(), "status", b"demo.Alpha.v1", b"2.3.0")
+
+    def test_patch_still_ignored_per_binding(self) -> None:
+        """The comparison rule is unchanged; only what it compares against moved."""
+        assert self._gate(_server(), "status", b"demo.Beta.v1", b"2.3.99") == "ok"
+
+    def test_mismatch_message_names_the_protocol(self) -> None:
+        """With N bindings, "Server: 1.0.0" alone does not say which server."""
+        msg = self._gate(_server(), "status", b"demo.Alpha.v1", b"1.4.0")
+        assert "'demo.Alpha.v1'" in msg
+
+    def test_absent_version_against_a_versioned_binding_is_an_error(self) -> None:
+        """Stripping the field must not silently disable the gate."""
+        assert "did not send" in self._gate(_server(), "status", b"demo.Beta.v1", None)
