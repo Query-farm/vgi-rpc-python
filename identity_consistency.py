@@ -78,8 +78,12 @@ CHECKS: tuple[tuple[str, str, str], ...] = (
      "the NBSP floor is not pinned by a test; the port may cover it today and regress silently"),
 
     # --- the JWS refusal: routing one onward hands a third party a token ---
-    ("JWS regex", r"A-Za-z0-9_-\]\+\\?\.\[A-Za-z0-9_-",
-     "a JWS-shaped subject may reach the resolver"),
+    # Matches a regex literal OR a hand-rolled matcher: C++ and Rust hand-roll
+    # deliberately, because a backtracking engine on attacker-controlled input
+    # is its own hazard.  Keying on the regex spelling marked those correct
+    # ports as failures.
+    ("JWS matcher present", r"A-Za-z0-9_-|base64url|jws.?shaped|is.?jws",
+     "no JWS shape test is discoverable; a JWS-shaped subject may reach the resolver"),
 
     # --- error taxonomy: the only definitive-vs-transient signal a caller has ---
     ("kind:introspection_refused", r"introspection_refused", "error_kind absent or misspelled"),
