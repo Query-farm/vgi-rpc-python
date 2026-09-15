@@ -55,16 +55,25 @@ SUBPROCESS_WORKERS: dict[str, dict[str, str | list[str] | Path]] = {
         "build": "cargo build --release --bin vgi-rpc-conformance-rust",
     },
     "java": {
-        "cmd": ["./gradlew", "-q", "--console=plain", "runConformanceWorker"],
+        # The installed distribution, not `gradlew run`: Gradle writes its own
+        # progress to stdout, which is the same stream the worker speaks Arrow
+        # IPC on.
+        "cmd": ["./conformance-worker/build/install/conformance-worker/bin/conformance-worker"],
         "cwd": REPOS_DIR / "vgi-rpc-java",
+        "build": "./gradlew -q --console=plain :conformance-worker:installDist",
     },
     "csharp": {
-        "cmd": ["dotnet", "run", "--project", "src/VgiRpc.Conformance", "-c", "Release", "--no-build"],
+        # The published binary, not `dotnet run`: the SDK writes build progress
+        # to stdout, which is the same stream the worker speaks Arrow IPC on.
+        "cmd": ["./artifacts/conformance-worker/QueryFarm.VgiRpc.ConformanceWorker"],
         "cwd": REPOS_DIR / "vgi-rpc-csharp",
-        "build": "dotnet build -c Release",
+        "build": (
+            "dotnet publish conformance/QueryFarm.VgiRpc.ConformanceWorker "
+            "-c Release -o artifacts/conformance-worker"
+        ),
     },
     "cpp": {
-        "cmd": ["./build/conformance_worker"],
+        "cmd": ["./build/conformance/conformance_worker"],
         "cwd": REPOS_DIR / "vgi-rpc-c++",
         "build": "cmake --build build --target conformance_worker",
     },
