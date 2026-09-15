@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from http import HTTPStatus
 from io import BytesIO
@@ -28,6 +27,7 @@ from vgi_rpc.rpc import (
     _write_error_batch,
 )
 from vgi_rpc.rpc._common import CookieSpec, _current_body_precompressed, _current_response_cookies
+from vgi_rpc.rpc._types import PROTOCOL_NAME_RE
 from vgi_rpc.utils import new_ipc_stream
 
 from .._common import (
@@ -134,13 +134,6 @@ def _apply_cookies_to_response(resp: falcon.Response, cookies: list[CookieSpec])
 #: (``__describe__``) are server-level and owned by no protocol.
 _RESERVED_PROTOCOL = "\x00reserved"
 
-#: Protocol names are identifiers, optionally dot-qualified (``vgi.Identity.v1``).
-#: A path segment that cannot be one was never addressed to this server, so it is
-#: 404 rather than 405 — otherwise unrelated two-segment paths such as
-#: ``/.well-known/oauth-protected-resource`` would be answered
-#: "method not allowed" by the RPC route they happen to match.
-_PROTOCOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
-
 
 class _RpcResource:
     """Falcon resource for unary calls: ``POST {prefix}/{method}``."""
@@ -207,7 +200,7 @@ class _RpcResource:
         to match this route, including paths belonging to other features.
         """
         del req, resp, method
-        if not _PROTOCOL_NAME.match(protocol) or protocol not in self._app._server._bindings:
+        if not PROTOCOL_NAME_RE.match(protocol) or protocol not in self._app._server._bindings:
             raise falcon.HTTPNotFound
         raise falcon.HTTPMethodNotAllowed(allowed_methods=["POST"])
 

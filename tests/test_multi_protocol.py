@@ -441,3 +441,68 @@ def _state_types(srv: RpcServer) -> dict[tuple[str, str], object]:
     from vgi_rpc.http.server._state_token import _resolve_state_types
 
     return dict(_resolve_state_types(srv))
+
+
+class TestNameGrammar:
+    """A protocol name is an identifier, optionally dot-qualified.
+
+    Validated on both carriers.  At construction it is a typo caught at
+    startup; on the wire it keeps a request-supplied string out of error
+    messages, log fields and metric labels before it is ever looked up.
+    """
+
+    @staticmethod
+    def _named(name: str) -> type:
+        class _P(Protocol):
+            protocol_name: ClassVar[str] = name
+
+            def noop(self) -> str: ...
+
+        return _P
+
+    class _NoopImpl:
+        def noop(self) -> str:
+            return ""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["vgi.Identity.v1", "Service", "_private", "a.b.c.d.v12", "A1.b2"],
+    )
+    def test_accepted(self, name: str) -> None:
+        """Dot-qualified identifiers, with the major version as the last part."""
+        assert RpcServer(self._named(name), self._NoopImpl()).protocol_name == name
+
+    @pytest.mark.parametrize(
+        "name",
+        ["1leading", "has space", "has-dash", "has/slash", ".leading", "has\x00nul", "é"],
+    )
+    def test_rejected(self, name: str) -> None:
+        """Everything a path segment or a metric label should never carry."""
+        with pytest.raises(ValueError, match=r"not an identifier"):
+            RpcServer(self._named(name), self._NoopImpl())
+
+    def test_empty_declaration_falls_back_to_the_class_name(self) -> None:
+        """An empty string reads as "not declared", the documented fallback.
+
+        Rejecting it would make ``protocol_name = ""`` an error rather than
+        the absence it looks like.
+        """
+        assert RpcServer(self._named(""), self._NoopImpl()).protocol_name == "_P"
+
+    def test_over_long_name_rejected(self) -> None:
+        """255 bytes: names travel as metadata and as a path segment."""
+        with pytest.raises(ValueError, match="exceeds 255 bytes"):
+            RpcServer(self._named("a" * 256), self._NoopImpl())
+
+    def test_reserved_prefix_rejected_for_applications(self) -> None:
+        """An application claiming ``vgi_rpc.`` would shadow the framework's own.
+
+        Reflection is the one surface a client can trust before it knows
+        anything else about the server, so it must not be impersonable.
+        """
+        with pytest.raises(ValueError, match="reserved"):
+            RpcServer(self._named("vgi_rpc.Reflection.v1"), self._NoopImpl())
+
+    def test_a_name_merely_containing_the_prefix_is_fine(self) -> None:
+        """The guard is on the prefix, not a substring anywhere."""
+        assert RpcServer(self._named("app.vgi_rpc.v1"), self._NoopImpl()).protocol_name == "app.vgi_rpc.v1"

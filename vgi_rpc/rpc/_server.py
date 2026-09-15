@@ -81,6 +81,7 @@ from vgi_rpc.rpc._types import (
     _protocol_wire_name,
     _validate_implementation,
     rpc_methods,
+    validate_protocol_name,
 )
 from vgi_rpc.rpc._wire import (
     _ClientLogSink,
@@ -609,6 +610,13 @@ class RpcServer:
         except UnicodeDecodeError as exc:
             raise ProtocolNotSpecifiedError("'vgi_rpc.protocol' is not valid UTF-8.") from exc
 
+        try:
+            validate_protocol_name(name, allow_reserved=True)
+        except ValueError as exc:
+            # Checked before the lookup so an arbitrary request-supplied string
+            # never reaches an error message, a log field or a metric label.
+            raise ProtocolNotSupportedError(f"'vgi_rpc.protocol' is not a protocol name: {exc}") from exc
+
         binding = self._bindings.get(name)
         if binding is None:
             raise ProtocolNotSupportedError(
@@ -621,7 +629,7 @@ class RpcServer:
             )
         return info
 
-    def _build_binding(self, proto: type, impl: object) -> _ProtocolBinding:
+    def _build_binding(self, proto: type, impl: object, *, allow_reserved: bool = False) -> _ProtocolBinding:
         """Validate one protocol/implementation pair and freeze it into a binding."""
         from vgi_rpc.metadata import PROTOCOL_HASH_KEY
 
@@ -641,6 +649,10 @@ class RpcServer:
         methods = rpc_methods(proto)
         _validate_implementation(proto, impl, methods)
         name = _protocol_wire_name(proto)
+        try:
+            validate_protocol_name(name, allow_reserved=allow_reserved)
+        except ValueError as exc:
+            raise ValueError(f"{proto.__name__}: {exc}") from exc
 
         from vgi_rpc.introspect import build_describe_batch
 

@@ -26,6 +26,7 @@ from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.http.server._resources import _RESERVED_PROTOCOL
 from vgi_rpc.rpc import MethodNotImplementedError, RpcMethodInfo, RpcServer
 from vgi_rpc.rpc._common import ProtocolNotSpecifiedError, ProtocolNotSupportedError
+from vgi_rpc.rpc._types import validate_protocol_name
 
 from .._common import _RpcHttpError
 from ._responses import _check_content_type
@@ -165,6 +166,16 @@ class _HttpRpcApp:
                 )
             _check_content_type(req)
             return reserved
+
+        try:
+            validate_protocol_name(protocol, allow_reserved=True)
+        except ValueError as exc:
+            # Checked before the lookup so a request-supplied path segment never
+            # reaches an error message, a log field or a metric label.
+            raise _RpcHttpError(
+                ProtocolNotSupportedError(f"Not a protocol name: {exc}"),
+                status_code=HTTPStatus.NOT_FOUND,
+            ) from exc
 
         binding = self._server._bindings.get(protocol)
         if binding is None:

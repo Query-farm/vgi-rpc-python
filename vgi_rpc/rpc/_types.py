@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 import functools
 import inspect
+import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType, TracebackType
@@ -860,6 +861,56 @@ def _get_param_defaults(protocol: type, method_name: str) -> dict[str, object]:
         if param.default is not inspect.Parameter.empty:
             defaults[name] = param.default
     return defaults
+
+
+#: A protocol name is an identifier, optionally dot-qualified, carrying its
+#: major version as the last component (``vgi.Identity.v1``).  Validated on
+#: both carriers: at construction, and again on the routing key read off the
+#: wire -- an unvalidated name from a request reaches error messages, log
+#: fields and metric labels, where arbitrary bytes do not belong.
+PROTOCOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+
+#: Reserved for protocols the framework itself defines.  An application
+#: claiming ``vgi_rpc.Reflection.v1`` would shadow the one surface a client
+#: can trust before it knows anything else about the server.
+RESERVED_PROTOCOL_PREFIX = "vgi_rpc."
+
+#: Names cross process boundaries as metadata and as a path segment; the cap
+#: keeps a hostile one out of both.
+MAX_PROTOCOL_NAME_BYTES = 255
+
+
+def validate_protocol_name(name: str, *, allow_reserved: bool = False) -> str:
+    """Return *name* if it can be a protocol's wire identity, else raise.
+
+    Args:
+        name: The candidate wire name.
+        allow_reserved: Permit the ``vgi_rpc.`` prefix.  Set only where the
+            framework registers its own protocols.
+
+    Returns:
+        The name, unchanged.
+
+    Raises:
+        ValueError: The name is empty, malformed, over-long, or claims the
+            reserved prefix without permission.
+
+    """
+    if not name:
+        raise ValueError("A protocol name may not be empty.")
+    if len(name.encode()) > MAX_PROTOCOL_NAME_BYTES:
+        raise ValueError(f"Protocol name exceeds {MAX_PROTOCOL_NAME_BYTES} bytes: {name[:64]!r}...")
+    if not PROTOCOL_NAME_RE.match(name):
+        raise ValueError(
+            f"Protocol name {name!r} is not an identifier, optionally dot-qualified. "
+            f"Expected something like 'vgi.Identity.v1'."
+        )
+    if not allow_reserved and name.startswith(RESERVED_PROTOCOL_PREFIX):
+        raise ValueError(
+            f"Protocol name {name!r} claims the reserved {RESERVED_PROTOCOL_PREFIX!r} prefix, "
+            f"which is for protocols the framework defines."
+        )
+    return name
 
 
 def _protocol_wire_name(protocol: type) -> str:
