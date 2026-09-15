@@ -27,6 +27,7 @@ from vgi_rpc.rpc._token_identity import (
     StaleAuthError,
     TokenIdentity,
     TokenUnresolvedError,
+    reject_jws_shaped,
     token_digest,
 )
 
@@ -344,3 +345,62 @@ class TestRateLimiter:
             limiter.allow(f"k{i}", now=100.0)
         limiter.allow("fresh", now=200.0)
         assert len(limiter._counts) == 1
+
+
+class TestJwsShapeTestSurvivesTranslation:
+    r"""Whitespace must not be a way to walk a JWS past the guard.
+
+    The shape test runs against the trimmed credential while the resolver
+    still receives what the caller sent, so trimming can only add refusals.
+
+    This exists because the ports diverged here and the reference was the
+    accident: Python's ``$`` matches before a single trailing newline, so
+    ``"a.b.c\n"`` was refused here while Go's ``\\A..\\z`` and JavaScript's
+    unflagged ``$`` routed it straight to the resolver -- the one outcome the
+    guard exists to prevent.  Python was not even self-consistent about it,
+    refusing one trailing newline and admitting two.  Trimming first is the
+    rule that means the same thing in seven regex dialects.
+    """
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "aaa.bbb.ccc",
+            "aaa.bbb.ccc\n",
+            "aaa.bbb.ccc\n\n",
+            "  aaa.bbb.ccc  ",
+            "\taaa.bbb.ccc\r\n",
+        ],
+    )
+    def test_padding_does_not_smuggle_a_jws_past_the_guard(self, token: str) -> None:
+        """No amount of surrounding whitespace makes a JWS resolvable."""
+        with pytest.raises(TokenUnresolvedError):
+            reject_jws_shaped(token)
+
+    @pytest.mark.parametrize("token", ["", "   ", "\n", "\t\r\n"])
+    def test_a_blank_credential_is_not_a_credential(self, token: str) -> None:
+        """Whitespace-only never reaches a resolver either."""
+        with pytest.raises(TokenUnresolvedError):
+            reject_jws_shaped(token)
+
+    @pytest.mark.parametrize("token", ["opaque-token", "a.b.c.d", "two.segments", "sk_live_abc123"])
+    def test_an_opaque_credential_still_reaches_the_resolver(self, token: str) -> None:
+        """Trimming tightens the JWS test; it must not refuse ordinary tokens."""
+        reject_jws_shaped(token)
+
+    def test_the_resolver_receives_the_credential_unmodified(self) -> None:
+        """Trimming is for the shape test only -- never for what is resolved.
+
+        Rewriting a credential before resolving it would make the worker
+        answer about a string the caller never sent.
+        """
+        seen: list[str] = []
+
+        def recording_resolver(token: str) -> TokenIdentity:
+            seen.append(token)
+            return TokenIdentity(principal="p")
+
+        impl = IdentityImpl(resolve_token=recording_resolver, introspect_principals=["proxy"])
+        ctx = _ctx(_auth("proxy"))
+        impl.introspect_token("  padded-opaque-token  ", ctx)
+        assert seen == ["  padded-opaque-token  "]

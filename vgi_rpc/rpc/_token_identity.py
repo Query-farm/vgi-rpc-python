@@ -231,8 +231,23 @@ def check_introspector(auth: AuthContext, principals: frozenset[str]) -> str:
 
 
 def reject_jws_shaped(token: str) -> None:
-    """Refuse a JWS-shaped subject before it reaches a resolver."""
-    if not token or len(token) > MAX_TOKEN_CHARS or _JWS_SHAPED.match(token):
+    r"""Refuse a JWS-shaped subject before it reaches a resolver.
+
+    The shape test runs against the *whitespace-trimmed* credential, while the
+    resolver still receives what the caller actually sent.  Trimming can only
+    add refusals, never remove one, and it closes a padding bypass: without it
+    ``"a.b.c\n"`` is not JWS-shaped to a strict matcher and gets routed onward,
+    which is precisely what this guard exists to stop.
+
+    That the reference happened to refuse a single trailing newline anyway was
+    an artifact of Python's ``$`` matching before one -- and an arbitrary one,
+    since two newlines slipped through.  Ports spelling the anchors strictly
+    (Go's ``\A..\z``, JavaScript's unflagged ``$``) diverged here, in the
+    unsafe direction.  Trimming first is the rule that survives translation
+    into seven regex dialects, because it does not depend on any of them.
+    """
+    candidate = token.strip()
+    if not candidate or len(token) > MAX_TOKEN_CHARS or _JWS_SHAPED.match(candidate):
         raise TokenUnresolvedError("unresolved")
 
 
