@@ -63,10 +63,12 @@ __all__ = [
 #:                         performing it once.
 IDEMPOTENCY_LEVELS = ("unknown", "no_side_effects", "idempotent")
 
-#: What a stream method does, when that is knowable.  Whether a stream is an
-#: exchange is decided by the implementation's return type, not by the
-#: Protocol, so a server describing its own Protocol often cannot say --
-#: ``unknown`` is the honest answer and is spelled rather than left null.
+#: What a stream method does, when that is knowable.
+#:
+#: Most methods in most ports are classifiable; ``unknown`` is for the ones that
+#: are not -- a port that decides producer-vs-exchange from the returned stream,
+#: or a registration whose shape is computed at run time.  Spelled rather than
+#: left null, because "I cannot say" is a different answer from "producer".
 STREAM_KINDS = ("unknown", "producer", "exchange")
 
 
@@ -88,9 +90,14 @@ class MethodInfo(ArrowSerializableDataclass):
         has_header: Whether a stream declares a header type.
         stream_kind: For streams, one of :data:`STREAM_KINDS`; empty for
             unary.  A string rather than a nullable bool because the state is
-            genuinely three-valued -- whether a stream is an exchange is an
-            *implementation* property, not visible on the Protocol -- and
-            "unknown" should be said rather than encoded as absence.
+            genuinely three-valued: a port that decides producer-vs-exchange
+            from the returned stream cannot say ahead of the call, so "unknown"
+            should be said rather than encoded as absence.
+
+            This is the only field that tells a client whether a stream accepts
+            input -- the description carries parameter, result and header
+            schemas, but a stream's *input* schema arrives at init time.  A port
+            that can determine the kind must state it.
         params_schema_ipc: Request parameter schema, as Arrow IPC.
         result_schema_ipc: Response schema, as Arrow IPC; empty when
             ``has_return`` is false.

@@ -1645,11 +1645,23 @@ reads. The *hash* is what compares across ports, and it is defined over the
 decoded structure precisely so these bytes need not match.
 
 `stream_kind` is a string rather than a nullable bool because the state is
-genuinely three-valued: whether a stream is an exchange is an *implementation*
-property, not visible on the Protocol, so `unknown` is often the honest answer
-and should be said rather than encoded as absence. An absent schema is empty
-bytes rather than null, so no port pays a null check on a value it will only
-ever treat as absent.
+genuinely three-valued. **A port that can determine a stream's kind MUST state
+it**: this is the only field in a description that says whether a stream accepts
+input — the description carries parameter, result and header schemas, but a
+stream's *input* schema arrives at init time, so a client, a code generator or a
+human reading a describe page has exactly one place to learn whether a method is
+send-and-receive or receive-only.
+
+`unknown` is for the methods a port genuinely cannot classify: one whose
+producer-vs-exchange shape is decided from the returned stream rather than
+declared, or a registration whose output schema is computed at run time and does
+not carry the shape. It is a real answer, not a default to fall back on — "I
+cannot say" is different from "producer", and a port that reports `unknown` for
+a method it could have classified has made its description useless for the
+question it exists to answer.
+
+An absent schema is empty bytes rather than null, so no port pays a null check
+on a value it will only ever treat as absent.
 
 `idempotency` follows gRPC's `idempotency_level`. With an HTTP transport and a
 policy proxy in the path, retries *will* happen; without this nothing on the
@@ -1699,7 +1711,7 @@ The preimage:
 ```json
 {"protocol":"vgi.Identity.v1","methods":[
   {"name":"introspect_token","type":"unary","has_return":true,
-   "has_header":false,"is_exchange":false,
+   "has_header":false,
    "params":[{"name":"token","nullable":false,"type":"utf8"}],
    "result":[{"name":"result","nullable":false,"type":"binary"}]}]}
 ```
@@ -1715,6 +1727,13 @@ The preimage:
   builds and ports without changing what is on the wire, and folding the framing
   version in would rotate every protocol's hash on a framework release that
   changed no protocol.
+- **`stream_kind` is not in the preimage either**, and for a different reason:
+  not that no port can determine it — every port can, for most methods — but
+  that *which* methods a port can classify depends on how that port's
+  registration works. So two ports can disagree about a method while neither is
+  wrong, and a field one port can state and another cannot is not a contract.
+  It still reaches clients on the description, where `unknown` is a sayable
+  answer; a hash has no such option.
 - The `v1` in the domain tag is the only version the hash carries, and it moves
   only when the *hash definition* moves.
 
