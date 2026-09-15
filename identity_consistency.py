@@ -56,7 +56,7 @@ CHECKS: tuple[tuple[str, str, str], ...] = (
      "method-level narrowing is not pinned in the other direction"),
 
     # --- constants: a different value is a different security posture ---
-    ("MAX_TOKEN_CHARS=4096", r"max[_a-z]*token[_a-z]*(chars|len|size|bytes)\D{0,40}4096|4096\D{0,40}token",
+    ("cap value 4096", r"max[_a-z]*token[_a-z]*(chars|len|size|bytes)\D{0,40}4096|4096\D{0,40}token",
      "the cap on a credential we will attempt to resolve differs"),
     ("rate limit 20/s", r"(rate.?limit|per.?window|introspect)\D{0,60}\b20\b",
      "the introspection oracle is bounded differently"),
@@ -66,6 +66,16 @@ CHECKS: tuple[tuple[str, str, str], ...] = (
      "the default cache window -- and so the revocation lag -- differs"),
     ("retry_after 5", r"retry.?after\D{0,30}\b5\b",
      "a transient failure does not tell the caller how long to wait"),
+
+    # --- the four divergences the port exercise found, none hash-visible ---
+    ("cap named in BYTES", r"MAX_TOKEN_BYTES|MaxTokenBytes|kMaxTokenBytes",
+     "the cap's unit is left to the reader; the ports used three different ones"),
+    ("trims before shape test", r"trim\w*\s*\(|Trimmed\(|strip\(\)",
+     "the shape test runs on the raw credential, so padding smuggles a JWS past it"),
+    ("U+0085 pinned by test", r"0085|u\{85\}|x85|\\u0085",
+     "the NEL floor is not pinned by a test; the port may cover it today and regress silently"),
+    ("U+00A0 pinned by test", r"00A0|00a0|u\{a0\}|xa0|\\u00a0",
+     "the NBSP floor is not pinned by a test; the port may cover it today and regress silently"),
 
     # --- the JWS refusal: routing one onward hands a third party a token ---
     ("JWS regex", r"A-Za-z0-9_-\]\+\\?\.\[A-Za-z0-9_-",
