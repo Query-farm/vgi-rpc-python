@@ -1660,6 +1660,7 @@ class TestRequestVersion:
         """Write a request IPC stream with custom metadata, returning raw bytes."""
         from io import BytesIO
 
+        from vgi_rpc.metadata import PROTOCOL_KEY
         from vgi_rpc.rpc import _convert_for_arrow
 
         buf = BytesIO()
@@ -1668,8 +1669,14 @@ class TestRequestVersion:
             val = _convert_for_arrow(kwargs.get(f.name))
             arrays.append(pa.array([val], type=f.type))
         batch = pa.RecordBatch.from_arrays(arrays, schema=params_schema)
+        # Supply the routing key unless the caller set one. These tests probe
+        # version and schema handling, so without it they would all stop at the
+        # routing check and never reach the behaviour they name. A test that
+        # wants to exercise routing passes its own.
+        md = dict(custom_metadata)
+        md.setdefault(PROTOCOL_KEY, b"RpcFixtureService")
         with pa.ipc.new_stream(buf, params_schema) as writer:
-            writer.write_batch(batch, custom_metadata=custom_metadata)
+            writer.write_batch(batch, custom_metadata=pa.KeyValueMetadata(md))
         return buf.getvalue()
 
     def test_wrong_version_raises(self) -> None:
@@ -1799,14 +1806,21 @@ class TestRawParameterSchema:
         """A valid IPC request with the wrong schema does not poison the pipe."""
         from io import BytesIO
 
-        from vgi_rpc.metadata import REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.metadata import PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
         from vgi_rpc.rpc import _dispatch_log_or_error, _drain_stream
         from vgi_rpc.rpc._wire import _write_request
 
         server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
         declared = rpc_methods(RpcFixtureService)["add"].params_schema
         wrong = pa.schema([pa.field(field.name, field.type, nullable=True) for field in declared])
-        metadata = pa.KeyValueMetadata({RPC_METHOD_KEY: b"add", REQUEST_VERSION_KEY: REQUEST_VERSION})
+        # Routed correctly — the point is that the *schema* is wrong.
+        metadata = pa.KeyValueMetadata(
+            {
+                RPC_METHOD_KEY: b"add",
+                REQUEST_VERSION_KEY: REQUEST_VERSION,
+                PROTOCOL_KEY: b"RpcFixtureService",
+            }
+        )
         bad_buf = BytesIO()
         with pa.ipc.new_stream(bad_buf, wrong) as writer:
             writer.write_batch(
@@ -1814,7 +1828,7 @@ class TestRawParameterSchema:
                 custom_metadata=metadata,
             )
         good_buf = BytesIO()
-        _write_request(good_buf, "add", declared, {"a": 3.0, "b": 4.0})
+        _write_request(good_buf, "add", declared, {"a": 3.0, "b": 4.0}, protocol="RpcFixtureService")
 
         request = BytesIO(bad_buf.getvalue() + good_buf.getvalue())
         response = BytesIO()

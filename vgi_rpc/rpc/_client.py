@@ -21,7 +21,7 @@ from vgi_rpc.metadata import CANCEL_KEY, parse_version
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
 from vgi_rpc.rpc._debug import fmt_batch, wire_request_logger, wire_stream_logger, wire_transport_logger
 from vgi_rpc.rpc._transport import RpcTransport
-from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, rpc_methods
+from vgi_rpc.rpc._types import _TICK_BATCH, AnnotatedBatch, RpcMethodInfo, _protocol_wire_name, rpc_methods
 from vgi_rpc.rpc._wire import _read_batch_with_log_check, _read_stream_header, _read_unary_response, _send_request
 from vgi_rpc.shm import ShmSegment, maybe_write_to_shm
 from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedReader, empty_batch, new_ipc_stream
@@ -344,6 +344,9 @@ class _RpcProxy:
                 raise TypeError(f"{protocol.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
             parse_version(raw_version)  # validate; raises ValueError on malformed
             self._protocol_version = raw_version
+        # The routing key this client addresses. Read from the bound Protocol,
+        # so a client generated for one protocol can never address another.
+        self._protocol_wire_name: str = _protocol_wire_name(protocol)
 
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
@@ -367,12 +370,15 @@ class _RpcProxy:
         ipc_validation = self._ipc_validation
         shm = self._shm
         protocol_version = self._protocol_version
+        protocol = self._protocol_wire_name
 
         def caller(**kwargs: object) -> object:
             if wire_request_logger.isEnabledFor(logging.DEBUG):
                 wire_request_logger.debug("Unary call: method=%s", info.name)
             try:
-                _send_request(transport.writer, info, kwargs, shm=shm, protocol_version=protocol_version)
+                _send_request(
+                    transport.writer, info, kwargs, shm=shm, protocol=protocol, protocol_version=protocol_version
+                )
                 reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
                 return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
             except RpcError:
@@ -391,12 +397,15 @@ class _RpcProxy:
         ipc_validation = self._ipc_validation
         shm = self._shm
         protocol_version = self._protocol_version
+        protocol = self._protocol_wire_name
 
         def caller(**kwargs: object) -> StreamSession:
             if wire_stream_logger.isEnabledFor(logging.DEBUG):
                 wire_stream_logger.debug("Stream init: method=%s", info.name)
             try:
-                _send_request(transport.writer, info, kwargs, shm=shm, protocol_version=protocol_version)
+                _send_request(
+                    transport.writer, info, kwargs, shm=shm, protocol=protocol, protocol_version=protocol_version
+                )
                 # _PooledTransport (pool.py) uses __slots__ and tracks stream
                 # lifecycle to detect abandoned streams.  object.__setattr__ is
                 # needed because __slots__ classes don't have __dict__.

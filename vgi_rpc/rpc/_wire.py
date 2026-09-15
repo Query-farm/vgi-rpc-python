@@ -27,6 +27,7 @@ from vgi_rpc.metadata import (
     LOG_EXTRA_KEY,
     LOG_LEVEL_KEY,
     LOG_MESSAGE_KEY,
+    PROTOCOL_KEY,
     PROTOCOL_VERSION_KEY,
     REQUEST_ID_KEY,
     REQUEST_VERSION,
@@ -183,6 +184,7 @@ def _write_request(
     kwargs: dict[str, object],
     *,
     shm: ShmSegment | None = None,
+    protocol: str | None = None,
     protocol_version: str | None = None,
     extra_metadata: dict[bytes, bytes] | None = None,
     param_types: Mapping[str, object] | None = None,
@@ -195,7 +197,9 @@ def _write_request(
     When *shm* is provided, the segment name and size are included in the
     metadata so the server can dynamically attach to the segment.
 
-    When *protocol_version* is provided, it is included as
+    When *protocol* is provided it is included as ``vgi_rpc.protocol`` — the
+    routing key naming which hosted protocol the call is addressed to. When
+    *protocol_version* is provided, it is included as
     ``vgi_rpc.protocol_version``. Callers that emit non-VGI requests (CLI
     debug tools, HTTP upload-URL bootstrap) leave it at ``None`` so they
     are structurally exempt from the server's dispatch-boundary check.
@@ -215,6 +219,8 @@ def _write_request(
     md: dict[bytes, bytes] = dict(extra_metadata) if extra_metadata else {}
     md[RPC_METHOD_KEY] = method_name.encode()
     md[REQUEST_VERSION_KEY] = REQUEST_VERSION
+    if protocol is not None:
+        md[PROTOCOL_KEY] = protocol.encode()
     if protocol_version is not None:
         md[PROTOCOL_VERSION_KEY] = protocol_version.encode()
     if shm is not None:
@@ -1007,6 +1013,7 @@ def _send_request(
     kwargs: dict[str, object],
     *,
     shm: ShmSegment | None = None,
+    protocol: str | None = None,
     protocol_version: str | None = None,
 ) -> None:
     """Merge defaults, validate, and write a request IPC stream.
@@ -1032,6 +1039,7 @@ def _send_request(
         info.params_schema,
         merged,
         shm=shm,
+        protocol=protocol,
         protocol_version=protocol_version,
         param_types=info.param_types,
     )

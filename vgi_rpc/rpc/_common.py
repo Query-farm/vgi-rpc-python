@@ -729,6 +729,36 @@ class MethodNotImplementedError(AttributeError):
     error_kind: ClassVar[str] = "method_not_implemented"
 
 
+class ProtocolNotSpecifiedError(ValueError):
+    """The request named no protocol.
+
+    Required on every request, including against a server hosting exactly one
+    protocol. An exemption would cost the property that makes this safe: an
+    intermediary that rebuilds a request and drops the field gets a loud
+    rejection instead of silently landing on whichever protocol happened to be
+    first. ``vgi-cedar-proxy`` rewrites request bodies on every call, so this is
+    a live path rather than a hypothetical one.
+
+    A ``ValueError`` so the dispatch shells that already catch one classify it
+    as a bad request rather than a server fault.
+    """
+
+    error_kind: ClassVar[str] = "protocol_not_specified"
+
+
+class ProtocolNotSupportedError(ValueError):
+    """The named protocol is not hosted by this server.
+
+    Deliberately distinct from ``MethodNotImplementedError``: "I do not speak
+    that protocol" and "I speak it but not that method" are different answers,
+    and a client probing for an optional protocol has to tell them apart.
+    Maps to 404 over HTTP, matching unknown-method — gRPC likewise answers
+    UNIMPLEMENTED for both.
+    """
+
+    error_kind: ClassVar[str] = "protocol_not_supported"
+
+
 class SessionLostError(Exception):
     """Raised server-side when a sticky session token cannot be honoured.
 

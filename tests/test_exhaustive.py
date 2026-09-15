@@ -1066,11 +1066,11 @@ class TestServeOneMalformed:
 
         # Write a valid request but with unknown method name
         schema = pa.schema([])
-        _write_request(client.writer, "nonexistent", schema, {})
+        _write_request(client.writer, "nonexistent", schema, {}, protocol="P")
 
         # Read response — should be an error
         reader = ipc.open_stream(client.reader)
-        with pytest.raises(RpcError, match="Unknown method"):
+        with pytest.raises(RpcError, match="has no method"):
             batch, md = reader.read_next_batch_with_custom_metadata()
             _dispatch_log_or_error(batch, md)
 
@@ -1095,7 +1095,7 @@ def _serve_one_roundtrip(
     Dispatches log/error batches so that server-side errors raise RpcError.
     """
     req_buf = BytesIO()
-    _write_request(req_buf, method_name, params_schema, kwargs)
+    _write_request(req_buf, method_name, params_schema, kwargs, protocol="P")
     req_buf.seek(0)
     resp_buf = BytesIO()
     transport = PipeTransport(req_buf, resp_buf)
@@ -1126,7 +1126,7 @@ class TestServeOneServerErrors:
                 return "ok"
 
         server = RpcServer(P, Impl())
-        with pytest.raises(RpcError, match="Unknown method: 'bogus'"):
+        with pytest.raises(RpcError, match="has no method 'bogus'"):
             _serve_one_roundtrip(server, "bogus", pa.schema([]), {})
 
     def test_unknown_method_error_carries_error_kind_metadata(self) -> None:
@@ -1152,7 +1152,7 @@ class TestServeOneServerErrors:
 
         server = RpcServer(P, Impl())
         req_buf = BytesIO()
-        _write_request(req_buf, "bogus", pa.schema([]), {})
+        _write_request(req_buf, "bogus", pa.schema([]), {}, protocol="P")
         req_buf.seek(0)
         resp_buf = BytesIO()
         server.serve_one(PipeTransport(req_buf, resp_buf))

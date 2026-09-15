@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "build_error_stream",
+    "find_protocol",
     "find_protocol_version",
     "find_state_token",
     "read_request",
@@ -173,6 +174,43 @@ def find_state_token(data: bytes) -> bytes | None:
                 break
             if buf.tell() == start:  # no forward progress — avoid an infinite loop
                 break
+    except Exception:
+        return None
+    return None
+
+
+def find_protocol(data: bytes) -> str | None:
+    """Return the ``vgi_rpc.protocol`` routing key stamped on a request body.
+
+    The sibling of :func:`find_protocol_version`, and an intermediary that
+    rebuilds a request **must re-stamp both or neither**. Preserving the version
+    while dropping the name would route the call to whichever protocol the
+    server happens to consider primary while faithfully carrying a version that
+    then gates against the wrong surface — the confusing half of a
+    confused-deputy bug. ``vgi-cedar-proxy`` rebuilds request bodies on every
+    rewrite, so this is a live path.
+
+    Args:
+        data: The (decompressed) request IPC body bytes.
+
+    Returns:
+        The protocol routing key, or ``None`` when absent or unparseable.
+
+    """
+    from vgi_rpc.metadata import PROTOCOL_KEY
+
+    try:
+        reader = ipc.open_stream(BytesIO(data))
+        while True:
+            try:
+                rb = reader.read_next_batch_with_custom_metadata()
+            except StopIteration:
+                break
+            md = rb.custom_metadata
+            if md is not None:
+                value = md.get(PROTOCOL_KEY)
+                if value:
+                    return value.decode()
     except Exception:
         return None
     return None

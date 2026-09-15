@@ -226,3 +226,71 @@ class TestSingleProtocolUnchanged:
         """`server.methods` keeps meaning what it meant."""
         srv = _server()
         assert set(srv.methods) == set(srv._bindings["demo.Alpha.v1"].methods)
+
+
+class TestRouting:
+    """Dispatch resolves on (protocol, method).
+
+    Exercised against ``_resolve`` directly: it is the whole routing decision,
+    and driving raw IPC here would reimplement the transport to test a dict
+    lookup. End-to-end coverage comes from the conformance suite, which routes
+    every call in the ordinary way.
+    """
+
+    @staticmethod
+    def _resolve(srv: RpcServer, method: str, protocol: bytes | None) -> str:
+        """Resolve one call, returning ``ok:<protocol>`` or the error text."""
+        import pyarrow as pa
+
+        from vgi_rpc.metadata import PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY
+        from vgi_rpc.rpc._common import _current_request_metadata
+
+        md: dict[bytes, bytes] = {RPC_METHOD_KEY: method.encode(), REQUEST_VERSION_KEY: REQUEST_VERSION}
+        if protocol is not None:
+            md[PROTOCOL_KEY] = protocol
+        token = _current_request_metadata.set(pa.KeyValueMetadata(md))
+        try:
+            return f"ok:{srv._resolve(method).protocol_name}"
+        except Exception as exc:
+            return str(exc)
+        finally:
+            _current_request_metadata.reset(token)
+
+    def test_each_protocol_gets_its_own_method(self) -> None:
+        """The property the whole change exists for: `status` means two different things."""
+        srv = _server()
+        assert self._resolve(srv, "status", b"demo.Alpha.v1") == "ok:demo.Alpha.v1"
+        assert self._resolve(srv, "status", b"demo.Beta.v1") == "ok:demo.Beta.v1"
+
+    def test_method_not_on_the_named_protocol_is_unknown(self) -> None:
+        """Alpha has `ping`; Beta does not. Addressing Beta must not reach Alpha's."""
+        assert "has no method 'ping'" in self._resolve(_server(), "ping", b"demo.Beta.v1")
+
+    def test_absent_routing_key_is_refused(self) -> None:
+        """Required even on a single-protocol server.
+
+        An exemption would let an intermediary that rebuilds a request and drops
+        the field land silently on whichever protocol happened to be first.
+        """
+        out = self._resolve(RpcServer(Alpha, AlphaImpl()), "ping", None)
+        assert "no 'vgi_rpc.protocol' routing key" in out
+
+    def test_unknown_protocol_is_distinct_from_unknown_method(self) -> None:
+        """A client probing for an optional protocol has to tell the two apart."""
+        out = self._resolve(_server(), "ping", b"demo.Nope.v1")
+        assert "does not host protocol 'demo.Nope.v1'" in out
+        assert "has no method" not in out
+
+    def test_describe_needs_no_routing_key(self) -> None:
+        """__describe__ is the diagnostic path a mismatched client uses.
+
+        Requiring it to name a protocol first would remove the tool exactly when
+        it is needed.
+        """
+        srv = RpcServer(Alpha, AlphaImpl(), enable_describe=True)
+        assert self._resolve(srv, "__describe__", None).startswith("ok:")
+
+    def test_reserved_but_unimplemented_answers_method_not_implemented(self) -> None:
+        """Not 'you failed to route' — the caller's routing was never the problem."""
+        out = self._resolve(RpcServer(Alpha, AlphaImpl()), "__describe__", None)
+        assert "does not implement the reserved method" in out

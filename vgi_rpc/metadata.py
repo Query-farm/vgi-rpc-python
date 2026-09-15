@@ -30,6 +30,7 @@ __all__ = [
     "LOG_LEVEL_KEY",
     "LOG_MESSAGE_KEY",
     "PROTOCOL_HASH_KEY",
+    "PROTOCOL_KEY",
     "PROTOCOL_NAME_KEY",
     "PROTOCOL_VERSION_KEY",
     "REQUEST_ID_KEY",
@@ -123,6 +124,19 @@ PROTOCOL_HASH_KEY = b"vgi_rpc.protocol_hash"
 # major+minor match required, patch ignored. Distinct from ``REQUEST_VERSION``
 # (wire framing) and from any catalog-level data-version semantics.
 PROTOCOL_VERSION_KEY = b"vgi_rpc.protocol_version"
+
+# Routing key: which hosted protocol a request is addressed to. A server may
+# host several, so this selects the binding and hence the method table, the
+# implementation, the version to gate against and the hash to log.
+#
+# The *major* version belongs in this name (``vgi.Identity.v1``), following
+# gRPC/AIP-185, Kubernetes API groups and D-Bus: an incompatible major is then a
+# different name, so it is a routing answer a proxy can act on without parsing
+# Arrow, and `v1` and `v2` can be served side by side while clients migrate.
+# ``PROTOCOL_VERSION_KEY`` carries the full semver and is gated separately —
+# it is what catches a *signature* change under an unchanged method name, which
+# Arrow, lacking field numbers, cannot detect for itself.
+PROTOCOL_KEY = b"vgi_rpc.protocol"
 
 SEMVER_REGEX = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 

@@ -25,6 +25,7 @@ from pyarrow import ipc
 from vgi_rpc.external import ExternalLocationConfig, _current_externalized_bytes, resolve_external_location
 from vgi_rpc.metadata import (
     CANCEL_KEY,
+    PROTOCOL_KEY,
     PROTOCOL_VERSION_KEY,
     REQUEST_VERSION,
     REQUEST_VERSION_KEY,
@@ -43,6 +44,8 @@ from vgi_rpc.rpc._common import (
     HookToken,
     MethodNotImplementedError,
     MethodType,
+    ProtocolNotSpecifiedError,
+    ProtocolNotSupportedError,
     ProtocolVersionError,
     RpcError,
     TransportKind,
@@ -552,6 +555,66 @@ class RpcServer:
         from vgi_rpc.introspect import build_describe_batch
 
         return build_describe_batch(binding.name, binding.methods, self._server_id, binding.version)
+
+    def _resolve(self, method_name: str) -> RpcMethodInfo:
+        """Resolve ``(protocol, method)`` from the current request's metadata.
+
+        The protocol is read from ``vgi_rpc.protocol`` on the request batch and
+        is **required** — including against a server hosting exactly one
+        protocol. An exemption would let an intermediary that rebuilds a request
+        and drops the field land silently on whichever protocol happens to be
+        first, rather than being told.
+
+        Framework built-ins (``__describe__``, ``__transport_options__``) are
+        resolved before this and never reach it.
+
+        Raises:
+            ProtocolNotSpecifiedError: No routing key on the request.
+            ProtocolNotSupportedError: The named protocol is not hosted here.
+            MethodNotImplementedError: The protocol is hosted but has no such
+                method — deliberately a different answer, since a client probing
+                for an optional method must distinguish the two.
+
+        """
+        # Framework built-ins are server-level, not owned by any protocol, and
+        # are resolved before routing. `__describe__` in particular is the
+        # diagnostic path a mismatched client uses to find out *what*
+        # mismatched, so requiring it to name a protocol first would remove the
+        # tool exactly when it is needed.
+        if method_name.startswith("__") and method_name.endswith("__"):
+            builtin = self._methods.get(method_name)
+            if builtin is not None:
+                return builtin
+            # A reserved name this server does not offer — e.g. __describe__ on
+            # a server built with enable_describe=False. The answer is "no such
+            # method", not "you failed to name a protocol": the caller did
+            # nothing wrong with routing, and a client probing for optional
+            # introspection needs the capability answer.
+            raise MethodNotImplementedError(f"This server does not implement the reserved method {method_name!r}.")
+
+        md = _current_request_metadata.get()
+        raw = md.get(PROTOCOL_KEY) if md is not None else None
+        if not raw:
+            raise ProtocolNotSpecifiedError(
+                "Request carries no 'vgi_rpc.protocol' routing key. Every request must "
+                f"name the protocol it addresses. This server hosts: {sorted(self._bindings)}."
+            )
+        try:
+            name = raw.decode()
+        except UnicodeDecodeError as exc:
+            raise ProtocolNotSpecifiedError("'vgi_rpc.protocol' is not valid UTF-8.") from exc
+
+        binding = self._bindings.get(name)
+        if binding is None:
+            raise ProtocolNotSupportedError(
+                f"This server does not host protocol {name!r}. Hosted: {sorted(self._bindings)}."
+            )
+        info = binding.methods.get(method_name)
+        if info is None:
+            raise MethodNotImplementedError(
+                f"Protocol {name!r} has no method {method_name!r}. Available: {sorted(binding.methods)}."
+            )
+        return info
 
     def _build_binding(self, proto: type, impl: object) -> _ProtocolBinding:
         """Validate one protocol/implementation pair and freeze it into a binding."""
@@ -1104,15 +1167,10 @@ class RpcServer:
                 )
                 return
 
-            info = self._methods.get(method_name)
-            if info is None:
-                available = sorted(self._methods.keys())
-                _write_error_stream(
-                    transport.writer,
-                    _EMPTY_SCHEMA,
-                    MethodNotImplementedError(f"Unknown method: '{method_name}'. Available methods: {available}"),
-                    server_id=self._server_id,
-                )
+            try:
+                info = self._resolve(method_name)
+            except (ProtocolNotSpecifiedError, ProtocolNotSupportedError, MethodNotImplementedError) as exc:
+                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
                 return
 
             # Application-protocol-version gate. Fires only when the Protocol

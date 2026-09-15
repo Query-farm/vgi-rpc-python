@@ -283,6 +283,10 @@ class _ProtoV100(Protocol):
 
     protocol_version: ClassVar[str] = "1.0.0"
 
+    # Same routing key on purpose: these model one protocol at different
+    # versions, so the call must route before the version gate can fire.
+    protocol_name: ClassVar[str] = "demo.Greeter"
+
     def greet(self, name: str) -> str: ...
 
 
@@ -291,11 +295,19 @@ class _ProtoV200(Protocol):
 
     protocol_version: ClassVar[str] = "2.0.0"
 
+    # Same routing key on purpose: these model one protocol at different
+    # versions, so the call must route before the version gate can fire.
+    protocol_name: ClassVar[str] = "demo.Greeter"
+
     def greet(self, name: str) -> str: ...
 
 
 class _ProtoNoVersion(Protocol):
     """Test Protocol that opts out of protocol_version entirely."""
+
+    # Same routing key on purpose: these model one protocol at different
+    # versions, so the call must route before the version gate can fire.
+    protocol_name: ClassVar[str] = "demo.Greeter"
 
     def greet(self, name: str) -> str: ...
 
@@ -381,7 +393,7 @@ class TestServerWireBehaviour:
             t.start()
             desc = introspect(client_t)
             t.join(timeout=5)
-            assert desc.protocol_name == "_ProtoV200"
+            assert desc.protocol_name == "demo.Greeter"
             # Server advertised its version in describe-response metadata.
             assert desc.protocol_version == "2.0.0"
         finally:
@@ -451,7 +463,7 @@ class TestHttpTransportVersionCheck:
             # protocol_version. The server must serve describe anyway so
             # mismatched clients can introspect the expected version.
             desc = http_introspect(client=client)
-            assert desc.protocol_name == "_ProtoV200"
+            assert desc.protocol_name == "demo.Greeter"
             assert desc.protocol_version == "2.0.0"
         finally:
             client.close()

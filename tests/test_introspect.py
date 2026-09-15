@@ -418,7 +418,7 @@ class TestIntrospectPipe:
         thread = threading.Thread(target=_run_server_thread, args=(server, server_transport), daemon=True)
         thread.start()
         try:
-            with pytest.raises(RpcError, match="Unknown method"):
+            with pytest.raises(RpcError, match="does not implement the reserved method"):
                 introspect(client_transport)
         finally:
             client_transport.close()
