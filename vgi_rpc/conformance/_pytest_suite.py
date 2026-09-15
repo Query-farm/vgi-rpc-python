@@ -3392,6 +3392,90 @@ class TestRequestId:
                     f"wrong description -- and nothing about it looks wrong."
                 )
 
+    def test_a_stream_call_emits_one_record_per_turn(self, request: pytest.FixtureRequest) -> None:
+        """A stream is not exempt from the access log.
+
+        ``access-log-spec.md`` is explicit: one record per RPC call, and for a
+        stream that means the ``init`` and every continuation, all sharing a
+        ``stream_id``, with ``request_data`` on the init record only.
+
+        Nothing caught a port that emitted *nothing* for streams, because the
+        record validator only checks records that exist -- a port with no
+        stream records passes it trivially, and the gap reads as "clean" rather
+        than "unexamined". Two ports were in exactly that state. This asserts
+        the records are there at all, which is the half no schema can check.
+
+        Skips where the runner exposes no access log, and where the worker does
+        not serve streams over HTTP.
+        """
+        import json
+        import time
+
+        import httpx2
+
+        try:
+            port, log_path = request.getfixturevalue("conformance_http_access_log")
+        except pytest.FixtureLookupError:
+            pytest.skip("runner provides no conformance_http_access_log")
+
+        before = 0
+        if log_path.exists():
+            before = len([ln for ln in log_path.read_text().splitlines() if ln.strip()])
+
+        # Built with the suite's own helper rather than by hand: it stamps the
+        # protocol AND the protocol_version, and a request missing the latter is
+        # refused by the version gate.
+        body = _unary_request_body("produce_n", count=3)
+
+        init = None
+        for prefix in ("", "/vgi"):
+            init = httpx2.post(
+                f"http://127.0.0.1:{port}{prefix}/ConformanceService/produce_n/init",
+                content=body,
+                headers={"content-type": "application/vnd.apache.arrow.stream"},
+                timeout=10.0,
+            )
+            if init.status_code == 200:
+                break
+        assert init is not None
+        if init.status_code != 200:
+            pytest.skip(f"worker does not serve streams over HTTP ({init.status_code})")
+
+        deadline = time.time() + 10.0
+        stream_records: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            if log_path.exists():
+                lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
+                stream_records = [
+                    rec
+                    for ln in lines[before:]
+                    for rec in [json.loads(ln)]
+                    if rec.get("logger") == "vgi_rpc.access" and rec.get("method") == "produce_n"
+                ]
+                if stream_records:
+                    break
+            time.sleep(0.2)
+
+        assert stream_records, (
+            "a stream init succeeded over HTTP but produced no access record. One record per "
+            "RPC call includes the init and every continuation of a stream; a transport that "
+            "logs unary calls and not streams loses the calls that run longest and carry the "
+            "most data."
+        )
+
+        for rec in stream_records:
+            assert rec.get("method_type") == "stream", f"a stream record reports method_type={rec.get('method_type')!r}"
+            sid = rec.get("stream_id")
+            assert isinstance(sid, str) and len(sid) == 32 and sid == sid.lower(), (
+                f"stream_id must be 32 lowercase hex characters, got {sid!r}"
+            )
+
+        ids = {r.get("stream_id") for r in stream_records}
+        assert len(ids) == 1, (
+            f"records of one stream call must share a stream_id, saw {sorted(map(str, ids))}. "
+            f"Without that a reader cannot reassemble a stream's turns."
+        )
+
 
 # ---------------------------------------------------------------------------
 # CORS conformance (HTTP-only)
