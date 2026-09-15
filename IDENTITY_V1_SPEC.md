@@ -267,6 +267,31 @@ worse than no test, because it is counted as coverage. Every port should do this
 for the JWS trap, the length cap, the allowlist, the rate limit and the freshness
 check.
 
+## 5c. The routing key on HTTP: required on raw transports, optional on HTTP
+
+The plan says `vgi_rpc.protocol` is required on every request, absent being an
+error even on a single-protocol server. **That is enforced on raw transports
+and deliberately not on HTTP.** Two ports reached this independently and one
+implemented the strict reading and became unshippable, so it is written down.
+
+On stdio, unix and named pipes the metadata field is the only carrier, so absent
+really is unroutable. On HTTP the path segment already resolved the binding, and
+the shared conformance harness actively tests the permissive behaviour: the
+`_adversarial_http.py` recovery probe requires a **200** for a namespaced request
+carrying no `vgi_rpc.protocol`. A worker that rejects it fails conformance.
+
+Tightening the reference to match the strict reading fails 100 tests (69 after
+fixing the central request builder), most in the cross-language harness that
+drives all six ports. It has to move the harness and the ports together.
+
+**What this gives up, stated plainly:** requiring the key on HTTP is what would
+make a *path rewrite* by an intermediary detectable, since an intermediary that
+rewrites the path cannot touch the metadata. Accepting absent means routing on
+the projection alone in exactly that case. It is a real gap, taken deliberately.
+
+Clients MUST still send it (the reference HTTP client did not, which is how this
+surfaced). Servers MUST still refuse *disagreement*.
+
 ## 6. Hygiene
 
 - The credential must never reach a log, a span, or an error message. Provide a
