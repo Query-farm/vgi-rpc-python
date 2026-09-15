@@ -198,6 +198,13 @@ def main() -> None:
     for name, desc in successful.items():
         if name == ref_name:
             continue
+        # The protocol name is in the hash preimage, so a tool that does not
+        # compare it reports "everything agrees" beside a digest mismatch.
+        if desc.protocol_name != reference.protocol_name:
+            failed = True
+            print()
+            print(f"{name} vs {ref_name}: protocol name "
+                  f"{desc.protocol_name!r} vs {reference.protocol_name!r}")
         only_ref = sorted(set(reference.methods) - set(desc.methods))
         only_port = sorted(set(desc.methods) - set(reference.methods))
         if only_ref or only_port:
