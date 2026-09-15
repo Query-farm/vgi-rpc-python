@@ -25,6 +25,12 @@ from vgi_rpc.rpc import (
     serve_pipe,
 )
 
+#: A syntactically valid protocol digest for records built directly in tests.
+#: ``protocol_hash`` is required on every record, so a test that emits one must
+#: name it -- these fixtures exercise other fields and any well-formed digest
+#: will do.
+_TEST_PROTOCOL_HASH = "0" * 64
+
 
 def _extra(record: logging.LogRecord, key: str) -> Any:
     """Read a dynamic extra field from a log record."""
@@ -207,6 +213,7 @@ class TestAccessLogStats:
                 transport_metadata={},
                 duration_ms=10.0,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
                 stats=stats,
             )
 
@@ -230,6 +237,7 @@ class TestAccessLogStats:
                 transport_metadata={},
                 duration_ms=10.0,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")

@@ -249,7 +249,16 @@ def _emit_access_log(
     http_status: int | None = None,
     stats: CallStatistics | None = None,
     server_version: str = "",
-    protocol_hash: str = "",
+    *,
+    # Required, deliberately: every site must name the owning binding's digest.
+    # It defaulted to "" and every current caller happened to pass it -- but a
+    # default is how the next site forgets, and an empty protocol_hash is a
+    # well-formed record that no registry can key. The C# port found exactly
+    # this shape one level up, where an optional parameter let five of eight
+    # callers silently take the server-wide default; its structural guard
+    # watched the record constructor, which was always correct, and never the
+    # call sites, which were not.
+    protocol_hash: str,
     request_state: bytes | None = None,
     response_state: bytes | None = None,
     cancelled: bool = False,

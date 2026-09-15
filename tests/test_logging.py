@@ -33,6 +33,12 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.rpc._transport import _drain_stderr
 
+#: A syntactically valid protocol digest for records built directly in tests.
+#: ``protocol_hash`` is required on every record, so a test that emits one must
+#: name it -- these fixtures exercise other fields and any well-formed digest
+#: will do.
+_TEST_PROTOCOL_HASH = "0" * 64
+
 
 def _extra(record: logging.LogRecord, key: str) -> Any:
     """Read a dynamic extra field from a log record without ``type: ignore``."""
@@ -324,6 +330,7 @@ class TestAccessLog:
                 transport_metadata={},
                 duration_ms=10.0,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
@@ -621,6 +628,7 @@ class TestEmitAccessLog:
                 transport_metadata={},
                 duration_ms=42.5,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
             )
 
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
@@ -642,6 +650,7 @@ class TestEmitAccessLog:
                 transport_metadata={},
                 duration_ms=42.5555,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
@@ -659,6 +668,7 @@ class TestEmitAccessLog:
                 transport_metadata={},
                 duration_ms=10.0,
                 status="error",
+                protocol_hash=_TEST_PROTOCOL_HASH,
                 error_type="ValueError",
             )
 
@@ -678,6 +688,7 @@ class TestEmitAccessLog:
                 transport_metadata={},
                 duration_ms=10.0,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
                 http_status=200,
             )
 
@@ -696,6 +707,7 @@ class TestEmitAccessLog:
                 transport_metadata={},
                 duration_ms=10.0,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
@@ -718,6 +730,7 @@ class TestEmitAccessLog:
                 transport_metadata=metadata,
                 duration_ms=10.0,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
             )
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
         assert _extra(record, "peer_identity_status") == "tailscale:available"
@@ -843,6 +856,7 @@ class TestEmitAccessLogExceptionGuard:
                 transport_metadata={},
                 duration_ms=1.0,
                 status="ok",
+                protocol_hash=_TEST_PROTOCOL_HASH,
             )
         finally:
             access_logger.removeHandler(handler)
