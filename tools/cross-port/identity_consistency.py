@@ -208,12 +208,30 @@ def identity_sources(root: Path, globs: tuple[str, ...]) -> list[Path]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--verbose", action="store_true", help="show the matching line for each check")
+    ap.add_argument(
+        "--only",
+        action="append",
+        metavar="PORT",
+        help=(
+            "Audit only this port (repeatable). Python is always included as "
+            "the reference -- a run without it compares ports to each other and "
+            "can call agreement on an invariant both got wrong. For a port's own "
+            "CI, where no sibling checkout exists, this is the usable form."
+        ),
+    )
     args = ap.parse_args()
+
+    selected = PORTS
+    if args.only:
+        unknown = sorted(set(args.only) - set(PORTS))
+        if unknown:
+            ap.error(f"unknown port(s): {', '.join(unknown)}. Known: {', '.join(PORTS)}")
+        selected = {k: v for k, v in PORTS.items() if k == "python" or k in set(args.only)}
 
     results: dict[str, dict[str, bool]] = {}
     missing_ports: list[str] = []
 
-    for port, (dirname, globs) in PORTS.items():
+    for port, (dirname, globs) in selected.items():
         root = DEV / dirname
         if not root.is_dir():
             missing_ports.append(port)
@@ -235,7 +253,7 @@ def main() -> int:
             for f in sorted(files):
                 print(f"    {f.relative_to(root)}")
 
-    ports = [p for p in PORTS if p in results]
+    ports = [p for p in selected if p in results]
     all_labels = [c[0] for c in CHECKS] + [c[0] for c in FORBIDDEN]
     why = {c[0]: c[2] for c in CHECKS + FORBIDDEN}
 

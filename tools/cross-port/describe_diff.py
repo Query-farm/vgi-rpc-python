@@ -36,6 +36,7 @@ Run: ``uv run python describe_diff.py``
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import io
 import os
@@ -429,13 +430,44 @@ def compare_protocol(hosts: dict[str, ServiceDescription]) -> list[str]:
 
 
 def main() -> None:
-    """Describe every port, then compare every protocol -- hash first."""
+    """Describe the selected ports, then compare every protocol -- hash first.
+
+    With no ``--only``, every port is spawned and compared, which is the shape
+    a maintainer wants locally.  A port's own CI cannot do that: only that port
+    and a checkout of the reference exist there.  ``--only <port>`` narrows the
+    run to that port versus Python, which is the comparison that actually
+    matters to a port -- does this implementation agree with the reference --
+    and is the only one a single repository can perform.
+
+    Python is always included.  It is the reference, so a run without it
+    compares two ports to each other and calls agreement on a shape both may
+    have got wrong together.
+    """
+    ap = argparse.ArgumentParser(description="Compare hosted protocols across vgi-rpc ports.")
+    ap.add_argument(
+        "--only",
+        action="append",
+        metavar="PORT",
+        help=(
+            "Restrict to this port (repeatable). Python is always included as "
+            f"the reference. Choices: {', '.join(sorted(SUBPROCESS_WORKERS))}"
+        ),
+    )
+    args = ap.parse_args()
+
+    workers = SUBPROCESS_WORKERS
+    if args.only:
+        unknown = sorted(set(args.only) - set(SUBPROCESS_WORKERS))
+        if unknown:
+            ap.error(f"unknown port(s): {', '.join(unknown)}. Known: {', '.join(sorted(SUBPROCESS_WORKERS))}")
+        workers = {k: v for k, v in SUBPROCESS_WORKERS.items() if k in set(args.only)}
+
     reports: dict[str, PortReport | str] = {}
 
     print("Connecting to python...", file=sys.stderr)
     reports["python"] = get_python_report()
 
-    for name, config in SUBPROCESS_WORKERS.items():
+    for name, config in workers.items():
         print(f"Connecting to {name}...", file=sys.stderr)
         reports[name] = get_subprocess_report(name, config)
 
