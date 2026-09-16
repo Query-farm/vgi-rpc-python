@@ -15,6 +15,24 @@ Keeps the [vgi-rpc](https://vgi-rpc.query.farm) implementations in sync:
 > Recent cross-port work is recorded under [`issues/`](issues/README.md) (see
 > [feature-tcp-transport](issues/feature-tcp-transport.md)).
 
+## Specs
+
+[`specs/`](specs/) holds the cross-port contracts — the documents a port
+implements against, as opposed to the tooling that checks it afterwards.
+
+| Spec | What it pins |
+|------|--------------|
+| [`CLIENT_DRIVER_PROTOCOL.md`](specs/CLIENT_DRIVER_PROTOCOL.md) | How a port exposes its **client** to the shared conformance suite: the JSONL + Arrow IPC driver protocol, and the rule that a conforming client passes **against the reference server** |
+| [`REFLECTION_SELF_DESCRIPTION.md`](specs/REFLECTION_SELF_DESCRIPTION.md) | `vgi_rpc.Reflection.v1` must describe its own methods |
+| [`IDENTITY_V1_SPEC.md`](specs/IDENTITY_V1_SPEC.md) | `vgi_rpc.Identity.v1` |
+| [`IDENTITY_CONFORMANCE_FIXTURE.md`](specs/IDENTITY_CONFORMANCE_FIXTURE.md) | The identity fixture every port ships |
+| [`DESCRIBE_RETIREMENT_AND_ACCESS_LOG.md`](specs/DESCRIBE_RETIREMENT_AND_ACCESS_LOG.md) | Retirement of `__describe__`, and access-log shape |
+| [`STREAM_RECORDS_AND_REFERENCE_PIN.md`](specs/STREAM_RECORDS_AND_REFERENCE_PIN.md) | Stream access-log records, and pinning the reference |
+
+The Python side of the client-driver bridge is shipped, not copied:
+`vgi_rpc.conformance.client_driver`. A port implements the driver executable and
+points `VGI_CLIENT_DRIVER` at it.
+
 ## Quick start
 
 ```bash
