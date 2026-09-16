@@ -22,6 +22,8 @@ import json
 import sys
 import urllib.request
 
+import pytest
+
 from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.conformance.fake_storage import serve_in_thread
 from vgi_rpc.external import ExternalLocationConfig
@@ -33,15 +35,28 @@ def _object_count(base_url: str) -> int:
         return int(json.loads(response.read()).get("object_count", 0))
 
 
-def test_cli_externalizes_over_a_subprocess_pipe() -> None:
-    """``--fake-storage`` on ``--pipe`` really pushes bytes through storage."""
+# Ports are split across these two spellings of "the reference byte-stream
+# peer": some spawn the console script, others spawn tests/serve_conformance_pipe.py.
+# They must not drift -- a flag that reaches only one of them strands whichever
+# ports use the other, and a flag passed to a parser that does not accept it is
+# discarded silently, so the symptom is a hang rather than an error.
+_PEER_SPELLINGS = pytest.mark.parametrize(
+    "module",
+    ["vgi_rpc.conformance._cli", "tests.serve_conformance_pipe"],
+    ids=["console-cli", "pipe-script"],
+)
+
+
+@_PEER_SPELLINGS
+def test_cli_externalizes_over_a_subprocess_pipe(module: str) -> None:
+    """``--fake-storage`` on a byte stream really pushes bytes through storage."""
     base_url, shutdown = serve_in_thread()
     try:
         argv = [
             sys.executable,
             "-m",
-            "vgi_rpc.conformance._cli",
-            "--pipe",
+            module,
+            *(["--pipe"] if module.endswith("_cli") else []),
             "--fake-storage",
             base_url,
             "--externalize-threshold",
@@ -68,8 +83,6 @@ def test_loopback_validator_refuses_a_non_loopback_url() -> None:
     A port copying this configuration must not inherit "validate nothing" --
     the fixture needs loopback fake storage, not arbitrary hosts.
     """
-    import pytest
-
     from vgi_rpc.conformance._cli import _loopback_only_validator
 
     _loopback_only_validator("http://127.0.0.1:8080/blob/1")
