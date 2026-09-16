@@ -26,6 +26,7 @@ from vgi_rpc.pool import WorkerPool
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
 if TYPE_CHECKING:
+    from vgi_rpc.conformance._external_bytestream_pytest import ByteStreamExternalTarget
     from vgi_rpc.conformance._resource_soak_pytest import ResourceSoakTarget
 
 _SKIP_UNIX = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets not available on Windows")
@@ -911,6 +912,76 @@ def conformance_fake_storage() -> Iterator[str]:
         yield base_url
     finally:
         shutdown()
+
+
+@pytest.fixture(scope="session")
+def conformance_bytestream_external_target(
+    conformance_fake_storage: str,
+) -> Iterator[ByteStreamExternalTarget]:
+    """Supply the reference externalising byte-stream connection.
+
+    Backs the shared ``TestExternalByteStream`` group.  The transport is the
+    in-process pipe: a real ``RpcServer`` on a thread, a real Arrow IPC frame
+    pair, and the same ``_read_batch_with_log_check`` the subprocess, Unix and
+    TCP clients use — so it exercises the byte-stream pointer path without
+    paying for a worker subprocess on every test.
+
+    One ``ExternalLocationConfig`` serves both ends, which is how
+    :func:`vgi_rpc.rpc.serve_pipe` wires it: the server reads ``storage`` and
+    ``externalize_threshold_bytes`` from it to *produce* pointers, the client
+    reads ``fetch_config`` and ``url_validator`` from it to *resolve* them.
+
+    The threshold is one byte, so every data-bearing batch is externalised
+    and the group's upload assertions have something to see.  The validator
+    is disabled because the fake storage vends ``http://127.0.0.1`` URLs that
+    the default HTTPS-only policy would (correctly) refuse.
+    """
+    from typing import cast
+
+    from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+    from vgi_rpc.conformance._external_bytestream_pytest import (
+        ByteStreamExternalConnection,
+        ByteStreamExternalTarget,
+    )
+    from vgi_rpc.conformance.fake_storage import FakeStorageBackend
+    from vgi_rpc.external import ExternalLocationConfig
+    from vgi_rpc.log import Message
+    from vgi_rpc.rpc import serve_pipe
+
+    config = ExternalLocationConfig(
+        storage=FakeStorageBackend(conformance_fake_storage),
+        externalize_threshold_bytes=1,
+        url_validator=None,
+    )
+
+    def connect(
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[ByteStreamExternalConnection]:
+        connection = serve_pipe(
+            ConformanceService,
+            ConformanceServiceImpl(),
+            on_log=on_log,
+            external_location=config,
+        )
+        # The Protocol spells its parameters keyword-only, which the RPC proxy
+        # honours but ``ConformanceService``'s positional declarations do not
+        # structurally satisfy -- same cast the resource-soak target makes.
+        return cast("contextlib.AbstractContextManager[ByteStreamExternalConnection]", connection)
+
+    def uploaded_objects() -> int:
+        response = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0)
+        response.raise_for_status()
+        return int(response.json()["object_count"])
+
+    try:
+        yield ByteStreamExternalTarget(
+            name="python-pipe",
+            connect=connect,
+            uploaded_objects=uploaded_objects,
+        )
+    finally:
+        # Releases the aiohttp session the resolver keeps for pointer fetches.
+        config.fetch_config.close()
 
 
 @pytest.fixture(scope="class")

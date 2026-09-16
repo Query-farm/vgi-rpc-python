@@ -221,6 +221,7 @@ Some tests can't run against one already-running server, because the state under
 | `conformance_http_external_security_port` | `TestExternalFetchSecurity` | skip — requires a server wired to the fake-storage redirect routes and small encoded/decoded caps | [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#fetch-safety) |
 | `conformance_http_sticky_short_ttl_port`<br>`conformance_http_sticky_peer_ports`<br>`conformance_http_sticky_auth_port` | the three `TestSticky` failure paths | **fail**, if the server advertises `VGI-Sticky-Enabled` — skip otherwise | [sticky-sessions-spec.md](sticky-sessions-spec.md) §9.1 |
 | `conformance_resource_soak_target` | `TestResourceSoak` | skip — requires a dedicated process PID and connection factory | Resource soak contract below |
+| `conformance_bytestream_external_target` | `TestExternalByteStream` | **fail**, if the runner supplies `conformance_fake_storage` — skip otherwise | Byte-stream externalization contract below |
 
 The external-security fixture uses the shared fake-storage service, a 4 KiB
 encoded cap, an 8 KiB decoded cap, and a URL policy that permits
@@ -240,7 +241,59 @@ Every port also consumes
 numeric grammar, the `2^53-1` portable maximum, minimum-based precedence, and
 the cursor-free `ResponseTooLargeError` envelope.
 
-The sticky row is the one to note: a port may decline sticky entirely, but a port that *claims* it cannot quietly omit the tests that prove sessions are refused when they should be. Everything else on this page skips silently when unsupplied, which is why the sticky fixtures name themselves in the failure message.
+Two rows escalate rather than skip, on the same reasoning: a port may decline a feature entirely, but a port that *claims* it cannot quietly omit the tests that prove the hard cases. Sticky is one — sessions must be refused when they should be. Byte-stream externalization is the other — a port with a pointer resolver must prove it works off the HTTP path too. Everything else on this page skips silently when unsupplied, which is why those fixtures name themselves in the failure message.
+
+### Byte-stream externalization contract
+
+External-location pointers are not an HTTP feature. Any transport that carries
+record batches carries pointer batches, and
+[WIRE_PROTOCOL.md §12](WIRE_PROTOCOL.md#12-external-storage-pointer-batches)
+governs all of them. `TestExternalInputRoutes` and its neighbours drive that
+path over HTTP only, because they need a raw HTTP driver to place a pointer on
+an inbound route — which leaves a port's byte-stream resolver unexercised.
+Two ports shipped the same two defects on their HTTP path, and one of them
+then found both still latent in its byte-stream resolver — invisible because
+nothing in the shared suite externalized over a byte stream.
+
+A runner opts in with a session-scoped `conformance_bytestream_external_target`
+fixture returning `ByteStreamExternalTarget(name, connect, uploaded_objects)`
+from `vgi_rpc.conformance._external_bytestream_pytest`:
+
+- `connect(on_log=None)` returns a fresh context-managed conformance proxy
+  whose **server and client are both wired to the same external storage**,
+  over one of the persistent byte-stream transports — pipe, subprocess, Unix
+  socket, or TCP. Not HTTP: that half is already covered, and pointing this
+  fixture at an HTTP connection makes the group re-test what it was written to
+  complement.
+- `uploaded_objects()` returns how many objects the backing storage has
+  accepted so far, monotonically non-decreasing. Every test asserts this rose,
+  which is what stops a misconfigured fixture from passing the group without
+  externalizing anything. The shared fake storage's `GET /_stats` already
+  reports `object_count`; a port with its own storage stub needs only an
+  equivalent counter.
+- The server's externalization threshold must be low enough that **every**
+  data-bearing batch goes through storage. One byte is the reference setting.
+  A threshold that leaves the suite's small batches inline fails the group
+  rather than skipping it.
+
+Like the sticky row above, this one escalates: a port may implement no
+external locations at all and skip cleanly, but a port that supplies
+`conformance_fake_storage` — and therefore runs the HTTP external groups —
+has exactly one pointer resolver, which its byte-stream client also calls.
+Withholding the fixture would leave that half untested, which is the failure
+this group exists to prevent, so the group fails rather than skipping.
+
+The group is deliberately a dozen targeted cases rather than a variant of
+`conformance_conn`. Adding a variant there multiplies the entire shared suite
+— roughly 300 cases per transport in the reference — and every port pays that
+on every CI run, to re-prove type mappings that externalization does not
+touch. Measured on the reference, a full `pipe_externalize_always` variant of
+`test_conformance.py` costs **+8.4s** of critical-path wall clock
+(5.3s → 13.8s single-process); the targeted group costs **1.3s** and covers
+the properties that actually differ: the resolved metadata's origin, log
+survival through a multi-batch payload, dictionary-typed schemas echoed onto a
+zero-row pointer, the separately-externalized stream header, and a zero-row
+error batch travelling among pointers.
 
 ### Resource soak contract
 
