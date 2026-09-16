@@ -538,10 +538,10 @@ def _mint_call_token(
         input_schema: Per-stream input schema (frozen at init).
         token_key: Master AEAD key from the server config.
         auth: Authenticated identity for AAD binding.
-        protocol: Wire name of the protocol that owns this stream, bound into
-            the AAD so a continuation cannot cross protocols.
         stream_id: Chain-correlation id.
         response_limit_bytes: Effective hard response limit sealed at init.
+        protocol: Wire name of the protocol that owns this stream, bound into
+            the AAD so a continuation cannot cross protocols.
         now: Override for the baked-in timestamp; default ``time.time()``.
 
     Returns:

@@ -935,9 +935,9 @@ def _run_http_producer_turn(
         schema: The output schema for the stream.
         state: The stream state object.
         input_schema: The input schema (stored in the call token).
-        info: The resolved method.  Carries the protocol, which selects the
-            state types this turn's cursor token is tagged against.
-        method_name: The RPC method name (for logging context).
+        info: The resolved method.  Carries the protocol and method name,
+            the latter for logging context and the former selecting the state
+            types this turn's cursor token is tagged against.
         stream_id: The chain-correlation id for this stream.  Generated
             fresh by the init turn and recovered from the inbound call
             token by continuation turns; passed in explicitly so this
@@ -1272,10 +1272,10 @@ def _resolve_call_from_token(
         app: The HTTP app providing the AEAD key, TTL, and state types.
         call_token: The sealed call token from ``CALL_STATE_KEY``.
         expected_call_id: The call id the cursor token named.
-        info: The resolved method, naming the protocol bound into the token's
-            AAD -- so a token minted under another protocol fails to open.
         state_info: The method's state class (or union tuple), which
             declares the call-state type to deserialize into.
+        info: The resolved method, naming the protocol bound into the token's
+            AAD -- so a token minted under another protocol fails to open.
         auth: Authenticated identity for the current request.
 
     Returns:

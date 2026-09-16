@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -35,6 +36,14 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.rpc._protocol_hash import compute_protocol_hash as _compute_protocol_hash
 from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
+
+if TYPE_CHECKING:
+    # Imported for annotations only: the wire types live under ``vgi_rpc.rpc``,
+    # which imports this module at runtime.  Naming them here costs nothing at
+    # import time and lets both type checkers see through ``_adapt_description``
+    # instead of being told to look away.
+    from vgi_rpc.rpc._reflection import ProtocolList as _WireProtocolList
+    from vgi_rpc.rpc._reflection import ServiceDescription as _WireDescription
 
 __all__ = [
     "DESCRIBE_VERSION",
@@ -262,7 +271,7 @@ def introspect(
     return _adapt_description(described, listing)
 
 
-def _adapt_description(wire: object, listing: object) -> ServiceDescription:
+def _adapt_description(wire: _WireDescription, listing: _WireProtocolList) -> ServiceDescription:
     """Present a reflection reply in this module's client-side shape.
 
     ``introspect.ServiceDescription`` is a *client-side view*, not a wire
@@ -271,7 +280,7 @@ def _adapt_description(wire: object, listing: object) -> ServiceDescription:
     runner move to reflection without changing a line.
     """
     methods: dict[str, MethodDescription] = {}
-    for m in wire.methods:  # type: ignore[attr-defined]
+    for m in wire.methods:
         methods[m.name] = MethodDescription(
             name=m.name,
             method_type=MethodType(m.method_type),
@@ -283,13 +292,13 @@ def _adapt_description(wire: object, listing: object) -> ServiceDescription:
             is_exchange=_is_exchange(m.stream_kind),
         )
     return ServiceDescription(
-        protocol_name=wire.protocol,  # type: ignore[attr-defined]
-        request_version=listing.request_version,  # type: ignore[attr-defined]
+        protocol_name=wire.protocol,
+        request_version=listing.request_version,
         describe_version=DESCRIBE_VERSION,
-        protocol_hash=wire.protocol_hash,  # type: ignore[attr-defined]
-        server_id=listing.server_id,  # type: ignore[attr-defined]
+        protocol_hash=wire.protocol_hash,
+        server_id=listing.server_id,
         methods=methods,
-        protocol_version=wire.protocol_version,  # type: ignore[attr-defined]
+        protocol_version=wire.protocol_version,
     )
 
 

@@ -583,6 +583,16 @@ class RpcServer:
         this and never reach it. ``__describe__`` is retired and answered there
         with a message naming its replacement.
 
+        Args:
+            method_name: The method being dispatched, as it arrived on the
+                request.  Reserved dunder names are answered from the
+                server-level built-ins without consulting the routing key.
+
+        Returns:
+            The ``RpcMethodInfo`` for *method_name* on the routed protocol's
+            binding -- the resolved ``(protocol, method)`` pair the rest of
+            dispatch runs against.
+
         Raises:
             ProtocolNotSpecifiedError: No routing key on the request.
             ProtocolNotSupportedError: The named protocol is not hosted here.
@@ -674,6 +684,12 @@ class RpcServer:
                 it, which is correct -- a server offering half the methods is
                 not offering the same surface.
 
+        Returns:
+            A frozen ``_ProtocolBinding`` carrying the protocol's wire name,
+            its declared version, the hosted method set and the implementation
+            -- everything dispatch needs, with nothing left to re-derive per
+            request.
+
         """
         # vars() not getattr(): a subclass that does not redeclare must not
         # inherit its base's version, or it silently claims compatibility it
@@ -753,8 +769,11 @@ class RpcServer:
             external_location: Optional ExternalLocation configuration.
             server_id: Optional server identifier; auto-generated if ``None``.
             server_version: Build version string included in access log entries.
-            enable_describe: When ``True``, the server handles ``__describe__``
-                requests returning machine-readable method metadata.
+            enable_describe: When ``True``, the server also hosts the
+                ``vgi_rpc.Reflection.v1`` protocol, through which a client
+                discovers what is hosted here and asks for one protocol's
+                machine-readable method metadata.  Named for the retired
+                ``__describe__`` method it replaced.
             ipc_validation: Validation level for incoming IPC batches.
                 ``None`` (the default) resolves from the
                 ``VGI_RPC_IPC_VALIDATION`` environment variable
@@ -993,6 +1012,12 @@ class RpcServer:
         metadata, so a rewrite is detectable only while both carriers are
         required to be present and to agree.
 
+        Args:
+            info: The method resolved from the path segment.  Its
+                ``protocol_name`` is the projection side of the comparison;
+                the request's ``vgi_rpc.protocol`` metadata is the canonical
+                side.
+
         Raises:
             ProtocolNotSpecifiedError: The request carried no routing key.
             ProtocolNotSupportedError: The two carriers name different
@@ -1031,6 +1056,10 @@ class RpcServer:
         for a binding marked version-exempt (reflection): that is the
         diagnostic path a mismatched client uses to find out *what* mismatched,
         so gating it would deny the client its own diagnosis.
+
+        Args:
+            info: The resolved method.  Its ``protocol_name`` selects which
+                binding's declared version the request is gated against.
 
         Raises:
             ProtocolVersionError: On a major or minor mismatch, with a

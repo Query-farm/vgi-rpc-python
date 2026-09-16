@@ -37,11 +37,19 @@ addition is a breaking change wearing a minor version number.
 from __future__ import annotations
 
 import dataclasses
-from typing import ClassVar, Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 import pyarrow as pa
 
 from vgi_rpc.utils import ArrowSerializableDataclass
+
+if TYPE_CHECKING:
+    # Annotation-only: ``_server`` reaches for this module from inside a method
+    # body to register the binding, so naming its types at module scope would
+    # close the loop.  Under ``TYPE_CHECKING`` it never executes, and both type
+    # checkers get the real types rather than ``object``.
+    from ._server import RpcServer
+    from ._types import RpcMethodInfo
 
 __all__ = [
     "IDEMPOTENCY_LEVELS",
@@ -253,7 +261,7 @@ class ReflectionImpl:
 
     __slots__ = ("_cache", "_server")
 
-    def __init__(self, server: object) -> None:
+    def __init__(self, server: RpcServer) -> None:
         self._server = server
         # Descriptions are immutable for a server's life, so build each once.
         # This is the pre-built-batch optimisation the old __describe__ had,
@@ -265,8 +273,8 @@ class ReflectionImpl:
         """Return every protocol this server hosts, with versions and hashes."""
         server = self._server
         return ProtocolList(
-            server_id=server.server_id,  # type: ignore[attr-defined]
-            server_version=server.server_version,  # type: ignore[attr-defined]
+            server_id=server.server_id,
+            server_version=server.server_version,
             request_version=_request_version(),
             protocols=[
                 ProtocolSummary(
@@ -277,7 +285,7 @@ class ReflectionImpl:
                     deprecation_message="",
                     features=[],
                 )
-                for binding in server.bindings.values()  # type: ignore[attr-defined]
+                for binding in server.bindings.values()
             ],
         )
 
@@ -300,9 +308,9 @@ class ReflectionImpl:
 
         from ._common import ProtocolNotSupportedError
 
-        binding = self._server.bindings.get(protocol)  # type: ignore[attr-defined]
+        binding = self._server.bindings.get(protocol)
         if binding is None:
-            hosted = sorted(self._server.bindings)  # type: ignore[attr-defined]
+            hosted = sorted(self._server.bindings)
             raise ProtocolNotSupportedError(f"This server does not host protocol {protocol!r}. Hosted: {hosted}.")
 
         description = ServiceDescription(
@@ -344,13 +352,13 @@ def _request_version() -> str:
     return REQUEST_VERSION.decode()
 
 
-def _stream_kind(info: object) -> str:
+def _stream_kind(info: RpcMethodInfo) -> str:
     """Return the stream kind for *info*, or empty for a unary method."""
     from vgi_rpc.rpc import MethodType
 
-    if info.method_type is not MethodType.STREAM:  # type: ignore[attr-defined]
+    if info.method_type is not MethodType.STREAM:
         return ""
-    is_exchange = info.is_exchange  # type: ignore[attr-defined]
+    is_exchange = info.is_exchange
     if is_exchange is None:
         return "unknown"
     return "exchange" if is_exchange else "producer"

@@ -186,6 +186,15 @@ def _post(port: int, protocol: str, method: str, body: bytes, headers: dict[str,
 def _read_result(response: httpx2.Response, cls: type[Any]) -> Any:
     """Decode the single result payload, or raise :class:`_Rejected`.
 
+    Args:
+        response: The HTTP response to a single ``Identity`` call.  Both a
+            result and a typed refusal ride the body as Arrow, so the status
+            line is not what decides which this is.
+        cls: The dataclass the ``result`` column deserializes into.
+
+    Returns:
+        The decoded *cls* instance carried by the response.
+
     Raises:
         _Rejected: The response carried a typed error instead of a result.
         AssertionError: The response was neither.
@@ -220,6 +229,15 @@ def _read_result(response: httpx2.Response, cls: type[Any]) -> Any:
 def _introspect(port: int, token: str, *, principal: str | None = INTROSPECTOR_PRINCIPAL) -> TokenIdentity:
     """Call ``introspect_token`` as *principal*, returning the identity.
 
+    Args:
+        port: Loopback port the conformance worker is listening on.
+        token: The opaque credential to resolve.
+        principal: Caller identity sent in the principal header.  ``None``
+            omits the header, which is the unauthenticated-caller case.
+
+    Returns:
+        The :class:`TokenIdentity` the worker resolved *token* to.
+
     Raises:
         _Rejected: The worker refused.
 
@@ -245,6 +263,19 @@ def _issue(
     ``auth_time="fresh"`` sends a timestamp well inside the ceiling; ``None``
     omits the header entirely, which is the "credential carries no auth_time"
     case rather than a malformed one.
+
+    Args:
+        port: Loopback port the conformance worker is listening on.
+        principal: Caller identity sent in the principal header.  ``None``
+            omits the header.
+        auth_time: ``"fresh"`` sends a timestamp inside the ceiling, ``None``
+            omits the header, any other string is sent verbatim.
+        purpose: The grant's declared purpose.
+        scopes: Scopes requested; ``None`` sends an empty list.
+        ttl_seconds: Requested grant lifetime.
+
+    Returns:
+        The :class:`IssuedGrant` the worker minted.
 
     Raises:
         _Rejected: The worker refused.

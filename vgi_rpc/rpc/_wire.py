@@ -719,6 +719,14 @@ def _deserialize_params(
     None of those is a usable answer, and tolerating unknown fields is at odds
     with a protocol that gates on an exact major+minor version match.
 
+    Args:
+        kwargs: The decoded call arguments, mutated in place.  Values that
+            survived ``as_py()`` with their fidelity intact are left alone.
+        param_types: The protocol's declared parameter types, keyed by name.
+            Doubles as the set of names this method is allowed to receive.
+        ipc_validation: Validation level applied to any nested IPC payload
+            decoded out of a parameter.
+
     Raises:
         TypeError: If ``kwargs`` carries a name the protocol does not declare.
             Matches ``_validate_params``, so every dispatch path already
