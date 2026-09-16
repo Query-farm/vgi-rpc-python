@@ -276,6 +276,33 @@ from `vgi_rpc.conformance._external_bytestream_pytest`:
   A threshold that leaves the suite's small batches inline fails the group
   rather than skipping it.
 
+**The reference serves this peer directly — do not hand-roll one.**
+`vgi-rpc-conformance --pipe --fake-storage URL --externalize-threshold 1`
+externalizes over every byte-stream transport (`--pipe`, `--unix`, `--tcp`),
+so a port's fixture needs no bespoke server script. Pointing the client half
+at *the reference* rather than at the port's own server is the entire value of
+this leg: most ports' servers externalize only in the data path and never
+externalize a stream header, so a port talking to itself cannot produce the
+pointer batches its own reader is supposed to resolve. Every defect this group
+has found in a header reader was invisible on the self-directed leg.
+
+**A trap worth naming, because several ports' harnesses share it.** A
+`_worker()`-style translation layer that infers the transport from *which
+flags are present* — "no flags means pipe, anything else is an HTTP variant" —
+silently reroutes the moment the fixture adds `--fake-storage`. The argv stops
+being a byte-stream server and becomes an HTTP one, the fixture then connects
+to it over stdio, and both ends block forever: nothing reads fd 0, nothing
+writes fd 1, and the symptom is every test in the group timing out in a read
+on the driver's stdout with no error at all. It is not a hang in the code
+under test.
+
+Prefer naming the transport to inferring it: have the fixture pass `--pipe`
+explicitly and accept it in the worker's argument parser, even as a no-op,
+rather than spelling "byte stream" as the absence of every other flag. A
+worker that exits non-zero on an unrecognised `--pipe` should gain the case.
+Inferring works until the next flag reaches a pipe server, at which point it
+fails this same way.
+
 Like the sticky row above, this one escalates: a port may implement no
 external locations at all and skip cleanly, but a port that supplies
 `conformance_fake_storage` — and therefore runs the HTTP external groups —
