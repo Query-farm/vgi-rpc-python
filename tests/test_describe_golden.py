@@ -94,7 +94,10 @@ def test_describe_payload_matches_golden() -> None:
     """
     current = render()
     assert _GOLDEN.exists(), f"golden missing; create it with: uv run python {__file__} --update"
-    expected = _GOLDEN.read_text()
+    # Explicit UTF-8, not the platform default: the rendering's header carries an
+    # em-dash, and on Windows the locale encoding decodes it to a replacement
+    # character, which reads as "the description moved" when nothing moved.
+    expected = _GOLDEN.read_text(encoding="utf-8")
     assert current == expected, (
         "The reflection description or protocol_hash changed.\n"
         "If intentional, re-baseline:\n"
@@ -106,7 +109,9 @@ def test_describe_payload_matches_golden() -> None:
 if __name__ == "__main__":
     if "--update" in sys.argv:
         _GOLDEN.parent.mkdir(parents=True, exist_ok=True)
-        _GOLDEN.write_text(render())
+        # ``newline`` pins LF so re-baselining from Windows does not rewrite every
+        # line ending and present it as the diff.
+        _GOLDEN.write_text(render(), encoding="utf-8", newline="\n")
         print(f"wrote {_GOLDEN}")
     else:
         print(render())
