@@ -157,6 +157,18 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
         method = str(environ["REQUEST_METHOD"]).upper()
         path = str(environ["PATH_INFO"])
 
+        # Read the whole request body up front, on every route, whether or not
+        # the handler below wants it.  ``wsgiref`` answers HTTP/1.0 and closes
+        # the connection after each response; closing a socket that still has
+        # unread bytes in its receive buffer makes the kernel send RST instead
+        # of FIN, and a client with a read in flight then loses the response it
+        # had already been sent.  POSIX hands the application the bytes it has
+        # buffered regardless, which is why ``POST /alloc`` -- whose JSON body
+        # nothing here consumes -- worked everywhere except Windows, where the
+        # abort surfaces as WSAECONNABORTED (10053) in whichever
+        # external-location test happened to be making the call.
+        body = _read_body(environ)
+
         if method == "POST" and path == "/alloc":
             return _handle_alloc(environ, start_response, store, base_url)
         redirect_prefix = next(
@@ -191,7 +203,7 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
             if route_prefix == "/download/":
                 store.hit("download_requests")
             if method == "PUT":
-                return _handle_put(environ, start_response, store, blob_id)
+                return _handle_put(environ, start_response, store, blob_id, body)
             if method == "HEAD":
                 return _handle_head(start_response, store, blob_id)
             if method == "GET":
@@ -233,16 +245,52 @@ def _handle_put(
     start_response: StartResponse,
     store: _BlobStore,
     blob_id: str,
+    data: bytes,
 ) -> list[bytes]:
-    try:
-        length = int(str(environ.get("CONTENT_LENGTH") or "0"))
-    except ValueError:
+    if data is _MALFORMED_LENGTH:
         return _respond(start_response, "400 Bad Request", b"invalid Content-Length")
-    stream = cast("IO[bytes] | None", environ.get("wsgi.input"))
-    data = stream.read(length) if stream is not None and length > 0 else b""
     encoding = environ.get("HTTP_CONTENT_ENCODING")
     store.put(blob_id, data, str(encoding) if encoding else None)
     return _respond(start_response, "204 No Content", b"")
+
+
+#: Sentinel distinguishing "the client sent a Content-Length we cannot parse"
+#: from "the client sent no body".  Returned rather than raised so the read
+#: still happens on every route -- see the note in ``make_app``.
+_MALFORMED_LENGTH = b"\x00__malformed_content_length__"
+
+
+def _read_body(environ: WSGIEnvironment) -> bytes:
+    """Read exactly ``CONTENT_LENGTH`` bytes of the request body.
+
+    Bounded by the declared length rather than read to EOF: ``wsgi.input`` is
+    the connection itself under ``wsgiref``, so an unbounded read would block
+    waiting for a client that has already said everything it intends to.
+
+    Args:
+        environ: The WSGI environment for the request.
+
+    Returns:
+        The body bytes, empty when there is no body, or
+        :data:`_MALFORMED_LENGTH` when ``CONTENT_LENGTH`` will not parse.
+
+    """
+    try:
+        length = int(str(environ.get("CONTENT_LENGTH") or "0"))
+    except ValueError:
+        return _MALFORMED_LENGTH
+    stream = cast("IO[bytes] | None", environ.get("wsgi.input"))
+    if stream is None or length <= 0:
+        return b""
+    chunks: list[bytes] = []
+    remaining = length
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def _handle_head(
