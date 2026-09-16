@@ -11,7 +11,8 @@ Usage::
     vgi-rpc-conformance --http [PORT]       # HTTP via waitress
     vgi-rpc-conformance --unix /tmp/s.sock  # Unix domain socket
     vgi-rpc-conformance --tcp [HOST:]PORT   # TCP socket (loopback default)
-    vgi-rpc-conformance --describe          # Enable __describe__ introspection
+    vgi-rpc-conformance --describe          # Register vgi_rpc.Reflection.v1
+    vgi-rpc-conformance --pipe --fake-storage URL --externalize-threshold 1
     vgi-rpc-conformance --http --access-log /tmp/a.log --access-log-debug
 
 The access-log flags exist so the *reference* worker can be validated against
@@ -35,6 +36,34 @@ from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.rpc import RpcServer, serve_stdio
 
 
+def _loopback_only_validator(url: str) -> None:
+    """Permit plain-HTTP loopback URLs and nothing else.
+
+    The default ``https_only_validator`` correctly refuses the
+    ``http://127.0.0.1:<port>/`` URLs a :class:`FakeStorageBackend` vends, so
+    a conformance server wired to fake storage needs a different policy.  The
+    obvious move is ``url_validator=None`` -- which means *validate nothing*,
+    a far bigger hole than the fixture needs, and one that reads in six ports'
+    fixtures like a blanket permission rather than a local one.
+
+    This permits exactly loopback over plain HTTP.  It is narrower than
+    ``None`` while still allowing every URL a fake-storage backend can
+    produce, so a port copying this configuration does not inherit a
+    validator that would accept an arbitrary attacker-supplied host.
+
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-HTTP external location URL: {url!r}")
+    if parsed.hostname not in ("127.0.0.1", "::1", "localhost"):
+        raise ValueError(
+            f"refusing non-loopback external location URL: {url!r} "
+            "(the conformance server permits loopback fake storage only)"
+        )
+
+
 def main() -> None:
     """Run the conformance test server."""
     parser = argparse.ArgumentParser(description="vgi-rpc conformance test server")
@@ -43,7 +72,7 @@ def main() -> None:
     group.add_argument("--http", nargs="?", type=int, const=0, default=None, metavar="PORT", help="Serve over HTTP")
     group.add_argument("--unix", metavar="PATH", help="Serve over a Unix domain socket")
     group.add_argument("--tcp", metavar="[HOST:]PORT", help="Serve over a TCP socket (host defaults to 127.0.0.1)")
-    parser.add_argument("--describe", action="store_true", help="Enable __describe__ introspection")
+    parser.add_argument("--describe", action="store_true", help="Register the vgi_rpc.Reflection.v1 binding")
     parser.add_argument("--threaded", action="store_true", help="Accept connections concurrently (unix/tcp only)")
     parser.add_argument(
         "--access-log",
@@ -54,6 +83,23 @@ def main() -> None:
         "--access-log-debug",
         action="store_true",
         help="Log the access channel at DEBUG, which is what emits request_data",
+    )
+    parser.add_argument(
+        "--fake-storage",
+        default=None,
+        metavar="URL",
+        help=(
+            "Base URL of a fake-storage backend.  When set, server-produced "
+            "batches above --externalize-threshold are uploaded and replaced "
+            "on the wire by pointer batches.  Works on every transport."
+        ),
+    )
+    parser.add_argument(
+        "--externalize-threshold",
+        type=int,
+        default=4096,
+        metavar="N",
+        help="Bytes threshold above which server-produced batches are externalized.",
     )
     parser.add_argument(
         "--max-connections",
@@ -69,8 +115,27 @@ def main() -> None:
     if args.max_connections is not None and not args.threaded:
         parser.error("--max-connections requires --threaded")
 
+    if args.externalize_threshold < 0:
+        parser.error("--externalize-threshold must be >= 0")
+
+    external_location = None
+    if args.fake_storage:
+        from vgi_rpc.conformance.fake_storage import FakeStorageBackend
+        from vgi_rpc.external import ExternalLocationConfig
+
+        external_location = ExternalLocationConfig(
+            storage=FakeStorageBackend(args.fake_storage),
+            externalize_threshold_bytes=args.externalize_threshold,
+            url_validator=_loopback_only_validator,
+        )
+
     impl = ConformanceServiceImpl()
-    server = RpcServer(ConformanceService, impl, enable_describe=args.describe)
+    server = RpcServer(
+        ConformanceService,
+        impl,
+        enable_describe=args.describe,
+        external_location=external_location,
+    )
 
     if args.access_log:
         import logging
