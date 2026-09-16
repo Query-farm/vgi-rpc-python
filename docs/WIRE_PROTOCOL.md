@@ -111,8 +111,21 @@ table below.
 |-------------|-------|-------------|
 | `vgi_rpc.location` | UTF-8 URL | URL to fetch the externalized batch data. |
 | `vgi_rpc.location.sha256` | UTF-8 hex string | SHA-256 of the uploaded payload **before** compression. Optional; when present the reader MUST verify it after fetching. |
-| `vgi_rpc.location.fetch_ms` | Decimal float string (e.g. `"42.3"`) | Fetch duration in milliseconds (diagnostics, on resolved batches). |
-| `vgi_rpc.location.source` | UTF-8 URL | Original fetch URL (diagnostics, on resolved batches). |
+
+A pointer batch on the wire carries **only** the two keys above. It MUST NOT
+carry either provenance key below: those are stamped by the reader, and a
+writer that emits one produces a resolved batch whose provenance names the
+writer's own guess rather than the URL that was actually fetched.
+
+### Resolved batch metadata (added by the reader)
+
+Neither key below is wire content. Both are added by the resolving reader at
+resolve time, on the batch it returns — see *Resolution (reading)*.
+
+| Key (bytes) | Value | Description |
+|-------------|-------|-------------|
+| `vgi_rpc.location.fetch_ms` | Decimal float string (e.g. `"42.3"`) | Elapsed fetch time in milliseconds, measured by the reader. |
+| `vgi_rpc.location.source` | UTF-8 URL | The URL the reader fetched. |
 
 ### Introspection batch metadata (on `__describe__` response batch `custom_metadata`)
 
@@ -514,6 +527,22 @@ Server → Client:  IPC stream (header_schema, 0..N log batches, 1 header row, E
 
 The header is a single-row batch containing serialized header data. If the
 method does not declare a header type, this phase is skipped entirely.
+
+**The header batch is externalizable like any other batch.** When it exceeds
+the server's externalization threshold it is uploaded and the header stream
+carries a **zero-row pointer batch** in its place, bearing `vgi_rpc.location`
+as described under *External storage*. Clients MUST resolve pointer batches in
+the header stream through the same resolution path they use for the data
+stream, and MUST test for a pointer **before** classifying a zero-row batch as
+a log or control batch. A pointer is zero-row by construction, so a reader
+whose header loop treats zero rows as "log, skip" discards the header and then
+reports it absent — the header does not fail to parse, it fails to exist.
+
+This is the one resolution path an implementation cannot exercise against
+itself unless its own server externalizes headers, and most do not: they write
+the header batch directly and externalize only in the data path. A port whose
+header reader has never seen a pointer has dead code there, not working code,
+and MUST verify it against a peer that externalizes headers.
 
 If the server encounters an error during method initialization, it writes an
 error stream (with EXCEPTION-level metadata) **on the empty schema** in place
@@ -1346,8 +1375,11 @@ as the default when adding the separate setting.
 Diagnostic errors, logs, traces, and exception chains MUST NOT expose URL
 userinfo, query strings, or fragments. In particular, signed query parameters
 are bearer credentials. Diagnostic URLs retain only scheme, host, port, and
-path. The `vgi_rpc.location` pointer and `vgi_rpc.location.source` provenance
-remain unchanged application metadata.
+path. This applies to *rendering* a URL for a human, not to the metadata keys
+themselves: the `vgi_rpc.location` pointer keeps its URL unchanged as
+application metadata, and `vgi_rpc.location.source` — which is not wire
+content, but stamped by the reader from the URL it fetched — likewise records
+that URL in full rather than its redacted diagnostic form.
 
 ### Resolution (reading)
 
@@ -1401,9 +1433,21 @@ resolve_external_location(batch, custom_metadata, config):
   return (data_batch, resolved_metadata)
 ```
 
-The two lines worth spelling out, because independent implementations have
-guessed both of them wrong:
+The three lines worth spelling out, because independent implementations have
+guessed all of them wrong:
 
+* **Provenance is stamped by the reader, at resolve time.**
+  `vgi_rpc.location.source` MUST be the URL that was fetched, and
+  `vgi_rpc.location.fetch_ms` the elapsed fetch time. Neither is written by
+  the producer, and a pointer batch on the wire MUST NOT carry either. Two
+  failures follow from getting this wrong, and both are invisible to a port
+  testing against itself. A writer that stamps `location.source` onto the
+  pointer, paired with a reader that passes the pointer's metadata through,
+  agrees with itself and disagrees with every correct peer — and the value it
+  propagates is whatever the writer chose rather than a URL anyone fetched. A
+  reader that stamps neither key returns a batch with no provenance at all,
+  which against a correct peer is indistinguishable from a resolver that
+  silently did not run.
 * **Resolved metadata is the fetched data batch's metadata**, merged with the
   provenance keys above — it is **not** the pointer batch's. The pointer
   carries only `vgi_rpc.location` and `vgi_rpc.location.sha256`; everything
