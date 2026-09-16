@@ -294,6 +294,19 @@ def main() -> int:
         print("\nRESULT: implemented ports agree; some ports have no implementation yet")
         return 1
 
+    if missing_ports:
+        # A repository this tool could not find was not audited, and a checker
+        # that passes on what it never examined is worse than no checker: it
+        # reports the reassuring line while proving nothing. That is doubly
+        # true under `--only`, where an absent checkout means the *one* port
+        # the run exists to audit was skipped -- so the summary below would be
+        # a claim about a single column that was never filled in.
+        print(
+            f"\nRESULT: {len(missing_ports)} repository/repositories were not found, so nothing "
+            f"was audited for them. This is a failure, not a clean run."
+        )
+        return 1
+
     print("\nRESULT: all ports implement vgi_rpc.Identity.v1 and agree on every checked invariant")
     print("(source-level only -- behaviour is established by each port's own suite)")
     return 0
