@@ -1,6 +1,6 @@
 [project]
 name = "vgi-rpc"
-version = "0.45.2"
+version = "0.45.3"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -64,6 +64,7 @@ conformance = ["jsonschema>=4.0", "psutil>=6.0"]
 iroh = ["iroh>=1.1,<2", "httpx2[zstd]>=2.9.1"]
 
 [project.scripts]
+qf = "vgi_rpc.qf:app"
 vgi-rpc = "vgi_rpc.cli:app"
 vgi-rpc-conformance = "vgi_rpc.conformance._cli:main"
 vgi-rpc-test = "vgi_rpc.conformance._test_cli:main"

@@ -147,6 +147,7 @@ nav:
     - Wire Protocol: WIRE_PROTOCOL.md
     - Iroh Transport Contract: iroh-transports.md
     - Native Iroh Client: iroh-client.md
+    - Stockgate Worker Client: stockgate-client.md
     - Conformance Testing: cross-language-conformance.md
     - Cross-Language Porting Guide: porting-guide.md
   - About:
