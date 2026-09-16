@@ -3,7 +3,7 @@
 **Wire protocol version**: 1
 **Status**: Normative
 **Audience**: Cross-language implementors (Go, Rust, TypeScript, C++, etc.)
-**Reflects**: vgi-rpc 0.43.0
+**Reflects**: vgi-rpc 0.45.3
 
 This document specifies the vgi-rpc wire protocol at byte level. A conforming
 implementation can interoperate with the Python reference without reading
@@ -148,7 +148,7 @@ protocol claiming it, because an application that could claim
 `vgi_rpc.Reflection.v1` could shadow the one surface a client trusts before it
 knows anything else about the server.
 
-**The major version is part of the name** — `vgi.Identity.v1`,
+**The major version is part of the name** — `vgi_rpc.Identity.v1`,
 `vgi_rpc.Reflection.v1` — following gRPC (AIP-185), Kubernetes API groups and
 D-Bus. Two consequences, both deliberate:
 
@@ -1491,11 +1491,22 @@ guess, which is the whole failure this key exists to prevent.
 The server also emits its `protocol_version` in the `__describe__` response
 metadata, so a client can read it without triggering a failure.
 
-> **Relationship to `protocol_hash`**: the hash ([Section 14](#14-introspection-__describe__))
-> is a byte-stable fingerprint of the *Python* describe payload, useful as a
-> drift detector within one runtime. It is **not** guaranteed identical across
-> Arrow implementations, so it is not a cross-language contract.
-> `protocol_version` is.
+> **Relationship to `protocol_hash`**: the hash is a fingerprint of the
+> protocol's *decoded* description, canonicalised as RFC 8785 JSON, so it **is**
+> a cross-language contract. All seven implementations produce the same digest
+> for the same protocol; `tests/golden/protocol_hash_vector.json` ships the
+> value and its preimage so a disagreeing port diffs JSON rather than guessing.
+>
+> This paragraph previously said the opposite -- that the hash fingerprinted the
+> Python describe payload's *bytes* and was not comparable across runtimes. That
+> was true of the old definition and is why the hash was worth little: a field
+> comparable only against itself detects no drift between implementations. The
+> definition changed; the disclaimer outlived it.
+>
+> `protocol_version` and the hash answer different questions. The version is a
+> declared, gated attribute; the hash is derived from the surface itself, so it
+> moves when the surface moves whether or not anyone remembered to bump
+> anything.
 
 ### Error stream format
 
@@ -1709,7 +1720,7 @@ the likeliest place for six ports to diverge — never applies. Keep it that way
 The preimage:
 
 ```json
-{"protocol":"vgi.Identity.v1","methods":[
+{"protocol":"vgi_rpc.Identity.v1","methods":[
   {"name":"introspect_token","type":"unary","has_return":true,
    "has_header":false,
    "params":[{"name":"token","nullable":false,"type":"utf8"}],

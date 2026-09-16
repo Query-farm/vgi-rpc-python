@@ -215,13 +215,13 @@ def rpc_path(protocol: str, method: str, *, prefix: str = "", suffix: str = "") 
     and ~100 test sites, and moving it cost a change at each one.
 
     Args:
-        protocol: Routing key of the hosted protocol (``vgi.Identity.v1``).
+        protocol: Routing key of the hosted protocol (``vgi_rpc.Identity.v1``).
         method: RPC method name.
         prefix: Server mount prefix (``""`` or ``"/vgi"``).
         suffix: ``"/init"`` or ``"/exchange"`` for stream endpoints.
 
     Returns:
-        The path, e.g. ``/vgi/vgi.Identity.v1/introspect_token/init``.
+        The path, e.g. ``/vgi/vgi_rpc.Identity.v1/introspect_token/init``.
 
     """
     return f"{prefix}/{protocol}/{method}{suffix}"

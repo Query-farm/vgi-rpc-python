@@ -19,7 +19,6 @@ import pyarrow as pa
 __all__ = [
     "CALL_STATE_KEY",
     "CANCEL_KEY",
-    "DESCRIBE_VERSION_KEY",
     "ERROR_KIND_KEY",
     "ERROR_KIND_METHOD_NOT_IMPLEMENTED",
     "LOCATION_FETCH_MS_KEY",
@@ -29,9 +28,7 @@ __all__ = [
     "LOG_EXTRA_KEY",
     "LOG_LEVEL_KEY",
     "LOG_MESSAGE_KEY",
-    "PROTOCOL_HASH_KEY",
     "PROTOCOL_KEY",
-    "PROTOCOL_NAME_KEY",
     "PROTOCOL_VERSION_KEY",
     "REQUEST_ID_KEY",
     "REQUEST_VERSION",
@@ -112,11 +109,6 @@ SHM_SEGMENT_SIZE_KEY = b"vgi_rpc.shm_segment_size"
 # shared-memory side-channel is used only when both peers advertise "true".
 TRANSPORT_SHM_KEY = b"vgi_rpc.transport.shm"
 
-# Introspection (reflection response batch metadata)
-PROTOCOL_NAME_KEY = b"vgi_rpc.protocol_name"
-DESCRIBE_VERSION_KEY = b"vgi_rpc.describe_version"
-PROTOCOL_HASH_KEY = b"vgi_rpc.protocol_hash"
-
 # Application protocol surface version. Carried on every request batch from a
 # vgi-rpc RpcClient bound to a Protocol that declares ``protocol_version``; also
 # emitted with a reflection response. Format: canonical semver MAJOR.MINOR.PATCH
@@ -129,7 +121,7 @@ PROTOCOL_VERSION_KEY = b"vgi_rpc.protocol_version"
 # host several, so this selects the binding and hence the method table, the
 # implementation, the version to gate against and the hash to log.
 #
-# The *major* version belongs in this name (``vgi.Identity.v1``), following
+# The *major* version belongs in this name (``vgi_rpc.Identity.v1``), following
 # gRPC/AIP-185, Kubernetes API groups and D-Bus: an incompatible major is then a
 # different name, so it is a routing answer a proxy can act on without parsing
 # Arrow, and `v1` and `v2` can be served side by side while clients migrate.

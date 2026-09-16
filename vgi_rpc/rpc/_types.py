@@ -864,7 +864,7 @@ def _get_param_defaults(protocol: type, method_name: str) -> dict[str, object]:
 
 
 #: A protocol name is an identifier, optionally dot-qualified, carrying its
-#: major version as the last component (``vgi.Identity.v1``).  Validated on
+#: major version as the last component (``vgi_rpc.Identity.v1``).  Validated on
 #: both carriers: at construction, and again on the routing key read off the
 #: wire -- an unvalidated name from a request reaches error messages, log
 #: fields and metric labels, where arbitrary bytes do not belong.
@@ -903,7 +903,7 @@ def validate_protocol_name(name: str, *, allow_reserved: bool = False) -> str:
     if not PROTOCOL_NAME_RE.match(name):
         raise ValueError(
             f"Protocol name {name!r} is not an identifier, optionally dot-qualified. "
-            f"Expected something like 'vgi.Identity.v1'."
+            f"Expected something like 'vgi_rpc.Identity.v1'."
         )
     if not allow_reserved and name.startswith(RESERVED_PROTOCOL_PREFIX):
         raise ValueError(
