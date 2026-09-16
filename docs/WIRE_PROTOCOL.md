@@ -1370,19 +1370,29 @@ resolve_external_location(batch, custom_metadata, config):
   data = fetch_url(url, config.fetch_config, config.url_validator)
 
   // Decompress if needed (zstd)
-  // Open as IPC stream, dispatch log batches, extract data batch
+  // Open as IPC stream, dispatch EVERY log batch, extract the one data batch.
+  // The object is a whole IPC stream, not a single batch: reading only its
+  // first batch, or stopping at the first data batch, discards the turn's logs.
   reader = open_ipc_stream(data)
+  data_batch = NULL
   FOR each batch in reader:
     IF is_log_or_error(batch):
       deliver to on_log callback
       CONTINUE
     IF has "vgi_rpc.location":
       ERROR: redirect loop detected
+    IF data_batch is not NULL:
+      ERROR: multiple data batches
     data_batch = batch
+  IF data_batch is NULL:
+    ERROR: no data batch in payload
 
   // Validate schema match
   IF data_batch.schema != expected_schema:
     ERROR: schema mismatch
+
+  // The resolved metadata is the INNER data batch's, never the pointer's.
+  resolved_metadata = data_batch.custom_metadata
 
   // Add fetch provenance metadata
   resolved_metadata["vgi_rpc.location.fetch_ms"] = elapsed_ms
@@ -1391,12 +1401,39 @@ resolve_external_location(batch, custom_metadata, config):
   return (data_batch, resolved_metadata)
 ```
 
+The two lines worth spelling out, because independent implementations have
+guessed both of them wrong:
+
+* **Resolved metadata is the fetched data batch's metadata**, merged with the
+  provenance keys above — it is **not** the pointer batch's. The pointer
+  carries only `vgi_rpc.location` and `vgi_rpc.location.sha256`; everything
+  the writer attached to the data batch is inside the fetched object. A
+  reader that returns the pointer's metadata loses whatever rode on the data
+  batch, and on HTTP that includes the continuation cursor
+  (`vgi_rpc.stream_state#b64`) — so the first turn succeeds and the second
+  cannot be addressed. A resolved batch MUST NOT carry `vgi_rpc.location` or
+  `vgi_rpc.location.sha256`.
+* **Every log batch in the payload MUST be dispatched.** The uploaded object
+  holds the turn's log batches *followed by* its data batch, so a reader that
+  returns at the first data batch drops logs that were delivered inline before
+  externalization was enabled — a regression no data assertion can see.
+
 ### Stream externalization
 
 For stream methods, the server may externalize an entire output cycle
 (log batches + data batch) as one IPC stream. The pointer batch replaces
 the entire cycle. On resolution, the client reads back all batches,
 dispatches log batches, and returns the data batch.
+
+### Transport independence
+
+Externalization is **not an HTTP feature**. Any transport that carries record
+batches carries pointer batches, and the persistent byte-stream transports
+(pipe, subprocess, Unix socket, TCP) resolve them through the same reader
+path. A port whose pointer resolution lives only in its HTTP client has an
+untested half; the shared `TestExternalByteStream` conformance group exists to
+find it (see
+[cross-language-conformance.md](cross-language-conformance.md#fixture-gated-tests)).
 
 ---
 
