@@ -413,6 +413,26 @@ the server mint one. `{"ok": true}`. Every subsequent call on this connection
 carries the session headers until `session_end`. A `null` or absent token means
 "mint"; treat an empty string the same way.
 
+**Scopes nest, and the ops are stack-disciplined.** A `session_begin` arriving
+while a scope is already open **pushes** a new one; `session_end` **pops** and
+restores the enclosing scope rather than clearing the connection. `session_token`,
+`session_echo_headers`, `session_detach` and the outgoing header application all
+act on the **top** of the stack. A `session_end` with an empty stack is a no-op,
+not an error. Closing the connection drains the whole stack innermost-out.
+
+Hold the session state as a stack, not a slot. A single slot passes every test
+that opens one session, and `TestSticky::test_drain_rejects_new_opens` opens an
+inner scope inside an outer one and keeps using the **outer** one after the
+inner ends — so a slot implementation loses the outer session at the inner
+`session_end`, and the failure lands *after* the nested block, on a line that
+never mentions a session. Four ports built a slot first and four ports hit that,
+which is why this paragraph exists rather than being inferable.
+
+There is no scope identifier, deliberately: the ops are connection-scoped, so
+"which scope is this request in" has exactly one expressible answer, and the
+stack is what makes that answer well-defined. A driver that wants explicit
+handles is solving a problem the nesting discipline already settles.
+
 **`session_token`** — `{"ok": true, "token": "<opaque>"}` or `token: null` when
 the server minted none.
 
@@ -423,8 +443,9 @@ Empty object when there are none.
 **`session_detach`** — `{"ok": true, "token": "<opaque>"}`. Detaches: the
 session outlives this connection and `session_end` must **not** delete it.
 
-**`session_end`** — `{"ok": true}`. Ends the scope; best-effort `DELETE` unless
-the session was detached.
+**`session_end`** — `{"ok": true}`. Pops the innermost scope and restores the
+enclosing one; best-effort `DELETE` for the popped scope only, and not at all if
+it was detached. An empty stack is a no-op.
 
 ### 4.11 `shutdown`
 
