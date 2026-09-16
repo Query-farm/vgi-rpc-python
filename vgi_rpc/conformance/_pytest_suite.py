@@ -24,6 +24,8 @@ import pyarrow as pa
 import pytest
 from pyarrow import ipc
 
+from ._types import ANNOTATED_EMIT_LABEL
+
 if TYPE_CHECKING:
     import httpx2
 
@@ -1029,6 +1031,34 @@ class TestProducerStream:
             for i, ab in enumerate(batches):
                 assert ab.batch.column("index")[0].as_py() == i
                 assert ab.batch.column("value")[0].as_py() == i * 10
+
+    def test_per_batch_metadata_travels_inline(self, conformance_conn: ConnFactory) -> None:
+        """Per-emit custom metadata reaches the caller on an ordinary batch.
+
+        The inline control for
+        ``TestExternalByteStream::test_per_batch_metadata_survives_externalization``.
+        Keeping both is what makes a failure diagnosable: this one red means
+        the port never plumbs per-emit metadata at all, and its author should
+        be in the collector rather than the externalizer; this one green with
+        the external one red means metadata and externalization compose
+        wrongly, which is a different defect in a different place.
+
+        Small batches on purpose -- nothing here should externalize.
+        """
+        with conformance_conn() as proxy:
+            batches = list(proxy.produce_annotated_batches(count=3, rows_per_batch=8))
+        assert len(batches) == 3
+        for index, annotated in enumerate(batches):
+            what = f"produce_annotated_batches batch {index}"
+            assert annotated.batch.num_rows == 8, f"{what}: wrong row count"
+            assert annotated.batch.column("value")[0].as_py() == index * 1_000_000
+            metadata = annotated.custom_metadata
+            assert metadata is not None, f"{what}: batch carried no custom metadata"
+            assert metadata.get(b"conformance.batch_index") == str(index).encode(), (
+                f"{what}: per-emit metadata is missing or is another batch's"
+            )
+            assert metadata.get(b"conformance.batch_total") == b"3"
+            assert metadata.get(b"conformance.emit_label") == ANNOTATED_EMIT_LABEL.encode()
 
     def test_tick_metadata(self, conformance_conn: ConnFactory, request: pytest.FixtureRequest) -> None:
         """Application metadata on a producer tick reaches ``process``."""
@@ -2540,7 +2570,7 @@ class TestDescribeConformance:
         # close_counter) + 2 sticky streaming methods (stream_session_counter
         # / exchange_session_counter), added 2026-05 alongside the
         # Sticky.* conformance group.
-        assert len(conformance_describe.methods) == 87
+        assert len(conformance_describe.methods) == 88
         assert conformance_describe.protocol_name == "ConformanceService"
         echo_str = conformance_describe.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

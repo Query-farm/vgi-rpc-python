@@ -1,8 +1,8 @@
 # Golden reflection description — see tests/test_describe_golden.py
 protocol: ConformanceService
 protocol_version: 2.0.0
-protocol_hash: 5cc768771c2e8a54e19ebb7546c97c119823eb13e20a5ff62ca5ce7ed2a1334e
-method_count: 87
+protocol_hash: 7713e810a0523bddfed4caa692dd218f4cbb09a773d0d94401a90d70ac3b6e54
+method_count: 88
 
 add_floats
   method_type: unary
@@ -735,6 +735,18 @@ pack_nested_containers
       status_by_name: map<string, dictionary<values=string, indices=int16, ordered=0>> not null
   result:
       result: binary not null
+
+produce_annotated_batches
+  method_type: stream
+  has_return: False
+  has_header: False
+  stream_kind: producer
+  idempotency: unknown
+  params:
+      count: int64 not null
+      rows_per_batch: int64 not null
+  result:
+      (empty)
 
 produce_dynamic_schema
   method_type: stream

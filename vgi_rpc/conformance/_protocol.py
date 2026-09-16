@@ -377,6 +377,10 @@ class ConformanceService(Protocol):
         """Produce batch_count batches of rows_per_batch rows each."""
         ...
 
+    def produce_annotated_batches(self, count: int, rows_per_batch: int) -> Stream[ProducerState]:
+        """Produce count batches, each carrying distinct per-emit metadata."""
+        ...
+
     def produce_with_logs(self, count: int) -> Stream[ProducerState]:
         """Produce batches with an INFO log before each."""
         ...

@@ -271,6 +271,58 @@ class LargeProducerState(ProducerState):
         self.current += 1
 
 
+_ANNOTATED_SCHEMA = pa.schema([pa.field("value", pa.int64())])
+
+# A constant, deliberately non-ASCII: a port that round-trips metadata through
+# a latin-1 or C-string path fails here rather than in someone's production
+# data.
+ANNOTATED_EMIT_LABEL = "\u00fcn\u00efcode-\u03bb"
+
+
+@dataclass
+class AnnotatedProducerState(ProducerState):
+    """Emit ``count`` batches, each carrying distinct per-emit metadata.
+
+    Exists to pin the one place metadata and externalization meet. Two ports
+    shipped opposite defects there: one refused to externalize any batch
+    carrying metadata (using "has metadata" as a proxy for "is a control
+    batch"), the other externalized and *then* replaced the result's metadata,
+    erasing ``vgi_rpc.location`` and leaving a zero-row batch no resolver
+    recognises. Neither was reachable through any existing conformance method,
+    because none emits per-batch custom metadata.
+
+    A producer rather than an exchange on purpose: all known variants live in
+    the collector flush, which every port shares between producer and exchange,
+    so a producer reaches the same code for less harness. Do not add an
+    exchange twin for symmetry -- it would re-prove this on every transport.
+
+    ``batch_index`` varies per batch and the tests check *which* batch carried
+    *which* value: a constant label alone would pass against a port that caches
+    the first turn's metadata and reuses it, which is a real failure mode once
+    metadata is threaded through a per-stream struct rather than a per-emit one.
+    """
+
+    count: int
+    rows_per_batch: int
+    current: int = 0
+
+    def produce(self, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit one annotated batch, or finish."""
+        if self.current >= self.count:
+            out.finish()
+            return
+        base = self.current * 1_000_000
+        out.emit_pydict(
+            {"value": [base + row for row in range(self.rows_per_batch)]},
+            metadata={
+                "conformance.batch_index": str(self.current),
+                "conformance.batch_total": str(self.count),
+                "conformance.emit_label": ANNOTATED_EMIT_LABEL,
+            },
+        )
+        self.current += 1
+
+
 @dataclass
 class OversizedBatchState(ProducerState):
     """Emit one large batch of int64 rows, then finish.

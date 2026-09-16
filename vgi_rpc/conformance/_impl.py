@@ -22,6 +22,7 @@ from vgi_rpc.rpc import CallContext, Stream
 from ._types import (
     _ACCUM_INPUT_SCHEMA,
     _ACCUM_OUTPUT_SCHEMA,
+    _ANNOTATED_SCHEMA,
     _COUNTER_SCHEMA,
     _SCALE_INPUT_SCHEMA,
     _SCALE_OUTPUT_SCHEMA,
@@ -29,6 +30,7 @@ from ._types import (
     _SESSION_COUNTER_OUTPUT_SCHEMA,
     AccumulatingExchangeState,
     AllTypes,
+    AnnotatedProducerState,
     BoundingBox,
     CancellableExchangeState,
     CancellableProducerState,
@@ -403,6 +405,13 @@ class ConformanceServiceImpl:
         return Stream(
             output_schema=_COUNTER_SCHEMA,
             state=LargeProducerState(rows_per_batch=rows_per_batch, batch_count=batch_count),
+        )
+
+    def produce_annotated_batches(self, count: int, rows_per_batch: int) -> Stream[AnnotatedProducerState]:
+        """Produce batches carrying per-emit custom metadata."""
+        return Stream(
+            output_schema=_ANNOTATED_SCHEMA,
+            state=AnnotatedProducerState(count=count, rows_per_batch=rows_per_batch),
         )
 
     def produce_with_logs(self, count: int) -> Stream[LoggingProducerState]:

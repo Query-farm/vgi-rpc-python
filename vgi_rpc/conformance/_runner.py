@@ -1682,6 +1682,7 @@ _EXPECTED_METHODS = frozenset(
         "pack_nested_containers",
         "produce_dynamic_schema",
         "produce_empty",
+        "produce_annotated_batches",
         "produce_error_mid_stream",
         "produce_error_on_init",
         "produce_large_batches",
@@ -1811,6 +1812,7 @@ _STREAM_METHODS = frozenset(
         "exchange_zero_columns",
         "produce_dynamic_schema",
         "produce_empty",
+        "produce_annotated_batches",
         "produce_error_mid_stream",
         "produce_error_on_init",
         "produce_large_batches",
@@ -1867,7 +1869,7 @@ def _test_desc_method_count(desc: ServiceDescription) -> None:
     # close_counter) + 2 sticky streaming methods (stream_session_counter
     # / exchange_session_counter), added 2026-05 alongside the HTTP-only
     # Sticky.* conformance group.
-    assert len(desc.methods) == 87
+    assert len(desc.methods) == 88
 
 
 # ---------------------------------------------------------------------------

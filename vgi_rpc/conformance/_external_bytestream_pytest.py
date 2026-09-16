@@ -56,6 +56,8 @@ from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import LOCATION_KEY, LOCATION_SHA256_KEY, LOCATION_SOURCE_KEY
 from vgi_rpc.rpc import AnnotatedBatch, RpcError
 
+from ._types import ANNOTATED_EMIT_LABEL
+
 pytestmark = pytest.mark.timeout(30)
 
 #: Storage objects one call is expected to produce, at minimum.  Deliberately
@@ -113,6 +115,8 @@ class ByteStreamExternalConnection(Protocol):
     def produce_n(self, *, count: int) -> Iterable[AnnotatedBatch]: ...
 
     def produce_with_logs(self, *, count: int) -> Iterable[AnnotatedBatch]: ...
+
+    def produce_annotated_batches(self, *, count: int, rows_per_batch: int) -> Iterable[AnnotatedBatch]: ...
 
     def produce_error_mid_stream(self, *, emit_before_error: int) -> Iterable[AnnotatedBatch]: ...
 
@@ -337,6 +341,55 @@ class TestExternalByteStream:
             assert second.batch.column("value").to_pylist() == pytest.approx([12.0])
             _assert_uploaded(target, before, "exchange_scale")
             _assert_resolved_metadata(second.custom_metadata, "exchange_scale turn 2")
+
+    def test_per_batch_metadata_survives_externalization(self, request: pytest.FixtureRequest) -> None:
+        """Per-emit custom metadata and externalization must compose.
+
+        This is the one place the two meet, and two ports shipped opposite
+        defects there -- one refusing to externalize any batch that carries
+        metadata, the other externalizing and then replacing the result's
+        metadata so ``vgi_rpc.location`` was erased. Each variant trips a
+        different assertion below, which is what makes a failure legible
+        rather than merely red:
+
+        * no upload at all -> the writer treated "has metadata" as "is a
+          control batch" and skipped externalization;
+        * uploaded but zero rows -> the pointer lost its own pointer, so a
+          resolver saw a bare zero-row data batch;
+        * rows present but metadata absent -> the metadata went onto the
+          pointer instead of into the payload, or the reader returned the
+          pointer's metadata instead of the inner batch's.
+
+        The last case is caught in *both* directions by this one test, because
+        the two conformance roles put a different implementation on each side
+        of the pointer: a writer defect fails it in the server role and a
+        reader defect fails it in the client role.
+
+        ``rows_per_batch=2000`` is 16 KB of int64, unambiguously over both the
+        reference's 4 KiB default threshold and this fixture's one byte.
+        """
+        target = _target(request)
+        with target.connect() as proxy:
+            before = target.uploaded_objects()
+            batches = list(proxy.produce_annotated_batches(count=3, rows_per_batch=2000))
+            _assert_uploaded(target, before, "produce_annotated_batches")
+        assert len(batches) == 3
+        for index, annotated in enumerate(batches):
+            what = f"produce_annotated_batches batch {index}"
+            assert annotated.batch.num_rows == 2000, (
+                f"{what}: arrived with {annotated.batch.num_rows} rows -- a pointer "
+                f"that lost vgi_rpc.location reads as a zero-row data batch"
+            )
+            metadata = annotated.custom_metadata
+            assert metadata is not None, f"{what}: resolved batch carried no custom metadata"
+            assert metadata.get(b"conformance.batch_index") == str(index).encode(), (
+                f"{what}: per-emit metadata is missing or is another batch's -- "
+                f"a reader that caches the first turn's metadata passes a constant "
+                f"label and fails here"
+            )
+            assert metadata.get(b"conformance.batch_total") == b"3"
+            assert metadata.get(b"conformance.emit_label") == ANNOTATED_EMIT_LABEL.encode()
+            _assert_resolved_metadata(metadata, what)
 
     def test_dictionary_encoded_payloads_round_trip(self, request: pytest.FixtureRequest) -> None:
         """Dictionary-typed columns survive the pointer/payload split.
