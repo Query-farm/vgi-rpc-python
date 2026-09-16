@@ -68,12 +68,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import socketserver
 import threading
 import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC
 from typing import IO, TYPE_CHECKING, cast
-from wsgiref.simple_server import WSGIRequestHandler, make_server
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 from wsgiref.types import StartResponse, WSGIApplication, WSGIEnvironment
 
 if TYPE_CHECKING:
@@ -315,6 +316,29 @@ class _SilentHandler(WSGIRequestHandler):
         return
 
 
+class _ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
+    """One thread per connection, rather than one connection at a time.
+
+    ``wsgiref``'s default server handles a single request to completion before
+    accepting the next, and this fixture has two concurrent clients by
+    construction: the test process, and the worker under test reaching for
+    ``/alloc`` while that test waits on ``/_stats`` or a ``GET``.  Serialised,
+    the second connection sits in the listen backlog for as long as the first
+    request takes.  On Windows a connection the local stack gives up on is a
+    hard ``WSAECONNABORTED`` where POSIX quietly delivers the response, so the
+    fixture's serialisation surfaces as an intermittent ``ReadError`` in
+    whichever external-location test happened to be running.
+
+    :class:`_BlobStore` was already written for this -- every accessor takes a
+    lock -- so the only thing that was single-threaded is the accept loop.
+    """
+
+    daemon_threads = True
+    #: The default of 5 is the other half of the same problem: a runner under
+    #: load can have more than five connections in flight against one fixture.
+    request_queue_size = 64
+
+
 def serve_in_thread(host: str = "127.0.0.1", port: int = 0) -> tuple[str, Callable[[], None]]:
     """Start the fake storage on a background thread and return ``(base_url, shutdown)``.
 
@@ -330,7 +354,7 @@ def serve_in_thread(host: str = "127.0.0.1", port: int = 0) -> tuple[str, Callab
     # Bind first to discover the chosen port, then build the app with the
     # full base URL so allocated object URLs are externally reachable.
     placeholder_app = cast("WSGIApplication", lambda environ, start_response: [b""])
-    server = make_server(host, port, placeholder_app, handler_class=_SilentHandler)
+    server = make_server(host, port, placeholder_app, server_class=_ThreadingWSGIServer, handler_class=_SilentHandler)
     bound_port = server.server_address[1]
     base_url = f"http://{host}:{bound_port}"
     server.set_app(make_app(base_url))
@@ -426,7 +450,9 @@ def main() -> None:
     args = parser.parse_args()
 
     placeholder_app = cast("WSGIApplication", lambda environ, start_response: [b""])
-    server = make_server(args.host, args.port, placeholder_app, handler_class=_SilentHandler)
+    server = make_server(
+        args.host, args.port, placeholder_app, server_class=_ThreadingWSGIServer, handler_class=_SilentHandler
+    )
     bound_port = server.server_address[1]
     base_url = f"http://{args.host}:{bound_port}"
     server.set_app(make_app(base_url))
