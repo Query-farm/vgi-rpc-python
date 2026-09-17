@@ -125,7 +125,23 @@ resolve time, on the batch it returns — see *Resolution (reading)*.
 | Key (bytes) | Value | Description |
 |-------------|-------|-------------|
 | `vgi_rpc.location.fetch_ms` | Decimal float string (e.g. `"42.3"`) | Elapsed fetch time in milliseconds, measured by the reader. |
-| `vgi_rpc.location.source` | UTF-8 URL | The URL the reader fetched. |
+| `vgi_rpc.location.source` | UTF-8 URL | The URL the reader fetched, **in full**. |
+
+`location.source` records the URL complete with its query string, and a
+presigned URL's query string is a bearer credential. That is deliberate — the
+value has to identify the object that was actually fetched, and a redacted form
+identifies a different URL — but it has a consequence worth stating, because
+one port redacted this key for exactly this reason before the rule was written
+down.
+
+The redaction rule under *Fetch safety* governs **diagnostics**: errors, logs,
+traces and exception chains. It does not govern this key. The same URL is
+already on the wire in `vgi_rpc.location`, so carrying it here exposes it to
+the consuming application rather than to a new network observer — but note it
+**outlives** the pointer, which a resolved batch MUST NOT carry. Treat
+`location.source` as credential-bearing: it is safe to compare, attribute and
+cache on, and it MUST NOT be written to logs or telemetry without the same
+redaction a diagnostic URL gets.
 
 ### Introspection batch metadata (on `__describe__` response batch `custom_metadata`)
 
