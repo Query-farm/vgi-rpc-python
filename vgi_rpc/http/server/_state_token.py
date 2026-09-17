@@ -227,11 +227,18 @@ def _compute_aad(auth: AuthContext | None, *, protocol: str) -> bytes:
 
     Wire format::
 
-        b"vgi_rpc.state.v4\x00" || domain_bytes || b"\x00" || principal_bytes
+        b"vgi_rpc.state.v6\x00" || b"\x01" || domain_bytes || b"\x00"
+            || principal_bytes || b"\x00" || protocol_bytes
 
     When peer authentication contributes a binding digest, the prefix is
-    ``vgi_rpc.state.v5`` and the digest is appended after another NUL. Tokens
-    without peer evidence retain the v4 AAD for backward compatibility.
+    ``vgi_rpc.state.v7`` and the digest is appended after another NUL, before
+    the protocol scope.
+
+    The pair distinguishes *peer evidence*, not a version sequence: v6 and v7
+    are the same format, differing only in whether the binding digest is
+    present. They replaced v4/v5, which had the identical layout minus the
+    trailing protocol scope -- so a v4/v5 token cannot be opened here, and is
+    rejected as an invalid token rather than as a version mismatch.
 
     For anonymous requests, the identity tail is the literal
     ``b"\x00anonymous"`` — matching the convention used elsewhere in the
