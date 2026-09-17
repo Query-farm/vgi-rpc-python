@@ -528,13 +528,18 @@ Server → Client:  IPC stream (header_schema, 0..N log batches, 1 header row, E
 The header is a single-row batch containing serialized header data. If the
 method does not declare a header type, this phase is skipped entirely.
 
-**The header batch is externalizable like any other batch.** When it exceeds
-the server's externalization threshold it is uploaded and the header stream
-carries a **zero-row pointer batch** in its place, bearing `vgi_rpc.location`
-as described under *External storage*. Clients MUST resolve pointer batches in
-the header stream through the same resolution path they use for the data
-stream, and MUST test for a pointer **before** classifying a zero-row batch as
-a log or control batch. A pointer is zero-row by construction, so a reader
+**The header batch is externalizable like any other batch.** A server MAY
+upload it when it exceeds the server's externalization threshold, in which case
+the header stream carries a **zero-row pointer batch** in its place, bearing
+`vgi_rpc.location` as described under *External storage*.
+
+The obligation is deliberately asymmetric: externalizing a header is **optional
+for servers** and resolving one is **mandatory for clients**. A server that
+externalizes only in its data path is conformant, and most are. A client that
+cannot read an externalized header is not, whether or not its own server ever
+produces one. Clients MUST resolve pointer batches in the header stream through
+the same resolution path they use for the data stream, and MUST test for a
+pointer **before** classifying a zero-row batch as a log or control batch. A pointer is zero-row by construction, so a reader
 whose header loop treats zero rows as "log, skip" discards the header and then
 reports it absent — the header does not fail to parse, it fails to exist.
 
