@@ -208,11 +208,23 @@ Two further rules close that gap:
   sign is a bug or an attempt to make the edge and the worker read different
   strings. Compare raw bytes; never compare decoded-against-raw.
 - **Stream continuations re-verify.** A continuation (`/exchange`, cancel) must
-  stay on the protocol its stream started on. Implementations bind the protocol
-  into the AEAD associated data of the cursor and call tokens, so a
-  cross-protocol continuation fails the tag check and is rejected exactly as an
-  invalid token. Binding it into the *cursor* token is what covers the
-  call-state cache-hit path, where the call token is never opened at all.
+  stay on the protocol its stream started on. The required *property* is that a
+  continuation carrying a token minted under another protocol is refused.
+  Binding the protocol into the AEAD associated data of the cursor and call
+  tokens is how the reference achieves it, and is recommended: there is no
+  comparison code to get wrong, and it covers the call-state cache-hit path,
+  where the call token is never opened at all. An implementation that enforces
+  the property another way is conformant.
+
+  **The AAD construction itself is not a wire contract.** Associated data never
+  crosses the wire, and a sealed token is only ever opened by the
+  implementation that minted it — so the prefix strings, their version
+  numbering, and the byte layout of the identity tail are internal to a worker
+  framework and MAY differ between implementations. Ports are not required to
+  match the reference here, and a port that happens to match today is not
+  promising to keep matching. Do not build an implementation that depends on
+  opening another implementation's tokens; that is not a supported deployment,
+  and nothing in the conformance suite can observe it.
 
 A name that cannot match the grammar is rejected **before** it is looked up, so
 a request-supplied string never reaches an error message, a log field or a
