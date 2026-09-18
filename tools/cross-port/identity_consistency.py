@@ -166,8 +166,10 @@ FORBIDDEN: tuple[tuple[str, str, str], ...] = (
     (
         "no introspection limiter",
         r"rate limit exceeded|\b(class|struct|type|interface|record)\s+(\w+\s+)?\w*RateLimiter\b",
-        "introspection is still rate limited: a per-caller budget is one budget for every user behind "
-        "the asker, drainable by unauthenticated junk credentials (spec §4, 'No rate limiter')",
+        (
+            "introspection is still rate limited: a per-caller budget is one budget for every user behind "
+            "the asker, drainable by unauthenticated junk credentials (spec §4, 'No rate limiter')"
+        ),
     ),
     (
         "no claims passthrough",
