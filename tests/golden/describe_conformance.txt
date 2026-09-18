@@ -1,8 +1,8 @@
 # Golden reflection description — see tests/test_describe_golden.py
 protocol: ConformanceService
 protocol_version: 2.0.0
-protocol_hash: 7713e810a0523bddfed4caa692dd218f4cbb09a773d0d94401a90d70ac3b6e54
-method_count: 88
+protocol_hash: 4b0269208a5a8fdeb7d8fe0f62a352713a3bfc071d7de99e5e12408c5f0b9402
+method_count: 89
 
 add_floats
   method_type: unary
@@ -598,6 +598,17 @@ exchange_error_on_nth
   idempotency: unknown
   params:
       fail_on: int64 not null
+  result:
+      (empty)
+
+exchange_input_metadata
+  method_type: stream
+  has_return: False
+  has_header: False
+  stream_kind: exchange
+  idempotency: unknown
+  params:
+      (empty)
   result:
       (empty)
 

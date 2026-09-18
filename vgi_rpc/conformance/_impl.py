@@ -24,6 +24,7 @@ from ._types import (
     _ACCUM_OUTPUT_SCHEMA,
     _ANNOTATED_SCHEMA,
     _COUNTER_SCHEMA,
+    _INPUT_METADATA_OUTPUT_SCHEMA,
     _SCALE_INPUT_SCHEMA,
     _SCALE_OUTPUT_SCHEMA,
     _SESSION_COUNTER_EXCHANGE_INPUT_SCHEMA,
@@ -44,6 +45,7 @@ from ._types import (
     ErrorAfterNState,
     FailOnExchangeNState,
     HeaderProducerState,
+    InputMetadataExchangeState,
     LargeProducerState,
     LoggingExchangeState,
     LoggingProducerState,
@@ -486,6 +488,14 @@ class ConformanceServiceImpl:
         """Exchange stream with zero-column input and output."""
         empty = pa.schema([])
         return Stream(output_schema=empty, state=ZeroColumnExchangeState(), input_schema=empty)
+
+    def exchange_input_metadata(self) -> Stream[InputMetadataExchangeState]:
+        """Report each exchange input batch's custom metadata."""
+        return Stream(
+            output_schema=_INPUT_METADATA_OUTPUT_SCHEMA,
+            state=InputMetadataExchangeState(),
+            input_schema=_SCALE_INPUT_SCHEMA,
+        )
 
     def exchange_error_on_nth(self, fail_on: int) -> Stream[FailOnExchangeNState]:
         """Raise on Nth exchange."""

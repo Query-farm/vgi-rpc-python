@@ -441,6 +441,10 @@ class ConformanceService(Protocol):
         """Exchange stream with zero-column input and output."""
         ...
 
+    def exchange_input_metadata(self) -> Stream[ExchangeState]:
+        """Report the custom metadata each exchange input batch was handed with."""
+        ...
+
     def exchange_error_on_init(self) -> Stream[ExchangeState]:
         """Raise during exchange stream initialization."""
         ...

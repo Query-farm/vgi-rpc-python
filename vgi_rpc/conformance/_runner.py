@@ -41,6 +41,7 @@ from vgi_rpc.conformance._lifecycle_tests import (
 )
 from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.conformance._types import (
+    INPUT_METADATA_KEY,
     AllTypes,
     BoundingBox,
     ConformanceHeader,
@@ -53,7 +54,7 @@ from vgi_rpc.conformance._types import (
 )
 from vgi_rpc.introspect import DESCRIBE_VERSION, ServiceDescription
 from vgi_rpc.log import Level, Message
-from vgi_rpc.metadata import REQUEST_VERSION
+from vgi_rpc.metadata import CALL_STATE_KEY, CANCEL_KEY, REQUEST_VERSION, STATE_KEY
 from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError
 
 # Default per-test timeout in seconds for the standalone runner.
@@ -1018,6 +1019,27 @@ def _test_exchange_accumulate(proxy: ConformanceService, logs: LogCollector) -> 
         assert cast("int", out2.batch.column("exchange_count")[0].as_py()) == 2
 
 
+@_conformance_test(category="exchange_stream", name="input_metadata")
+def _test_exchange_input_metadata(proxy: ConformanceService, logs: LogCollector) -> None:
+    # Each input's own metadata, every turn; none on the bare turn; never the
+    # HTTP cursor or call token.  See TestExchangeStream.test_input_metadata.
+    turns = [
+        pa.KeyValueMetadata({INPUT_METADATA_KEY: b"first"}),
+        pa.KeyValueMetadata({INPUT_METADATA_KEY: b"second"}),
+        None,
+    ]
+    seen: list[str] = []
+    with proxy.exchange_input_metadata() as session:
+        for index, metadata in enumerate(turns):
+            batch = pa.RecordBatch.from_pydict({"value": [float(index)]})
+            out = session.exchange(AnnotatedBatch(batch=batch, custom_metadata=metadata))
+            seen.append(cast("str", out.batch.column("seen")[0].as_py()))
+            keys = cast("str", out.batch.column("keys")[0].as_py()).split(",")
+            for transport_key in (STATE_KEY, CALL_STATE_KEY, CANCEL_KEY):
+                assert transport_key.decode() not in keys, f"turn {index + 1} leaked {transport_key.decode()}"
+    assert seen == ["first", "second", ""], f"exchange input metadata not delivered per turn: {seen!r}"
+
+
 @_conformance_test(category="exchange_stream", name="with_logs")
 def _test_exchange_with_logs(proxy: ConformanceService, logs: LogCollector) -> None:
     logs.clear()
@@ -1673,6 +1695,7 @@ _EXPECTED_METHODS = frozenset(
         "exchange_cast_compatible",
         "exchange_error_on_init",
         "exchange_error_on_nth",
+        "exchange_input_metadata",
         "exchange_scale",
         "exchange_with_header",
         "exchange_with_logs",
@@ -1804,6 +1827,7 @@ _STREAM_METHODS = frozenset(
         "exchange_cast_compatible",
         "exchange_error_on_init",
         "exchange_error_on_nth",
+        "exchange_input_metadata",
         "exchange_oversized",
         "exchange_scale",
         "exchange_with_header",
@@ -1868,8 +1892,8 @@ def _test_desc_method_count(desc: ServiceDescription) -> None:
     # 76 + 3 sticky unary methods (open_counter / increment_counter /
     # close_counter) + 2 sticky streaming methods (stream_session_counter
     # / exchange_session_counter), added 2026-05 alongside the HTTP-only
-    # Sticky.* conformance group.
-    assert len(desc.methods) == 88
+    # Sticky.* conformance group, + exchange_input_metadata.
+    assert len(desc.methods) == 89
 
 
 # ---------------------------------------------------------------------------

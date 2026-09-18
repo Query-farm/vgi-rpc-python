@@ -24,7 +24,7 @@ import pyarrow as pa
 import pytest
 from pyarrow import ipc
 
-from ._types import ANNOTATED_EMIT_LABEL
+from ._types import ANNOTATED_EMIT_LABEL, INPUT_METADATA_KEY
 
 if TYPE_CHECKING:
     import httpx2
@@ -90,7 +90,7 @@ from vgi_rpc.conformance._transport_lifecycle_pytest import (  # noqa: F401
 from vgi_rpc.conformance.proof_harness import ProofUnsupported, ProofWorker, ProofWorkerFactory
 from vgi_rpc.introspect import ServiceDescription, introspect
 from vgi_rpc.log import Level, Message
-from vgi_rpc.metadata import CALL_STATE_KEY, STATE_KEY
+from vgi_rpc.metadata import CALL_STATE_KEY, CANCEL_KEY, STATE_KEY
 from vgi_rpc.rpc import AnnotatedBatch, MethodType, RpcError, RpcServer, make_pipe_pair
 from vgi_rpc.utils import empty_batch, new_ipc_stream
 
@@ -1185,6 +1185,55 @@ class TestExchangeStream:
             out2 = session.exchange(AnnotatedBatch.from_pydict({"value": [10.0]}))
             assert out2.batch.column("running_sum")[0].as_py() == pytest.approx(13.0)
             assert out2.batch.column("exchange_count")[0].as_py() == 2
+
+    def test_input_metadata(self, conformance_conn: ConnFactory) -> None:
+        """Each exchange input's custom metadata reaches ``exchange`` -- its own, on every turn.
+
+        The metadata on an exchange input batch is application data, per
+        input: VGI puts the conditional-revalidation validators
+        (``vgi.cache.if_none_match``) and dynamic-filter deltas on it, and a
+        worker reads them off ``input.custom_metadata``. The pipe transport
+        hands them over with the batch. Over HTTP each turn is its own request,
+        and a server that rebuilds the input as a bare data batch drops them --
+        silently, since the stream still completes and the rows are right.
+
+        Three turns with different metadata each, so a server that froze the
+        first turn's or carried one turn's into the next fails a later turn;
+        the last carries none and must see none. And on HTTP the tokens that
+        addressed the turn are the transport's bookkeeping, not the input's:
+        the cursor is a sealed token application code must not be able to read,
+        and the pipe never puts either on a batch (WIRE_PROTOCOL.md, "Stream
+        exchange (HTTP)").
+        """
+        extra_key = b"vgi.conformance.extra"
+        turns: list[pa.KeyValueMetadata | None] = [
+            pa.KeyValueMetadata({INPUT_METADATA_KEY: b"first"}),
+            pa.KeyValueMetadata({INPUT_METADATA_KEY: b"second", extra_key: b"1"}),
+            None,
+        ]
+        observed: list[tuple[str, list[str]]] = []
+        with conformance_conn() as proxy, proxy.exchange_input_metadata() as session:
+            for index, metadata in enumerate(turns):
+                batch = pa.RecordBatch.from_pydict({"value": [float(index)]})
+                out = session.exchange(AnnotatedBatch(batch=batch, custom_metadata=metadata))
+                assert out.batch.num_rows == 1, f"turn {index + 1}: expected one row per input"
+                keys = out.batch.column("keys")[0].as_py()
+                observed.append((out.batch.column("seen")[0].as_py(), keys.split(",") if keys else []))
+
+        assert [seen for seen, _ in observed] == ["first", "second", ""], (
+            "each exchange input's custom metadata must reach exchange() with that input "
+            f"(expected its own value per turn, and none on the bare turn); got {observed!r}"
+        )
+        assert extra_key.decode() in observed[1][1], f"every application key passes, not one; got {observed[1]!r}"
+        assert extra_key.decode() not in observed[2][1], (
+            f"metadata must not carry over into a later turn; got {observed[2]!r}"
+        )
+        for index, (_, keys) in enumerate(observed):
+            for transport_key in (STATE_KEY, CALL_STATE_KEY, CANCEL_KEY):
+                assert transport_key.decode() not in keys, (
+                    f"turn {index + 1}: {transport_key.decode()} is transport bookkeeping and must not "
+                    f"reach application code; got keys {keys!r}"
+                )
 
     def test_exchange_with_logs(self, conformance_conn: ConnFactory) -> None:
         """Verify logs per exchange."""
@@ -2570,8 +2619,8 @@ class TestDescribeConformance:
         # 76 + 3 sticky unary methods (open_counter / increment_counter /
         # close_counter) + 2 sticky streaming methods (stream_session_counter
         # / exchange_session_counter), added 2026-05 alongside the
-        # Sticky.* conformance group.
-        assert len(conformance_describe.methods) == 88
+        # Sticky.* conformance group, + exchange_input_metadata.
+        assert len(conformance_describe.methods) == 89
         assert conformance_describe.protocol_name == "ConformanceService"
         echo_str = conformance_describe.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

@@ -21,8 +21,17 @@ import pytest
 from pyarrow import ipc
 
 from vgi_rpc.conformance._protocol import ConformanceService
+from vgi_rpc.conformance._types import INPUT_METADATA_KEY
 from vgi_rpc.external import ClientExternalConfig, make_external_location_batch
-from vgi_rpc.metadata import CALL_STATE_KEY, STATE_KEY, merge_metadata
+from vgi_rpc.metadata import (
+    CALL_STATE_KEY,
+    LOCATION_FETCH_MS_KEY,
+    LOCATION_KEY,
+    LOCATION_SHA256_KEY,
+    LOCATION_SOURCE_KEY,
+    STATE_KEY,
+    merge_metadata,
+)
 from vgi_rpc.rpc import AnnotatedBatch, RpcError, _dispatch_log_or_error, rpc_methods
 from vgi_rpc.rpc._wire import _write_request
 from vgi_rpc.utils import new_ipc_stream
@@ -229,6 +238,72 @@ class TestExternalInputRoutes:
         data = [batch for batch, _ in batches if batch.num_rows > 0]
         assert len(data) == 1
         assert data[0].column("value").to_pylist() == pytest.approx([4.5, 6.0])
+
+    def test_exchange_external_input_carries_the_payloads_metadata(
+        self,
+        conformance_http_with_storage_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """An externalized exchange input reaches ``exchange`` with the payload's metadata.
+
+        Resolved metadata is the fetched batch's, never the pointer's, plus the
+        reader's provenance stamp (WIRE_PROTOCOL.md §12) -- and on an exchange
+        it is application data the method reads. The pointer and the payload
+        disagree on the application key here, so a server that hands over the
+        pointer's metadata, or none, is told which.
+        """
+        import httpx2
+
+        base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            cursor, call = _state_tokens(
+                _post(
+                    client,
+                    "/ConformanceService/exchange_input_metadata/init",
+                    _request_body("exchange_input_metadata"),
+                )
+            )
+            input_batch = pa.RecordBatch.from_pydict(
+                {"value": [1.0]},
+                schema=pa.schema([pa.field("value", pa.float64())]),
+            )
+            payload = BytesIO()
+            with new_ipc_stream(payload, input_batch.schema) as writer:
+                writer.write_batch(
+                    input_batch,
+                    custom_metadata=pa.KeyValueMetadata(
+                        {STATE_KEY: cursor, CALL_STATE_KEY: call, INPUT_METADATA_KEY: b"from-payload"}
+                    ),
+                )
+            download_url, checksum = _upload_body(conformance_fake_storage, payload.getvalue())
+            pointer, location_metadata = make_external_location_batch(input_batch.schema, download_url, sha256=checksum)
+            pointer_body = BytesIO()
+            with new_ipc_stream(pointer_body, input_batch.schema) as writer:
+                writer.write_batch(
+                    pointer,
+                    custom_metadata=merge_metadata(
+                        pa.KeyValueMetadata(
+                            {STATE_KEY: cursor, CALL_STATE_KEY: call, INPUT_METADATA_KEY: b"from-pointer"}
+                        ),
+                        location_metadata,
+                    ),
+                )
+            batches = _response_batches(
+                _post(client, "/ConformanceService/exchange_input_metadata/exchange", pointer_body.getvalue())
+            )
+        data = [batch for batch, _ in batches if batch.num_rows > 0]
+        assert len(data) == 1
+        seen = data[0].column("seen")[0].as_py()
+        keys = data[0].column("keys")[0].as_py().split(",")
+        assert seen == "from-payload", (
+            f"resolved metadata must be the fetched payload's, not the pointer's; got {seen!r}"
+        )
+        for stamped in (LOCATION_SOURCE_KEY, LOCATION_FETCH_MS_KEY):
+            assert stamped.decode() in keys, (
+                f"the reader must stamp {stamped.decode()} on a resolved input; got {keys!r}"
+            )
+        for absent in (LOCATION_KEY, LOCATION_SHA256_KEY, STATE_KEY, CALL_STATE_KEY):
+            assert absent.decode() not in keys, f"{absent.decode()} must not reach application code; got {keys!r}"
 
     def test_exchange_client_auto_externalizes_large_input(
         self,

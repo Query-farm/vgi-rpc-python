@@ -448,6 +448,34 @@ class LoggingExchangeState(ExchangeState):
         out.emit(input.batch)
 
 
+#: The application key :class:`InputMetadataExchangeState` reports the value of.
+INPUT_METADATA_KEY = b"vgi.conformance.input"
+_INPUT_METADATA_OUTPUT_SCHEMA = pa.schema([pa.field("seen", pa.string()), pa.field("keys", pa.string())])
+
+
+@dataclass
+class InputMetadataExchangeState(ExchangeState):
+    """Report the custom metadata each exchange input batch reached ``exchange`` with.
+
+    One row per input: ``seen`` is the value of :data:`INPUT_METADATA_KEY`
+    (empty when absent) and ``keys`` every key present, sorted and
+    comma-joined (empty when there is no metadata at all). The two together
+    let a test check both halves of the rule -- the application's own metadata
+    arrives, and the transport's bookkeeping (the HTTP cursor and call token)
+    does not.
+    """
+
+    _placeholder: int = 0
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Emit what this input's metadata carried."""
+        md = input.custom_metadata
+        raw = md.get(INPUT_METADATA_KEY) if md is not None else None
+        seen = raw.decode("utf-8", "replace") if raw is not None else ""
+        keys = ",".join(sorted(k.decode("utf-8", "replace") for k in md)) if md is not None else ""
+        out.emit_pydict({"seen": [seen], "keys": [keys]})
+
+
 @dataclass
 class ZeroColumnExchangeState(ExchangeState):
     """Accept and emit zero-column batches."""
