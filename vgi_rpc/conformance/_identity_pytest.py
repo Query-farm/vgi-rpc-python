@@ -933,6 +933,49 @@ class TestUnavailableIsTransient:
         )
 
 
+class TestIntrospectionIsNotThrottled:
+    """The allowlist is the control; the protocol does not rate-limit introspection.
+
+    The only caller is a trusted asker -- in practice a proxy -- which
+    introspects on behalf of every client that presents a bearer.  A per-caller
+    limit is therefore one budget for every user's login, and unauthenticated
+    junk credentials sent to the proxy drain it.  It bounded only guessing,
+    which a random credential defeats at any rate, never resolving a stolen one
+    (one call).  So it was removed from the protocol; this pins that no port
+    kept it, now that the fixture no longer raises it out of the way.
+    """
+
+    #: Three times the retired default of 20 per caller per second.
+    BURST = 60
+
+    def test_a_burst_from_the_introspector_is_answered_in_full(self, request: pytest.FixtureRequest) -> None:
+        """Every one of a concurrent burst resolves; none is refused.
+
+        Concurrent so the burst lands inside a single one-second window however
+        slow the worker is -- a sequential loop against a slow port could spread
+        across windows and slip under a limiter the port forgot to remove.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        port = _identity_port(request)
+
+        def one(_: int) -> str:
+            try:
+                _introspect(port, SUBJECT_TOKEN)
+            except _Rejected as exc:
+                return f"{exc.kind or exc.error_type}: {exc.message}"
+            return "resolved"
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            outcomes = list(pool.map(one, range(self.BURST)))
+        refused = [o for o in outcomes if o != "resolved"]
+        assert not refused, (
+            f"{len(refused)} of {self.BURST} introspections from the allowlisted caller were refused, "
+            f"e.g. {refused[0]!r}. Introspection is not rate limited: a per-caller limit is one budget "
+            f"for every user behind the asker, and unauthenticated junk credentials drain it."
+        )
+
+
 # ---------------------------------------------------------------------------
 # issue_grant
 # ---------------------------------------------------------------------------
@@ -941,8 +984,8 @@ class TestUnavailableIsTransient:
 class TestGrantIssuance:
     """Minting is about the caller, so it is guarded differently on purpose.
 
-    No allowlist and no rate limit, because it is not an oracle about anybody
-    else -- and rejections that are deliberately *actionable*, because a
+    No allowlist, because it is not an oracle about anybody else -- and
+    rejections that are deliberately *actionable*, because a
     console that cannot tell "your login is too old" from "no" cannot know to
     re-prompt.
     """

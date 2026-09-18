@@ -112,7 +112,12 @@ real bug: see §7.
 |---|---|---|
 | introspector allowlist | exactly `["conformance-introspector"]` | one principal, so "on the list" and "authenticated but not on the list" are both reachable |
 | `max_auth_age` | `900.0` | the documented default |
-| `introspect_rate_limit` | `100000` | **deliberately far above the default 20.** Nearly every case in this group is an introspection; a production-tuned limiter would fire mid-group and every resulting failure would read as the wrong guard. The limiter is not asserted here — see §6. |
+
+There is no rate limit to configure: introspection is not rate limited (spec §4,
+"No rate limiter"), and `TestIntrospectionIsNotThrottled` asserts it — a
+concurrent burst of 60 introspections from the introspector must all resolve.
+The fixture used to set `introspect_rate_limit=100000` to keep a production
+limiter out of the group's way; delete that setting with the limiter.
 
 ### 3.2 Principals the group sends
 
@@ -426,10 +431,8 @@ omissions for oversights.
 
 | Property | Why not |
 |---|---|
-| **the rate limiter** | It is the one guard that poisons its own neighbours: nearly every case here is an introspection, and a production-tuned limiter would fire mid-group with every resulting failure reading as the wrong guard. The fixture raises it to 100000 to get it out of the way. Spec §5b measured it as *already soundly covered in every port*, because its refusal is distinguishable by message and so cannot be tested vacuously. **Keep testing it port-locally.** |
 | **allowlist required at construction** | A worker that refuses to start cannot be probed over the wire. Port-local. |
 | **`token_digest`** | A diagnostics helper; nothing puts it on the wire. |
-| **the limiter's whole-map reset** | In-process state, invisible from outside. |
 | **`IdentityUnavailable`'s supertype** | A language-level property. Its wire-observable proxy — a distinct `error_kind` *and* a distinct error type — **is** asserted (§4.9). |
 | **a null *inside* the scopes list** | The item's nullability is already pinned byte-for-byte by the `protocol_hash` (§4.1), which the group reads off a running server. Sending an actual null would additionally require every port's mint hook to accept `list<optional<string>>`, which several cannot express without changing the hook signature — a large ask for a property the hash already covers. |
 | **the exact `max_auth_age` boundary** | A knife-edge across a clock the test does not share with the worker. The group probes a minute old and a day old. |
@@ -522,7 +525,6 @@ headers             X-Conformance-Principal
 
 allowlist           ["conformance-introspector"]
 max_auth_age        900.0
-rate limit          100000
 
 principals          conformance-introspector
                     conformance-outsider

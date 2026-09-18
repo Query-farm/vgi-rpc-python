@@ -25,7 +25,6 @@ from vgi_rpc.rpc._token_identity import (
     IdentityUnavailableError,
     IntrospectionRefusedError,
     IssuedGrant,
-    RateLimiter,
     StaleAuthError,
     TokenIdentity,
     TokenUnresolvedError,
@@ -213,14 +212,26 @@ class TestIntrospectionIsLockedDown:
             "sidecar outage raised as one is read as 'not my credential, try the next'"
         )
 
-    def test_rate_limited(self) -> None:
-        """Bounds, rather than closes, the oracle an allowlisted caller still has."""
-        impl = self._impl(introspect_rate_limit=2)
+    def test_introspection_is_not_rate_limited(self) -> None:
+        """The allowlisted caller is answered however often it asks.
+
+        The caller is the asker -- a proxy -- introspecting on behalf of every
+        client that presents a bearer, so a per-caller limit was one budget for
+        every user's login, drainable by unauthenticated junk credentials.
+        """
+        impl = self._impl()
         ctx = _ctx(_auth("proxy"))
-        assert impl.introspect_token("good", ctx).principal == "bob"
-        assert impl.introspect_token("good", ctx).principal == "bob"
-        with pytest.raises(IntrospectionRefusedError, match="rate limit"):
-            impl.introspect_token("good", ctx)
+        assert all(impl.introspect_token("good", ctx).principal == "bob" for _ in range(500))
+
+    def test_the_retired_rate_limit_argument_is_accepted_and_ignored(self) -> None:
+        """Deprecated, not refused: vgi-python 0.34.1 passes it whenever introspection is on.
+
+        Refusing it would stop those workers from starting against this release.
+        """
+        with pytest.warns(DeprecationWarning, match="no longer rate limited"):
+            impl = self._impl(introspect_rate_limit=2)
+        ctx = _ctx(_auth("proxy"))
+        assert all(impl.introspect_token("good", ctx).principal == "bob" for _ in range(10))
 
     def test_an_allowlist_is_mandatory(self) -> None:
         """There is no permissive default, so it cannot be reached by omission."""
@@ -410,41 +421,6 @@ class TestDiagnostics:
         assert StaleAuthError.error_kind == "stale_auth"
         assert GrantRefusedError.error_kind == "grant_refused"
         assert IdentityUnavailableError.error_kind == "identity_unavailable"
-
-
-class TestRateLimiter:
-    """Fixed-window, because the state is two integers rather than an aged float."""
-
-    def test_admits_up_to_the_limit(self) -> None:
-        """Within a window."""
-        limiter = RateLimiter(3)
-        assert [limiter.allow("a", now=100.0) for _ in range(4)] == [True, True, True, False]
-
-    def test_window_rolls(self) -> None:
-        """A new window resets the count."""
-        limiter = RateLimiter(1)
-        assert limiter.allow("a", now=100.0)
-        assert not limiter.allow("a", now=100.5)
-        assert limiter.allow("a", now=101.5)
-
-    def test_callers_are_independent(self) -> None:
-        """One caller exhausting its budget must not refuse another."""
-        limiter = RateLimiter(1)
-        assert limiter.allow("a", now=100.0)
-        assert limiter.allow("b", now=100.0)
-        assert not limiter.allow("a", now=100.0)
-
-    def test_cycling_keys_cannot_grow_the_map(self) -> None:
-        """Whole-map reset rather than per-key ageing, so an attacker cannot.
-
-        Per-key ageing would let a caller cycling keys grow the map without
-        bound between sweeps.
-        """
-        limiter = RateLimiter(1)
-        for i in range(1000):
-            limiter.allow(f"k{i}", now=100.0)
-        limiter.allow("fresh", now=200.0)
-        assert len(limiter._counts) == 1
 
 
 class TestJwsShapeTestSurvivesTranslation:

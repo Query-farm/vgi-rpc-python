@@ -56,7 +56,6 @@ __all__ = [
     "GRANT_ID",
     "GRANT_TOKEN_PREFIX",
     "INTROSPECTOR_PRINCIPAL",
-    "INTROSPECT_RATE_LIMIT",
     "MAX_AUTH_AGE",
     "MINIMAL_PURPOSE",
     "MINTER_PRINCIPAL",
@@ -129,14 +128,9 @@ OTHER_MINTER_PRINCIPAL = "other-minter@conformance.example"
 #: ``max_auth_age`` the worker must configure -- the documented default.
 MAX_AUTH_AGE = 900.0
 
-#: ``introspect_rate_limit`` the worker must configure.  Deliberately far above
-#: the default 20 so the limiter cannot fire during this group: nearly every
-#: case here is an introspection, and a limiter tuned for production would turn
-#: a dense test group into a flaky one whose failures all read as the wrong
-#: guard.  The limiter is tested port-locally instead -- per spec §5b it is one
-#: of the guards whose refusal is already distinguishable and so was soundly
-#: covered in every port.
-INTROSPECT_RATE_LIMIT = 100_000
+# There is no ``introspect_rate_limit`` to configure: introspection is not rate
+# limited (``TestIntrospectionIsNotThrottled`` pins that). The fixture used to
+# set it to 100,000 so a production-tuned limiter could not fire mid-group.
 
 # ---------------------------------------------------------------------------
 # What the resolver answers

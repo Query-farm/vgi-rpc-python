@@ -2018,8 +2018,24 @@ guards, all normative:
   routing one onward hands a third party a token the asker may itself have
   rejected for being expired or wrong-audience.
 
-Rate limiting (default 20/caller/second) **bounds, rather than closes**, the
-oracle an allowlisted-but-compromised caller still has.
+**`introspect_token` is not rate limited.** The allowlist is the control. An
+earlier revision also capped each caller at 20 introspections a second, to bound
+what an allowlisted-but-compromised caller could do. It bounded the wrong thing
+and cost the right one:
+
+- It bounded only *guessing*, which a random credential defeats at any rate, and
+  not the harm a leaked introspector credential actually does -- resolving a
+  *stolen* credential to its owner takes one call.
+- The caller is the asker, and the asker introspects on behalf of every client
+  that presents a bearer. A per-caller limit was therefore one budget for every
+  user's first login, and unauthenticated clients drained it simply by sending
+  the asker junk credentials.
+
+Throttle untrusted traffic where it arrives -- at the asker, per client. An
+implementation or deployment that throttles introspection anyway MUST answer
+with a transient kind (`identity_unavailable`), never `introspection_refused`:
+that kind is definitive and MAY be cached, so a throttled answer reported as it
+negative-caches valid credentials, which is how the cap used to lock users out.
 
 `TokenIdentity` carries `principal`, `token_name` and `ttl_seconds`, and
 **never claims**. A pass-through claims field would let a worker choose its
@@ -2039,7 +2055,7 @@ later by unattended automation as an ordinary bearer.
 **There is no subject parameter.** The subject is always the caller's
 authenticated principal, so cross-subject minting is closed by construction
 rather than by a check one of six ports can forget. That is also why this method
-needs no allowlist and no rate limit while `introspect_token` has both.
+needs no allowlist while `introspect_token` has one.
 
 **A credential with no verifiable `auth_time` cannot mint.** That single rule is
 what stops a grant being used to mint another grant and escaping the identity
@@ -2074,7 +2090,7 @@ load-bearing rather than decorative:
 
 | `error_kind` | Meaning | Caller |
 |---|---|---|
-| `introspection_refused` | The caller may not introspect. | Definitive; MAY cache. |
+| `introspection_refused` | The caller may not introspect -- it is not on the allowlist. Never a throttle. | Definitive; MAY cache. |
 | `token_unresolved` | The subject credential did not resolve. | Definitive; MAY cache. |
 | `stale_auth` | The caller has not authenticated recently enough to mint. | Definitive, and actionable — re-prompt. |
 | `grant_refused` | The worker declined to mint. | Definitive. |
