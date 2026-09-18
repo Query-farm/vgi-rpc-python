@@ -72,6 +72,10 @@ _HASH_LEN: Final[int] = 16
 # enough that a hung worker doesn't make the launcher hang.
 _PROBE_TIMEOUT_S: Final[float] = 2.0
 
+# Pauses between re-probes of a refused socket — see ``_probe``. A socket left
+# by a dead worker costs this once, before it is replaced.
+_PROBE_REFUSED_BACKOFF_S: Final[tuple[float, ...]] = (0.05, 0.1, 0.2)
+
 
 @dataclasses.dataclass(frozen=True)
 class LaunchConfig:
@@ -152,16 +156,36 @@ def _socket_paths(state_dir: Path, hash_id: str) -> tuple[Path, Path, Path]:
 
 
 def _probe(path: str | Path) -> bool:
-    """Return True if a worker is currently accepting on *path*."""
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(_PROBE_TIMEOUT_S)
-    try:
-        s.connect(str(path))
-    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, OSError):
-        return False
-    finally:
-        s.close()
-    return True
+    """Return True if a worker is listening on *path*.
+
+    A listener whose accept queue is full is alive, only busy — and a false
+    "dead" here is destructive, because the launcher then unlinks the socket out
+    from under the live worker and spawns a duplicate (a 32-process test run
+    produced 64 workers for 2 commands). Linux reports a full queue on the
+    non-blocking connect as ``EAGAIN`` (``BlockingIOError``), distinct from the
+    ``ECONNREFUSED`` of an unbound socket, so it counts as alive. macOS reports
+    both as ``ECONNREFUSED``, so a refusal is re-probed briefly before it is
+    believed. This asks "is anything listening", not "is it responsive": a
+    connect lands in the queue of a worker that never accepts, so a successful
+    one never proved that either.
+    """
+    for attempt in range(len(_PROBE_REFUSED_BACKOFF_S) + 1):
+        if attempt:
+            time.sleep(_PROBE_REFUSED_BACKOFF_S[attempt - 1])
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(_PROBE_TIMEOUT_S)
+        try:
+            s.connect(str(path))
+        except BlockingIOError:
+            return True
+        except ConnectionRefusedError:
+            continue
+        except OSError:  # absent, timed out, or otherwise unreachable
+            return False
+        finally:
+            s.close()
+        return True
+    return False
 
 
 def _unlink_stale_socket(path: str | Path) -> None:

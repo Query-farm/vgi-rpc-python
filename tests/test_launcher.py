@@ -304,6 +304,78 @@ def test_stale_socket_file_cleaned_up(state_dir: Path) -> None:
     _connect_and_close(path)
 
 
+def _fill_accept_queue(path: str) -> tuple[socket.socket, list[socket.socket]]:
+    """Bind a listener on *path* that never accepts, and queue connects until it is full.
+
+    Returns the listener and the queued client sockets, which the caller keeps
+    open so the queue stays full.
+    """
+    af_unix = cast("Any", socket).AF_UNIX
+    listener = socket.socket(af_unix, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(0)
+    queued: list[socket.socket] = []
+    for _ in range(256):
+        client = socket.socket(af_unix, socket.SOCK_STREAM)
+        client.setblocking(False)
+        try:
+            client.connect(path)
+        except (BlockingIOError, ConnectionRefusedError):
+            client.close()
+            return listener, queued
+        queued.append(client)
+    raise AssertionError("the accept queue never filled")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux tells a full accept queue (EAGAIN) from no listener")
+def test_launch_leaves_a_worker_with_a_full_accept_queue_alone(state_dir: Path) -> None:
+    """A busy worker is not a dead one: its socket is not unlinked and nothing is spawned in its place.
+
+    Under a burst of connections the worker's accept queue fills and the probe's
+    connect fails with ``EAGAIN``. Reading that as "dead" unlinked the live
+    worker's socket and spawned a duplicate on every busy probe.
+    """
+    sock = str(state_dir / "busy.sock")
+    listener, queued = _fill_accept_queue(sock)
+    inode = os.stat(sock).st_ino
+    try:
+        config = LaunchConfig(
+            # Would fail loudly ("worker exited before readiness") if spawned.
+            worker_argv=(sys.executable, "-c", "raise SystemExit(3)"),
+            socket_path=sock,
+            connect_timeout=5.0,
+            worker_startup_timeout=5.0,
+        )
+        assert launch(config) == sock
+        assert os.stat(sock).st_ino == inode
+    finally:
+        for client in queued:
+            client.close()
+        listener.close()
+
+
+@_SKIP_WIN
+def test_probe_counts_a_momentarily_full_accept_queue_as_alive(state_dir: Path) -> None:
+    """A full queue that drains is alive however the platform reports it (EAGAIN, or macOS's ECONNREFUSED)."""
+    sock = str(state_dir / "busy.sock")
+    listener, queued = _fill_accept_queue(sock)
+
+    def _accept_one_shortly() -> None:
+        time.sleep(0.03)
+        conn, _ = listener.accept()
+        conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        drained = pool.submit(_accept_one_shortly)
+        try:
+            assert launcher_module._probe(sock)
+        finally:
+            drained.result(timeout=5)
+            for client in queued:
+                client.close()
+            listener.close()
+
+
 @_SKIP_WIN
 @pytest.mark.parametrize("entry_kind", ("regular", "symlink"))
 def test_launcher_preserves_non_socket_path(state_dir: Path, entry_kind: str) -> None:
