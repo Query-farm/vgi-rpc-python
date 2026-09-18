@@ -7,8 +7,8 @@ every field name, type and nullability flag in the description.
 
 It cannot see any of the things this file checks.  Identity's security
 properties live almost entirely in code the hash does not touch: the order the
-guards run in, the size of the window a rate limiter admits, whether an
-allowlist can be reached by omission, whether a transient failure is
+guards run in, whether an allowlist can be reached by omission, whether a
+transient failure is
 distinguishable from a definitive one.  Six ports can agree on the digest to
 the last byte and still disagree about every one of those.
 
@@ -89,11 +89,6 @@ CHECKS: tuple[tuple[str, str, str], ...] = (
         "the cap on a credential we will attempt to resolve differs",
     ),
     (
-        "rate limit 20/s",
-        r"(rate.?limit|per.?window|introspect)\D{0,60}\b20\b",
-        "the introspection oracle is bounded differently",
-    ),
-    (
         "max_auth_age 900",
         r"max.?auth.?age\D{0,40}900|900(\.0)?\D{0,40}auth.?age",
         "the ceiling on how stale a login may be and still mint a grant differs",
@@ -167,6 +162,12 @@ FORBIDDEN: tuple[tuple[str, str, str], ...] = (
         "no subject param",
         r"issue_grant\s*\([^)]*\bsubject\b",
         "issue_grant takes a subject: cross-subject minting is open",
+    ),
+    (
+        "no introspection limiter",
+        r"rate limit exceeded|\b(class|struct|type|interface|record)\s+(\w+\s+)?\w*RateLimiter\b",
+        "introspection is still rate limited: a per-caller budget is one budget for every user behind "
+        "the asker, drainable by unauthenticated junk credentials (spec §4, 'No rate limiter')",
     ),
     (
         "no claims passthrough",

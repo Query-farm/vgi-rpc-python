@@ -18,13 +18,24 @@ assertion made by the thing being protected, which the asker then acts on using
 credentials the worker does not hold -- storage credentials, entitlement
 lookups, policy-tier selection.  "Trust it as much as you trust the worker" is
 the wrong frame: it must be trusted *more*.  So every rejection is uniform, the
-caller must be on an allowlist with no permissive default, a JWS-shaped subject
-never reaches the resolver, and the whole thing is rate limited.
+caller must be on an allowlist with no permissive default, and a JWS-shaped
+subject never reaches the resolver.
+
+It is deliberately **not rate limited**.  The allowlist is the control: the only
+callers are trusted askers, in practice a proxy.  A per-caller limit there bounds
+only guessing, which is hopeless against a random credential at any rate, and
+not the real harm of a leaked introspector credential -- resolving a *stolen*
+credential to its owner takes one call.  What it did do was harm: the asker
+calls on behalf of everyone who presents a bearer, so a per-caller budget is one
+budget for every user's login, drainable by unauthenticated junk credentials.
+Throttling untrusted traffic belongs where it arrives -- at the asker, per
+client -- and a throttled answer is never ``introspection_refused``, which a
+caller may cache as definitive.
 
 ``issue_grant`` mints a credential for the *calling* user, so it is not an
-oracle about anybody else.  It therefore needs no allowlist and no rate limit,
-and its rejections are deliberately *actionable*: a console that cannot tell
-"your login is too old" from "no" cannot know to re-prompt.
+oracle about anybody else.  It therefore needs no allowlist, and its rejections
+are deliberately *actionable*: a console that cannot tell "your login is too
+old" from "no" cannot know to re-prompt.
 
 Errors carry a stable ``error_kind``.  That is load-bearing rather than
 decorative: these used to be a bespoke HTTP route whose callers classified
@@ -40,8 +51,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import re
-import threading
 import time
+import warnings
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from vgi_rpc.utils import ArrowSerializableDataclass
@@ -60,7 +71,6 @@ __all__ = [
     "IdentityUnavailableError",
     "IntrospectionRefusedError",
     "MAX_TOKEN_BYTES",
-    "RateLimiter",
     "StaleAuthError",
     "TokenUnresolvedError",
     "check_freshness",
@@ -159,44 +169,6 @@ class IdentityUnavailableError(Exception):
         super().__init__(detail or "identity lookup unavailable")
         self.detail = detail
         self.retry_after = retry_after
-
-
-class RateLimiter:
-    """Fixed-window request limiter, keyed by caller.
-
-    Present because introspection is a credential-to-identity oracle even when
-    correctly restricted: an allowlisted caller whose own credential leaks can
-    still test guesses.  Rate limiting does not close that, it bounds it.
-
-    Fixed-window rather than a token bucket: a window admits at most twice the
-    rate across a boundary, which is a rounding error here, and the state is
-    two integers per caller rather than a float that has to be aged.
-    """
-
-    __slots__ = ("_counts", "_lock", "_per_window", "_window", "_window_start")
-
-    def __init__(self, per_window: int, window_seconds: float = 1.0) -> None:
-        """Build a limiter admitting *per_window* requests per window."""
-        self._per_window = per_window
-        self._window = window_seconds
-        self._counts: dict[str, int] = {}
-        self._window_start = 0.0
-        self._lock = threading.Lock()
-
-    def allow(self, key: str, now: float | None = None) -> bool:
-        """Return ``True`` if *key* may make a request in the current window."""
-        current = time.monotonic() if now is None else now
-        with self._lock:
-            if current - self._window_start >= self._window:
-                # Whole-map reset rather than per-key ageing: an attacker
-                # cycling keys cannot grow the map beyond one window's worth.
-                self._counts.clear()
-                self._window_start = current
-            count = self._counts.get(key, 0)
-            if count >= self._per_window:
-                return False
-            self._counts[key] = count + 1
-            return True
 
 
 def normalise_principals(principals: Iterable[str] | None) -> frozenset[str]:
@@ -375,8 +347,8 @@ class Identity(Protocol):
         -- storage credentials, entitlement lookups, policy-tier selection.
         "Trust it as much as you trust the worker" is the wrong frame: it must
         be trusted *more*.  Hence the guards: an introspector allowlist with no
-        permissive default, uniform rejections, a JWS-shaped subject refused
-        before the resolver runs, and rate limiting.
+        permissive default, uniform rejections, and a JWS-shaped subject refused
+        before the resolver runs.
 
         Deliberately *not* "replay the credential through the worker's own
         authenticate chain": that would run an independently-configured
@@ -436,7 +408,7 @@ class IdentityImpl:
     """Applies this module's guards, then delegates to worker-supplied hooks.
 
     The framework owns the guards and owns none of the policy.  It decides who
-    may ask, how often, and what shape of credential is refused outright; the
+    may ask and what shape of credential is refused outright; the
     worker decides what a credential resolves to and whether a grant is minted.
     That split is deliberate -- the guards are the part that is identical in
     every deployment and catastrophic to get wrong, and the policy is the part
@@ -451,7 +423,7 @@ class IdentityImpl:
     credential-to-identity oracle on every existing worker.
     """
 
-    __slots__ = ("_limiter", "_max_auth_age", "_mint_grant", "_principals", "_resolve_token")
+    __slots__ = ("_max_auth_age", "_mint_grant", "_principals", "_resolve_token")
 
     _resolve_token: Callable[[str], TokenIdentity | None] | None
     _mint_grant: Callable[[str, str, list[str], int], IssuedGrant] | None
@@ -462,7 +434,7 @@ class IdentityImpl:
         resolve_token: Callable[[str], TokenIdentity | None] | None = None,
         mint_grant: Callable[[str, str, list[str], int], IssuedGrant] | None = None,
         introspect_principals: Iterable[str] | None = None,
-        introspect_rate_limit: int = 20,
+        introspect_rate_limit: int | None = None,
         max_auth_age: float = 900.0,
     ) -> None:
         """Build the implementation.
@@ -475,7 +447,11 @@ class IdentityImpl:
             introspect_principals: Who may call ``introspect_token``.  Required
                 whenever *resolve_token* is supplied; there is no permissive
                 default.
-            introspect_rate_limit: Introspections allowed per caller per second.
+            introspect_rate_limit: Deprecated and ignored.  Introspection is no
+                longer rate limited (see the module docstring).  Still accepted
+                for one release, with a ``DeprecationWarning``, because
+                vgi-python 0.34.1 passes it whenever introspection is enabled,
+                and refusing it would stop those workers from starting.
             max_auth_age: How recently a caller must have authenticated to mint
                 a grant.
 
@@ -490,7 +466,13 @@ class IdentityImpl:
         # refuse every introspection should fail to start rather than serve
         # traffic until someone tries.
         self._principals = normalise_principals(introspect_principals) if resolve_token is not None else frozenset()
-        self._limiter = RateLimiter(introspect_rate_limit)
+        if introspect_rate_limit is not None:
+            warnings.warn(
+                "IdentityImpl(introspect_rate_limit=...) is ignored: introspection is no longer rate "
+                "limited. The allowlist is the control; throttle untrusted traffic at the asker.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     def offered_methods(self) -> frozenset[str]:
         """Return the methods this deployment can actually answer.
@@ -515,9 +497,7 @@ class IdentityImpl:
 
         # Authorization first: an unauthorized caller must learn nothing about
         # the subject credential, including how long looking at it took.
-        caller = check_introspector(ctx.auth, self._principals)
-        if not self._limiter.allow(caller):
-            raise IntrospectionRefusedError("introspection rate limit exceeded")
+        check_introspector(ctx.auth, self._principals)
         reject_jws_shaped(token)
 
         identity = self._resolve_token(token)

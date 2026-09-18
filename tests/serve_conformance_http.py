@@ -27,7 +27,6 @@ import falcon
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
 from vgi_rpc.conformance.identity_fixture import (
     AUTH_TIME_HEADER,
-    INTROSPECT_RATE_LIMIT,
     INTROSPECTOR_PRINCIPAL,
     MAX_AUTH_AGE,
     PRINCIPAL_HEADER,
@@ -350,7 +349,6 @@ def main() -> None:
             # routed-and-refusing, and the protocol_hash narrows with it.
             mint_grant=conformance_mint_grant if args.identity == "both" else None,
             introspect_principals=[INTROSPECTOR_PRINCIPAL],
-            introspect_rate_limit=INTROSPECT_RATE_LIMIT,
             max_auth_age=MAX_AUTH_AGE,
         )
     )

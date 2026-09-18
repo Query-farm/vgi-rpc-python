@@ -5,6 +5,12 @@ tests in `vgi-rpc-python/tests/test_token_identity.py` (29 tests).
 Read both before writing code. This file is the contract; where it and your
 intuition disagree, this file wins.
 
+**Revision 2026-09-18.** Two removals every port must make: introspection is
+**no longer rate limited** (§4, "No rate limiter"), and the pre-0.46
+`POST {prefix}/__introspect_token__` HTTP JSON route is **retired** (§8). The
+earlier revision of this contract only *added* `Identity.v1`; it never said to
+remove the route it replaced, so every port kept serving both.
+
 ## 1. Wire shape — must match byte for byte in the hash
 
 Protocol name: `vgi_rpc.Identity.v1` (reserved `vgi_rpc.` prefix — register it the
@@ -62,7 +68,6 @@ refuses.
 ```
 MAX_TOKEN_BYTES      = 4096   # UTF-8 BYTES -- see below
 JWS_SHAPED regex     = ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$
-default introspect_rate_limit = 20      (per caller, per 1.0s window)
 default max_auth_age          = 900.0   seconds
 IdentityUnavailableError.retry_after default = 5
 ```
@@ -157,12 +162,11 @@ would make the worker answer about a string the caller never sent.
 1. hook absent → `IntrospectionRefused("this worker does not resolve credentials")`
 2. **authorization**: caller must be authenticated AND its principal in the
    allowlist → else `IntrospectionRefused("caller is not an introspector")`
-3. rate limit, keyed by caller principal → `IntrospectionRefused("introspection rate limit exceeded")`
-4. `reject_jws_shaped`: empty OR `len > MAX_TOKEN_CHARS` OR matches the JWS regex
+3. `reject_jws_shaped`: empty OR `len > MAX_TOKEN_CHARS` OR matches the JWS regex
    → `TokenUnresolved("unresolved")`
-5. resolve; hook returned "unknown" → `TokenUnresolved("unresolved")`
+4. resolve; hook returned "unknown" → `TokenUnresolved("unresolved")`
 
-Steps 2–3 come **before** step 4 on purpose: an unauthorized caller must learn
+Step 2 comes **before** step 3 on purpose: an unauthorized caller must learn
 nothing about the subject credential, *including how long looking at it took*.
 Do not reorder for tidiness. A test must pin the order (an unauthorized caller
 presenting an over-long or JWS-shaped token still gets `introspection_refused`,
@@ -200,12 +204,28 @@ not serve traffic until someone tries). Empty or absent → construction error.
 There is no permissive default: "any authenticated caller" lets any user resolve
 any other user's credential to its owner, and test that omission is an error.
 
-### Rate limiter
+### No rate limiter
 
-Fixed window (not a token bucket), keyed by caller. On window roll, clear the
-**whole map** rather than ageing per key — an attacker cycling keys then cannot
-grow the map beyond one window's worth. Must be safe under your port's concurrency
-model.
+The previous revision required a per-caller fixed-window limiter (default 20 per
+second) answering `IntrospectionRefused("introspection rate limit exceeded")`.
+**Remove it**, and its configuration option. The allowlist is the control. The
+limiter bounded only guessing, which a random credential defeats at any rate,
+and not the harm a leaked introspector credential does (resolving a *stolen*
+credential takes one call). Its cost was real: the caller is the asker, which
+introspects for every client that presents a bearer, so the per-caller budget
+was one budget for every user's login -- and unauthenticated clients drained it
+by sending the asker junk credentials (demonstrated against Rowfence).
+
+If you ever throttle introspection anyway, the refusal is transient
+(`identity_unavailable`) and **never** `introspection_refused`, which is
+definitive and may be cached: a throttle reported as it negative-caches valid
+credentials. Conformance pins the absence
+(`TestIntrospectionIsNotThrottled`); the cross-port audit forbids a limiter in
+identity code.
+
+Python keeps accepting its `introspect_rate_limit=` keyword as a deprecated
+no-op for one release, only because a published vgi-python passes it. A port
+with no such published caller removes the option outright.
 
 ## 5. Method-level narrowing
 
@@ -262,8 +282,9 @@ rejection can only have come from the guard, and assert the hook was never
 reached. That second assertion is the half that fails when the guard is skipped.
 
 **The hole tracks exactly where uniformity applies.** Measured across the ports:
-the rate limit and the freshness check were already soundly tested everywhere,
-because their refusals are distinguishable by type or by message. Only guards
+the freshness check (and, before it was removed, the rate limit) was already
+soundly tested everywhere, because its refusal is distinguishable by type or by
+message. Only guards
 whose refusal collapses into the *uniform* `token_unresolved` answer -- the
 length cap and the JWS trap -- can be tested vacuously. That is the rule for
 deciding where to look first in a port you have not audited.
@@ -277,8 +298,7 @@ missing test, because it reads as coverage in review.
 **Mutation-check every guard test.** Break the guard on purpose and confirm the
 test goes red. A guard test that passes against a deliberately broken guard is
 worse than no test, because it is counted as coverage. Every port should do this
-for the JWS trap, the length cap, the allowlist, the rate limit and the freshness
-check.
+for the JWS trap, the length cap, the allowlist and the freshness check.
 
 ## 5c. The routing key on HTTP: required on raw transports, optional on HTTP
 
@@ -327,7 +347,8 @@ surfaced). Servers MUST still refuse *disagreement*.
    registered **after** reflection so it appears in reflection's output, with
    `only`-style narrowing to the configured methods.
 4. Tests: the three hash vectors, the guard order, allowlist-required,
-   rate limiting, JWS/oversize/empty rejection, uniform rejections, freshness
+   no throttling of an allowlisted caller, JWS/oversize/empty rejection, uniform
+   rejections, freshness
    including the no-`auth_time` case, no-subject-parameter, narrowing changes the
    hash, and `identity_unavailable` not being caught as invalid-argument.
    Port the 29 reference tests; do not invent a thinner set.
@@ -336,3 +357,20 @@ surfaced). Servers MUST still refuse *disagreement*.
 Do NOT change the primary conformance protocol or its hash
 (`5cc768771c2e8a54e19ebb7546c97c119823eb13e20a5ff62ca5ce7ed2a1334e`) — it is
 verified across all seven ports. If your change moves it, you broke something.
+
+## 8. Retired: the `__introspect_token__` HTTP route
+
+`POST {prefix}/__introspect_token__` -- the JSON route introspection was before
+`vgi_rpc.Identity.v1` -- is **retired**. The Python reference deleted it when it
+moved to the protocol (vgi-rpc 0.46, commit 66f0696); a port MUST NOT serve it.
+
+Delete the route, its handler, its own allowlist/limiter plumbing, its
+`VGI-Token-Introspection` capability header, and its server options -- not just
+its registration. `Identity.v1` is the only introspection surface. Two surfaces
+means two sets of guards to keep identical, and the second was already drifting:
+it kept a rate limiter after the protocol dropped one.
+
+The `/health` capability header goes with it: a client learns whether a worker
+introspects from reflection (`vgi_rpc.Identity.v1` hosted, `introspect_token` in
+its description), which is what the reference and the conformance group use.
+
