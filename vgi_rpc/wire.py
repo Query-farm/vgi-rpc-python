@@ -64,15 +64,30 @@ def write_request(
     params_schema: pa.Schema,
     kwargs: dict[str, Any],
     *,
+    protocol: str | None = None,
     protocol_version: str | None = None,
     extra_metadata: dict[bytes, bytes] | None = None,
 ) -> bytes:
     """Frame a request as a complete IPC stream body for forwarding.
 
+    An intermediary re-framing a client's request must re-stamp the routing key
+    and the version **both or neither** — pass what :func:`find_protocol` and
+    :func:`find_protocol_version` recovered from the original body. Carrying the
+    version while dropping the name gates the call against a protocol the client
+    never addressed, and a server that enforces the routing key refuses the
+    request outright.
+
     Args:
         method_name: The RPC method name (e.g. ``"bind"``).
         params_schema: The method's parameter schema.
         kwargs: The parameter values, keyed by field name.
+        protocol: The ``vgi_rpc.protocol`` routing key to stamp — the hosted
+            protocol the call addresses (e.g. ``"vgi_rpc.Identity.v1"``).
+            Carried as given, not validated: an intermediary forwards the
+            client's key verbatim and leaves refusing a malformed one to the
+            server, rather than failing the re-frame. Leave ``None`` for a
+            server-level reserved call such as ``__upload_url__``, which belongs
+            to no protocol (the codec then omits the key).
         protocol_version: The application ``protocol_version`` to stamp on the
             request, so a versioned server's dispatch-boundary check still sees
             the originating client's version. Leave ``None`` to emit a request
@@ -91,7 +106,13 @@ def write_request(
 
     buf = BytesIO()
     _write_request(
-        buf, method_name, params_schema, kwargs, protocol_version=protocol_version, extra_metadata=extra_metadata
+        buf,
+        method_name,
+        params_schema,
+        kwargs,
+        protocol=protocol,
+        protocol_version=protocol_version,
+        extra_metadata=extra_metadata,
     )
     return buf.getvalue()
 
@@ -188,7 +209,8 @@ def find_protocol(data: bytes) -> str | None:
     server happens to consider primary while faithfully carrying a version that
     then gates against the wrong surface — the confusing half of a
     confused-deputy bug. ``vgi-cedar-proxy`` rebuilds request bodies on every
-    rewrite, so this is a live path.
+    rewrite, so this is a live path. Re-stamp both through
+    :func:`write_request`'s ``protocol`` and ``protocol_version``.
 
     Args:
         data: The (decompressed) request IPC body bytes.
