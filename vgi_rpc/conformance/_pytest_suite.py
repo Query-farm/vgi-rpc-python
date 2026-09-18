@@ -65,6 +65,7 @@ from vgi_rpc.conformance._identity_pytest import (  # noqa: F401
     TestIdentityWireShape,
     TestIntrospectionAuthorization,
     TestIntrospectionHappyPath,
+    TestIntrospectionIsNotThrottled,
     TestRejectionsAreUniform,
     TestTheCredentialSizeCap,
     TestTheJwsTrap,
