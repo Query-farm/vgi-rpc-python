@@ -739,24 +739,27 @@ from authentication. `HEAD` is the probe to use: `GET`, `HEAD` and `OPTIONS`
 all carry the same headers, and `HEAD` is the only one of the three that works
 from every client. There is no Arrow IPC body on any of them.
 
-> **`OPTIONS` cannot be used by a browser client, and a port whose client
-> probes with it does not work in a browser at all.** The probe carries
-> `VGI-Accept-Max-Response-Bytes`, and a custom request header makes the
-> request non-simple, so the browser preflights it — sending its own `OPTIONS`
-> with `Access-Control-Request-Method: OPTIONS`. A server answers a preflight
-> with the methods the route implements, `GET` and `HEAD`, so the probe is
-> refused before it is ever sent. The failure surfaces as a CORS error naming a
-> method the client author never wrote, on the first request of the connection.
-> The reference C++ client has always probed with `HEAD`; the TypeScript client
+> **A browser client MUST probe with `HEAD`, never `OPTIONS`.** The probe
+> carries `VGI-Accept-Max-Response-Bytes`, and a custom request header makes the
+> request non-simple, so the browser preflights it.
+>
+> `HEAD` survives that preflight everywhere, because `GET`, `HEAD` and `POST`
+> are *CORS-safelisted methods*: they pass the preflight's method check even
+> when absent from the server's `Access-Control-Allow-Methods`. A probe with
+> `HEAD` therefore needs nothing from a server's CORS configuration, and
+> servers advertising only `POST, OPTIONS` answer it correctly today.
+>
+> `OPTIONS` is not safelisted, so it must be named in
+> `Access-Control-Allow-Methods` to be permitted — and a server that derives
+> that list from the route's own responders names `GET` and `HEAD`, not
+> `OPTIONS`. The probe is then refused before it is sent, and the failure
+> surfaces as a CORS error naming a method the client author never wrote, on
+> the first request of the connection. The Python reference does exactly this,
+> so an `OPTIONS`-probing browser client cannot talk to it at all.
+>
+> The reference C++ client has always probed with `HEAD`. The TypeScript client
 > probed with `OPTIONS` until `@query-farm/vgi-rpc` 0.25.3, and every browser
 > consumer of it had to wrap `fetch` to rewrite the method.
->
-> Accordingly, a server that enables CORS MUST answer a preflight for
-> `{prefix}/health` with `GET` and `HEAD` in `Access-Control-Allow-Methods`.
-> Deriving the list from the route's own methods satisfies this; a server that
-> serves one fixed list for every route must widen it to include them, because
-> advertising only the `POST` that RPC itself uses refuses the discovery probe,
-> and with it the whole connection.
 
 > **Note for implementors migrating from an earlier draft of this document**:
 > the discovery endpoint is `{prefix}/health`, **not** `{prefix}/__capabilities__`.
@@ -851,11 +854,10 @@ Every response carries the capability headers from
 Servers that enable CORS expose `WWW-Authenticate`, `X-Request-ID`,
 `X-VGI-Content-Encoding`, `X-VGI-RPC-Error`, `VGI-Auth-Reason`, and every
 advertised capability header, so a browser client can read them cross-origin.
-A preflight for `{prefix}/health` also allows `GET` and `HEAD` in
-`Access-Control-Allow-Methods`, so the capability probe
-([Section 10](#capability-discovery)) survives it — a server that advertises
-only the `POST` used by RPC refuses the first request every browser client
-makes.
+A server need not name `GET` or `HEAD` in `Access-Control-Allow-Methods` for
+the capability probe ([Section 10](#capability-discovery)) to reach it: both are
+CORS-safelisted and pass a preflight regardless. `OPTIONS` is not, which is why
+the probe is `HEAD`.
 
 ### Content-encoding negotiation
 
