@@ -30,7 +30,7 @@ Sticky sessions let an RPC method bind a **handle-bearing Python object** — an
 
 ### 2.3 Capability headers
 
-When `enable_sticky=True`, the server MUST advertise these on every response (cheapest discovery via `OPTIONS /health`):
+When `enable_sticky=True`, the server MUST advertise these on every response (cheapest discovery via `HEAD /health`):
 
 | Header | Value | Notes |
 |---|---|---|

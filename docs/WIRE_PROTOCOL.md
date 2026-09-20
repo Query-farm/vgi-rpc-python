@@ -735,8 +735,28 @@ page), `/.well-known/oauth-protected-resource` (OAuth resource metadata), and
 Capability headers are stamped on **every** response, so a client that has
 already made a call needs no separate probe. The dedicated discovery target is
 `{prefix}/health`, because it is present in every implementation and exempt
-from authentication; `OPTIONS` is the cheapest verb for it (`HEAD` and `GET`
-carry the same headers). There is no Arrow IPC body on any of them.
+from authentication. `HEAD` is the probe to use: `GET`, `HEAD` and `OPTIONS`
+all carry the same headers, and `HEAD` is the only one of the three that works
+from every client. There is no Arrow IPC body on any of them.
+
+> **`OPTIONS` cannot be used by a browser client, and a port whose client
+> probes with it does not work in a browser at all.** The probe carries
+> `VGI-Accept-Max-Response-Bytes`, and a custom request header makes the
+> request non-simple, so the browser preflights it — sending its own `OPTIONS`
+> with `Access-Control-Request-Method: OPTIONS`. A server answers a preflight
+> with the methods the route implements, `GET` and `HEAD`, so the probe is
+> refused before it is ever sent. The failure surfaces as a CORS error naming a
+> method the client author never wrote, on the first request of the connection.
+> The reference C++ client has always probed with `HEAD`; the TypeScript client
+> probed with `OPTIONS` until `@query-farm/vgi-rpc` 0.25.3, and every browser
+> consumer of it had to wrap `fetch` to rewrite the method.
+>
+> Accordingly, a server that enables CORS MUST answer a preflight for
+> `{prefix}/health` with `GET` and `HEAD` in `Access-Control-Allow-Methods`.
+> Deriving the list from the route's own methods satisfies this; a server that
+> serves one fixed list for every route must widen it to include them, because
+> advertising only the `POST` that RPC itself uses refuses the discovery probe,
+> and with it the whole connection.
 
 > **Note for implementors migrating from an earlier draft of this document**:
 > the discovery endpoint is `{prefix}/health`, **not** `{prefix}/__capabilities__`.
@@ -831,6 +851,11 @@ Every response carries the capability headers from
 Servers that enable CORS expose `WWW-Authenticate`, `X-Request-ID`,
 `X-VGI-Content-Encoding`, `X-VGI-RPC-Error`, `VGI-Auth-Reason`, and every
 advertised capability header, so a browser client can read them cross-origin.
+A preflight for `{prefix}/health` also allows `GET` and `HEAD` in
+`Access-Control-Allow-Methods`, so the capability probe
+([Section 10](#capability-discovery)) survives it — a server that advertises
+only the `POST` used by RPC refuses the first request every browser client
+makes.
 
 ### Content-encoding negotiation
 
@@ -1248,7 +1273,7 @@ shared memory and replaced with pointer batches on the pipe.
 > server predating the method) reports `"false"` (or errors), and the client
 > falls back to the inline pipe transport. HTTP servers advertise their
 > deployment capabilities on every response; the dedicated discovery probe is
-> `OPTIONS {prefix}/health` (Section 10).
+> `HEAD {prefix}/health` (Section 10).
 
 ### Segment header format
 
@@ -1920,7 +1945,7 @@ addition changes only that port's hash.
 `__describe__`) through which a client and server discover each other's
 **transport** capabilities — chiefly whether the shared-memory side-channel
 (Section 11) may be used. HTTP deployment capabilities use response headers;
-the dedicated discovery probe is `OPTIONS {prefix}/health` (Section 10).
+the dedicated discovery probe is `HEAD {prefix}/health` (Section 10).
 
 It is **mandatory before SHM is used**: a client that has SHM available MUST NOT
 write SHM pointer batches (or advertise a segment) to a server unless that server

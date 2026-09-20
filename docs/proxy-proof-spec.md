@@ -25,7 +25,7 @@ The header is **not** an `Authorization` credential and MUST NOT be sent as one.
 
 ### 2.2 Capability header
 
-When mode is `require`, the server MUST advertise this on every response (cheapest discovery via `OPTIONS /health`, which is exempt per §2.3):
+When mode is `require`, the server MUST advertise this on every response (cheapest discovery via `HEAD /health`, which is exempt per §2.3):
 
 | Header | Value | Notes |
 |---|---|---|
