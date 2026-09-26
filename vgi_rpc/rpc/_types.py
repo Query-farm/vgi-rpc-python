@@ -796,13 +796,19 @@ def _build_params_schema(hints: dict[str, object]) -> pa.Schema:
 
 
 def _build_result_schema(result_type: object) -> pa.Schema:
-    """Build a single-field Arrow schema for a unary result type."""
+    """Build a scalar envelope or an explicitly annotated batch result schema."""
     if result_type is type(None) or result_type is None:
         return _EMPTY_SCHEMA
 
-    # ArrowSerializableDataclass — serialize whole dataclass as binary blob
-    base, _, _ = _annotation_details(result_type)
+    base, _, markers = _annotation_details(result_type)
+    if base is pa.RecordBatch:
+        schemas = [marker for marker in markers if isinstance(marker, pa.Schema)]
+        if len(schemas) > 1:
+            raise TypeError("RecordBatch returns accept exactly one explicit schema")
+        if schemas:
+            return schemas[0]
     is_nullable = _resolve_field_nullability(result_type)
+    # ArrowSerializableDataclass — serialize whole dataclass as binary blob.
     if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
         return pa.schema([pa.field("result", pa.binary(), nullable=is_nullable)])
 

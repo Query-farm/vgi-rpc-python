@@ -275,7 +275,12 @@ def _write_error_batch(
             type(exc).__name__,
             str(exc)[:200],
         )
-    _write_message_batch(writer, schema, Message.from_exception(exc), server_id=server_id)
+    message = Message.from_exception(exc)
+    # Wire errors carry the raw message, matching the Rust server. The type is
+    # already present in log_extra.exception_type; prefixing it here corrupts
+    # structured messages consumed by other language implementations.
+    message.message = str(exc)
+    _write_message_batch(writer, schema, message, server_id=server_id)
 
 
 def _write_error_stream(
@@ -333,6 +338,13 @@ def _build_result_batch(
     the batch eagerly and pre-flight the external-channel cap (predicting
     upload size from the batch before paying for the actual S3/GCS PUT).
     """
+    base, _, markers = _annotation_details(result_type)
+    if base is pa.RecordBatch and any(isinstance(marker, pa.Schema) for marker in markers):
+        if not isinstance(value, pa.RecordBatch):
+            raise TypeError("Expected a RecordBatch result")
+        if not value.schema.equals(result_schema, check_metadata=True):
+            raise TypeError("Returned RecordBatch does not match the declared result schema")
+        return value
     if len(result_schema) == 0:
         return pa.RecordBatch.from_pydict({}, schema=_EMPTY_SCHEMA)
     wire_value = _convert_for_arrow(value, result_type)
@@ -843,6 +855,16 @@ def _validate_result(method_name: str, value: object, result_type: object) -> No
     Raises TypeError if the implementation returns None for a method whose
     return type annotation does not include None.
     """
+    base, _, markers = _annotation_details(result_type)
+    if base is pa.RecordBatch and any(isinstance(marker, pa.Schema) for marker in markers):
+        schema = next((marker for marker in markers if isinstance(marker, pa.Schema)), None)
+        if (
+            not isinstance(value, pa.RecordBatch)
+            or schema is None
+            or not value.schema.equals(schema, check_metadata=True)
+        ):
+            raise TypeError(f"{method_name}() expected a RecordBatch with the declared schema")
+        return
     if value is not None:
         return
     if result_type is None or result_type is type(None):
@@ -1109,6 +1131,13 @@ def _read_unary_response(
             if wire_response_logger.isEnabledFor(logging.DEBUG):
                 wire_response_logger.debug("Read unary response: method=%s, void return", info.name)
             return None
+        base, _, markers = _annotation_details(info.result_type)
+        if base is pa.RecordBatch and any(isinstance(marker, pa.Schema) for marker in markers):
+            _validate_result(info.name, batch.batch, info.result_type)
+            # Detach from a possible shared-memory lease before releasing it.
+            if batch._release_fn is not None:
+                return ipc.open_stream(serialize_record_batch_bytes(batch.batch)).read_next_batch()
+            return batch.batch
         value = batch.batch.column("result")[0].as_py()
         _validate_result(info.name, value, info.result_type)
         if wire_response_logger.isEnabledFor(logging.DEBUG):

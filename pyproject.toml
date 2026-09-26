@@ -73,6 +73,22 @@ vgi-rpc-test = "vgi_rpc.conformance._test_cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+# Apply to source archives and package data alike; global Git ignore rules are
+# not a release manifest. Keep machine state and credentials out of artifacts.
+exclude = [
+    "**/.git", "**/.claude", "**/.codex", "**/.agents", "**/.hypothesis",
+    "**/.venv", "**/venv", "**/__pycache__", "**/.mypy_cache", "**/.ruff_cache", "**/.pytest_cache",
+    "**/*.pyc", "**/.env*", "**/*.pem", "**/*.key", "**/*.crt", "**/*.cer", "**/*.p12", "**/*.pfx",
+    "**/credentials", "**/credentials.json", "**/secrets.json", "**/id_rsa", "**/id_ed25519",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vgi_rpc", "/tests", "/docs", "/examples", "/tools", "/scripts",
+    "/README.md", "/LICENSE.md", "/CONTRIBUTING.md", "/llms.md", "/mkdocs.yml", "/pyproject.toml", "/uv.lock",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py313"
