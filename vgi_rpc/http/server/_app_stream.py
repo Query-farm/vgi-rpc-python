@@ -344,7 +344,7 @@ def _run_stream_init_sync(
                 time.time(),
             )
 
-            if result.input_schema == _EMPTY_SCHEMA and info.is_exchange is not True:
+            if result.input_schema == _EMPTY_SCHEMA:
                 return _run_http_producer_init(
                     app,
                     info=info,
@@ -570,7 +570,7 @@ def _run_stream_exchange_sync(
         stream_id = resolved_call.stream_id
         _tighten_response_budget(resolved_call.response_limit_bytes)
 
-        is_producer = input_schema == _EMPTY_SCHEMA and info.is_exchange is not True
+        is_producer = input_schema == _EMPTY_SCHEMA
 
         cancel_flag = custom_metadata is not None and custom_metadata.get(CANCEL_KEY) is not None
 

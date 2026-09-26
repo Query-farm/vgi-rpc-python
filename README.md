@@ -128,35 +128,6 @@ with serve_pipe(Calculator, CalculatorImpl()) as proxy:
 
 `serve_pipe` runs the server on a background thread — great for trying things out. For production deployments, see [Subprocess](#subprocess) or [HTTP](#http) transports.
 
-## Explicit Arrow return schemas
-
-For interoperability with an existing wire contract, a unary method can return
-a complete Arrow batch instead of the usual single `result` column:
-
-```python
-from typing import Annotated, Protocol
-import pyarrow as pa
-
-RESPONSE = pa.schema([pa.field("session_id", pa.string(), nullable=False)])
-
-class Sessions(Protocol):
-    def open(self, target: str) -> Annotated[pa.RecordBatch, RESPONSE]: ...
-```
-
-The implementation returns a `pa.RecordBatch` matching that schema exactly.
-Empty and multirow batches are supported. Both the pipe and HTTP clients return
-the batch directly. Shared-memory responses are copied before their lease is
-released. This supports protocols whose response fields have defined names and types.
-
-Wire error envelopes carry the raw exception message in `vgi_rpc.log_message`;
-the exception type is carried separately in `vgi_rpc.log_extra.exception_type`.
-This preserves structured error payloads for clients in other languages.
-
-For streams declared with an `ExchangeState` subclass, the exchange direction
-is explicit even when the input schema has no fields. HTTP initialization waits
-for the first client batch, and application metadata is preserved on every turn.
-Legacy `StreamState` declarations retain schema-based direction inference.
-
 ## CLI
 
 The `vgi-rpc` command-line tool lets you introspect and call methods on any service that has `enable_describe=True`. Requires `pip install vgi-rpc[cli]`.
