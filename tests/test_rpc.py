@@ -526,6 +526,25 @@ class TestErrorRecovery:
                 proxy.fail_unary()
             assert proxy.add(a=1.0, b=2.0) == pytest.approx(3.0)
 
+    def test_unary_serialization_error_preserves_connection(self) -> None:
+        """Serialization errors in unary returns raise RpcError and preserve connection."""
+
+        class Calculator(Protocol):
+            def calculate(self, broken: bool) -> int: ...
+
+        class CalculatorImpl:
+            def calculate(self, broken: bool) -> int:
+                if broken:
+                    return "not_an_integer"  # type: ignore[return-value]
+                return 42
+
+        with serve_pipe(Calculator, CalculatorImpl()) as client:
+            with pytest.raises(RpcError):
+                client.calculate(broken=True)
+
+            # Reuse the same connection after the failed call.
+            assert client.calculate(broken=False) == 42
+
     def test_stream_error_then_success(self, make_conn: ConnFactory) -> None:
         """Stream error followed by successful call."""
         with make_conn() as proxy:
