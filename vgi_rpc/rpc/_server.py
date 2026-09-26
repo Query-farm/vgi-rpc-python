@@ -1532,21 +1532,33 @@ class RpcServer:
                 try:
                     result = getattr(self.implementation_for(info), info.name)(**kwargs)
                     _validate_result(info.name, result, info.result_type)
+
+                    # Serialization can fail too, so handle it here.
+                    _write_result_batch(
+                        writer,
+                        info.result_schema,
+                        result,
+                        self._external_config,
+                        shm=shm,
+                        result_type=info.result_type,
+                    )
                 except Exception as exc:
                     _hook_exc = exc
                     status = "error"
-                    error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    error_type = _log_method_error(
+                        protocol_name,
+                        info.name,
+                        self._server_id,
+                        exc,
+                    )
                     error_message = str(exc)
-                    _write_error_batch(writer, schema, exc, server_id=self._server_id)
+                    _write_error_batch(
+                        writer,
+                        schema,
+                        exc,
+                        server_id=self._server_id,
+                    )
                     return
-                _write_result_batch(
-                    writer,
-                    info.result_schema,
-                    result,
-                    self._external_config,
-                    shm=shm,
-                    result_type=info.result_type,
-                )
         finally:
             duration_ms = (time.monotonic() - start) * 1000
             _emit_access_log(
