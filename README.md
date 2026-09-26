@@ -152,6 +152,11 @@ Wire error envelopes carry the raw exception message in `vgi_rpc.log_message`;
 the exception type is carried separately in `vgi_rpc.log_extra.exception_type`.
 This preserves structured error payloads for clients in other languages.
 
+For streams declared with an `ExchangeState` subclass, the exchange direction
+is explicit even when the input schema has no fields. HTTP initialization waits
+for the first client batch, and application metadata is preserved on every turn.
+Legacy `StreamState` declarations retain schema-based direction inference.
+
 ## CLI
 
 The `vgi-rpc` command-line tool lets you introspect and call methods on any service that has `enable_describe=True`. Requires `pip install vgi-rpc[cli]`.

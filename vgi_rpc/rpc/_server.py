@@ -1692,7 +1692,7 @@ class RpcServer:
 
                         # Record input batch for stats — skip tick batches on
                         # producer streams (zero-row, empty-schema protocol artifacts).
-                        if input_schema != _EMPTY_SCHEMA:
+                        if input_schema != _EMPTY_SCHEMA or info.is_exchange is True:
                             _record_input(input_batch)
 
                         # Resolve ExternalLocation on input batch
@@ -1712,7 +1712,7 @@ class RpcServer:
                         if prev_input is not None:
                             prev_input.release()
                         prev_input = ab_in
-                        is_producer = input_schema == _EMPTY_SCHEMA
+                        is_producer = input_schema == _EMPTY_SCHEMA and info.is_exchange is not True
                         out = OutputCollector(
                             output_schema,
                             prior_data_bytes=cumulative_bytes,

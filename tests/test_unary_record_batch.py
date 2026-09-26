@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Explicit unary Arrow schemas interoperate with non-Python services."""
 
+from __future__ import annotations
+
 from io import BytesIO
 from typing import Annotated, Protocol
 
@@ -14,7 +16,11 @@ from vgi_rpc.rpc import rpc_methods
 from vgi_rpc.rpc._wire import _write_error_batch
 from vgi_rpc.utils import new_ipc_stream
 
-SCHEMA = pa.schema([pa.field("handle", pa.string(), nullable=False), pa.field("count", pa.int64())])
+_FIELDS: list[pa.Field[pa.DataType]] = [
+    pa.field("handle", pa.string(), nullable=False),
+    pa.field("count", pa.int64()),
+]
+SCHEMA = pa.schema(_FIELDS)
 Batch = Annotated[pa.RecordBatch, SCHEMA]
 
 
