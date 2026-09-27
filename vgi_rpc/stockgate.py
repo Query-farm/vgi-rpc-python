@@ -81,7 +81,7 @@ def _urllib_transport(
         payload = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(payload) > _MAX_RESPONSE_BYTES:
             raise StockgateError(502, "response_too_large", "Stockgate response exceeded 1 MiB.")
-        status = response.getcode()
+        status = response.status
         if status is None:
             raise StockgateError(502, "invalid_response", "Stockgate returned no HTTP status.")
         return StockgateHttpResponse(status, dict(response.headers.items()), payload)

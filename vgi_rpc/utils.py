@@ -1540,9 +1540,9 @@ class ArrowSerializableDataclass:
 
         # Handle types with deserialize_from_bytes class method
         if isinstance(inner_type, type) and hasattr(inner_type, "deserialize_from_bytes") and isinstance(value, bytes):
-            deserialize_method: object = getattr(inner_type, "deserialize_from_bytes")  # noqa: B009
+            deserialize_method: Callable[[bytes, IpcValidation], object] = getattr(inner_type, "deserialize_from_bytes")  # noqa: B009
             if callable(deserialize_method):
-                return deserialize_method(value, ipc_validation)  # ty: ignore[call-top-callable]
+                return deserialize_method(value, ipc_validation)
 
         # Handle Enum reconstruction from name (uppercase) or value (legacy lowercase)
         if isinstance(inner_type, type) and issubclass(inner_type, Enum):
