@@ -212,6 +212,7 @@ from vgi_rpc.rpc._wire import (
     _validate_result,
     _write_error_batch,
     _write_error_stream,
+    _write_external_ref,
     _write_message_batch,
     _write_request,
     _write_result_batch,
@@ -346,6 +347,7 @@ __all__ = [
     "_write_error_stream",
     "_write_message_batch",
     "_write_request",
+    "_write_external_ref",
     "_write_result_batch",
     "_write_stream_header",
 ]

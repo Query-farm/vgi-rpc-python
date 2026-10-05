@@ -1409,6 +1409,20 @@ When a data batch's total buffer size exceeds the threshold:
 4. Upload to external storage via the `ExternalStorage.upload()` interface.
 5. Replace the entire cycle with a single zero-row pointer batch containing `vgi_rpc.location` (and `vgi_rpc.location.sha256` when the digest was computed).
 
+### Pre-published references
+
+A server MAY answer a unary call with a pointer to an object it published
+earlier (Python: a method returning an `ExternalRef` built by
+`publish_external`). The wire is unchanged: one zero-row batch with the
+method's result schema carrying `vgi_rpc.location`, and
+`vgi_rpc.location.sha256` only when the publisher recorded a digest. The
+object is exactly what the externalizer would have uploaded for that result —
+an Arrow IPC stream of the result schema holding one 1-row data batch,
+optionally `Content-Encoding`-compressed. Such a pointer is written regardless
+of the server's externalization threshold or storage configuration, is never
+inlined or routed through shared memory, and uploads nothing during the call.
+Readers resolve it like any other pointer.
+
 ### Integrity
 
 `vgi_rpc.location.sha256` is optional on the wire — a pointer batch without it

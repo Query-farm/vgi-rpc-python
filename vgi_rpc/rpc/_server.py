@@ -23,7 +23,12 @@ from typing import Any, Literal, cast
 import pyarrow as pa
 from pyarrow import ipc
 
-from vgi_rpc.external import ExternalLocationConfig, _current_externalized_bytes, resolve_external_location
+from vgi_rpc.external import (
+    ExternalLocationConfig,
+    ExternalRef,
+    _current_externalized_bytes,
+    resolve_external_location,
+)
 from vgi_rpc.metadata import (
     CANCEL_KEY,
     PROTOCOL_KEY,
@@ -95,6 +100,7 @@ from vgi_rpc.rpc._wire import (
     _validate_result,
     _write_error_batch,
     _write_error_stream,
+    _write_external_ref,
     _write_result_batch,
     _write_stream_header,
 )
@@ -1531,13 +1537,17 @@ class RpcServer:
                 sink.flush_contents(writer, schema)
                 try:
                     result = getattr(self.implementation_for(info), info.name)(**kwargs)
-                    _validate_result(info.name, result, info.result_type)
+                    if not isinstance(result, ExternalRef):
+                        _validate_result(info.name, result, info.result_type)
                 except Exception as exc:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
                     error_message = str(exc)
                     _write_error_batch(writer, schema, exc, server_id=self._server_id)
+                    return
+                if isinstance(result, ExternalRef):
+                    _write_external_ref(writer, info.result_schema, result)
                     return
                 _write_result_batch(
                     writer,

@@ -8,14 +8,16 @@ from __future__ import annotations
 import abc
 import functools
 import inspect
+import operator
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from types import MappingProxyType, TracebackType
+from types import MappingProxyType, TracebackType, UnionType
 from typing import (
     Any,
     ClassVar,
     Self,
+    Union,
     get_args,
     get_origin,
     get_type_hints,
@@ -25,6 +27,7 @@ import pyarrow as pa
 from docstring_parser import DocstringStyle
 from docstring_parser import parse as parse_docstring
 
+from vgi_rpc.external import ExternalRef
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import SERVER_ID_KEY, encode_metadata, merge_metadata
 from vgi_rpc.rpc._common import (
@@ -757,12 +760,44 @@ def _unwrap_annotated(hint: object) -> object:
     return base
 
 
+def _strip_external_ref(hint: object) -> object:
+    """Remove :class:`~vgi_rpc.external.ExternalRef` from a unary return annotation.
+
+    A unary method may be annotated ``-> X | ExternalRef`` to say it can
+    answer with a pre-published reference; the wire result type is still
+    ``X``.  Other annotations are returned unchanged.
+
+    Args:
+        hint: The method's return annotation.
+
+    Returns:
+        The annotation with any ``ExternalRef`` union member removed.
+
+    Raises:
+        TypeError: If the annotation is ``ExternalRef`` alone, which names
+            no result type to derive a schema from.
+
+    """
+    if hint is ExternalRef:
+        raise TypeError("A return annotation of bare ExternalRef has no result type; annotate it as `X | ExternalRef`")
+    if get_origin(hint) not in (Union, UnionType):
+        return hint
+    args = get_args(hint)
+    kept = [a for a in args if a is not ExternalRef]
+    if len(kept) == len(args):
+        return hint
+    return functools.reduce(operator.or_, kept)
+
+
 def _classify_return_type(hint: object) -> tuple[MethodType, object, bool]:
     """Classify a return type hint into a MethodType.
 
     Returns (method_type, result_type, has_return).
     Handles both bare ``Stream`` and generic forms like ``Stream[MyState]``.
+    An ``ExternalRef`` member of a unary return union is stripped from the
+    result type (see :func:`_strip_external_ref`).
     """
+    hint = _strip_external_ref(hint)
     base, _, _ = _annotation_details(hint)
 
     # Bare class reference

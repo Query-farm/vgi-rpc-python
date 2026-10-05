@@ -1,8 +1,8 @@
 # Golden reflection description — see tests/test_describe_golden.py
 protocol: ConformanceService
 protocol_version: 2.0.0
-protocol_hash: 4b0269208a5a8fdeb7d8fe0f62a352713a3bfc071d7de99e5e12408c5f0b9402
-method_count: 89
+protocol_hash: 05479410c96f34410a2b10a4f6a49d59dcfd9d6d1d45ce9a9807d060a3bd6014
+method_count: 90
 
 add_floats
   method_type: unary
@@ -906,6 +906,18 @@ produce_with_rich_header
       count: int64 not null
   result:
       (empty)
+
+published_string
+  method_type: unary
+  has_return: True
+  has_header: False
+  stream_kind: (n/a)
+  idempotency: unknown
+  params:
+      value: string not null
+      include_sha256: bool not null
+  result:
+      result: string not null
 
 raise_runtime_error
   method_type: unary

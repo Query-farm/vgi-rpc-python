@@ -43,6 +43,7 @@ because withholding is how this half stayed untested in the first place.  See
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, fields
@@ -111,6 +112,8 @@ class ByteStreamExternalConnection(Protocol):
     def echo_status_list(self, *, statuses: list[Status]) -> list[Status]: ...
 
     def oversized_unary(self, *, target_bytes: int) -> bytes: ...
+
+    def published_string(self, *, value: str, include_sha256: bool) -> str: ...
 
     def produce_n(self, *, count: int) -> Iterable[AnnotatedBatch]: ...
 
@@ -268,6 +271,23 @@ class TestExternalByteStream:
             before = target.uploaded_objects()
             assert proxy.echo_bytes(data=payload) == payload
             _assert_uploaded(target, before, "echo_bytes")
+
+    def test_published_ref_round_trips(self, request: pytest.FixtureRequest) -> None:
+        """A pre-published ``ExternalRef`` resolves over a byte stream and is not re-uploaded.
+
+        The worker behind the target must hand its storage (and compression)
+        to ``published_string`` -- see that method's docstring.  Both digest
+        variants round-trip, and a repeat call answers from the cached ref
+        without a new upload.
+        """
+        target = _target(request)
+        value = f"published-pipe-{os.urandom(8).hex()}"
+        with target.connect() as proxy:
+            for include_sha256 in (True, False):
+                assert proxy.published_string(value=value, include_sha256=include_sha256) == value
+            before = target.uploaded_objects()
+            assert proxy.published_string(value=value, include_sha256=True) == value
+            assert target.uploaded_objects() == before, f"{target.name}: a cached ref was uploaded again"
 
     def test_resolved_metadata_is_the_payloads_not_the_pointers(self, request: pytest.FixtureRequest) -> None:
         """Every resolved batch carries the inner payload's metadata.

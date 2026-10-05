@@ -1417,6 +1417,15 @@ config = ExternalLocationConfig(
 server = RpcServer(MyService, MyServiceImpl(), external_location=config)
 ```
 
+### Pre-published references
+
+A result that is large but rarely changes can be published **once** and handed back
+by reference on later calls: `publish_external(batch, storage, compression)` uploads
+the 1-row result batch and returns an `ExternalRef`; a unary method annotated
+`-> X | ExternalRef` may return that ref, and the server writes the pointer batch
+directly (no serialization or upload, regardless of storage config or threshold).
+Clients need no change. See [External Storage](https://vgi-rpc-python.query.farm/api/external/#pre-published-references).
+
 ### Storage backends
 
 **S3** (`pip install vgi-rpc[s3]`):

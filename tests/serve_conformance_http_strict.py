@@ -82,7 +82,7 @@ def main() -> None:
 
     server = RpcServer(
         ConformanceService,
-        ConformanceServiceImpl(),
+        ConformanceServiceImpl(external_storage=external_location.storage if external_location else None),
         enable_describe=args.describe,
         external_location=external_location,
     )

@@ -18,6 +18,7 @@ from pyarrow import ipc
 
 from vgi_rpc.external import (
     ExternalLocationConfig,
+    ExternalRef,
     maybe_externalize_batch,
     maybe_externalize_collector,
     resolve_external_location,
@@ -390,6 +391,22 @@ def _write_result_batch(
         wire_response_logger.debug("Write result batch: %s, route=inline", fmt_batch(batch))
     writer.write_batch(batch)
     return 0
+
+
+def _write_external_ref(writer: ipc.RecordBatchStreamWriter, result_schema: pa.Schema, ref: ExternalRef) -> None:
+    """Write the pointer batch for a pre-published :class:`ExternalRef` result.
+
+    The unary dispatchers call this instead of :func:`_write_result_batch`
+    when a method returns an ``ExternalRef``: nothing is built, validated,
+    serialized, or uploaded, and the shared-memory and inline routes are
+    never taken — a ref always goes as a pointer.  It contributes nothing
+    to the per-response externalised-bytes total.
+    """
+    batch, cm = ref.pointer_batch(result_schema)
+    _record_output(batch)
+    if wire_response_logger.isEnabledFor(logging.DEBUG):
+        wire_response_logger.debug("Write result batch: %s, route=external_ref", fmt_batch(batch))
+    writer.write_batch(batch, custom_metadata=cm)
 
 
 def _read_request(

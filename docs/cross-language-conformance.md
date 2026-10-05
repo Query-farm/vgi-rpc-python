@@ -243,6 +243,30 @@ the cursor-free `ResponseTooLargeError` envelope.
 
 Two rows escalate rather than skip, on the same reasoning: a port may decline a feature entirely, but a port that *claims* it cannot quietly omit the tests that prove the hard cases. Sticky is one — sessions must be refused when they should be. Byte-stream externalization is the other — a port with a pointer resolver must prove it works off the HTTP path too. Everything else on this page skips silently when unsupplied, which is why those fixtures name themselves in the failure message.
 
+### Pre-published references (`published_string`)
+
+`ConformanceService.published_string(value: str, include_sha256: bool) -> str`
+exercises pre-published `ExternalRef` results. A port's conformance worker must
+implement it against **the worker's own external storage and compression** —
+the `--fake-storage` backend and `--compression` setting — keeping a per-process
+cache keyed by `(value, include_sha256)`: on a miss build `{result: [value]}`
+with the method's result schema, publish it once (digest only when
+`include_sha256`), cache the ref, and return the cached ref on every call. With
+no storage configured, raise `published_string requires external storage`.
+
+`TestExternalRef` (HTTP, raw driver + ordinary client) uses
+`conformance_http_with_storage_port`, `conformance_http_with_zstd_storage_port`
+and `conformance_fake_storage`, and skips like the rest of the external groups
+when they are not supplied. It checks that a two-byte value still arrives
+through a pointer, that the pointer is zero-row with
+`vgi_rpc.location.sha256` present iff requested and equal to the fetched
+object's digest, that two calls return the same location with at most one
+upload between them, and that a zstd worker publishes compressed.
+`TestExternalByteStream::test_published_ref_round_trips` does the round trip
+over a byte stream, so the worker behind `conformance_bytestream_external_target`
+must also hand its storage to `published_string`
+(`vgi-rpc-conformance --pipe --fake-storage URL` does).
+
 ### Byte-stream externalization contract
 
 External-location pointers are not an HTTP feature. Any transport that carries

@@ -11,14 +11,17 @@ the appropriate Stream with state objects.
 from __future__ import annotations
 
 import datetime as _dt
+import threading
 from decimal import Decimal
 from typing import Any
 
 import pyarrow as pa
 
+from vgi_rpc.external import Compression, ExternalRef, ExternalStorage, publish_external
 from vgi_rpc.log import Level
-from vgi_rpc.rpc import CallContext, Stream
+from vgi_rpc.rpc import CallContext, Stream, rpc_methods
 
+from ._protocol import ConformanceService
 from ._types import (
     _ACCUM_INPUT_SCHEMA,
     _ACCUM_OUTPUT_SCHEMA,
@@ -75,6 +78,46 @@ _LOGGING_EXCHANGE_OUTPUT = pa.schema([pa.field("value", pa.float64())])
 
 class ConformanceServiceImpl:
     """Implementation of ConformanceService."""
+
+    def __init__(
+        self,
+        *,
+        external_storage: ExternalStorage | None = None,
+        external_compression: Compression | None = None,
+    ) -> None:
+        """Remember the worker's storage for ``published_string``.
+
+        Args:
+            external_storage: The worker's external storage backend, if any.
+                ``published_string`` publishes through it; without one that
+                method raises.
+            external_compression: The worker's configured compression for
+                externalised data, applied when ``published_string`` publishes.
+
+        """
+        self._external_storage = external_storage
+        self._external_compression = external_compression
+        self._published: dict[tuple[str, bool], ExternalRef] = {}
+        self._published_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Unary: pre-published external reference
+    # ------------------------------------------------------------------
+
+    def published_string(self, value: str, include_sha256: bool) -> str | ExternalRef:
+        """Return *value* as a cached, publish-once ``ExternalRef``."""
+        storage = self._external_storage
+        if storage is None:
+            raise RuntimeError("published_string requires external storage")
+        key = (value, include_sha256)
+        with self._published_lock:
+            ref = self._published.get(key)
+            if ref is None:
+                schema = rpc_methods(ConformanceService)["published_string"].result_schema
+                batch = pa.RecordBatch.from_pydict({"result": [value]}, schema=schema)
+                ref = publish_external(batch, storage, self._external_compression, include_sha256=include_sha256)
+                self._published[key] = ref
+        return ref
 
     # ------------------------------------------------------------------
     # Unary: Scalar Echo

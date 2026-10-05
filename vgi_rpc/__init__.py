@@ -12,11 +12,13 @@ from vgi_rpc.external import (
     ClientExternalConfig,
     Compression,
     ExternalLocationConfig,
+    ExternalRef,
     ExternalStorage,
     ServerExternalConfig,
     UploadUrl,
     UploadUrlProvider,
     https_only_validator,
+    publish_external,
 )
 from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.introspect import (
@@ -276,10 +278,12 @@ __all__ = [
     "ClientExternalConfig",
     "Compression",
     "ExternalLocationConfig",  # alias for ServerExternalConfig
+    "ExternalRef",
     "ExternalStorage",
     "FetchConfig",
     "ServerExternalConfig",
     "https_only_validator",
+    "publish_external",
     # Upload URLs
     "UploadUrl",
     "UploadUrlProvider",

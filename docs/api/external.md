@@ -180,6 +180,72 @@ fetch_config = FetchConfig(
 )
 ```
 
+## Pre-published References
+
+Per-call externalization re-serializes, re-compresses and re-uploads a result on
+every call. When a large result rarely changes — a worker's whole catalog, say —
+publish it **once** with [`publish_external()`](#vgi_rpc.external.publish_external),
+keep the returned [`ExternalRef`](#vgi_rpc.external.ExternalRef), and return that
+ref from the unary method on later calls. The server writes the pointer batch
+directly: no serialization, compression or upload happens during the call.
+
+```python
+import threading
+from typing import Protocol
+
+import pyarrow as pa
+
+from vgi_rpc import Compression, ExternalRef, ExternalStorage, publish_external, rpc_methods
+
+
+class CatalogService(Protocol):
+    def catalog(self) -> str: ...
+
+
+class CatalogServiceImpl:
+    def __init__(self, storage: ExternalStorage, compression: Compression | None) -> None:
+        self._storage, self._compression = storage, compression
+        self._ref: ExternalRef | None = None
+        self._lock = threading.Lock()
+
+    def catalog(self) -> str | ExternalRef:
+        with self._lock:
+            if self._ref is None:  # publish once per process / catalog version
+                schema = rpc_methods(CatalogService)["catalog"].result_schema
+                batch = pa.RecordBatch.from_pydict({"result": [build_catalog()]}, schema=schema)
+                self._ref = publish_external(batch, self._storage, self._compression)
+            return self._ref
+```
+
+A unary method may return an `ExternalRef` instead of its declared value. The
+return annotation may say so (`-> str | ExternalRef`); `ExternalRef` is stripped
+when the result schema is derived, so the wire contract (and protocol hash) is
+that of `str`. Returning a ref:
+
+- always answers with a pointer — whether or not the server has external storage
+  configured, and regardless of `externalize_threshold_bytes` (a ref is never
+  inlined, nor routed through shared memory);
+- skips building and validating the result value;
+- is not counted toward `max_externalized_response_bytes` (nothing is uploaded
+  during the call); the tiny pointer still goes through the wire-body budget;
+- works on every transport (pipe, subprocess, Unix, TCP, HTTP). Stream methods
+  are not supported.
+
+`publish_external(batch, storage, compression=None, *, include_sha256=True)`
+serializes the 1-row result batch exactly as the per-call externalizer would,
+hashes the raw IPC bytes, compresses if asked, and calls `storage.upload()` once.
+With `include_sha256=False` the ref carries no digest, so clients skip the
+content check — for an object rewritten in place, or one too large to hash.
+Clients need no change: a ref's pointer is indistinguishable from any other.
+
+The caller owns the ref and the object's lifecycle:
+
+- A long-lived ref must **not** point at an object under the short-TTL lifecycle
+  rule used for per-call uploads (see [Object Lifecycle](#object-lifecycle)) —
+  publish under a different prefix.
+- A pre-signed URL expires; re-sign or rebuild the ref before it does.
+- Only return a ref to callers who are all entitled to the same content.
+
 ## Object Lifecycle
 
 Uploaded objects persist indefinitely — vgi-rpc does not delete them. Configure storage-level cleanup policies to auto-expire old data.
@@ -222,6 +288,12 @@ By default, external location URLs are validated with `https_only_validator`, wh
 ::: vgi_rpc.external.Compression
 
 ::: vgi_rpc.external_fetch.FetchConfig
+
+### Pre-published References
+
+::: vgi_rpc.external.ExternalRef
+
+::: vgi_rpc.external.publish_external
 
 ### Storage Protocol
 

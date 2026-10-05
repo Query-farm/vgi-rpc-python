@@ -33,7 +33,7 @@ from vgi_rpc.conformance.identity_fixture import (
     conformance_mint_grant,
     conformance_resolve_token,
 )
-from vgi_rpc.external import Compression, ExternalLocationConfig, FetchConfig
+from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage, FetchConfig
 from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
 from vgi_rpc.rpc import AuthContext, RpcServer
 from vgi_rpc.rpc._token_identity import IdentityImpl
@@ -78,7 +78,13 @@ def _principal_from_header(req: falcon.Request) -> AuthContext:
 class _FailServeStartOnce(ConformanceServiceImpl):
     """Conformance implementation whose first lifecycle notification fails."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        external_storage: ExternalStorage | None = None,
+        external_compression: Compression | None = None,
+    ) -> None:
+        super().__init__(external_storage=external_storage, external_compression=external_compression)
         self._serve_start_calls = 0
         self._serve_start_lock = threading.Lock()
 
@@ -368,7 +374,8 @@ def main() -> None:
     # Mirror make_wsgi_app's own default so the plain worker keeps shipping
     # the documented value in VGI-Sticky-Default-TTL.
     sticky_default_ttl: float = 300.0 if args.sticky_ttl is None else float(args.sticky_ttl)
-    impl = _FailServeStartOnce() if args.fail_serve_start_once else ConformanceServiceImpl()
+    impl_cls = _FailServeStartOnce if args.fail_serve_start_once else ConformanceServiceImpl
+    impl = impl_cls()
 
     if not args.fake_storage:
         # Plain HTTP server, no external storage.
@@ -449,6 +456,8 @@ def main() -> None:
         fetch_config=fetch_config,
         url_validator=external_url_validator if args.reject_localhost_redirects else None,
     )
+    # published_string publishes through the worker's own storage + compression.
+    impl = impl_cls(external_storage=backend, external_compression=external_location.compression)
     server = RpcServer(
         ConformanceService,
         impl,

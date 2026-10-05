@@ -71,6 +71,21 @@ class ConformanceService(Protocol):
         """
         ...
 
+    def published_string(self, value: str, include_sha256: bool) -> str:
+        """Return *value* through a pre-published ``ExternalRef`` (publish once, reuse).
+
+        Requires the worker's external storage (``--fake-storage``).  The
+        worker keeps a per-process cache keyed by ``(value, include_sha256)``;
+        on a miss it builds the result batch ``{result: [value]}``, calls
+        ``publish_external`` (with the worker's configured compression, and
+        a digest only when *include_sha256*) and caches the ref.  Every call
+        returns the cached ref, so the response is always a pointer batch --
+        regardless of the externalisation threshold -- and repeated calls
+        name the same URL without uploading again.  Without storage the
+        call fails with "published_string requires external storage".
+        """
+        ...
+
     def echo_int(self, value: int) -> int:
         """Echo an integer value."""
         ...

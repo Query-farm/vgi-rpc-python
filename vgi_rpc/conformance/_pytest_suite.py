@@ -54,6 +54,7 @@ from vgi_rpc.conformance._external_pytest import (
     TestExternalFetchFailures,  # noqa: F401
     TestExternalFetchSecurity,  # noqa: F401
     TestExternalInputRoutes,  # noqa: F401
+    TestExternalRef,  # noqa: F401
     TestExternalStorageUrlPair,  # noqa: F401
 )
 from vgi_rpc.conformance._identity_pytest import (  # noqa: F401
@@ -2619,8 +2620,9 @@ class TestDescribeConformance:
         # 76 + 3 sticky unary methods (open_counter / increment_counter /
         # close_counter) + 2 sticky streaming methods (stream_session_counter
         # / exchange_session_counter), added 2026-05 alongside the
-        # Sticky.* conformance group, + exchange_input_metadata.
-        assert len(conformance_describe.methods) == 89
+        # Sticky.* conformance group, + exchange_input_metadata,
+        # + published_string (pre-published ExternalRef, added 2026-10).
+        assert len(conformance_describe.methods) == 90
         assert conformance_describe.protocol_name == "ConformanceService"
         echo_str = conformance_describe.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

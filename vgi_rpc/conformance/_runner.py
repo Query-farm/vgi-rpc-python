@@ -1730,6 +1730,8 @@ _EXPECTED_METHODS = frozenset(
         # non-HTTP transports — they simply emit large payloads.
         "exchange_oversized",
         "oversized_unary",
+        # Pre-published ExternalRef support (added 2026-10).
+        "published_string",
         "produce_oversized_batch",
         # HTTP-only sticky-session conformance support (added 2026-05).
         # The Sticky.* canonical conformance tests exercise these. Cross-
@@ -1803,6 +1805,8 @@ _UNARY_METHODS = frozenset(
         "inspect_point",
         "pack_nested_containers",
         "oversized_unary",
+        # Pre-published ExternalRef support (added 2026-10).
+        "published_string",
         "raise_runtime_error",
         "raise_type_error",
         "raise_value_error",
@@ -1892,8 +1896,9 @@ def _test_desc_method_count(desc: ServiceDescription) -> None:
     # 76 + 3 sticky unary methods (open_counter / increment_counter /
     # close_counter) + 2 sticky streaming methods (stream_session_counter
     # / exchange_session_counter), added 2026-05 alongside the HTTP-only
-    # Sticky.* conformance group, + exchange_input_metadata.
-    assert len(desc.methods) == 89
+    # Sticky.* conformance group, + exchange_input_metadata,
+    # + published_string (pre-published ExternalRef, added 2026-10).
+    assert len(desc.methods) == 90
 
 
 # ---------------------------------------------------------------------------

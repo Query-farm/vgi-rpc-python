@@ -110,11 +110,13 @@ _logger = logging.getLogger(__name__)
 __all__ = [
     "Compression",
     "ExternalLocationConfig",
+    "ExternalRef",
     "ExternalStorage",
     "FetchConfig",
     "UploadUrl",
     "UploadUrlProvider",
     "https_only_validator",
+    "publish_external",
 ]
 
 
@@ -761,38 +763,9 @@ def maybe_externalize_collector(
             else:
                 writer.write_batch(ab.batch)
 
-    ipc_bytes = buf.getvalue()
-    original_bytes: int | None = None
-
-    # Compute SHA-256 of the raw IPC bytes (pre-compression) for end-to-end verification
-    data_sha256 = hashlib.sha256(ipc_bytes).hexdigest()
-
-    content_encoding: str | None = None
-    if config.compression is not None:
-        codec = _CodecEncoding(config.compression.algorithm)
-        original_bytes = len(ipc_bytes)
-        ipc_bytes = _codec_compress(codec, ipc_bytes, level=config.compression.level)
-        content_encoding = codec.value
-
-    raw_size = original_bytes if original_bytes is not None else len(ipc_bytes)
-    url = _traced_upload(
-        ipc_bytes, out.output_schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
+    url, data_sha256, raw_size = _upload_ipc_bytes(
+        buf.getvalue(), out.output_schema, config.storage, config.compression
     )
-    _logger.debug(
-        "Batch externalized: %s (%d bytes raw, %d bytes uploaded, compressed=%s, sha256=%s)",
-        redact_url(url),
-        raw_size,
-        len(ipc_bytes),
-        content_encoding is not None,
-        data_sha256,
-        extra={
-            "url": redact_url(url),
-            "raw_size_bytes": raw_size,
-            "uploaded_size_bytes": len(ipc_bytes),
-            "compressed": content_encoding is not None,
-        },
-    )
-
     pointer_batch, pointer_cm = make_external_location_batch(out.output_schema, url, sha256=data_sha256)
     return [(pointer_batch, pointer_cm)], raw_size
 
@@ -838,31 +811,66 @@ def maybe_externalize_batch(
     if batch.get_total_buffer_size() < config.externalize_threshold_bytes:
         return batch, custom_metadata, 0
 
-    # Serialize the single batch as IPC stream
+    url, data_sha256, raw_size = _upload_ipc_bytes(
+        _serialize_single_batch(batch, custom_metadata), batch.schema, config.storage, config.compression
+    )
+    pointer_batch, pointer_cm = make_external_location_batch(batch.schema, url, sha256=data_sha256)
+    return pointer_batch, pointer_cm, raw_size
+
+
+# ---------------------------------------------------------------------------
+# Shared serialize / hash / compress / upload
+# ---------------------------------------------------------------------------
+
+
+def _serialize_single_batch(batch: pa.RecordBatch, custom_metadata: pa.KeyValueMetadata | None) -> bytes:
+    """Serialize *batch* as a complete IPC stream (schema + one batch + EOS)."""
     buf = BytesIO()
     with new_ipc_stream(buf, batch.schema) as writer:
         if custom_metadata is not None:
             writer.write_batch(batch, custom_metadata=custom_metadata)
         else:
             writer.write_batch(batch)
+    return buf.getvalue()
 
-    ipc_bytes = buf.getvalue()
-    original_bytes: int | None = None
 
-    # Compute SHA-256 of the raw IPC bytes (pre-compression) for end-to-end verification
+def _upload_ipc_bytes(
+    ipc_bytes: bytes,
+    schema: pa.Schema,
+    storage: ExternalStorage,
+    compression: Compression | None,
+) -> tuple[str, str, int]:
+    """Hash, optionally compress, and upload one serialized IPC stream.
+
+    The single choke point shared by every server-side externalisation
+    path (collector cycles, single batches, and :func:`publish_external`)
+    so the bytes a pointer names are always produced the same way.
+
+    Args:
+        ipc_bytes: Complete raw Arrow IPC stream bytes.
+        schema: Schema of the stream (passed through to ``storage.upload``).
+        storage: Storage backend to upload to.
+        compression: Optional compression applied before upload.
+
+    Returns:
+        ``(url, sha256, raw_size)`` — the URL returned by the backend, the
+        hex SHA-256 of the raw (pre-compression) IPC bytes, and the raw
+        byte count.
+
+    """
+    # SHA-256 of the raw IPC bytes (pre-compression) for end-to-end verification
     data_sha256 = hashlib.sha256(ipc_bytes).hexdigest()
+    raw_size = len(ipc_bytes)
 
+    original_bytes: int | None = None
     content_encoding: str | None = None
-    if config.compression is not None:
-        codec = _CodecEncoding(config.compression.algorithm)
-        original_bytes = len(ipc_bytes)
-        ipc_bytes = _codec_compress(codec, ipc_bytes, level=config.compression.level)
+    if compression is not None:
+        codec = _CodecEncoding(compression.algorithm)
+        original_bytes = raw_size
+        ipc_bytes = _codec_compress(codec, ipc_bytes, level=compression.level)
         content_encoding = codec.value
 
-    raw_size = original_bytes if original_bytes is not None else len(ipc_bytes)
-    url = _traced_upload(
-        ipc_bytes, batch.schema, config.storage, content_encoding=content_encoding, original_bytes=original_bytes
-    )
+    url = _traced_upload(ipc_bytes, schema, storage, content_encoding=content_encoding, original_bytes=original_bytes)
     _logger.debug(
         "Batch externalized: %s (%d bytes raw, %d bytes uploaded, compressed=%s, sha256=%s)",
         redact_url(url),
@@ -877,6 +885,116 @@ def maybe_externalize_batch(
             "compressed": content_encoding is not None,
         },
     )
+    return url, data_sha256, raw_size
 
-    pointer_batch, pointer_cm = make_external_location_batch(batch.schema, url, sha256=data_sha256)
-    return pointer_batch, pointer_cm, raw_size
+
+# ---------------------------------------------------------------------------
+# Pre-published references
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExternalRef:
+    """A reference to an already-published unary result.
+
+    A unary method may return an ``ExternalRef`` in place of its declared
+    result value.  The server then answers with the ExternalLocation
+    pointer batch for ``url`` directly — no result serialization,
+    compression, or upload happens during the call, and the ref is used
+    whether or not the server has external storage configured and
+    regardless of ``externalize_threshold_bytes``.  Clients resolve it
+    like any other pointer, so they need no change.
+
+    Build one with :func:`publish_external` (or by hand for an object
+    published out of band).  The object at ``url`` must be an Arrow IPC
+    stream (optionally ``Content-Encoding``-compressed) whose schema is the
+    method's result schema and which holds exactly one 1-row data batch.
+
+    The caller owns caching the ref and the object's lifecycle: a
+    long-lived ref must not point at an object under the short-TTL
+    lifecycle rule used for per-call uploads, and a pre-signed URL
+    expires — re-sign or rebuild the ref before then.  Only return a ref
+    to callers who are all entitled to the same content.
+
+    Attributes:
+        url: Where the published IPC stream lives.
+        sha256: Lowercase hex SHA-256 of the raw (pre-compression) IPC
+            stream bytes, sent as ``vgi_rpc.location.sha256``.  ``None``
+            omits the key, so clients skip the content check — use this
+            for an object rewritten in place or one too large to hash.
+
+    """
+
+    url: str
+    sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the URL and digest shape.
+
+        Raises:
+            ValueError: If ``url`` is empty or ``sha256`` is not 64
+                lowercase hex characters.
+
+        """
+        if not self.url:
+            raise ValueError("ExternalRef.url must be non-empty")
+        if self.sha256 is not None and (
+            len(self.sha256) != 64 or any(c not in "0123456789abcdef" for c in self.sha256)
+        ):
+            raise ValueError("ExternalRef.sha256 must be 64 lowercase hex characters (or None)")
+
+    def pointer_batch(self, schema: pa.Schema) -> tuple[pa.RecordBatch, pa.KeyValueMetadata]:
+        """Build the zero-row pointer batch announcing this ref.
+
+        Args:
+            schema: The method's result schema.
+
+        Returns:
+            ``(batch, custom_metadata)`` as from
+            :func:`make_external_location_batch`.
+
+        """
+        return make_external_location_batch(schema, self.url, sha256=self.sha256)
+
+
+def publish_external(
+    batch: pa.RecordBatch,
+    storage: ExternalStorage,
+    compression: Compression | None = None,
+    *,
+    include_sha256: bool = True,
+) -> ExternalRef:
+    """Publish a unary result batch once and return a reusable reference.
+
+    Serializes *batch* exactly as the per-call externalizer does (an IPC
+    stream of the schema plus this one batch), hashes the raw bytes,
+    compresses when *compression* is given, and calls ``storage.upload``
+    once.  Cache the returned :class:`ExternalRef` and return it from the
+    unary method on later calls; the server writes the pointer directly.
+
+    Build *batch* against the method's result schema, e.g.::
+
+        schema = rpc_methods(MyService)["catalog"].result_schema
+        ref = publish_external(pa.RecordBatch.from_pydict({"result": [value]}, schema=schema), storage)
+
+    Args:
+        batch: The 1-row result batch (single ``result`` column).
+        storage: Storage backend to upload to.
+        compression: Optional compression applied before upload (pass the
+            server's ``ServerExternalConfig.compression`` to match it).
+        include_sha256: When ``False`` the ref carries no digest, so
+            clients skip the content check.
+
+    Returns:
+        An :class:`ExternalRef` for the uploaded object.
+
+    Raises:
+        ValueError: If *batch* does not have exactly one row.
+
+    """
+    if batch.num_rows != 1:
+        raise ValueError(f"publish_external expects a 1-row result batch, got {batch.num_rows} rows")
+    url, data_sha256, _raw_size = _upload_ipc_bytes(
+        _serialize_single_batch(batch, None), batch.schema, storage, compression
+    )
+    return ExternalRef(url=url, sha256=data_sha256 if include_sha256 else None)

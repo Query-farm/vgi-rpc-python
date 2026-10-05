@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal
 
 import pyarrow as pa
 
-from vgi_rpc.external import predict_externalize_bytes_for_batch
+from vgi_rpc.external import ExternalRef, predict_externalize_bytes_for_batch
 from vgi_rpc.rpc import (
     CallContext,
     RpcError,
@@ -31,6 +31,7 @@ from vgi_rpc.rpc import (
     _validate_params,
     _validate_result,
     _write_error_batch,
+    _write_external_ref,
     _write_result_batch,
 )
 from vgi_rpc.rpc._common import (
@@ -158,33 +159,41 @@ def _run_unary_sync(
                 sink.flush_contents(writer, schema)
                 try:
                     result = getattr(app._server.implementation_for(info), method_name)(**kwargs)
-                    _validate_result(info.name, result, info.result_type)
-                    # Build the result batch eagerly so we can pre-flight the
-                    # external-channel cap before paying for an upload that
-                    # would violate it.
-                    result_batch = _build_result_batch(schema, result, info.result_type)
-                    ext_cfg = app._server.external_config
-                    predicted_external = (
-                        predict_externalize_bytes_for_batch(result_batch, ext_cfg) if ext_cfg is not None else 0
-                    )
-                    if (
-                        app._max_externalized_response_bytes is not None
-                        and predicted_external > app._max_externalized_response_bytes
-                    ):
-                        overshoot = RuntimeError(
-                            f"Externalised payload exceeds max_externalized_response_bytes "
-                            f"({predicted_external} > {app._max_externalized_response_bytes}) "
-                            f"for method {method_name!r}"
-                        )
-                        _hook_exc = overshoot
-                        status = "error"
-                        error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
-                        _write_error_batch(writer, schema, overshoot, server_id=server_id)
-                        http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                    if isinstance(result, ExternalRef):
+                        # A pre-published reference: write its pointer as-is.
+                        # No result batch to build or validate and nothing to
+                        # upload, so the external-channel pre-flight does not
+                        # apply; the wire-body budget below still sees the
+                        # (tiny) pointer.
+                        _write_external_ref(writer, schema, result)
                     else:
-                        external_bytes_written = _write_result_batch(
-                            writer, schema, result, app._server.external_config, prebuilt=result_batch
+                        _validate_result(info.name, result, info.result_type)
+                        # Build the result batch eagerly so we can pre-flight the
+                        # external-channel cap before paying for an upload that
+                        # would violate it.
+                        result_batch = _build_result_batch(schema, result, info.result_type)
+                        ext_cfg = app._server.external_config
+                        predicted_external = (
+                            predict_externalize_bytes_for_batch(result_batch, ext_cfg) if ext_cfg is not None else 0
                         )
+                        if (
+                            app._max_externalized_response_bytes is not None
+                            and predicted_external > app._max_externalized_response_bytes
+                        ):
+                            overshoot = RuntimeError(
+                                f"Externalised payload exceeds max_externalized_response_bytes "
+                                f"({predicted_external} > {app._max_externalized_response_bytes}) "
+                                f"for method {method_name!r}"
+                            )
+                            _hook_exc = overshoot
+                            status = "error"
+                            error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                            _write_error_batch(writer, schema, overshoot, server_id=server_id)
+                            http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                        else:
+                            external_bytes_written = _write_result_batch(
+                                writer, schema, result, app._server.external_config, prebuilt=result_batch
+                            )
                 # No narrow (TypeError, pa.ArrowInvalid) -> 400 branch here.
                 # Every *request* error is already caught above, before the
                 # method is invoked: _read_request, the method-name check,

@@ -10,9 +10,10 @@ tests must place one on each inbound HTTP route explicitly.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -599,3 +600,146 @@ __all__ = [
     "TestExternalInputRoutes",
     "TestExternalStorageUrlPair",
 ]
+
+
+@contextlib.contextmanager
+def _external_proxy(port: int) -> Iterator[ConformanceService]:
+    """Connect an ordinary external-config client with an owned fetch pool."""
+    from vgi_rpc.external import ExternalLocationConfig
+    from vgi_rpc.http import http_connect
+
+    config = ExternalLocationConfig(url_validator=None)
+    try:
+        with http_connect(
+            ConformanceService,  # type: ignore[type-abstract]
+            f"http://127.0.0.1:{port}",
+            external_location=config,
+        ) as proxy:
+            yield proxy
+    finally:
+        config.fetch_config.close()
+
+
+def _published_string_pointer(client: httpx2.Client, value: str, *, include_sha256: bool) -> tuple[str, str | None]:
+    """Call ``published_string`` raw; return its pointer's ``(location, sha256)``."""
+    response = _post(
+        client,
+        "/ConformanceService/published_string",
+        _request_body("published_string", value=value, include_sha256=include_sha256),
+    )
+    data = [
+        (batch, metadata)
+        for batch, metadata in _response_batches(response)
+        if metadata is None or metadata.get(b"vgi_rpc.log_level") is None
+    ]
+    assert len(data) == 1, f"expected exactly one data batch, got {len(data)}"
+    batch, metadata = data[0]
+    assert batch.num_rows == 0, f"a published ref must answer with a zero-row pointer, got {batch.num_rows} rows"
+    assert metadata is not None and metadata.get(LOCATION_KEY) is not None, (
+        f"published_string response carried no {LOCATION_KEY.decode()}"
+    )
+    expected_schema = rpc_methods(ConformanceService)["published_string"].result_schema
+    assert batch.schema.equals(expected_schema), f"pointer schema {batch.schema} != result schema {expected_schema}"
+    location = metadata.get(LOCATION_KEY)
+    assert location is not None
+    digest = metadata.get(LOCATION_SHA256_KEY)
+    return location.decode(), None if digest is None else digest.decode()
+
+
+def _fetch_published(url: str) -> bytes:
+    """Fetch (and decode) a published object the way a client resolver does."""
+    from vgi_rpc.external_fetch import FetchConfig, fetch_url
+
+    config = FetchConfig()
+    try:
+        return fetch_url(url, config)
+    finally:
+        config.close()
+
+
+def _published_value() -> str:
+    """Return a value no earlier call has published, so the cache starts cold."""
+    return f"published-{os.urandom(8).hex()}"
+
+
+class TestExternalRef:
+    """Pre-published ``ExternalRef`` results: publish once, answer with the same pointer.
+
+    ``published_string(value, include_sha256)`` publishes ``{result: [value]}``
+    through the worker's storage on its first call and returns the cached ref
+    thereafter.  The answer is always a pointer batch -- even for a two-byte
+    value, because a ref is never inlined -- and the client resolves it like
+    any other.  Uses the same fixtures as :class:`TestExternalInputRoutes`.
+    """
+
+    def test_tiny_value_round_trips_through_pointer(self, conformance_http_with_storage_port: int) -> None:
+        """A tiny value still arrives through the pointer: the threshold does not apply."""
+        with _external_proxy(conformance_http_with_storage_port) as proxy:
+            assert proxy.published_string(value="hi", include_sha256=True) == "hi"
+
+    @pytest.mark.parametrize("include_sha256", [True, False])
+    def test_pointer_shape_and_digest(
+        self,
+        conformance_http_with_storage_port: int,
+        include_sha256: bool,
+    ) -> None:
+        """The response is a zero-row pointer; the digest is present iff requested and correct."""
+        import httpx2
+
+        value = _published_value()
+        base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            url, digest = _published_string_pointer(client, value, include_sha256=include_sha256)
+        raw = _fetch_published(url)
+        if include_sha256:
+            assert digest is not None, f"include_sha256=True but no {LOCATION_SHA256_KEY.decode()} on the pointer"
+            assert digest == hashlib.sha256(raw).hexdigest(), "pointer digest does not match the object"
+        else:
+            assert digest is None, f"include_sha256=False but the pointer carries {LOCATION_SHA256_KEY.decode()}"
+        # The object is the result stream: result schema + exactly one 1-row batch.
+        reader = ipc.open_stream(BytesIO(raw))
+        batches = list(reader)
+        assert len(batches) == 1 and batches[0].num_rows == 1
+        assert batches[0].column("result")[0].as_py() == value
+
+    def test_published_once(
+        self,
+        conformance_http_with_storage_port: int,
+        conformance_fake_storage: str,
+    ) -> None:
+        """Two calls name the same location and upload at most one object between them."""
+        import httpx2
+
+        value = _published_value()
+        base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
+        before = _storage_stats(conformance_fake_storage)["object_count"]
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            first, _ = _published_string_pointer(client, value, include_sha256=True)
+            middle = _storage_stats(conformance_fake_storage)["object_count"]
+            second, _ = _published_string_pointer(client, value, include_sha256=True)
+        after = _storage_stats(conformance_fake_storage)["object_count"]
+        assert first == second, "a published ref must be reused, not re-uploaded"
+        assert middle - before <= 1, f"first call uploaded {middle - before} objects (expected at most 1)"
+        assert after == middle, f"second call uploaded {after - middle} objects (expected 0)"
+
+    def test_without_digest_round_trips(self, conformance_http_with_storage_port: int) -> None:
+        """``include_sha256=False``: the client skips the content check and still resolves."""
+        value = _published_value()
+        with _external_proxy(conformance_http_with_storage_port) as proxy:
+            assert proxy.published_string(value=value, include_sha256=False) == value
+
+    def test_publish_uses_worker_compression(self, conformance_http_with_zstd_storage_port: int) -> None:
+        """A worker with zstd externalisation publishes compressed; the digest covers the raw bytes."""
+        import httpx2
+
+        value = _published_value()
+        base_url = f"http://127.0.0.1:{conformance_http_with_zstd_storage_port}"
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            url, digest = _published_string_pointer(client, value, include_sha256=True)
+            head = client.head(url)
+        assert head.status_code == 200
+        assert head.headers.get("Content-Encoding") == "zstd", "published object should use the worker's compression"
+        raw = _fetch_published(url)
+        assert digest == hashlib.sha256(raw).hexdigest()
+        with _external_proxy(conformance_http_with_zstd_storage_port) as proxy:
+            assert proxy.published_string(value=value, include_sha256=True) == value

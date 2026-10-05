@@ -129,7 +129,11 @@ def main() -> None:
             url_validator=_loopback_only_validator,
         )
 
-    impl = ConformanceServiceImpl()
+    # published_string publishes through the worker's own storage + compression.
+    impl = ConformanceServiceImpl(
+        external_storage=external_location.storage if external_location is not None else None,
+        external_compression=external_location.compression if external_location is not None else None,
+    )
     server = RpcServer(
         ConformanceService,
         impl,

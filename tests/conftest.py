@@ -959,7 +959,7 @@ def conformance_bytestream_external_target(
     ) -> contextlib.AbstractContextManager[ByteStreamExternalConnection]:
         connection = serve_pipe(
             ConformanceService,
-            ConformanceServiceImpl(),
+            ConformanceServiceImpl(external_storage=config.storage, external_compression=config.compression),
             on_log=on_log,
             external_location=config,
         )
