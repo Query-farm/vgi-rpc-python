@@ -561,11 +561,11 @@ class TestOtelStats:
         assert len(spans) == 1
         attrs = dict(spans[0].attributes or {})
         assert attrs["rpc.vgi_rpc.input_batches"] == 1
-        assert int(attrs["rpc.vgi_rpc.output_batches"]) >= 1  # type: ignore[arg-type]
+        assert int(attrs["rpc.vgi_rpc.output_batches"]) >= 1
         assert attrs["rpc.vgi_rpc.input_rows"] == 1
-        assert int(attrs["rpc.vgi_rpc.output_rows"]) >= 1  # type: ignore[arg-type]
-        assert int(attrs["rpc.vgi_rpc.input_bytes"]) > 0  # type: ignore[arg-type]
-        assert int(attrs["rpc.vgi_rpc.output_bytes"]) >= 0  # type: ignore[arg-type]
+        assert int(attrs["rpc.vgi_rpc.output_rows"]) >= 1
+        assert int(attrs["rpc.vgi_rpc.input_bytes"]) > 0
+        assert int(attrs["rpc.vgi_rpc.output_bytes"]) >= 0
 
     def test_otel_error_span_has_stats(self) -> None:
         """OTel error span should still include stats attributes."""
@@ -610,4 +610,4 @@ class TestOtelStats:
         # Stats should be present even on error
         assert "rpc.vgi_rpc.input_batches" in attrs
         assert "rpc.vgi_rpc.output_batches" in attrs
-        assert int(attrs["rpc.vgi_rpc.output_batches"]) >= 1  # type: ignore[arg-type]  # error batch
+        assert int(attrs["rpc.vgi_rpc.output_batches"]) >= 1  # error batch
