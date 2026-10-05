@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import cast
 
@@ -52,8 +53,11 @@ async def _main() -> None:
         # Do not close the endpoint immediately after FIN: on slower CI runners
         # that can race the client's final body read and turn a valid response
         # into a connection-level ReadError. Wait until the peer acknowledges the
-        # finished send side (or its own close) first.
-        await asyncio.wait_for(stream.send().stopped(), timeout=10)
+        # finished send side (or its own close) first. When the peer closes
+        # first, `stopped()` raises rather than returning; the response was
+        # already fully sent by then, so that is a normal ending too.
+        with contextlib.suppress(iroh.IrohError):
+            await asyncio.wait_for(stream.send().stopped(), timeout=10)
     finally:
         await endpoint.close()
 
