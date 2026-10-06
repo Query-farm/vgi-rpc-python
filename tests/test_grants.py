@@ -38,7 +38,9 @@ from vgi_rpc.rpc import AuthContext, CallContext, RpcServer
 from vgi_rpc.rpc._token_identity import IdentityImpl, IdentityUnavailableError, StaleAuthError, TokenIdentity
 
 VECTORS = json.loads(
-    (Path(__file__).resolve().parents[1] / "vgi_rpc" / "conformance" / "grant_token_vectors.json").read_text()
+    (Path(__file__).resolve().parents[1] / "vgi_rpc" / "conformance" / "grant_token_vectors.json").read_text(
+        encoding="utf-8"
+    )
 )
 KEY = bytes(range(32))
 
