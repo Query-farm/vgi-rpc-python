@@ -24,7 +24,7 @@ from vgi_rpc.external import (
     maybe_externalize_collector,
     resolve_external_location,
 )
-from vgi_rpc.log import Level, Message
+from vgi_rpc.log import Level, Message, exception_str
 from vgi_rpc.metadata import (
     ERROR_CODE_KEY,
     ERROR_DETAILS_KEY,
@@ -66,7 +66,7 @@ from vgi_rpc.rpc._debug import (
     wire_request_logger,
     wire_response_logger,
 )
-from vgi_rpc.rpc._types import AnnotatedBatch, RpcMethodInfo
+from vgi_rpc.rpc._types import AnnotatedBatch, RpcMethodInfo, Stream
 from vgi_rpc.shm import ShmSegment, is_shm_pointer_batch, maybe_write_to_shm, resolve_shm_batch
 from vgi_rpc.utils import (
     ArrowSerializableDataclass,
@@ -255,13 +255,28 @@ def _write_message_batch(
     server_id: str | None = None,
 ) -> None:
     """Write a zero-row batch with Message metadata on an existing IPC stream writer."""
+    _write_encoded_message_batch(writer, schema, _encode_message_metadata(msg, server_id))
+
+
+def _encode_message_metadata(msg: Message, server_id: str | None = None) -> pa.KeyValueMetadata:
+    """Encode a log message as the custom metadata of its zero-row batch.
+
+    Raises whatever serializing the message raises (``json.dumps`` of an
+    ``extra`` value that is not JSON-serializable).
+    """
     md = msg.add_to_metadata()
     if server_id is not None:
         md[SERVER_ID_KEY.decode()] = server_id
     request_id = _current_request_id.get()
     if request_id:
         md[REQUEST_ID_KEY.decode()] = request_id
-    custom_metadata = encode_metadata(md)
+    return encode_metadata(md)
+
+
+def _write_encoded_message_batch(
+    writer: ipc.RecordBatchStreamWriter, schema: pa.Schema, custom_metadata: pa.KeyValueMetadata
+) -> None:
+    """Write a zero-row log batch whose metadata is already encoded."""
     batch = empty_batch(schema)
     _record_output(batch)
     writer.write_batch(batch, custom_metadata=custom_metadata)
@@ -286,7 +301,7 @@ def _write_error_batch(
         wire_response_logger.debug(
             "Write error batch: %s: %s",
             type(exc).__name__,
-            str(exc)[:200],
+            exception_str(exc)[:200],
         )
     _write_message_batch(
         writer, schema, Message.from_exception(exc, include_traceback=include_traceback), server_id=server_id
@@ -307,28 +322,37 @@ def _write_error_stream(
 
 
 class _ClientLogSink:
-    """Buffers client-directed log messages until an IPC writer is available, then writes directly."""
+    """Buffers client-directed log messages until an IPC writer is available, then writes directly.
+
+    A buffered message is encoded when it is logged, not when it is flushed.
+    The flush happens later, after a response stream is already open; a
+    message that fails to serialize there (an ``extra`` value ``json.dumps``
+    rejects) would abort a half-written stream outside any guard. Encoding at
+    log time raises inside the method's own ``ctx.client_log`` call instead,
+    where the dispatcher answers it as the method's error.
+    """
 
     __slots__ = ("_buffer", "_schema", "_server_id", "_writer")
 
     def __init__(self, server_id: str | None = None) -> None:
-        self._buffer: list[Message] = []
+        self._buffer: list[pa.KeyValueMetadata] = []
         self._writer: ipc.RecordBatchStreamWriter | None = None
         self._schema: pa.Schema | None = None
         self._server_id = server_id
 
     def __call__(self, msg: Message) -> None:
+        custom_metadata = _encode_message_metadata(msg, self._server_id)
         if self._writer is not None and self._schema is not None:
-            _write_message_batch(self._writer, self._schema, msg, server_id=self._server_id)
+            _write_encoded_message_batch(self._writer, self._schema, custom_metadata)
         else:
-            self._buffer.append(msg)
+            self._buffer.append(custom_metadata)
 
     def flush_contents(self, writer: ipc.RecordBatchStreamWriter, schema: pa.Schema) -> None:
         """Flush buffered messages and switch to direct writing."""
         self._writer = writer
         self._schema = schema
-        for msg in self._buffer:
-            _write_message_batch(writer, schema, msg, server_id=self._server_id)
+        for custom_metadata in self._buffer:
+            _write_encoded_message_batch(writer, schema, custom_metadata)
         self._buffer.clear()
 
     def reset(self) -> None:
@@ -933,6 +957,31 @@ def _validate_result(method_name: str, value: object, result_type: object) -> No
         raise TypeError(f"{method_name}() expected a non-None return value but got None")
 
 
+def _validate_stream_result(method_name: str, value: object) -> None:
+    """Validate that a stream method returned a usable :class:`Stream`.
+
+    Runs inside the dispatcher's init guard, before anything reads the
+    result's schemas or opens a stream with them: a method returning
+    ``None`` or a ``Stream`` whose schemas are not ``pa.Schema`` otherwise
+    fails later, outside the guard, with a half-open response.
+
+    Args:
+        method_name: The stream method's name, for the error message.
+        value: What the method returned.
+
+    Raises:
+        TypeError: If *value* is not a ``Stream`` or carries a non-schema
+            ``output_schema`` / ``input_schema``.
+
+    """
+    if not isinstance(value, Stream):
+        raise TypeError(f"{method_name}() expected a Stream return value but got {type(value).__name__}")
+    for name in ("output_schema", "input_schema"):
+        schema = getattr(value, name)
+        if not isinstance(schema, pa.Schema):
+            raise TypeError(f"{method_name}() returned a Stream whose {name} is {type(schema).__name__}, not pa.Schema")
+
+
 def _drain_stream(reader: ValidatedReader) -> None:
     """Consume remaining batches so the IPC EOS marker is read."""
     while True:
@@ -1179,9 +1228,34 @@ def _read_unary_response(
     *,
     shm: ShmSegment | None = None,
 ) -> object:
-    """Read a unary response: skip logs, extract result, deserialize."""
+    """Read a unary response: skip logs, extract result, deserialize.
+
+    Args:
+        reader: Reader positioned at the response IPC stream.
+        info: The called method's metadata.
+        on_log: Optional callback for log batches preceding the result.
+        external_config: Optional config for resolving externalized results.
+        shm: Optional shared-memory segment the result may arrive in.
+
+    Returns:
+        The deserialized result, or ``None`` for a void or null return.
+
+    Raises:
+        RpcError: If the server wrote an error, or the response stream ended
+            without a result batch (a bare ``StopIteration`` would otherwise
+            escape into the caller, where it silently ends an enclosing
+            ``for`` loop or becomes ``RuntimeError`` inside a generator).
+
+    """
     try:
         batch = _read_batch_with_log_check(reader, on_log, external_config, shm=shm)
+    except StopIteration:
+        raise RpcError(
+            "ProtocolError",
+            f"{info.name}() response stream ended without a result batch. "
+            "The server must write a result or error batch for every unary call.",
+            "",
+        ) from None
     except RpcError:
         _drain_stream(reader)
         raise

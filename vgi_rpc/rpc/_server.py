@@ -30,6 +30,7 @@ from vgi_rpc.external import (
     _current_externalized_bytes,
     resolve_external_location,
 )
+from vgi_rpc.log import exception_str
 from vgi_rpc.metadata import (
     CANCEL_KEY,
     PROTOCOL_KEY,
@@ -99,6 +100,7 @@ from vgi_rpc.rpc._wire import (
     _validate_call_signature,
     _validate_params,
     _validate_result,
+    _validate_stream_result,
     _write_error_batch,
     _write_error_stream,
     _write_external_ref,
@@ -137,7 +139,7 @@ def _truncate_error_message(exc: BaseException | None, limit: int = _ACCESS_LOG_
     """
     if exc is None:
         return ""
-    return str(exc)[:limit]
+    return exception_str(exc)[:limit]
 
 
 def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc: BaseException) -> str:
@@ -162,7 +164,7 @@ def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc:
         "Error in %s.%s: %s",
         protocol_name,
         method_name,
-        exc,
+        exception_str(exc),
         exc_info=True,
         extra=extra,
     )
@@ -1604,31 +1606,36 @@ class RpcServer:
         try:
             with new_ipc_stream(transport.writer, schema) as writer:
                 sink.flush_contents(writer, schema)
+                # Writing the result belongs inside the guard: building the batch
+                # (a result that does not fit the declared type), the shm route
+                # and the external upload all raise *before* anything reaches the
+                # writer, so the error batch can still answer the call. Outside
+                # it, the stream closed with no batch -- the client read a bare
+                # StopIteration -- and the exception escaped to the serve loop,
+                # which ended the connection (issue #55).
                 try:
                     result = getattr(self.implementation_for(info), info.name)(**kwargs)
-                    if not isinstance(result, ExternalRef):
+                    if isinstance(result, ExternalRef):
+                        _write_external_ref(writer, info.result_schema, result)
+                    else:
                         _validate_result(info.name, result, info.result_type)
+                        _write_result_batch(
+                            writer,
+                            info.result_schema,
+                            result,
+                            self._external_config,
+                            shm=shm,
+                            result_type=info.result_type,
+                        )
                 except Exception as exc:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
                     error_code = error_code_of(exc).value
-                    error_message = str(exc)
+                    error_message = exception_str(exc)
                     _write_error_batch(
                         writer, schema, exc, server_id=self._server_id, include_traceback=self._tracebacks
                     )
-                    return
-                if isinstance(result, ExternalRef):
-                    _write_external_ref(writer, info.result_schema, result)
-                    return
-                _write_result_batch(
-                    writer,
-                    info.result_schema,
-                    result,
-                    self._external_config,
-                    shm=shm,
-                    result_type=info.result_type,
-                )
         finally:
             duration_ms = (time.monotonic() - start) * 1000
             _emit_access_log(
@@ -1688,12 +1695,23 @@ class RpcServer:
         # the outer one handles streaming errors.  Only one access log fires per call.
         try:
             result: Stream[StreamState, Any] = getattr(self.implementation_for(info), info.name)(**kwargs)
+            _validate_stream_result(info.name, result)
+            # The header is written under the init guard: serializing it (a
+            # header that does not fit its type, or ``header=None`` for a method
+            # that declares one) raises before any byte is written, so the
+            # error stream below takes the header's place on the wire and the
+            # client's header read raises RpcError. Outside the guard the
+            # exception escaped the serve loop and ended the connection.
+            if info.header_type is not None:
+                _write_stream_header(
+                    transport.writer, result.header, self._external_config, sink=sink, method_name=info.name
+                )
         except Exception as exc:
             _hook_exc = exc
             status = "error"
             error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
             error_code = error_code_of(exc).value
-            error_message = str(exc)
+            error_message = exception_str(exc)
             with contextlib.suppress(BrokenPipeError, OSError):
                 _write_error_stream(
                     transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id, include_traceback=self._tracebacks
@@ -1737,12 +1755,6 @@ class RpcServer:
         input_schema = result.input_schema
         state = result.state
         cancelled = False
-
-        # Write header IPC stream before the main output stream
-        if info.header_type is not None:
-            _write_stream_header(
-                transport.writer, result.header, self._external_config, sink=sink, method_name=info.name
-            )
 
         input_reader = ValidatedReader(ipc.open_stream(transport.reader), self._ipc_validation)
 
@@ -1829,7 +1841,7 @@ class RpcServer:
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
                     error_code = error_code_of(exc).value
-                    error_message = str(exc)
+                    error_message = exception_str(exc)
                     with contextlib.suppress(BrokenPipeError, OSError):
                         _write_error_batch(
                             output_writer,

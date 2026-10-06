@@ -46,6 +46,7 @@ from vgi_rpc.rpc import (
     _truncate_error_message,
     _validate_call_signature,
     _validate_params,
+    _validate_stream_result,
     _write_error_batch,
     _write_stream_header,
 )
@@ -303,6 +304,42 @@ def _run_stream_init_sync(
         ) as outcome:
             try:
                 result: Stream[StreamState, Any] = getattr(app._server.implementation_for(info), method_name)(**kwargs)
+                # Validating the result and minting the call token (which
+                # serializes ``call_state`` and both schemas) are the method's
+                # errors too: outside this guard they surfaced as an unhandled
+                # Falcon 500 with a non-Arrow body and an access record of "ok".
+                _validate_stream_result(method_name, result)
+                # Mint the stream's call token once, here.  Everything it carries —
+                # the call state, both schemas, the stream id — is fixed for the
+                # life of the stream, so this is the only time any of it is
+                # serialized or sealed.  Continuations echo the token back and the
+                # server resolves it from cache; see ``_state_token`` for why that
+                # lookup is safe.
+                call_token, call_id, call_state_bytes = _mint_call_token(
+                    result.call_state,
+                    result.output_schema,
+                    result.input_schema,
+                    app._token_key,
+                    auth,
+                    stream_id,
+                    _current_response_budget.get().response_limit_bytes,
+                    protocol=info.protocol_name,
+                )
+                # Warm the cache with the objects we already hold, so this stream's
+                # first continuation does not have to open the token it was just
+                # handed.
+                app._call_state_cache.put(
+                    call_id,
+                    auth,
+                    _ResolvedCall(
+                        result.call_state,
+                        result.output_schema,
+                        result.input_schema,
+                        stream_id,
+                        _current_response_budget.get().response_limit_bytes,
+                    ),
+                    time.time(),
+                )
             # No narrow (TypeError, pa.ArrowInvalid) -> 400 branch here; see the
             # matching note in _app_unary.py.  Request errors are already caught
             # above by the _read_request / _deserialize_params / _validate_params
@@ -315,38 +352,6 @@ def _run_stream_init_sync(
                 outcome.error_message = _truncate_error_message(exc)
                 outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                 raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
-
-            # Mint the stream's call token once, here.  Everything it carries —
-            # the call state, both schemas, the stream id — is fixed for the
-            # life of the stream, so this is the only time any of it is
-            # serialized or sealed.  Continuations echo the token back and the
-            # server resolves it from cache; see ``_state_token`` for why that
-            # lookup is safe.
-            call_token, call_id, call_state_bytes = _mint_call_token(
-                result.call_state,
-                result.output_schema,
-                result.input_schema,
-                app._token_key,
-                auth,
-                stream_id,
-                _current_response_budget.get().response_limit_bytes,
-                protocol=info.protocol_name,
-            )
-            # Warm the cache with the objects we already hold, so this stream's
-            # first continuation does not have to open the token it was just
-            # handed.
-            app._call_state_cache.put(
-                call_id,
-                auth,
-                _ResolvedCall(
-                    result.call_state,
-                    result.output_schema,
-                    result.input_schema,
-                    stream_id,
-                    _current_response_budget.get().response_limit_bytes,
-                ),
-                time.time(),
-            )
 
             if result.input_schema == _EMPTY_SCHEMA:
                 return _run_http_producer_init(
@@ -405,7 +410,22 @@ def _run_http_producer_init(
     """
     resp_buf = BytesIO()
     if info.header_type is not None:
-        _write_stream_header(resp_buf, result.header, app._server.external_config, sink=sink, method_name=method_name)
+        # Guarded like the exchange init's header: a header that does not fit
+        # its type (or ``header=None`` for a declared one) is the method's
+        # error, answered 200 + X-VGI-RPC-Error, not an unhandled Falcon 500
+        # whose non-Arrow body the client cannot parse.
+        try:
+            _write_stream_header(
+                resp_buf, result.header, app._server.external_config, sink=sink, method_name=method_name
+            )
+        except Exception as exc:
+            protocol_name = info.protocol_name or app._server.protocol_name
+            outcome.status = "error"
+            outcome.error_type = _log_method_error(protocol_name, method_name, app._server.server_id, exc)
+            outcome.error_code = error_code_of(exc).value
+            outcome.error_message = _truncate_error_message(exc)
+            outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+            raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
     # Over HTTP a producer's first turn runs INSIDE the /init request, so the init
     # request's Arrow metadata IS the first tick's metadata — surface it to the
     # producer's first process() call. Without this the first turn sees the empty

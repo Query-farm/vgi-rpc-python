@@ -59,6 +59,28 @@ __all__ = [
 ]
 
 
+def exception_str(exc: BaseException) -> str:
+    """Return ``str(exc)``, or a placeholder when the exception's ``__str__`` raises.
+
+    The error path renders every exception it reports. An exception whose
+    ``__str__`` raises would otherwise turn reporting the method's error
+    into a second, unreported failure -- on the pipe transport, one that
+    escapes the serve loop. The placeholder matches the one ``traceback``
+    uses for the same case.
+
+    Args:
+        exc: The exception to render.
+
+    Returns:
+        The exception's message, or ``"<exception str() failed>"``.
+
+    """
+    try:
+        return str(exc)
+    except Exception:
+        return "<exception str() failed>"
+
+
 class Level(Enum):
     """Severity levels for log messages emitted during function processing.
 
@@ -246,11 +268,12 @@ class Message:
 
         """
         # Short, semantic summary (LLM anchor)
-        summary = f"{type(exc).__name__}: {exc}"
+        message = exception_str(exc)
+        summary = f"{type(exc).__name__}: {message}"
 
         extra: dict[str, object] = {
             "exception_type": type(exc).__name__,
-            "exception_message": str(exc),
+            "exception_message": message,
         }
         # Code first: it is required on every EXCEPTION batch, so it is set
         # before anything that could be skipped.

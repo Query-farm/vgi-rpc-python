@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import http.cookies
 import logging
 import uuid
 from collections.abc import Callable, Mapping, MutableMapping
@@ -347,6 +348,8 @@ class CallContext:
 
         Raises:
             RuntimeError: If the call is not a unary HTTP request.
+            ValueError: If *name* is not a legal cookie name or *same_site*
+                is not a recognised value.
 
         """
         sink = _current_response_cookies.get()
@@ -354,6 +357,7 @@ class CallContext:
             raise RuntimeError(
                 "set_cookie() is only supported inside unary RPC methods served over HTTP",
             )
+        _check_cookie(name, same_site)
         sink.append(
             CookieSpec(
                 name=name,
@@ -385,6 +389,7 @@ class CallContext:
 
         Raises:
             RuntimeError: If the call is not a unary HTTP request.
+            ValueError: If *name* is not a legal cookie name.
 
         """
         sink = _current_response_cookies.get()
@@ -392,6 +397,7 @@ class CallContext:
             raise RuntimeError(
                 "delete_cookie() is only supported inside unary RPC methods served over HTTP",
             )
+        _check_cookie(name)
         sink.append(CookieSpec(name=name, delete=True, path=path, domain=domain))
 
     # --- Sticky sessions (HTTP-only) -----------------------------------
@@ -480,6 +486,34 @@ class CallContext:
             raise RuntimeError("sticky sessions not available on this transport")
         sink.close()
         _current_sticky_action.set("close")
+
+
+_SAME_SITE_VALUES: Final = frozenset({"lax", "strict", "none"})
+
+
+def _check_cookie(name: str, same_site: str | None = None) -> None:
+    """Reject a cookie the HTTP response could not carry.
+
+    Runs when the method queues the cookie, so a bad one raises inside the
+    method's own call and is answered as its error. The response layer
+    applies cookies only after the result is written; failing there left an
+    unhandled 500 with a non-Arrow body and an access record of "ok".
+
+    Args:
+        name: The cookie name.
+        same_site: The ``SameSite`` attribute, if any.
+
+    Raises:
+        ValueError: If *name* is not a legal cookie name, or *same_site* is
+            not ``"Strict"``, ``"Lax"`` or ``"None"`` (case-insensitive).
+
+    """
+    try:
+        http.cookies.Morsel[str]().set(name, "", "")
+    except http.cookies.CookieError as exc:
+        raise ValueError(f"Illegal cookie name {name!r}") from exc
+    if same_site is not None and same_site.lower() not in _SAME_SITE_VALUES:
+        raise ValueError(f"same_site must be 'Strict', 'Lax' or 'None', not {same_site!r}")
 
 
 @dataclass(frozen=True)

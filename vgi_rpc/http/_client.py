@@ -1709,15 +1709,17 @@ class _HttpProxy:
                 )
 
             # Read header from response before main IPC stream (if method declares one).
-            # For non-401 errors (e.g. 500), _read_stream_header still works correctly
-            # because _set_error_response writes a proper IPC error stream with error
-            # metadata, which _read_stream_header detects via _dispatch_log_or_error.
+            # A server error is normally an IPC error stream, which
+            # _read_stream_header detects via _dispatch_log_or_error.  A non-200
+            # body that is not Arrow at all -- a 401 JSON envelope, or a 5xx
+            # from a proxy or an unhandled server fault -- is screened first by
+            # _open_response_stream, which raises a typed error for it instead
+            # of letting the header read fail with a raw ArrowInvalid.
             header = None
             content = _enforce_accepted_response_bytes(resp.content, self._accepted_max_response_bytes)
             resp_stream = BytesIO(content)
             if info.header_type is not None:
-                # Check for auth errors first (JSON envelope, not Arrow IPC)
-                if resp.status_code == 401:
+                if resp.status_code != HTTPStatus.OK:
                     _open_response_stream(content, resp.status_code, ipc_validation)
                 header = _read_stream_header(resp_stream, info.header_type, ipc_validation, on_log, ext_cfg)
 
