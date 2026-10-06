@@ -50,6 +50,7 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import SECONDARY_PROTOCOL_HASH, SECONDARY_PROTOCOL_NAME, conformance_extra_protocols
 from vgi_rpc.introspect import _reflection_call
 from vgi_rpc.rpc import _EMPTY_SCHEMA, PipeTransport, RpcServer
 from vgi_rpc.rpc._reflection import MethodInfo, ProtocolList, ServiceDescription
@@ -110,6 +111,15 @@ SUBPROCESS_WORKERS: dict[str, dict[str, str | list[str] | Path]] = {
         "build": "cmake --build build --target conformance_worker",
     },
 }
+
+#: Protocols every conformance worker MUST host, with the digest each MUST
+#: report.  Unlike identity -- hosted only where a deployment wires it up --
+#: ``conformance.Secondary.v1`` is part of the conformance worker itself
+#: (MULTI_PROTOCOL_HOSTING.md, D6), so a port that does not host it is a
+#: failure rather than an asymmetry, and agreement among the ports is not
+#: enough: the reference could drift with them.  Checked against the pinned
+#: value as well as against each other.
+REQUIRED_PROTOCOLS: dict[str, str] = {SECONDARY_PROTOCOL_NAME: SECONDARY_PROTOCOL_HASH}
 
 #: Schema for the ``describe`` request.  Built once; it is the same for every
 #: call to every port.
@@ -173,7 +183,12 @@ def get_python_report() -> PortReport | str:
     """Describe the Python implementation in-process via a pipe pair."""
     try:
         client_transport, server_transport = make_pipe_pair()
-        server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+        server = RpcServer(
+            ConformanceService,
+            ConformanceServiceImpl(),
+            enable_describe=True,
+            extra_protocols=conformance_extra_protocols(),
+        )
         thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
         thread.start()
         try:
@@ -553,11 +568,26 @@ def main() -> None:
             details.append(f"{protocol}: hashes agree but descriptions do not")
             details.extend(detail)
 
-        if absent:
+        pinned = REQUIRED_PROTOCOLS.get(protocol)
+        if pinned is not None:
+            off_pin = sorted(name for name, desc in hosts.items() if desc.protocol_hash != pinned)
+            if off_pin:
+                failed = True
+                details.append(f"{protocol}: {', '.join(off_pin)} report a hash other than the pinned {pinned}")
+        if absent and pinned is not None:
+            failed = True
+            details.append(f"{protocol}: required of every conformance worker, not hosted by {', '.join(absent)}")
+        elif absent:
             asymmetries.append(f"{protocol}: not hosted by {', '.join(absent)}")
         for port_name, why in sorted(unusable.items()):
             failed = True
             undescribable.append(f"{protocol}: {port_name} lists it but {why}")
+
+    # A required protocol hosted by *no* reachable port never enters the loop
+    # above, so it is checked on its own: "nobody hosts it" is not agreement.
+    for protocol in sorted(set(REQUIRED_PROTOCOLS) - set(hosting)):
+        failed = True
+        details.append(f"{protocol}: required of every conformance worker, hosted by none of {sorted(reachable)}")
 
     # --- Versions ----------------------------------------------------------
     versions = {k: v.listing.request_version for k, v in reachable.items()}

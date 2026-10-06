@@ -392,10 +392,14 @@ class TestErrors:
     """Tests for error propagation through the RPC layer."""
 
     def test_unary_error(self, make_conn: ConnFactory) -> None:
-        """Errors from unary methods are raised as RpcError with error details."""
+        """Errors from unary methods are raised as RpcError with error details.
+
+        The traceback is included by default on every transport (WIRE_PROTOCOL.md §8).
+        """
         with make_conn() as proxy, pytest.raises(RpcError, match="unary boom") as exc_info:
             proxy.fail_unary()
         assert exc_info.value.error_type == "ValueError"
+        assert exc_info.value.error_code == "UNKNOWN"
         assert "unary boom" in exc_info.value.remote_traceback
 
     def test_unknown_method_raises(self, make_conn: ConnFactory) -> None:

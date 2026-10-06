@@ -146,7 +146,9 @@ which uniformity cannot disguise.
 
 ```
 resolve_token(token) ->
-    token == "conformance-unavailable-token"  -> raise IdentityUnavailable("conformance: mapping store unreachable")
+    token == "conformance-unavailable-token"  -> raise IdentityUnavailable("conformance: mapping store unreachable", retry_after=5)
+    token == "conformance-auth-unavailable-token"
+                                              -> raise AuthUnavailable("conformance: authority unreachable", retry_after=7)
     token == "conformance-unknown-token"      -> unknown  (None / null / "not found")
     token == "conformance-zero-ttl-token"     -> Identity(principal=SUBJECT, token_name="conformance-subject", ttl_seconds=0)
     token == "conformance-minimal-token"      -> Identity(principal=SUBJECT)   # other fields OMITTED, not zeroed
@@ -156,7 +158,24 @@ resolve_token(token) ->
 
 where `SUBJECT = "subject@conformance.example"`.
 
-Three of those rules need their reasons stated:
+Four of those rules need their reasons stated:
+
+- **`conformance-auth-unavailable-token`** raises your port's
+  **transport-auth** "could not find out" error — the one an authenticator
+  raises to get a 503 with `Retry-After` (`AuthUnavailableError` in Python;
+  whatever your port's `chain_authenticate` equivalent propagates rather than
+  advancing past) — **not** the identity-unavailable error, and with a retry
+  hint of **7 seconds**. A hook that calls the same store an authenticator
+  calls raises exactly this, and vgi-python's docs tell workers to. WIRE_PROTOCOL
+  §16 requires the framework to translate it to `identity_unavailable` with
+  `RetryInfo{retry_delay_seconds: 7}`. 7 is deliberately not any port's
+  default, so a port that translates but substitutes its own hint is caught.
+  The translation belongs in the framework's identity implementation, never in
+  this fixture: a fixture that raised the identity error directly would make
+  the test pass while the rule stays unimplemented.
+- **`conformance-unavailable-token`** carries an explicit `retry_after=5`, so
+  the `RetryInfo` it must put on the wire is a pinned value rather than each
+  port's default.
 
 - **`conformance-zero-ttl-token`** returns `ttl_seconds = 0` and the group
   asserts the wire carries `0`. Spec §5a: a resolver naming zero is saying *do
@@ -182,6 +201,8 @@ Three of those rules need their reasons stated:
 
 ```
 mint_grant(principal, purpose, scopes, ttl_seconds) ->
+    purpose == "conformance-auth-unavailable"
+                                      -> raise AuthUnavailable("conformance: grant store unreachable", retry_after=7)
     purpose == "conformance-refused"  -> raise GrantRefused("conformance: this purpose is refused")
     purpose == "conformance-minimal"  -> Grant(token=T, expires_at=1893456000.0)            # grant_id OMITTED
     anything else                     -> Grant(token=T, expires_at=1893456000.0, grant_id="conformance-grant-id")
@@ -204,6 +225,10 @@ where T = "conformance-grant-for:" + principal + "|" + join(scopes, ",")
   ending in `|`.
 - **`conformance-minimal`** omits `grant_id` so its documented default (`""`)
   is observable. Omit it; do not pass `""`.
+- **`conformance-auth-unavailable`** raises the transport-auth unavailable
+  error from the *mint* hook, with the same 7-second hint. The translation rule
+  covers both hooks; a port that wraps only `resolve_token` passes the token
+  case and fails this one.
 
 Both hooks must be **pure functions of their arguments** — no clock, no
 counter, no shared state. A conformance worker must answer identically on the
@@ -371,6 +396,16 @@ be catchable as your port's invalid-argument type". A chain that advances on
 that type reads an outage as "try the next authenticator" and turns a
 thirty-second blip into a fleet-wide re-login.
 
+### 4.9a Transient answers carry a retry hint (`TestUnavailableCarriesARetryHint`)
+
+| Probe | Expected `error_code` / `error_kind` / `RetryInfo.retry_delay_seconds` |
+|---|---|
+| `conformance-unavailable-token` | `UNAVAILABLE` / `identity_unavailable` / `5` |
+| `conformance-auth-unavailable-token` | `UNAVAILABLE` / `identity_unavailable` / `7` |
+| purpose `conformance-auth-unavailable` | `UNAVAILABLE` / `identity_unavailable` / `7` |
+
+Read `RetryInfo` from the top-level `vgi_rpc.error_details` array (§5).
+
 ### 4.10 Grant issuance
 
 Caller `minter@conformance.example` with `X-Conformance-Auth-Time` set to
@@ -407,6 +442,11 @@ identity_unavailable}`. Each kind is asserted at its own site above; this is the
 assertion that fails when a port surfaces four of five and folds the fifth into
 a generic error.
 
+`test_every_kind_carries_its_code` drives the same five probes and requires
+the code each kind names in WIRE_PROTOCOL §16: `introspection_refused` and
+`grant_refused` → `PERMISSION_DENIED`, `token_unresolved` → `NOT_FOUND`,
+`stale_auth` → `UNAUTHENTICATED`, `identity_unavailable` → `UNAVAILABLE`.
+
 ---
 
 ## 5. How to read the errors off the wire
@@ -419,6 +459,8 @@ reads are:
 | Field | Source |
 |---|---|
 | `error_kind` | batch custom-metadata key `vgi_rpc.error_kind` |
+| `error_code` | batch custom-metadata key `vgi_rpc.error_code` |
+| details | batch custom-metadata key `vgi_rpc.error_details` (a JSON array) |
 | error type | `exception_type` inside `vgi_rpc.log_extra` |
 | message | `exception_message` inside `vgi_rpc.log_extra` |
 
@@ -535,7 +577,8 @@ subject identity    subject@conformance.example / "conformance-subject" / 300
 
 tokens              conformance-opaque-subject-token    -> subject identity
                     conformance-unknown-token           -> unknown
-                    conformance-unavailable-token       -> IdentityUnavailable
+                    conformance-unavailable-token       -> IdentityUnavailable, retry_after 5
+                    conformance-auth-unavailable-token  -> transport-auth AuthUnavailable, retry_after 7
                     conformance-zero-ttl-token          -> ttl_seconds = 0
                     conformance-minimal-token           -> principal only, other fields omitted
                     "  conformance-padded-probe  "      -> token_name "conformance-padded"
@@ -544,6 +587,7 @@ tokens              conformance-opaque-subject-token    -> subject identity
 jws trap            eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl
 
 purposes            conformance-refused                 -> GrantRefused
+                    conformance-auth-unavailable        -> transport-auth AuthUnavailable, retry_after 7
                     conformance-minimal                 -> grant_id omitted
                     (anything else)                     -> full grant
 
@@ -559,8 +603,16 @@ trim floor          U+0009 U+000A U+000B U+000C U+000D U+0020 U+0085 U+00A0
 cap                 4096 UTF-8 bytes
 error kinds         introspection_refused token_unresolved stale_auth
                     grant_refused identity_unavailable
+codes               PERMISSION_DENIED NOT_FOUND UNAUTHENTICATED
+                    PERMISSION_DENIED UNAVAILABLE          (same order)
 ```
 
-Do NOT move the primary conformance protocol hash
-(`5cc768771c2e8a54e19ebb7546c97c119823eb13e20a5ff62ca5ce7ed2a1334e`) or the
-three digests above. If your change moves one, you broke something.
+An Identity change must not move the primary conformance protocol hash
+(currently `05479410c96f34410a2b10a4f6a49d59dcfd9d6d1d45ce9a9807d060a3bd6014`)
+or the three digests above. If your Identity change moves one, you broke
+something.
+
+(The primary hash moves legitimately whenever `ConformanceService` gains a
+method: it was `5cc768…`, then `4b0269…`, then `05479410…` after
+`published_string`. The value to compare against is always the one pinned in
+`tests/golden/protocol_hash_vector.json`, not a copy quoted in a spec.)

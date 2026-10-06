@@ -8,6 +8,24 @@ import importlib.util
 import logging
 from typing import Any
 
+from vgi_rpc.errors import (
+    AuthUnavailableError,
+    BadRequest,
+    Code,
+    ErrorDetail,
+    ErrorInfo,
+    FieldViolation,
+    Help,
+    HelpLink,
+    LocalizedMessage,
+    PreconditionFailure,
+    PreconditionViolation,
+    QuotaFailure,
+    QuotaViolation,
+    ResourceInfo,
+    RetryInfo,
+    StatusError,
+)
 from vgi_rpc.external import (
     ClientExternalConfig,
     Compression,
@@ -211,6 +229,23 @@ __all__ = [
     "ProtocolVersionError",
     "VersionError",
     "IPCError",
+    # Error model (WIRE_PROTOCOL.md §8)
+    "AuthUnavailableError",
+    "BadRequest",
+    "Code",
+    "ErrorDetail",
+    "ErrorInfo",
+    "FieldViolation",
+    "Help",
+    "HelpLink",
+    "LocalizedMessage",
+    "PreconditionFailure",
+    "PreconditionViolation",
+    "QuotaFailure",
+    "QuotaViolation",
+    "ResourceInfo",
+    "RetryInfo",
+    "StatusError",
     # Convenience
     "run_server",
     "connect",

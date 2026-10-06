@@ -89,7 +89,12 @@ class TestAdversarialRawRequestContract:
         protocol the dispatcher reaches first.
         """
         with conformance_raw_conn() as proxy:
-            _assert_rejected_and_reusable(proxy, _metadata_mutation_body("add_floats", _ROUTING_KEY_MUTATION))
+            error = _send_invalid_request(proxy, _metadata_mutation_body("add_floats", _ROUTING_KEY_MUTATION))
+            # protocol_not_specified carries INVALID_ARGUMENT (WIRE_PROTOCOL.md §8).
+            assert (error.error_kind, error.error_code) == ("protocol_not_specified", "INVALID_ARGUMENT"), (
+                f"kind={error.error_kind!r} code={error.error_code!r}"
+            )
+            assert proxy.add_floats(a=1.25, b=2.5) == pytest.approx(3.75)
 
 
 __all__ = ["TestAdversarialRawRequestContract"]

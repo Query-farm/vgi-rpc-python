@@ -70,6 +70,7 @@ from vgi_rpc.conformance._identity_pytest import (  # noqa: F401
     TestRejectionsAreUniform,
     TestTheCredentialSizeCap,
     TestTheJwsTrap,
+    TestUnavailableCarriesARetryHint,
     TestUnavailableIsTransient,
 )
 from vgi_rpc.conformance._lifecycle_tests import (
@@ -84,6 +85,18 @@ from vgi_rpc.conformance._lifecycle_tests import (
 )
 from vgi_rpc.conformance._request_limits_pytest import TestCompressedHttpRequestCap  # noqa: F401
 from vgi_rpc.conformance._resource_soak_pytest import TestResourceSoak  # noqa: F401
+from vgi_rpc.conformance._secondary_pytest import (  # noqa: F401
+    TestErrorModelOnTheWire,
+    TestErrorModelRoundTrip,
+    TestRoutingByPair,
+    TestSecondaryDescribes,
+    TestSecondaryIsHosted,
+    TestSecondaryRouting,
+    TestTracebackPolicy,
+    TestUnclassifiedErrorsAreUnknown,
+    TestVersionMismatchCode,
+    protocol_target,
+)
 from vgi_rpc.conformance._transport_lifecycle_pytest import (  # noqa: F401
     TestServeStartLifecycle,
     TestTransportKindContext,

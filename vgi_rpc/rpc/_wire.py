@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, get_args, get_origin
 import pyarrow as pa
 from pyarrow import ipc
 
+from vgi_rpc.errors import decode_error_details
 from vgi_rpc.external import (
     ExternalLocationConfig,
     ExternalRef,
@@ -25,6 +26,9 @@ from vgi_rpc.external import (
 )
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import (
+    ERROR_CODE_KEY,
+    ERROR_DETAILS_KEY,
+    ERROR_KIND_KEY,
     LOG_EXTRA_KEY,
     LOG_LEVEL_KEY,
     LOG_MESSAGE_KEY,
@@ -268,23 +272,38 @@ def _write_error_batch(
     schema: pa.Schema,
     exc: BaseException,
     server_id: str | None = None,
+    *,
+    include_traceback: bool,
 ) -> None:
-    """Write error as zero-row batch (convenience wrapper)."""
+    """Write error as zero-row batch (convenience wrapper).
+
+    ``include_traceback`` is required rather than defaulted: it is the
+    server's setting (``RpcServer.include_tracebacks``), and a call site that
+    supplied a default instead would silently ignore an operator who turned
+    tracebacks off.
+    """
     if wire_response_logger.isEnabledFor(logging.DEBUG):
         wire_response_logger.debug(
             "Write error batch: %s: %s",
             type(exc).__name__,
             str(exc)[:200],
         )
-    _write_message_batch(writer, schema, Message.from_exception(exc), server_id=server_id)
+    _write_message_batch(
+        writer, schema, Message.from_exception(exc, include_traceback=include_traceback), server_id=server_id
+    )
 
 
 def _write_error_stream(
-    writer_stream: IOBase, schema: pa.Schema, exc: BaseException, server_id: str | None = None
+    writer_stream: IOBase,
+    schema: pa.Schema,
+    exc: BaseException,
+    server_id: str | None = None,
+    *,
+    include_traceback: bool,
 ) -> None:
     """Write a complete IPC stream containing just an error batch."""
     with new_ipc_stream(writer_stream, schema) as writer:
-        _write_error_batch(writer, schema, exc, server_id=server_id)
+        _write_error_batch(writer, schema, exc, server_id=server_id, include_traceback=include_traceback)
 
 
 class _ClientLogSink:
@@ -624,6 +643,46 @@ def _flush_collector(
     return 0
 
 
+def _error_model_fields(custom_metadata: pa.KeyValueMetadata, extra: Mapping[str, object]) -> dict[str, Any]:
+    """Read the error model's three layers off an EXCEPTION batch.
+
+    The top-level keys are canonical and read first; ``log_extra`` mirrors them
+    and is the fallback, so a server -- or an intermediary that rebuilt the
+    batch -- that set only one of the two still classifies.  Every client
+    decode path (pipe, HTTP unary/stream/exchange, an externalized error)
+    funnels through :func:`_dispatch_log_or_error`, which is why this is the
+    only place the fields are read.
+
+    Args:
+        custom_metadata: The EXCEPTION batch's metadata.
+        extra: Its decoded ``log_extra`` object.
+
+    Returns:
+        ``error_code``, ``error_kind`` and ``error_details`` keyword arguments
+        for :class:`RpcError`.
+
+    """
+
+    def _text(key: bytes, fallback: str) -> str:
+        raw = custom_metadata.get(key)
+        if raw is not None:
+            return bytes(raw).decode("utf-8", errors="replace")
+        value = extra.get(fallback)
+        return value if isinstance(value, str) else ""
+
+    raw_details = custom_metadata.get(ERROR_DETAILS_KEY)
+    if raw_details is not None:
+        details = decode_error_details(bytes(raw_details))
+    else:
+        mirrored = extra.get("error_details")
+        details = [dict(d) for d in mirrored if isinstance(d, dict)] if isinstance(mirrored, list) else []
+    return {
+        "error_code": _text(ERROR_CODE_KEY, "error_code"),
+        "error_kind": _text(ERROR_KIND_KEY, "error_kind"),
+        "error_details": details,
+    }
+
+
 def _dispatch_log_or_error(
     batch: pa.RecordBatch,
     custom_metadata: pa.KeyValueMetadata | None,
@@ -683,7 +742,13 @@ def _dispatch_log_or_error(
     if level_str == Level.EXCEPTION.value:
         error_type = str(raw_extra_data.get("exception_type", level_str))
         traceback_str = str(raw_extra_data.get("traceback", ""))
-        raise RpcError(error_type, message_str, traceback_str, request_id=request_id)
+        raise RpcError(
+            error_type,
+            message_str,
+            traceback_str,
+            request_id=request_id,
+            **_error_model_fields(custom_metadata, raw_extra_data),
+        )
 
     # Non-exception log message → invoke callback
     # Coerce all extra values to str for Message(**extra)

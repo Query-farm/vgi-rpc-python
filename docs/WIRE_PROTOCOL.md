@@ -85,7 +85,9 @@ table below.
 | `vgi_rpc.log_level` | One of: `EXCEPTION`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` | Severity level. Present on log and error batches. |
 | `vgi_rpc.log_message` | UTF-8 string | Human-readable message text. |
 | `vgi_rpc.log_extra` | JSON string | Additional structured data. Optional. |
-| `vgi_rpc.error_kind` | UTF-8 token (open set) | Stable machine-readable error category on EXCEPTION batches. See [Section 8](#error-kinds). Optional. |
+| `vgi_rpc.error_kind` | UTF-8 token (open set) | Stable machine-readable error category on EXCEPTION batches — the *reason*. See [Section 8](#error-kinds). Optional. |
+| `vgi_rpc.error_code` | Canonical code name (closed set) | The error's canonical code, e.g. `UNAVAILABLE`, on EXCEPTION batches. **Required** whenever `vgi_rpc.error_kind` is set, and emitted on every EXCEPTION batch by a server implementing [Section 8's error model](#error-model). |
+| `vgi_rpc.error_details` | JSON array of typed objects | Machine-readable specifics from a fixed catalog (`vgi_rpc.RetryInfo`, …), on EXCEPTION batches. At most 4 KiB; omitted whole when larger. See [Section 8](#error-model). Optional. |
 | `vgi_rpc.server_id` | UTF-8 string (12-char hex) | Server instance identifier for distributed tracing. |
 | `vgi_rpc.request_id` | UTF-8 string | Echoed request correlation ID. |
 | `vgi_rpc.transport.shm` | `"true"` / `"false"` | Server's shared-memory capability, on the `__transport_options__` response. See [Section 15](#15-transport-capability-negotiation-__transport_options__). |
@@ -247,6 +249,57 @@ difference:
 The last is the documented capability-probe signal: a client testing for an
 optional method must be able to tell "you do not speak this protocol" from "you
 speak it but lack this method".
+
+#### Hosting several application protocols
+
+A server MUST let an application register **any number of application
+protocols** when it is constructed, each a `(name, version, implementation)`
+triple — in the reference, `RpcServer(primary, impl, extra_protocols=[(P2,
+impl2), …])`. Hosting is not optional machinery for exotic deployments: a
+worker that serves its own surface and also a shared one (a reporting
+protocol, a fixture, a later major version beside the current one) needs it,
+and a port that can host exactly one application protocol forces every such
+worker to fork the framework.
+
+- **The protocol is the unit of optionality.** There is no API for hosting a
+  *subset* of a protocol's methods, and no capability tokens for application
+  protocols ([Section 14](#14-introspection-vgi_rpcreflectionv1) reserves
+  `features`). A capability that may be absent is its own protocol, so a
+  client learns whether it is present from `list_protocols` rather than by
+  calling and reading an error. (`vgi_rpc.Identity.v1`'s hook-driven method
+  narrowing, [Section 16](#16-identity-vgi_rpcidentityv1), is framework-owned
+  and unaffected.)
+- **The registered set is fixed for the server's lifetime.** It may be computed
+  from configuration or environment when the server is built, but it does not
+  change afterwards, so reflection output and every `protocol_hash` are stable
+  for the life of the process. The set is **sealed no later than when the
+  server first starts serving on any transport**: an attempt to register a
+  protocol after that MUST fail loudly (an error or exception at the call),
+  never take effect silently or on some transports only. A port may seal
+  earlier — the reference has no registration API after construction at all.
+- **The same set is hosted on every transport** the server is offered on.
+  A protocol reachable over stdio but not HTTP (or the reverse) is a different
+  server wearing one name. Framework protocols that are transport-scoped by
+  definition — `vgi_rpc.Identity.v1` on transports that authenticate callers —
+  are the only exception, and are not application protocols.
+- **The reserved-prefix rule applies to every registered protocol, however its
+  name was derived** — declared explicitly, taken from a class or interface
+  name, or synthesised by a binding generator. A port that checks only names
+  declared one way lets the other way shadow `vgi_rpc.Reflection.v1`.
+- **Names are unique.** Registering two protocols under one name is a
+  construction-time error, not last-writer-wins.
+- **Order is registration order, primary first.** `list_protocols` lists the
+  application protocols in the order they were registered, the primary (the
+  one passed first) first. Framework protocols (`vgi_rpc.*`) may appear
+  anywhere in the list; clients locate application protocols by filtering the
+  reserved prefix out, and the relative order of what remains is the contract.
+  The client driver's `describe` op and every client's "describe this server"
+  already rely on "the first protocol whose name does not start with
+  `vgi_rpc.`".
+
+Each binding is versioned, gated ([Section 13](#version-checking)) and hashed
+independently; nothing about a server is "the" protocol except which one is
+listed first.
 
 
 ## 4. Type Mapping
@@ -442,7 +495,9 @@ the following custom metadata keys:
 | `vgi_rpc.log_level` | Yes | One of: `EXCEPTION`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` |
 | `vgi_rpc.log_message` | Yes | Human-readable message text (UTF-8) |
 | `vgi_rpc.log_extra` | No | JSON object with additional structured data |
-| `vgi_rpc.error_kind` | No | Stable error category; EXCEPTION batches only (see below) |
+| `vgi_rpc.error_kind` | No | Stable error category — the reason; EXCEPTION batches only (see below) |
+| `vgi_rpc.error_code` | On EXCEPTION | Canonical code name; EXCEPTION batches only ([Error model](#error-model)) |
+| `vgi_rpc.error_details` | No | JSON array of typed details, ≤ 4 KiB; EXCEPTION batches only ([Error model](#error-model)) |
 | `vgi_rpc.server_id` | No | Server instance identifier |
 | `vgi_rpc.request_id` | No | Request correlation ID |
 
@@ -454,9 +509,22 @@ extracted from the metadata:
 
 - **error_type**: `log_extra.exception_type` (string) or the level string `"EXCEPTION"` as fallback.
 - **error_message**: `vgi_rpc.log_message` value.
-- **remote_traceback**: `log_extra.traceback` (string) or empty string.
+- **remote_traceback**: `log_extra.traceback` (string) or empty string. Empty
+  when the operator turned tracebacks off ([Tracebacks](#tracebacks)).
 - **request_id**: `vgi_rpc.request_id` value or empty string.
-- **error_kind**: `vgi_rpc.error_kind` value, when present.
+- **error_code**: `vgi_rpc.error_code` value, or empty string when absent (a
+  server that predates the error model).
+- **error_kind**: `vgi_rpc.error_kind` value, or empty string when absent.
+- **error_details**: the decoded `vgi_rpc.error_details` array — every element,
+  in order, unknown types included — or an empty list when absent.
+
+Each of the last three is read from its top-level key first and from the
+`log_extra` mirror (`error_code`, `error_kind`, `error_details`) when the
+top-level key is absent. A client MUST surface all three on **every** decode
+path — unary, stream init, stream exchange, an externalized error batch — and
+expose an `is_retryable` check ([Retryability](#retryability)). Dropping one
+on any path is the defect this list exists to prevent: three clients dropped
+`error_kind` because the client-driver contract never asked for it.
 
 ### Error kinds
 
@@ -467,16 +535,24 @@ metadata key, mirroring `log_extra.error_kind` — a reader may take either, but
 the top-level key means the JSON blob need not be parsed to dispatch.
 
 The set is **open**: a client MUST treat an unrecognised value as an
-unclassified error rather than rejecting the batch. Well-known values:
+unclassified error rather than rejecting the batch. A kind is unique within the
+protocol that raised it; the pair (protocol, kind) is gRPC's (domain, reason).
+**Each kind names exactly one canonical code**, fixed where the kind is
+defined, and the code is required whenever the kind is set. Well-known values:
 
-| Value | Meaning |
-|-------|---------|
-| `method_not_implemented` | The named protocol is hosted but has no such method (old server vs. new client, or a method that was removed). The intended signal for capability detection with fallback. |
-| `protocol_not_specified` | The request carried no `vgi_rpc.protocol` routing key. Required even against a single-protocol server — see [Section 3.1](#31-protocol-routing). |
-| `protocol_not_supported` | This server does not host the named protocol, or the path and the metadata named different ones. Also the answer for an incompatible **major**, since the major is part of the name. |
-| `protocol_version_mismatch` | The client's `vgi_rpc.protocol_version` is incompatible with the server's for **the protocol the resolved method belongs to** (see [Section 13](#protocol-version-negotiation)). |
-| `session_lost` | An HTTP sticky-session token could not be honoured — expired, evicted, misrouted, or presented under a different principal (see [Section 17](#17-sticky-sessions-http-optional)). |
-| `server_draining` | The server is shutting down and refuses new sticky-session opens. |
+| Value | Code | Details | Meaning |
+|-------|------|---------|---------|
+| `method_not_implemented` | `UNIMPLEMENTED` | | The named protocol is hosted but has no such method (old server vs. new client, or a method that was removed). The intended signal for capability detection with fallback. |
+| `protocol_not_specified` | `INVALID_ARGUMENT` | | The request carried no `vgi_rpc.protocol` routing key. Required even against a single-protocol server — see [Section 3.1](#31-protocol-routing). |
+| `protocol_not_supported` | `UNIMPLEMENTED` | | This server does not host the named protocol, or the path and the metadata named different ones. Also the answer for an incompatible **major**, since the major is part of the name. |
+| `protocol_version_mismatch` | `FAILED_PRECONDITION` | `PreconditionFailure` | The client's `vgi_rpc.protocol_version` is incompatible with the server's for **the protocol the resolved method belongs to** (see [Section 13](#protocol-version-negotiation)). The violation has `type` `"protocol_version"` and `subject` the protocol's name. |
+| `session_lost` | `ABORTED` | | An HTTP sticky-session token could not be honoured — expired, evicted, misrouted, or presented under a different principal (see [Section 17](#17-sticky-sessions-http-optional)). Retry the whole session, not the call. |
+| `server_draining` | `UNAVAILABLE` | `RetryInfo` | The server is shutting down and refuses new sticky-session opens. |
+| `identity_unavailable` | `UNAVAILABLE` | `RetryInfo` (required) | See [Section 16](#16-identity-vgi_rpcidentityv1). |
+| `stale_auth` | `UNAUTHENTICATED` | | See [Section 16](#16-identity-vgi_rpcidentityv1). |
+| `introspection_refused` | `PERMISSION_DENIED` | | See [Section 16](#16-identity-vgi_rpcidentityv1). |
+| `grant_refused` | `PERMISSION_DENIED` | | See [Section 16](#16-identity-vgi_rpcidentityv1). |
+| `token_unresolved` | `NOT_FOUND` | | See [Section 16](#16-identity-vgi_rpcidentityv1). |
 
 **Normative client behaviour on `protocol_not_supported`:** a client SHOULD
 call `vgi_rpc.Reflection.v1/list_protocols` to learn what the server does host,
@@ -486,8 +562,127 @@ in that moment — the two names side by side — is the thing most likely to be
 dropped.
 
 A batch carrying `error_kind` is otherwise an ordinary EXCEPTION batch: the
-key adds classification and removes nothing. Implementations that do not emit
-it remain conformant; clients simply lose the ability to branch.
+key adds classification and removes nothing.
+
+### Error model
+
+Errors take the shape of gRPC's `google.rpc.Status` — canonical codes, a
+reason, and typed details, with [AIP-193](https://google.aip.dev/193) as the
+usage guide — because that shape has held up across many languages for years.
+Three layers ride on every EXCEPTION batch:
+
+| Layer | Key | Set | Purpose |
+|---|---|---|---|
+| Code | `vgi_rpc.error_code` | **Closed**: the sixteen below | Generic handling — retry or not, how to show it, and the HTTP status a proxy maps it to |
+| Reason | `vgi_rpc.error_kind` | Open; unique within the raising protocol | What a client branches on |
+| Details | `vgi_rpc.error_details` | Fixed catalog | Machine-readable specifics: retry delay, which field, which resource |
+
+`vgi_rpc.log_message` stays developer-facing English, as in gRPC.
+
+#### Codes
+
+The wire value is the code's **name** — `"UNAVAILABLE"`, never `14` — so a
+log line, a proxy rule and a client switch read the same string. gRPC's
+sixteen non-`OK` codes, no more:
+
+`CANCELLED`, `UNKNOWN`, `INVALID_ARGUMENT`, `DEADLINE_EXCEEDED`, `NOT_FOUND`,
+`ALREADY_EXISTS`, `PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`,
+`FAILED_PRECONDITION`, `ABORTED`, `OUT_OF_RANGE`, `UNIMPLEMENTED`, `INTERNAL`,
+`UNAVAILABLE`, `DATA_LOSS`, `UNAUTHENTICATED`.
+
+A client that receives any other value treats it as `UNKNOWN`.
+
+#### Detail catalog
+
+Each detail is a JSON object naming its type in `@type`, mirroring protobuf's
+JSON form for `Any`. Field names follow gRPC's, in snake_case:
+
+| `@type` | Fields | Use |
+|---|---|---|
+| `vgi_rpc.ErrorInfo` | `metadata: {string: string}` | Extra context for the reason. The reason and domain are already `error_kind` and the protocol, so they are not repeated |
+| `vgi_rpc.RetryInfo` | `retry_delay_seconds: number` | How long to wait before retrying; finite, ≥ 0 |
+| `vgi_rpc.BadRequest` | `field_violations: [{field, description}]` | Which inputs were wrong |
+| `vgi_rpc.PreconditionFailure` | `violations: [{type, subject, description}]` | What state must change first |
+| `vgi_rpc.QuotaFailure` | `violations: [{subject, description}]` | Which limit was hit |
+| `vgi_rpc.ResourceInfo` | `resource_type, resource_name, owner, description` | Which object the error concerns |
+| `vgi_rpc.Help` | `links: [{description, url}]` | Where to read more |
+| `vgi_rpc.LocalizedMessage` | `locale, message` | Text safe to show an end user |
+
+`DebugInfo` is deliberately absent — see [Tracebacks](#tracebacks). String
+fields absent from an object read as `""`; arrays as `[]`.
+
+#### Rules
+
+- **The code is required whenever `error_kind` is set**, and each kind maps to
+  exactly one code (the table above; protocols define the codes of their own
+  kinds where they define the kinds). A server implementing this model emits a
+  code on **every** EXCEPTION batch: errors with no classification get
+  `UNKNOWN`. A code may be sent without a kind. `INTERNAL` is **reserved** for
+  faults an implementation itself detects in its own machinery — an invariant
+  violated, a response it cannot encode — and MAY be emitted for them; it is
+  never the default for an unclassified error, and conformance does not
+  require any particular fault to produce it. (The reference has no such
+  classified site today and emits `UNKNOWN` for every unclassified error,
+  including framework-raised ones without a kind.)
+- **Details come only from the catalog.** A protocol may define its own detail
+  type only under its own protocol name (`vgi.reports.v1.SomeDetail`), and
+  should prefer `ErrorInfo.metadata`. A type in the reserved `vgi_rpc.` space
+  that is not in the catalog, or an unqualified type name, is not a detail.
+- **Each type appears at most once** in a details array, as AIP-193 requires.
+- **Clients ignore detail types they do not know**, and never require details.
+  "Ignore" means typed access skips them; the client still reports the whole
+  array as received.
+- **Bounded.** The serialized `vgi_rpc.error_details` value is at most
+  **4096 bytes of UTF-8**, measured as emitted. A server whose array would
+  exceed it **omits the whole array** — both the top-level key and the
+  `log_extra` mirror — and never sends a prefix or a subset, because a client
+  cannot tell a partial list from a complete one. A server likewise omits an
+  array that breaks the uniqueness or catalog rules. The code and kind are
+  sent regardless.
+- **No secrets.** Details MUST NOT carry credentials, tokens or user data.
+- **Mirrored.** `log_extra` carries `error_code` and `error_kind` as strings
+  and `error_details` as a JSON *array* (not a string) with the same elements.
+  The top-level keys are canonical.
+
+#### Retryability
+
+Retryability follows the code. `UNAVAILABLE` is retryable; so is
+`RESOURCE_EXHAUSTED` **when it carries `RetryInfo`**. When `RetryInfo` is
+present a retry waits at least that long. `ABORTED` means *retry the whole
+operation at a higher level* (re-open the session, re-read and re-apply), not
+this call. Everything else is final.
+
+Clients expose this as an `is_retryable` check and **do not retry RPC errors
+automatically**: as in gRPC, automatic retry is opt-in, because a method may
+not be idempotent. (Transport-level retry of replay-safe HTTP responses — 429,
+502, 503, 504 before any RPC body — is a separate mechanism and is unchanged.)
+
+#### Tracebacks
+
+A server has a setting that decides whether EXCEPTION batches carry
+`log_extra.traceback` and with it `frames`, `cause` and `context`. It is **on
+by default, on every transport**, and an operator may turn it off for the
+whole server (every transport it answers on — not per transport). The
+exception type, message, code, kind and details are sent either way.
+
+The default is "include" everywhere because at least one client puts the
+remote traceback into the error a user sees: the DuckDB extension does, and an
+earlier draft of this section that omitted tracebacks on HTTP and TCP hid
+chained causes from its users. An operator who does not want stack traces to
+leave the process — they name files, functions and sometimes values, which is
+why gRPC keeps `DebugInfo` out of production responses — turns the setting
+off.
+
+**A port without exception stacks still sends one.** When the setting is on,
+`log_extra.traceback` MUST be a non-empty string. A language that has no
+stack trace for an error (C++, Rust) sends a synthesized trace: at minimum
+`<ErrorType>: <message>` and the `<protocol>/<method>` that raised it, one per
+line, plus whatever context the port has (a chained cause, a backtrace when
+one is captured). Conformance asserts non-empty only; the shape is for humans.
+`frames` may be an empty array when there are no frames to report.
+
+Test vectors for all of the above — JSON forms, the cap boundary, the rules —
+are in [`tools/cross-port/specs/MULTI_PROTOCOL_HOSTING.md`](https://github.com/Query-farm/vgi-rpc-python/blob/main/tools/cross-port/specs/MULTI_PROTOCOL_HOSTING.md).
 
 ### `log_extra` JSON structure for EXCEPTION
 
@@ -495,6 +690,11 @@ it remain conformant; clients simply lose the ability to branch.
 {
   "exception_type": "ValueError",
   "exception_message": "invalid input",
+  "error_code": "INVALID_ARGUMENT",
+  "error_kind": "widget_invalid",
+  "error_details": [
+    {"@type": "vgi_rpc.BadRequest", "field_violations": [{"field": "size", "description": "must be positive"}]}
+  ],
   "traceback": "Traceback (most recent call last):\n  ...",
   "frames": [
     {
@@ -513,7 +713,10 @@ it remain conformant; clients simply lose the ability to branch.
 |-------|------|-------------|
 | `exception_type` | string | Exception class name. |
 | `exception_message` | string | `str(exception)`. |
-| `traceback` | string | Formatted traceback. Truncated at 16,000 characters with `"\n… <traceback truncated>"` suffix. |
+| `error_code` | string | Mirror of `vgi_rpc.error_code`. |
+| `error_kind` | string (optional) | Mirror of `vgi_rpc.error_kind`. |
+| `error_details` | array (optional) | Mirror of `vgi_rpc.error_details`, as a JSON array. Absent whenever the top-level key is. |
+| `traceback` | string (optional) | Formatted traceback. Truncated at 16,000 characters with `"\n… <traceback truncated>"` suffix. Absent when the server omits tracebacks; `frames`, `cause` and `context` are then absent too. |
 | `frames` | array of objects | Last 5 stack frames (most recent at end). |
 | `frames[].file` | string | Source file path. |
 | `frames[].line` | integer | Line number. |
@@ -1780,7 +1983,7 @@ Both are ordinary unary methods: they carry `vgi_rpc.protocol` =
 | `protocol_hash` | `utf8` | 64 lowercase hex. See below. |
 | `deprecated` | `bool` | Whether callers should migrate off. |
 | `deprecation_message` | `utf8` | What to migrate to. Empty unless `deprecated`. |
-| `features` | `list<utf8>` | Open set of capability tokens. |
+| `features` | `list<utf8>` | **Reserved.** MUST be emitted as an empty list in this version; clients MUST ignore its contents. |
 
 `ServiceDescription` is `ProtocolSummary`'s fields plus `methods:
 list<MethodInfo>`, sorted by name. It deliberately carries **no server
@@ -1828,6 +2031,14 @@ question it exists to answer.
 
 An absent schema is empty bytes rather than null, so no port pays a null check
 on a value it will only ever treat as absent.
+
+`features` is reserved rather than open because the protocol is the unit of
+optionality ([Section 3.1](#hosting-several-application-protocols)): a
+capability that may be absent is hosted as its own protocol, which reflection
+already reports, rather than advertised as a token whose meaning every port
+would have to agree on. A later version may define tokens; until it does a
+server sends `[]` and a client that reads anything else ignores it, so a
+future token cannot change how a current client behaves.
 
 `idempotency` follows gRPC's `idempotency_level`. With an HTTP transport and a
 policy proxy in the path, retries *will* happen; without this nothing on the
@@ -2129,13 +2340,30 @@ the status code (404 vs 503). As protocol methods every handler exception
 surfaces the same way, so `error_kind` carries the whole distinction and is
 load-bearing rather than decorative:
 
-| `error_kind` | Meaning | Caller |
-|---|---|---|
-| `introspection_refused` | The caller may not introspect -- it is not on the allowlist. Never a throttle. | Definitive; MAY cache. |
-| `token_unresolved` | The subject credential did not resolve. | Definitive; MAY cache. |
-| `stale_auth` | The caller has not authenticated recently enough to mint. | Definitive, and actionable — re-prompt. |
-| `grant_refused` | The worker declined to mint. | Definitive. |
-| `identity_unavailable` | The answer is not *knowable* — a store is down. | **Transient**; MUST NOT negative-cache. |
+| `error_kind` | Code | Meaning | Caller |
+|---|---|---|---|
+| `introspection_refused` | `PERMISSION_DENIED` | The caller may not introspect -- it is not on the allowlist. Never a throttle. | Definitive; MAY cache. |
+| `token_unresolved` | `NOT_FOUND` | The subject credential did not resolve. | Definitive; MAY cache. |
+| `stale_auth` | `UNAUTHENTICATED` | The caller has not authenticated recently enough to mint. | Definitive, and actionable — re-prompt. |
+| `grant_refused` | `PERMISSION_DENIED` | The worker declined to mint. | Definitive. |
+| `identity_unavailable` | `UNAVAILABLE` | The answer is not *knowable* — a store is down. | **Transient**; MUST NOT negative-cache. |
+
+**`identity_unavailable` MUST carry `vgi_rpc.RetryInfo`** with the delay the
+failing component asked for. Every port had a `retry_after` on its
+identity-unavailable error and none put it on the wire, so a caller learned
+the failure was transient and then had to guess when to ask again.
+
+**A hook that raises the transport-auth "unavailable" error is translated, not
+passed through.** A `resolve_token` or `mint_grant` hook typically calls the
+same backing store an authenticator does, and so raises what an authenticator
+raises when that store is down — the port's "authentication unavailable" error
+(`AuthUnavailableError` in the reference; the 503-with-`Retry-After` signal of
+[`unauthorized-spec.md`](unauthorized-spec.md)). The framework MUST emit that as
+`identity_unavailable` carrying **that error's own retry hint** as `RetryInfo`,
+never unclassified and never with a substituted default. Untranslated it
+reaches the wire with no kind, and a caller can no longer tell an outage from a
+refusal — the one distinction this table exists to carry. TypeScript and Rust
+translated before the rule was written; the other five ports did not.
 
 A caller that negative-caches a transient failure locks out valid users; one
 that retries a definitive rejection hammers the worker. `identity_unavailable`

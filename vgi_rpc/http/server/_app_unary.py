@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal
 
 import pyarrow as pa
 
+from vgi_rpc.errors import error_code_of
 from vgi_rpc.external import ExternalRef, predict_externalize_bytes_for_batch
 from vgi_rpc.rpc import (
     CallContext,
@@ -144,6 +145,7 @@ def _run_unary_sync(
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        error_code = ""
         hook: _DispatchHook | None = app._server._dispatch_hook
         hook_token: HookToken = None
         if hook is not None:
@@ -188,7 +190,10 @@ def _run_unary_sync(
                             _hook_exc = overshoot
                             status = "error"
                             error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
-                            _write_error_batch(writer, schema, overshoot, server_id=server_id)
+                            error_code = error_code_of(overshoot).value
+                            _write_error_batch(
+                                writer, schema, overshoot, server_id=server_id, include_traceback=app._tracebacks
+                            )
                             http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                         else:
                             external_bytes_written = _write_result_batch(
@@ -211,7 +216,8 @@ def _run_unary_sync(
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, exc)
-                    _write_error_batch(writer, schema, exc, server_id=server_id)
+                    error_code = error_code_of(exc).value
+                    _write_error_batch(writer, schema, exc, server_id=server_id, include_traceback=app._tracebacks)
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
             # Wire body cap is checked post-flush — no upload cost was
@@ -232,9 +238,12 @@ def _run_unary_sync(
                     _hook_exc = overshoot
                     status = "error"
                     error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                    error_code = error_code_of(overshoot).value
                     resp_buf = BytesIO()
                     with new_ipc_stream(resp_buf, schema) as err_writer:
-                        _write_error_batch(err_writer, schema, overshoot, server_id=server_id)
+                        _write_error_batch(
+                            err_writer, schema, overshoot, server_id=server_id, include_traceback=app._tracebacks
+                        )
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         finally:
             duration_ms = (time.monotonic() - start) * 1000
@@ -252,6 +261,7 @@ def _run_unary_sync(
                 stats=stats,
                 server_version=app._server.server_version,
                 protocol_hash=app._server.protocol_hash_for(info),
+                error_code=error_code,
                 error_message=_truncate_error_message(_hook_exc),
             )
             if hook is not None:

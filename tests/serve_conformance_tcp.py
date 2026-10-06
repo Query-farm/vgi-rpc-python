@@ -14,6 +14,7 @@ harness can learn the auto-selected port.
 import sys
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.rpc import RpcServer, serve_tcp
 
 
@@ -21,7 +22,12 @@ def main() -> None:
     """Serve the conformance service over a threaded TCP socket."""
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-    server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+    server = RpcServer(
+        ConformanceService,
+        ConformanceServiceImpl(),
+        enable_describe=True,
+        extra_protocols=conformance_extra_protocols(),
+    )
 
     def _emit(bound_host: str, bound_port: int) -> None:
         print(f"TCP:{bound_host}:{bound_port}", flush=True)

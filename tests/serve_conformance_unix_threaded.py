@@ -12,13 +12,19 @@ RPC requests over a threaded Unix domain socket.
 import sys
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.rpc import RpcServer, serve_unix
 
 
 def main() -> None:
     """Serve the conformance service over a threaded Unix domain socket."""
     path = sys.argv[1]
-    server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+    server = RpcServer(
+        ConformanceService,
+        ConformanceServiceImpl(),
+        enable_describe=True,
+        extra_protocols=conformance_extra_protocols(),
+    )
     print(f"UNIX:{path}", flush=True)
     serve_unix(server, path, threaded=True)
 

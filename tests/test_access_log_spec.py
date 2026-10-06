@@ -346,6 +346,22 @@ class TestLiveCapture:
         assert err["status"] == "error"
         assert err["error_type"] == "ValueError"
         assert err["error_message"] == "bang"
+        # The canonical code rides on every error record (WIRE_PROTOCOL.md §8);
+        # an unclassified ValueError is UNKNOWN.
+        assert err["error_code"] == "UNKNOWN"
+        assert all("error_code" not in e for e in entries if e["status"] == "ok")
+
+    def test_ok_record_with_error_code_is_rejected(self) -> None:
+        """``error_code`` belongs to failures; a success carrying one is malformed."""
+        rec = TestValidator()._good_unary_record()
+        rec["error_code"] = "UNKNOWN"
+        assert validate_access_logs([rec])
+
+    def test_error_code_outside_the_closed_set_is_rejected(self) -> None:
+        """The code is a closed set, so the schema enumerates it."""
+        rec = TestValidator()._good_unary_record()
+        rec.update(status="error", error_type="ValueError", error_message="x", error_code="NOT_A_CODE")
+        assert validate_access_logs([rec])
 
     def test_sticky_session_records_pass_schema(self) -> None:
         """Open / resume / close records carry schema-conformant sticky fields.

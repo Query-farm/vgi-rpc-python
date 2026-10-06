@@ -42,7 +42,7 @@ import shlex
 import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast, overload
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -822,6 +822,7 @@ class ClientDriverProxy:
             # A driver that spelled a remote failure as a bare string.  Not the
             # contract, but losing the message would be worse than accepting it.
             raise RpcError("TransportError", _as_str(err) or repr(err), "")
+        raw_details = _as_list(detail.get("error_details")) or []
         raise RpcError(
             _as_str(detail.get("error_type")) or "RpcError",
             # ``error_message`` is the contract; ``message`` is accepted because
@@ -829,6 +830,13 @@ class ClientDriverProxy:
             # the worst possible failure mode for a conformance run.
             _as_str(detail.get("error_message")) or _as_str(detail.get("message")) or "",
             _as_str(detail.get("traceback")) or "",
+            # The error model (CLIENT_DRIVER_PROTOCOL.md §2).  Relayed as the
+            # client under test reported them -- no defaulting, no
+            # normalising: a driver that drops error_kind is exactly the defect
+            # this field exists to catch, and three clients had it.
+            error_code=_as_str(detail.get("error_code")) or "",
+            error_kind=_as_str(detail.get("error_kind")) or "",
+            error_details=[dict(d) for d in raw_details if isinstance(d, dict)],
         )
 
     def _check_ok(self, resp: JsonObject) -> None:
@@ -955,8 +963,20 @@ class ClientDriverProxy:
 
         return caller
 
-    def describe(self) -> ServiceDescription:
+    @overload
+    def describe(self) -> ServiceDescription: ...
+
+    @overload
+    def describe(self, *, protocol: str) -> object: ...
+
+    def describe(self, **kwargs: object) -> object:
         """Return the driver client's own introspection, relayed as JSON.
+
+        When the proxy is bound to a service that itself declares a ``describe``
+        RPC method -- ``vgi_rpc.Reflection.v1``'s ``describe(protocol=...)`` --
+        the call is that method, sent as an ordinary unary op. Without this
+        branch the driver's own introspection op shadowed it, and every port's
+        client failed the secondary-protocol ``describe`` test in client role.
 
         Introspection is ``vgi_rpc.Reflection.v1``, whose reply is two nested
         payloads rather than one flat batch.  Relaying raw Arrow the way every
@@ -967,10 +987,21 @@ class ClientDriverProxy:
         Returns:
             The described service.
 
+        Args:
+            **kwargs: The RPC method's arguments, when the bound service
+                declares ``describe``; otherwise none are accepted.
+
         Raises:
             RpcError: If the driver refused, or the description is missing.
+            TypeError: If arguments are given but the service has no
+                ``describe`` RPC method.
 
         """
+        info = self._methods.get("describe")
+        if info is not None:
+            return self._make_unary(info)(**kwargs)
+        if kwargs:
+            raise TypeError(f"{self._driver.service.__name__} has no RPC method 'describe'")
         self._send({"op": "describe"})
         resp = self._recv()
         self._check_ok(resp)

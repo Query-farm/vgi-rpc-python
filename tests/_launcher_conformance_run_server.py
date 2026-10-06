@@ -8,6 +8,7 @@ via ``vgi-rpc launch``.
 """
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.rpc import RpcServer, run_server
 
 
@@ -18,7 +19,12 @@ def main() -> None:
     conformance suite (which probes ``__describe__``) works without the
     caller needing to remember ``--describe``.
     """
-    server = RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True)
+    server = RpcServer(
+        ConformanceService,
+        ConformanceServiceImpl(),
+        enable_describe=True,
+        extra_protocols=conformance_extra_protocols(),
+    )
     run_server(server)
 
 

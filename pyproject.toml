@@ -68,6 +68,7 @@ qf = "vgi_rpc.qf:app"
 vgi-rpc = "vgi_rpc.cli:app"
 vgi-rpc-conformance = "vgi_rpc.conformance._cli:main"
 vgi-rpc-test = "vgi_rpc.conformance._test_cli:main"
+vgi-rpc-test-hosted = "vgi_rpc.conformance.hosted_protocols:main"
 
 [build-system]
 requires = ["hatchling"]

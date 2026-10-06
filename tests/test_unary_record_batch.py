@@ -55,7 +55,7 @@ def test_wire_error_retains_exception_type_prefix() -> None:
     schema = pa.schema([pa.field("result", pa.binary(), nullable=False)])
     buffer = BytesIO()
     with new_ipc_stream(buffer, schema) as writer:
-        _write_error_batch(writer, schema, ValueError("fixture failure"))
+        _write_error_batch(writer, schema, ValueError("fixture failure"), include_traceback=True)
     _, metadata = pa.ipc.open_stream(buffer.getvalue()).read_next_batch_with_custom_metadata()
     assert metadata is not None
     assert metadata[b"vgi_rpc.log_message"] == b"ValueError: fixture failure"

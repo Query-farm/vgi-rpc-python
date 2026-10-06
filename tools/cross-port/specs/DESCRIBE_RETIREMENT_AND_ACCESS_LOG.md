@@ -145,7 +145,7 @@ been a pass is how this stayed hidden.
 # Constraints for both tasks
 
 - Do NOT move the primary conformance hash
-  `5cc768771c2e8a54e19ebb7546c97c119823eb13e20a5ff62ca5ce7ed2a1334e` or the
+  `05479410c96f34410a2b10a4f6a49d59dcfd9d6d1d45ce9a9807d060a3bd6014` (pinned in `tests/golden/protocol_hash_vector.json`) or the
   three `vgi_rpc.Identity.v1` digests (`8317f2ad…`, `27b75bef…`, `c71b12f4…`).
 - Mutation-check what you add: break the per-binding lookup and confirm a test
   goes red. A test that passes against a deliberately broken implementation is

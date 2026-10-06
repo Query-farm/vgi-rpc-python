@@ -39,6 +39,7 @@ asserted exactly rather than within a tolerance.
 
 from __future__ import annotations
 
+from vgi_rpc.errors import AuthUnavailableError
 from vgi_rpc.rpc._token_identity import (
     GrantRefusedError,
     IdentityUnavailableError,
@@ -52,6 +53,8 @@ __all__ = [
     "IDENTITY_INTROSPECT_ONLY_HASH",
     "IDENTITY_PROTOCOL_NAME",
     "AUTH_TIME_HEADER",
+    "AUTH_UNAVAILABLE_PURPOSE",
+    "AUTH_UNAVAILABLE_RETRY_AFTER",
     "GRANT_EXPIRES_AT",
     "GRANT_ID",
     "GRANT_TOKEN_PREFIX",
@@ -72,7 +75,9 @@ __all__ = [
     "TOKEN_MINIMAL",
     "TOKEN_PADDED_PROBE",
     "TOKEN_PADDED_PROBE_NAME",
+    "TOKEN_AUTH_UNAVAILABLE",
     "TOKEN_UNAVAILABLE",
+    "UNAVAILABLE_RETRY_AFTER",
     "TOKEN_UNKNOWN",
     "TOKEN_ZERO_TTL",
     "conformance_mint_grant",
@@ -156,6 +161,25 @@ TOKEN_UNKNOWN = "conformance-unknown-token"
 #: user for as long as the cache holds, so the two must not share an answer.
 TOKEN_UNAVAILABLE = "conformance-unavailable-token"
 
+#: Retry hint :data:`TOKEN_UNAVAILABLE` carries.  ``identity_unavailable``
+#: MUST carry ``RetryInfo`` (WIRE_PROTOCOL.md §16), so the value is pinned
+#: rather than left to each port's default.
+UNAVAILABLE_RETRY_AFTER = 5
+
+#: The credential the resolver answers by raising the port's **transport-auth**
+#: "could not find out" error -- ``AuthUnavailableError`` here -- rather than
+#: the identity one.  A hook calling the same store an authenticator calls
+#: raises what the authenticator raises, and vgi-python's docs tell workers to.
+#: The framework MUST translate it to ``identity_unavailable`` and keep its
+#: retry hint; before the rule was written down five of seven ports sent it
+#: unclassified, with no kind and no hint.
+TOKEN_AUTH_UNAVAILABLE = "conformance-auth-unavailable-token"
+
+#: Retry hint the transport-auth error carries.  Deliberately not the identity
+#: error's default, so a port that translates but substitutes its own default
+#: hint is caught: 7 can only have come from the hook.
+AUTH_UNAVAILABLE_RETRY_AFTER = 7
+
 #: A resolver that names a TTL of zero is saying *do not cache this*.  Several
 #: ports have a zero value where Python has an absent column, and the tempting
 #: fix -- normalise ``<= 0`` up to the 300 default -- silently converts that
@@ -198,10 +222,15 @@ def conformance_resolve_token(token: str) -> TokenIdentity | None:
     Raises:
         IdentityUnavailableError: For :data:`TOKEN_UNAVAILABLE`, standing in
             for a backing store that cannot be reached.
+        AuthUnavailableError: For :data:`TOKEN_AUTH_UNAVAILABLE` -- the
+            transport-auth spelling of the same outage, which the framework
+            must translate.
 
     """
     if token == TOKEN_UNAVAILABLE:
-        raise IdentityUnavailableError("conformance: mapping store unreachable")
+        raise IdentityUnavailableError("conformance: mapping store unreachable", retry_after=UNAVAILABLE_RETRY_AFTER)
+    if token == TOKEN_AUTH_UNAVAILABLE:
+        raise AuthUnavailableError("conformance: authority unreachable", retry_after=AUTH_UNAVAILABLE_RETRY_AFTER)
     if token == TOKEN_UNKNOWN:
         return None
     if token == TOKEN_ZERO_TTL:
@@ -247,6 +276,12 @@ REFUSED_PURPOSE = "conformance-refused"
 #: documented default (``""``) is observable.
 MINIMAL_PURPOSE = "conformance-minimal"
 
+#: The purpose the minter answers by raising the transport-auth unavailable
+#: error, so the translation rule is observable on ``issue_grant`` too -- the
+#: rule covers both hooks, and a port that wraps only one passes a token-only
+#: test.
+AUTH_UNAVAILABLE_PURPOSE = "conformance-auth-unavailable"
+
 
 def conformance_mint_grant(principal: str, purpose: str, scopes: list[str], ttl_seconds: int) -> IssuedGrant:
     """Mint a grant under the fixed conformance policy.
@@ -268,9 +303,12 @@ def conformance_mint_grant(principal: str, purpose: str, scopes: list[str], ttl_
 
     Raises:
         GrantRefusedError: For :data:`REFUSED_PURPOSE`.
+        AuthUnavailableError: For :data:`AUTH_UNAVAILABLE_PURPOSE`.
 
     """
     del ttl_seconds
+    if purpose == AUTH_UNAVAILABLE_PURPOSE:
+        raise AuthUnavailableError("conformance: grant store unreachable", retry_after=AUTH_UNAVAILABLE_RETRY_AFTER)
     if purpose == REFUSED_PURPOSE:
         raise GrantRefusedError("conformance: this purpose is refused")
     token = GRANT_TOKEN_PREFIX + principal + SCOPE_SEPARATOR + ",".join(scopes)

@@ -122,6 +122,7 @@ def build_error_stream(
     *,
     schema: pa.Schema | None = None,
     server_id: str | None = None,
+    include_traceback: bool = False,
 ) -> bytes:
     """Build a complete IPC stream carrying a single error batch.
 
@@ -132,6 +133,9 @@ def build_error_stream(
         exc: The exception to encode; its type and message reach the client.
         schema: The stream schema; defaults to an empty schema.
         server_id: Optional server id to stamp on the error batch.
+        include_traceback: Whether to carry the traceback.  Off by default
+            here: an intermediary's own stack is not the caller's business,
+            and this helper encodes errors the intermediary itself raises.
 
     Returns:
         The error IPC stream bytes.
@@ -140,7 +144,13 @@ def build_error_stream(
     from vgi_rpc.rpc._wire import _write_error_stream
 
     buf = BytesIO()
-    _write_error_stream(buf, schema if schema is not None else pa.schema([]), exc, server_id=server_id)
+    _write_error_stream(
+        buf,
+        schema if schema is not None else pa.schema([]),
+        exc,
+        server_id=server_id,
+        include_traceback=include_traceback,
+    )
     return buf.getvalue()
 
 

@@ -1258,6 +1258,93 @@ def conformance_conn(
     return factory
 
 
+@pytest.fixture(scope="session")
+def conformance_protocol_connector(
+    conformance_http_port: int,
+    conformance_subprocess: SubprocessTransport,
+    request: pytest.FixtureRequest,
+) -> Callable[..., contextlib.AbstractContextManager[Any]]:
+    """Connect a proxy bound to *any* protocol to the worker behind a ``conformance_conn`` transport.
+
+    The contract ``MULTI_PROTOCOL_HOSTING.md`` gives every port's runner:
+    ``connector(transport, protocol, on_log=None)`` where *transport* is the
+    ``conformance_conn`` parameter id the test is running under, and the proxy
+    talks to **the same worker** that transport reaches, routing on
+    *protocol*'s wire name.  That is what lets one test hold a primary and a
+    secondary proxy and show the same method name resolving to two bindings.
+    """
+    from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+    from vgi_rpc.conformance.secondary import conformance_extra_protocols
+    from vgi_rpc.http import http_connect
+    from vgi_rpc.log import Message
+    from vgi_rpc.rpc import RpcServer, make_pipe_pair, tcp_connect, unix_connect
+
+    def connect(
+        transport: str,
+        protocol: type,
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if transport == "pipe":
+
+            @contextlib.contextmanager
+            def _pipe() -> Iterator[Any]:
+                client_transport, server_transport = make_pipe_pair()
+                server = RpcServer(
+                    ConformanceService,
+                    ConformanceServiceImpl(),
+                    enable_describe=True,
+                    extra_protocols=conformance_extra_protocols(),
+                )
+                thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+                thread.start()
+                try:
+                    yield _RpcProxy(protocol, client_transport, on_log)
+                finally:
+                    client_transport.close()
+                    thread.join(timeout=5)
+
+            return _pipe()
+        if transport == "subprocess":
+
+            @contextlib.contextmanager
+            def _sub() -> Iterator[Any]:
+                yield _RpcProxy(protocol, conformance_subprocess, on_log)
+
+            return _sub()
+        if transport in ("unix", "unix_threaded", "unix_launcher"):
+            path_fixture = {
+                "unix": "conformance_unix_path",
+                "unix_threaded": "conformance_unix_threaded_path",
+                "unix_launcher": "conformance_unix_launcher_path",
+            }[transport]
+            return unix_connect(protocol, request.getfixturevalue(path_fixture), on_log=on_log)
+        if transport == "tcp":
+            host, tcp_port = request.getfixturevalue("conformance_tcp_addr")
+            return tcp_connect(protocol, host, tcp_port, on_log=on_log)
+        if transport == "http_externalize_always":
+            from vgi_rpc.external import ExternalLocationConfig
+
+            @contextlib.contextmanager
+            def _external() -> Iterator[Any]:
+                ext_port = request.getfixturevalue("conformance_http_externalize_always_port")
+                config = ExternalLocationConfig(url_validator=None)
+                try:
+                    bound: contextlib.AbstractContextManager[Any] = http_connect(
+                        protocol, f"http://127.0.0.1:{ext_port}", on_log=on_log, external_location=config
+                    )
+                    with bound as proxy:
+                        yield proxy
+                finally:
+                    config.fetch_config.close()
+
+            return _external()
+        if transport == "http":
+            return http_connect(protocol, f"http://127.0.0.1:{conformance_http_port}", on_log=on_log)
+        raise ValueError(f"no conformance transport named {transport!r}")
+
+    return connect
+
+
 @pytest.fixture(
     params=[
         "pipe",

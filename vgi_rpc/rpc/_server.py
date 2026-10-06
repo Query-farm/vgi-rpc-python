@@ -23,6 +23,7 @@ from typing import Any, Literal, cast
 import pyarrow as pa
 from pyarrow import ipc
 
+from vgi_rpc.errors import error_code_of
 from vgi_rpc.external import (
     ExternalLocationConfig,
     ExternalRef,
@@ -265,6 +266,10 @@ def _emit_access_log(
     # watched the record constructor, which was always correct, and never the
     # call sites, which were not.
     protocol_hash: str,
+    # Required for the same reason: the code is what an operator alerts on,
+    # and a site that forgot it would log a well-formed error record that no
+    # "page on UNAVAILABLE" rule can see.  "" on success.
+    error_code: str,
     request_state: bytes | None = None,
     response_state: bytes | None = None,
     cancelled: bool = False,
@@ -295,6 +300,8 @@ def _emit_access_log(
             extra["peer_identity_sources"] = peer_identity_sources
         if error_message:
             extra["error_message"] = error_message
+        if status == "error" and error_code:
+            extra["error_code"] = error_code
         if server_version:
             extra["server_version"] = server_version
         request_id = _current_request_id.get()
@@ -550,6 +557,7 @@ class RpcServer:
         "_dispatch_hook",
         "_external_config",
         "_impl",
+        "_include_tracebacks",
         "_ipc_validation",
         "_methods",
         "_protocol",
@@ -745,6 +753,7 @@ class RpcServer:
         server_version: str = "",
         enable_describe: bool = False,
         ipc_validation: IpcValidation | None = None,
+        include_tracebacks: bool = True,
     ) -> None:
         """Initialize with a protocol type and its implementation.
 
@@ -787,9 +796,16 @@ class RpcServer:
                 ``FULL`` for maximum safety.  An explicit value always
                 wins over the environment — the variable is a deployment
                 knob, not an override of stated intent.
+            include_tracebacks: Whether EXCEPTION batches carry the remote
+                traceback (``log_extra.traceback``, ``frames``, ``cause``,
+                ``context``).  Included by default on every transport; set
+                ``False`` to omit them everywhere this server answers.  The
+                exception type, message, code, kind and details are sent
+                either way.  See WIRE_PROTOCOL.md §8.
 
         """
         self._protocol = protocol
+        self._include_tracebacks = include_tracebacks
         self._impl = implementation
         self._server_version = server_version
         self._ipc_validation = IpcValidation.from_env() if ipc_validation is None else ipc_validation
@@ -902,8 +918,13 @@ class RpcServer:
 
         Framework-internal: dispatch, state-type resolution and telemetry read
         it.  Ordinary callers want ``methods`` or ``implementation_for``.
+
+        Read-only.  The hosted set is sealed at construction -- earlier than
+        the "before serving starts" WIRE_PROTOCOL.md §3.1 requires -- and there
+        is no registration API afterwards, so a protocol cannot appear on one
+        transport and not another, or change what reflection already reported.
         """
-        return self._bindings
+        return MappingProxyType(self._bindings)
 
     def implementation_for(self, info: RpcMethodInfo) -> object:
         """Return the implementation that owns *info*'s method.
@@ -1089,7 +1110,9 @@ class RpcServer:
                 f"  Server: {server_version}\n"
                 f"  Direction: the client did not send a vgi_rpc.protocol_version "
                 f"metadata key. This is either a vgi-rpc framework bug or a "
-                f"non-VGI client connecting to a VGI worker."
+                f"non-VGI client connecting to a VGI worker.",
+                protocol=protocol_name,
+                server_version=server_version,
             )
         try:
             client_version = client_version_bytes.decode()
@@ -1098,7 +1121,10 @@ class RpcServer:
                 f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
                 f"  Client: <undecodable bytes>\n"
                 f"  Server: {server_version}\n"
-                f"  Direction: client sent non-UTF-8 protocol_version metadata."
+                f"  Direction: client sent non-UTF-8 protocol_version metadata.",
+                protocol=protocol_name,
+                client_version="<undecodable>",
+                server_version=server_version,
             ) from exc
         try:
             client_parts = parse_version(client_version)
@@ -1108,7 +1134,10 @@ class RpcServer:
                 f"  Client: {client_version}\n"
                 f"  Server: {server_version}\n"
                 f"  Direction: client sent a malformed protocol_version. "
-                f"Expected canonical semver MAJOR.MINOR.PATCH."
+                f"Expected canonical semver MAJOR.MINOR.PATCH.",
+                protocol=protocol_name,
+                client_version=client_version,
+                server_version=server_version,
             ) from exc
         # Exact major+minor match; patch is ignored.
         if client_parts[:2] == server_parts[:2]:
@@ -1126,13 +1155,33 @@ class RpcServer:
             f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
             f"  Client: {client_version}\n"
             f"  Server: {server_version}\n"
-            f"  Direction: {direction}"
+            f"  Direction: {direction}",
+            protocol=protocol_name,
+            client_version=client_version,
+            server_version=server_version,
         )
 
     @property
     def protocol_hash(self) -> str:
         """SHA-256 hex digest of the canonical __describe__ payload."""
         return self._protocol_hash
+
+    @property
+    def include_tracebacks(self) -> bool:
+        """Whether EXCEPTION batches carry the remote traceback, on every transport.
+
+        On by default everywhere.  An earlier draft omitted it on HTTP and TCP;
+        that hid chained causes from the DuckDB extension, which puts the
+        remote traceback into the user-visible error.  The setting stays so an
+        operator who does not want stack traces leaving the process can turn
+        them off for the whole server.
+        """
+        return self._include_tracebacks
+
+    @property
+    def _tracebacks(self) -> bool:
+        """Alias used by the error-writing call sites."""
+        return self._include_tracebacks
 
     @property
     def ctx_methods(self) -> frozenset[str]:
@@ -1365,11 +1414,23 @@ class RpcServer:
                 )
             except pa.ArrowInvalid as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
-                    _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+                    _write_error_stream(
+                        transport.writer,
+                        _EMPTY_SCHEMA,
+                        exc,
+                        server_id=self._server_id,
+                        include_traceback=self._tracebacks,
+                    )
                 raise
             except (VersionError, RpcError) as exc:
                 with contextlib.suppress(BrokenPipeError, OSError):
-                    _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+                    _write_error_stream(
+                        transport.writer,
+                        _EMPTY_SCHEMA,
+                        exc,
+                        server_id=self._server_id,
+                        include_traceback=self._tracebacks,
+                    )
                 return
 
             # __transport_options__ — framework transport-capability handshake,
@@ -1398,13 +1459,16 @@ class RpcServer:
                     stats=stats,
                     server_version=self._server_version,
                     protocol_hash=self._protocol_hash,
+                    error_code="",
                 )
                 return
 
             try:
                 info = self._resolve(method_name)
             except (ProtocolNotSpecifiedError, ProtocolNotSupportedError, MethodNotImplementedError) as exc:
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+                _write_error_stream(
+                    transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id, include_traceback=self._tracebacks
+                )
                 return
 
             # Application-protocol-version gate, against the binding that owns
@@ -1414,7 +1478,9 @@ class RpcServer:
                 self.gate_version(info)
             except ProtocolVersionError as exc:
                 err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
-                _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
+                _write_error_stream(
+                    transport.writer, err_schema, exc, server_id=self._server_id, include_traceback=self._tracebacks
+                )
                 return
 
             # Request validation. Both steps are answered with a typed error
@@ -1437,7 +1503,9 @@ class RpcServer:
                 _validate_params(info.name, kwargs, info.param_types)
             except Exception as exc:
                 err_schema = info.result_schema if info.method_type == MethodType.UNARY else _EMPTY_SCHEMA
-                _write_error_stream(transport.writer, err_schema, exc, server_id=self._server_id)
+                _write_error_stream(
+                    transport.writer, err_schema, exc, server_id=self._server_id, include_traceback=self._tracebacks
+                )
                 return
 
             # Determine the SHM segment for this call's data plane (resolving
@@ -1522,6 +1590,7 @@ class RpcServer:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        error_code = ""
         error_message = ""
         hook = self._dispatch_hook
         hook_token: HookToken = None
@@ -1543,8 +1612,11 @@ class RpcServer:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    error_code = error_code_of(exc).value
                     error_message = str(exc)
-                    _write_error_batch(writer, schema, exc, server_id=self._server_id)
+                    _write_error_batch(
+                        writer, schema, exc, server_id=self._server_id, include_traceback=self._tracebacks
+                    )
                     return
                 if isinstance(result, ExternalRef):
                     _write_external_ref(writer, info.result_schema, result)
@@ -1573,6 +1645,7 @@ class RpcServer:
                 stats=stats,
                 server_version=self._server_version,
                 protocol_hash=self.protocol_hash_for(info),
+                error_code=error_code,
             )
             if hook is not None:
                 try:
@@ -1599,6 +1672,7 @@ class RpcServer:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        error_code = ""
         error_message = ""
         hook = self._dispatch_hook
         hook_token: HookToken = None
@@ -1618,9 +1692,12 @@ class RpcServer:
             _hook_exc = exc
             status = "error"
             error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+            error_code = error_code_of(exc).value
             error_message = str(exc)
             with contextlib.suppress(BrokenPipeError, OSError):
-                _write_error_stream(transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id)
+                _write_error_stream(
+                    transport.writer, _EMPTY_SCHEMA, exc, server_id=self._server_id, include_traceback=self._tracebacks
+                )
             # The request IPC stream is followed by a distinct input IPC
             # stream on persistent transports.  Even when construction fails,
             # consume that second stream through EOS before the serve loop
@@ -1648,6 +1725,7 @@ class RpcServer:
                     stats=stats,
                     server_version=self._server_version,
                     protocol_hash=self.protocol_hash_for(info),
+                    error_code=error_code,
                 )
                 if hook is not None:
                     try:
@@ -1750,9 +1828,16 @@ class RpcServer:
                     _hook_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, info.name, self._server_id, exc)
+                    error_code = error_code_of(exc).value
                     error_message = str(exc)
                     with contextlib.suppress(BrokenPipeError, OSError):
-                        _write_error_batch(output_writer, output_schema, exc, server_id=self._server_id)
+                        _write_error_batch(
+                            output_writer,
+                            output_schema,
+                            exc,
+                            server_id=self._server_id,
+                            include_traceback=self._tracebacks,
+                        )
                 finally:
                     # Release the final input before closing the output IPC
                     # stream. Observing output EOS must guarantee that the
@@ -1782,6 +1867,7 @@ class RpcServer:
                 stats=stats,
                 server_version=self._server_version,
                 protocol_hash=self.protocol_hash_for(info),
+                error_code=error_code,
                 cancelled=cancelled,
             )
             if hook is not None:

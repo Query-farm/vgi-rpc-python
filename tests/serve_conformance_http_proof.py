@@ -14,6 +14,7 @@ import argparse
 import waitress
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.http import ProxyProofConfig, make_wsgi_app, parse_secrets, proxy_proof_gate, require_all
 from vgi_rpc.rpc import RpcServer
 
@@ -34,7 +35,7 @@ def main() -> None:
     parser.add_argument("--prefix", default="")
     args = parser.parse_args()
 
-    server = RpcServer(ConformanceService, ConformanceServiceImpl())
+    server = RpcServer(ConformanceService, ConformanceServiceImpl(), extra_protocols=conformance_extra_protocols())
 
     authenticate = None
     if args.proof_mode != "off":

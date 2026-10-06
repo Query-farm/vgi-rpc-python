@@ -355,7 +355,7 @@ surfaced). Servers MUST still refuse *disagreement*.
 5. Your port's full suite green, formatter and linter clean.
 
 Do NOT change the primary conformance protocol or its hash
-(`5cc768771c2e8a54e19ebb7546c97c119823eb13e20a5ff62ca5ce7ed2a1334e`) — it is
+(`05479410c96f34410a2b10a4f6a49d59dcfd9d6d1d45ce9a9807d060a3bd6014` (pinned in `tests/golden/protocol_hash_vector.json`)) — it is
 verified across all seven ports. If your change moves it, you broke something.
 
 ## 8. Retired: the `__introspect_token__` HTTP route

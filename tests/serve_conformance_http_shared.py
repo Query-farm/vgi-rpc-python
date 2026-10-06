@@ -14,6 +14,7 @@ import argparse
 import waitress
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.http import make_wsgi_app
 from vgi_rpc.rpc import RpcServer
 
@@ -25,7 +26,7 @@ def main() -> None:
     parser.add_argument("--key", required=True, help="hex-encoded 32-byte HMAC signing key")
     args = parser.parse_args()
 
-    server = RpcServer(ConformanceService, ConformanceServiceImpl())
+    server = RpcServer(ConformanceService, ConformanceServiceImpl(), extra_protocols=conformance_extra_protocols())
     app = make_wsgi_app(server, token_key=bytes.fromhex(args.key))
 
     print(f"PORT:{args.port}", flush=True)

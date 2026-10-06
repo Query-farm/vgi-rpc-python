@@ -53,6 +53,7 @@ These fields appear when their condition is met and are absent (key not present)
 | Field | Type | Condition |
 |---|---|---|
 | `error_message` | string | Required and non-empty when `status == "error"`. No length cap. The full server-side message is reported. |
+| `error_code` | string | The canonical error code the call failed with — one of the sixteen names in [WIRE_PROTOCOL.md §8](WIRE_PROTOCOL.md#8-log-error-batch-format) (`UNAVAILABLE`, `NOT_FOUND`, …), the same value the client received in `vgi_rpc.error_code`. Servers SHOULD emit it on every `status == "error"` record; it MUST be absent when `status == "ok"`. An operator alerts on the code ("page on `UNAVAILABLE`"), not on a language's exception class name. Optional in the schema for one release so ports that predate the error model still validate. |
 
 ### 4.2 Stream lifecycle
 

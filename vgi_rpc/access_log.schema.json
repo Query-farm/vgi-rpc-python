@@ -89,6 +89,27 @@
     "error_message": {
       "type": "string"
     },
+    "error_code": {
+      "description": "Canonical error code of a failed call (WIRE_PROTOCOL.md section 8). Closed set; absent on success.",
+      "enum": [
+        "CANCELLED",
+        "UNKNOWN",
+        "INVALID_ARGUMENT",
+        "DEADLINE_EXCEEDED",
+        "NOT_FOUND",
+        "ALREADY_EXISTS",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "FAILED_PRECONDITION",
+        "ABORTED",
+        "OUT_OF_RANGE",
+        "UNIMPLEMENTED",
+        "INTERNAL",
+        "UNAVAILABLE",
+        "DATA_LOSS",
+        "UNAUTHENTICATED"
+      ]
+    },
     "cancelled": {
       "const": true
     },
@@ -259,6 +280,11 @@
           "error_type": {
             "const": ""
           }
+        },
+        "not": {
+          "required": [
+            "error_code"
+          ]
         }
       }
     },

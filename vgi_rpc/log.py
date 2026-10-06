@@ -43,7 +43,15 @@ import traceback
 from enum import Enum
 from typing import ClassVar
 
-from vgi_rpc.metadata import ERROR_KIND_KEY, LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY
+from vgi_rpc.errors import encode_error_details, error_code_of, error_details_of, error_kind_of
+from vgi_rpc.metadata import (
+    ERROR_CODE_KEY,
+    ERROR_DETAILS_KEY,
+    ERROR_KIND_KEY,
+    LOG_EXTRA_KEY,
+    LOG_LEVEL_KEY,
+    LOG_MESSAGE_KEY,
+)
 
 __all__ = [
     "Level",
@@ -202,11 +210,65 @@ class Message:
             kind = self.extra.get("error_kind")
             if isinstance(kind, str):
                 result[ERROR_KIND_KEY.decode()] = kind
+            # The other two layers of the error model ride the same way.  Only
+            # on EXCEPTION: a WARN carrying "error_code" in its extras is an
+            # application's free-form log, not a classification.
+            if self.level is Level.EXCEPTION:
+                code = self.extra.get("error_code")
+                if isinstance(code, str):
+                    result[ERROR_CODE_KEY.decode()] = code
+                details = self.extra.get("error_details")
+                if isinstance(details, list):
+                    # Same encoder from_exception() measured the cap with, so
+                    # the bytes on the wire are the bytes that were checked.
+                    encoded = encode_error_details(details)
+                    if encoded is not None:
+                        result[ERROR_DETAILS_KEY.decode()] = encoded
         return result
 
     @classmethod
-    def from_exception(cls, exc: BaseException) -> Message:
-        """Produce a Message from an exception."""
+    def from_exception(cls, exc: BaseException, *, include_traceback: bool = True) -> Message:
+        """Produce a Message from an exception.
+
+        Carries the error model (WIRE_PROTOCOL.md §8): the canonical
+        ``error_code`` always, ``error_kind`` when the exception declares one,
+        and ``error_details`` when it declares any and they fit the 4 KiB cap
+        -- dropped whole otherwise, never trimmed.
+
+        Args:
+            exc: The exception to report.
+            include_traceback: Whether to send the traceback, its frames, and
+                the chained ``cause`` / ``context`` tracebacks.  Servers send
+                them by default; an operator may turn them off per server.
+
+        Returns:
+            An EXCEPTION-level message.
+
+        """
+        # Short, semantic summary (LLM anchor)
+        summary = f"{type(exc).__name__}: {exc}"
+
+        extra: dict[str, object] = {
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+        }
+        # Code first: it is required on every EXCEPTION batch, so it is set
+        # before anything that could be skipped.
+        extra["error_code"] = error_code_of(exc).value
+        kind = error_kind_of(exc)
+        if kind is not None:
+            # Typed marker exceptions advertise an `error_kind` attribute
+            # (open-enum string) that is surfaced as a first-class metadata key
+            # on the wire, so callers pattern-match on a stable token rather
+            # than on message text.
+            extra["error_kind"] = kind
+        details = error_details_of(exc)
+        if details and encode_error_details(details) is not None:
+            extra["error_details"] = details
+
+        if not include_traceback:
+            return cls(Level.EXCEPTION, summary, **extra)
+
         tb_exc = traceback.TracebackException.from_exception(
             exc,
             capture_locals=False,
@@ -216,14 +278,7 @@ class Message:
         if len(formatted_tb) > cls.MAX_TRACEBACK_CHARS:
             formatted_tb = formatted_tb[: cls.MAX_TRACEBACK_CHARS] + "\n… <traceback truncated>"
 
-        # Short, semantic summary (LLM anchor)
-        summary = f"{type(exc).__name__}: {exc}"
-
-        extra: dict[str, object] = {
-            "exception_type": type(exc).__name__,
-            "exception_message": str(exc),
-            "traceback": formatted_tb,
-        }
+        extra["traceback"] = formatted_tb
 
         if tb_exc.__cause__:
             cause_str = "".join(tb_exc.__cause__.format())
@@ -246,14 +301,6 @@ class Message:
             }
             for f in tb_exc.stack[-cls.MAX_TRACEBACK_FRAMES :]
         ]
-
-        # Typed marker exceptions advertise an `error_kind` class attribute
-        # (open-enum string) that we surface as a first-class metadata key
-        # on the wire (see metadata.ERROR_KIND_KEY). Callers can then
-        # pattern-match on the stable token rather than message text.
-        kind = getattr(exc, "error_kind", None)
-        if isinstance(kind, str):
-            extra["error_kind"] = kind
 
         return cls(
             Level.EXCEPTION,

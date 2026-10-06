@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import pyarrow as pa
 from pyarrow import ipc
 
+from vgi_rpc.errors import error_code_of
 from vgi_rpc.external import predict_externalize_bytes_for_collector, resolve_external_location
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import CALL_STATE_KEY, CANCEL_KEY, STATE_KEY, strip_keys
@@ -117,6 +118,7 @@ class _DispatchOutcome:
 
     status: Literal["ok", "error"] = "ok"
     error_type: str = ""
+    error_code: str = ""
     error_message: str = ""
     http_status: HTTPStatus = HTTPStatus.OK
     response_state_bytes: bytes | None = None
@@ -193,6 +195,7 @@ def _dispatch_telemetry(
             stats=_current_call_stats.get(),
             server_version=app._server.server_version,
             protocol_hash=app._server.protocol_hash_for(info),
+            error_code=outcome.error_code,
             error_message=outcome.error_message,
             request_state=outcome.request_state_bytes,
             response_state=outcome.response_state_bytes,
@@ -308,6 +311,7 @@ def _run_stream_init_sync(
             except Exception as exc:
                 outcome.status = "error"
                 outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+                outcome.error_code = error_code_of(exc).value
                 outcome.error_message = _truncate_error_message(exc)
                 outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                 raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
@@ -498,6 +502,7 @@ def _run_http_exchange_init(
     except Exception as exc:
         outcome.status = "error"
         outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+        outcome.error_code = error_code_of(exc).value
         outcome.error_message = _truncate_error_message(exc)
         outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
@@ -756,6 +761,7 @@ def _run_http_exchange_turn(
     except Exception as exc:
         outcome.status = "error"
         outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+        outcome.error_code = error_code_of(exc).value
         outcome.error_message = _truncate_error_message(exc)
         outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
@@ -824,7 +830,15 @@ def _run_http_exchange_turn(
                 f"({predicted_external} > {app._max_externalized_response_bytes}) "
                 f"for method {method_name!r}"
             )
-            return _exchange_error_response(output_schema, server_id, protocol_name, method_name, overshoot, outcome)
+            return _exchange_error_response(
+                output_schema,
+                server_id,
+                protocol_name,
+                method_name,
+                overshoot,
+                outcome,
+                include_traceback=app._tracebacks,
+            )
 
         # Write response batches (log + data, in order).
         resp_buf = BytesIO()
@@ -842,13 +856,22 @@ def _run_http_exchange_turn(
                 external_cap=app._max_externalized_response_bytes,
             )
         except RuntimeError as overshoot:
-            return _exchange_error_response(output_schema, server_id, protocol_name, method_name, overshoot, outcome)
+            return _exchange_error_response(
+                output_schema,
+                server_id,
+                protocol_name,
+                method_name,
+                overshoot,
+                outcome,
+                include_traceback=app._tracebacks,
+            )
 
         resp_buf.seek(0)
         return resp_buf
     except Exception as exc:
         outcome.status = "error"
         outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+        outcome.error_code = error_code_of(exc).value
         outcome.error_message = _truncate_error_message(exc)
         outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         raise _RpcHttpError(exc, status_code=outcome.http_status, schema=output_schema) from exc
@@ -861,6 +884,8 @@ def _exchange_error_response(
     method_name: str,
     exc: BaseException,
     outcome: _DispatchOutcome,
+    *,
+    include_traceback: bool,
 ) -> BytesIO:
     """Build a fresh response IPC stream containing only an EXCEPTION batch.
 
@@ -871,13 +896,14 @@ def _exchange_error_response(
     """
     outcome.status = "error"
     outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+    outcome.error_code = error_code_of(exc).value
     outcome.error_message = _truncate_error_message(exc)
     # Signal the resource layer to surface this as 200 + X-VGI-RPC-Error: true
     # so the documented hard-cap contract holds for stream-exchange.
     _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
     resp_buf = BytesIO()
     with new_ipc_stream(resp_buf, output_schema) as err_writer:
-        _write_error_batch(err_writer, output_schema, exc, server_id=server_id)
+        _write_error_batch(err_writer, output_schema, exc, server_id=server_id, include_traceback=include_traceback)
     resp_buf.seek(0)
     return resp_buf
 
@@ -1104,9 +1130,10 @@ def _run_http_producer_turn(
             if overshoot is not None:
                 outcome.status = "error"
                 outcome.error_type = _log_method_error(protocol_name, method_name, server_id, overshoot)
+                outcome.error_code = error_code_of(overshoot).value
                 outcome.error_message = _truncate_error_message(overshoot)
                 _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
-                _write_error_batch(writer, schema, overshoot, server_id=server_id)
+                _write_error_batch(writer, schema, overshoot, server_id=server_id, include_traceback=app._tracebacks)
             else:
                 _flush_collector(writer, out, app._server.external_config)
                 if not out.finished:
@@ -1136,6 +1163,7 @@ def _run_http_producer_turn(
         except Exception as exc:
             outcome.status = "error"
             outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
+            outcome.error_code = error_code_of(exc).value
             outcome.error_message = _truncate_error_message(exc)
             # Signal the resource layer to surface this as 200 +
             # ``X-VGI-RPC-Error: true``, the documented shape for a method that
@@ -1151,7 +1179,7 @@ def _run_http_producer_turn(
             # client that only reads the first stream sees a valid header and
             # no error at all.
             _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
-            _write_error_batch(writer, schema, exc, server_id=server_id)
+            _write_error_batch(writer, schema, exc, server_id=server_id, include_traceback=app._tracebacks)
     # Close the codec BEFORE getvalue(): the compressed frame is only complete
     # once the stream is finalised.
     if write_sink is not resp_buf:

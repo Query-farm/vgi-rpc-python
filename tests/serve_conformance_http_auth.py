@@ -21,6 +21,7 @@ import falcon
 import waitress
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.http import AuthFailure, AuthReason, make_wsgi_app
 from vgi_rpc.rpc import AuthContext, RpcServer
 
@@ -57,7 +58,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args()
 
-    server = RpcServer(ConformanceService, ConformanceServiceImpl())
+    server = RpcServer(ConformanceService, ConformanceServiceImpl(), extra_protocols=conformance_extra_protocols())
     app = make_wsgi_app(server, authenticate=_reject_all)
 
     print(f"PORT:{args.port}", flush=True)

@@ -108,7 +108,9 @@ means the harness's instruction was not executed.
 The structured error object is:
 
 ```json
-{"error_type": "ValueError", "error_message": "boom", "traceback": ""}
+{"error_type": "ValueError", "error_message": "boom", "traceback": "",
+ "error_code": "UNAVAILABLE", "error_kind": "identity_unavailable",
+ "error_details": [{"@type": "vgi_rpc.RetryInfo", "retry_delay_seconds": 7}]}
 ```
 
 - `error_type` — the peer's error class name, verbatim. Tests assert on this
@@ -116,7 +118,24 @@ The structured error object is:
   translate it into your language's exception names.
 - `error_message` — the peer's message, verbatim. **The key is
   `error_message`, not `message`.**
-- `traceback` — the peer's remote traceback, or `""`. Never `null`.
+- `traceback` — the peer's remote traceback, or `""`. Never `null`. Servers
+  include it by default on every transport; `""` means the operator turned
+  tracebacks off.
+- `error_code` — the canonical code **your client** decoded
+  (`vgi_rpc.error_code`, WIRE_PROTOCOL §8), or `""` when the server sent none.
+- `error_kind` — the reason your client decoded (`vgi_rpc.error_kind`), or
+  `""` when absent.
+- `error_details` — the detail array your client decoded
+  (`vgi_rpc.error_details`): every element, in wire order, **unknown `@type`
+  values included**, or `[]` when absent. Relay JSON values as decoded; the
+  harness compares numbers by value, so `7` and `7.0` are equal.
+
+All three come from the client library's own error object, not from the
+driver re-reading the batch. A driver that cannot get them from its client has
+found the client defect this field exists to catch — the Python, TypeScript and
+Rust clients dropped `error_kind` for months because this object had no field
+for it. Absent fields are read as `""` / `""` / `[]` by the harness, so an
+older driver still runs, and fails exactly the tests that need them.
 
 A response may carry both a successful payload slot set to `null` and an
 `error`; the harness reads `error` first.
@@ -517,7 +536,10 @@ test owns everything on the wire. In particular a driver must not:
   method-name heuristic for `is_exchange`.
 - **retry.** A retry the client did not perform is a passing test for behaviour
   the client does not have.
-- **normalise errors.** `error_type` is asserted verbatim.
+- **normalise errors.** `error_type`, `error_code`, `error_kind` and
+  `error_details` are asserted verbatim. Never default a missing code to
+  `UNKNOWN` in the driver: `""` (the server sent none) and `"UNKNOWN"` (the
+  server sent that) are different answers.
 
 `describe` is the single deliberate exception to "no decoding", for the reason
 given in §4.3.

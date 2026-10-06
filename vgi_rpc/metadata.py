@@ -19,6 +19,8 @@ import pyarrow as pa
 __all__ = [
     "CALL_STATE_KEY",
     "CANCEL_KEY",
+    "ERROR_CODE_KEY",
+    "ERROR_DETAILS_KEY",
     "ERROR_KIND_KEY",
     "ERROR_KIND_METHOD_NOT_IMPLEMENTED",
     "LOCATION_FETCH_MS_KEY",
@@ -77,6 +79,19 @@ LOG_EXTRA_KEY = b"vgi_rpc.log_extra"
 # unknown kinds by clients. Lets callers pattern-match on a stable
 # identifier instead of substring-searching the exception message.
 ERROR_KIND_KEY = b"vgi_rpc.error_kind"
+
+# Canonical error code on EXCEPTION-level batches: the *name* of one of gRPC's
+# sixteen non-OK status codes (``UNAVAILABLE``, ``NOT_FOUND``, ...).  Closed
+# set -- see :class:`vgi_rpc.errors.Code`.  Where ``error_kind`` is the reason
+# a client branches on, this is what generic handling (retry, display, a
+# proxy's HTTP status) keys on.  WIRE_PROTOCOL.md §8.
+ERROR_CODE_KEY = b"vgi_rpc.error_code"
+
+# Typed error details on EXCEPTION-level batches: a JSON array of objects, each
+# naming its type in ``@type`` (``vgi_rpc.RetryInfo``, ``vgi_rpc.BadRequest``,
+# ...).  At most 4 KiB serialized; a server that would exceed the cap omits the
+# whole array.  WIRE_PROTOCOL.md §8.
+ERROR_DETAILS_KEY = b"vgi_rpc.error_details"
 
 # Well-known error_kind value: the server has no handler for the requested
 # RPC method (old server vs. new client, or method removed).

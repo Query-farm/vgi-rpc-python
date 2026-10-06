@@ -157,6 +157,12 @@ class FakeDriver:
                     "error_type": "ValueError",
                     "error_message": batch.column("message")[0].as_py(),
                     "traceback": "remote traceback",
+                    "error_code": "UNAVAILABLE",
+                    "error_kind": "identity_unavailable",
+                    "error_details": [
+                        {"@type": "vgi_rpc.RetryInfo", "retry_delay_seconds": 7},
+                        {"@type": "conformance.Secondary.v1.Probe", "note": "unknown to every client"},
+                    ],
                 },
             }
         if method == "raise_runtime_error":

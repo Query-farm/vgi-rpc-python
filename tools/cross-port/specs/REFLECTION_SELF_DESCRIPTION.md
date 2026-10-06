@@ -59,7 +59,7 @@ preimage, so `describe` precedes `list_protocols`.
 
 ## Constraints
 
-- The application protocol hash `5cc768771c2e8a54e19ebb7546c97c119823eb13e20a5ff62ca5ce7ed2a1334e`
+- The application protocol hash `05479410c96f34410a2b10a4f6a49d59dcfd9d6d1d45ce9a9807d060a3bd6014` (pinned in `tests/golden/protocol_hash_vector.json`)
   MUST NOT move, nor the three `vgi_rpc.Identity.v1` digests (`8317f2ad…`,
   `27b75bef…`, `c71b12f4…`). Only reflection's own digest changes.
 - Registering the methods must not change how reflection **dispatches** — it

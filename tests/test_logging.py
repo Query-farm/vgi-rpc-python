@@ -331,6 +331,7 @@ class TestAccessLog:
                 duration_ms=10.0,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
@@ -629,6 +630,7 @@ class TestEmitAccessLog:
                 duration_ms=42.5,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
             )
 
         access_records = [r for r in caplog.records if r.name == "vgi_rpc.access"]
@@ -651,6 +653,7 @@ class TestEmitAccessLog:
                 duration_ms=42.5555,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
@@ -669,6 +672,7 @@ class TestEmitAccessLog:
                 duration_ms=10.0,
                 status="error",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="UNKNOWN",
                 error_type="ValueError",
             )
 
@@ -689,6 +693,7 @@ class TestEmitAccessLog:
                 duration_ms=10.0,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
                 http_status=200,
             )
 
@@ -708,6 +713,7 @@ class TestEmitAccessLog:
                 duration_ms=10.0,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
@@ -731,6 +737,7 @@ class TestEmitAccessLog:
                 duration_ms=10.0,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
             )
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
         assert _extra(record, "peer_identity_status") == "tailscale:available"
@@ -857,6 +864,7 @@ class TestEmitAccessLogExceptionGuard:
                 duration_ms=1.0,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
             )
         finally:
             access_logger.removeHandler(handler)

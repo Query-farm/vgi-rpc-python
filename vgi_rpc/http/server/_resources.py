@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 import falcon
 import pyarrow as pa
 
+from vgi_rpc.errors import error_code_of
 from vgi_rpc.rpc import (
     MethodType,
     RpcError,
@@ -59,6 +60,7 @@ def _strict_response_stream(
     method: str,
     limit: int | None,
     server_id: str,
+    include_traceback: bool,
 ) -> tuple[BytesIO, bool]:
     """Materialize and strict-cap one successful resource response."""
     body = stream.read()
@@ -70,7 +72,7 @@ def _strict_response_stream(
         # the negotiated codec before this final strict check. The replacement
         # error is plaintext, so let response middleware encode it normally.
         _current_body_precompressed.set(False)
-        return _error_response_stream(exc, server_id=server_id), True
+        return _error_response_stream(exc, server_id=server_id, include_traceback=include_traceback), True
     return BytesIO(body), False
 
 
@@ -153,7 +155,12 @@ class _RpcResource:
             )
         except _RpcHttpError as e:
             _set_error_response(
-                resp, e.cause, status_code=e.status_code, schema=e.schema, server_id=self._app._server.server_id
+                resp,
+                e.cause,
+                status_code=e.status_code,
+                schema=e.schema,
+                server_id=self._app._server.server_id,
+                include_traceback=self._app._tracebacks,
             )
             _current_response_cookies.reset(cookie_token)
             return
@@ -174,6 +181,7 @@ class _RpcResource:
                         method=method,
                         limit=_current_response_budget.get().response_limit_bytes,
                         server_id=self._app._server.server_id,
+                        include_traceback=self._app._tracebacks,
                     )
                     if oversized:
                         http_status = HTTPStatus.INTERNAL_SERVER_ERROR
@@ -187,6 +195,7 @@ class _RpcResource:
                     status_code=e.status_code,
                     schema=e.schema,
                     server_id=self._app._server.server_id,
+                    include_traceback=self._app._tracebacks,
                 )
             _apply_cookies_to_response(resp, cookies)
         finally:
@@ -236,7 +245,12 @@ class _StreamInitResource:
             )
         except _RpcHttpError as e:
             _set_error_response(
-                resp, e.cause, status_code=e.status_code, schema=e.schema, server_id=self._app._server.server_id
+                resp,
+                e.cause,
+                status_code=e.status_code,
+                schema=e.schema,
+                server_id=self._app._server.server_id,
+                include_traceback=self._app._tracebacks,
             )
             return
         budget_token = _current_response_budget.set(budget)
@@ -256,6 +270,7 @@ class _StreamInitResource:
                         method=method,
                         limit=budget.response_limit_bytes,
                         server_id=self._app._server.server_id,
+                        include_traceback=self._app._tracebacks,
                     )
                     if oversized:
                         _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -266,6 +281,7 @@ class _StreamInitResource:
                     status_code=e.status_code,
                     schema=e.schema,
                     server_id=self._app._server.server_id,
+                    include_traceback=self._app._tracebacks,
                 )
                 return
             resp.content_type = _ARROW_CONTENT_TYPE
@@ -294,7 +310,12 @@ class _ExchangeResource:
             )
         except _RpcHttpError as e:
             _set_error_response(
-                resp, e.cause, status_code=e.status_code, schema=e.schema, server_id=self._app._server.server_id
+                resp,
+                e.cause,
+                status_code=e.status_code,
+                schema=e.schema,
+                server_id=self._app._server.server_id,
+                include_traceback=self._app._tracebacks,
             )
             return
         budget_token = _current_response_budget.set(budget)
@@ -314,6 +335,7 @@ class _ExchangeResource:
                         method=method,
                         limit=_current_response_budget.get().response_limit_bytes,
                         server_id=self._app._server.server_id,
+                        include_traceback=self._app._tracebacks,
                     )
                     if oversized:
                         _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -324,6 +346,7 @@ class _ExchangeResource:
                     status_code=e.status_code,
                     schema=e.schema,
                     server_id=self._app._server.server_id,
+                    include_traceback=self._app._tracebacks,
                 )
                 return
             resp.content_type = _ARROW_CONTENT_TYPE
@@ -373,7 +396,13 @@ class _UploadUrlResource:
                 count = 1
             count = max(1, min(count, _MAX_UPLOAD_URL_COUNT))
         except _RpcHttpError as e:
-            _set_error_response(resp, e.cause, status_code=e.status_code, server_id=self._app._server.server_id)
+            _set_error_response(
+                resp,
+                e.cause,
+                status_code=e.status_code,
+                server_id=self._app._server.server_id,
+                include_traceback=self._app._tracebacks,
+            )
             return
 
         # Execute: follows the same response pattern as _unary_sync —
@@ -388,6 +417,7 @@ class _UploadUrlResource:
         start = time.monotonic()
         status: Literal["ok", "error"] = "ok"
         error_type = ""
+        error_code = ""
         _upload_exc: BaseException | None = None
         try:
             with new_ipc_stream(resp_buf, _UPLOAD_URL_SCHEMA) as writer:
@@ -407,7 +437,10 @@ class _UploadUrlResource:
                     _upload_exc = exc
                     status = "error"
                     error_type = _log_method_error(protocol_name, _UPLOAD_URL_METHOD, server_id, exc)
-                    _write_error_batch(writer, _UPLOAD_URL_SCHEMA, exc, server_id=server_id)
+                    error_code = error_code_of(exc).value
+                    _write_error_batch(
+                        writer, _UPLOAD_URL_SCHEMA, exc, server_id=server_id, include_traceback=self._app._tracebacks
+                    )
                     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
         finally:
             duration_ms = (time.monotonic() - start) * 1000
@@ -426,6 +459,7 @@ class _UploadUrlResource:
                 # A framework endpoint owned by no protocol: the spec says these
                 # log the server's primary, so this one is correct as-is.
                 protocol_hash=self._app._server.protocol_hash,
+                error_code=error_code,
                 error_message=_truncate_error_message(_upload_exc),
             )
 
@@ -436,6 +470,7 @@ class _UploadUrlResource:
                 method=_UPLOAD_URL_METHOD,
                 limit=budget.response_limit_bytes,
                 server_id=server_id,
+                include_traceback=self._app._tracebacks,
             )
             if oversized:
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR

@@ -121,6 +121,14 @@ class _HttpRpcApp:
             ttl=float(token_ttl) if token_ttl > 0 else 3600.0,
         )
 
+    @property
+    def _tracebacks(self) -> bool:
+        """Whether an EXCEPTION batch this app writes carries the traceback.
+
+        The server's setting -- the same on every transport.
+        """
+        return self._server.include_tracebacks
+
     def _resolve_method(self, req: falcon.Request, protocol: str, method: str) -> RpcMethodInfo:
         """Validate content type and resolve ``(protocol, method)`` from the path.
 

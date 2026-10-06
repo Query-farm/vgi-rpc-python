@@ -137,6 +137,30 @@ class TestUnary:
         assert excinfo.value.error_message == "boom"
         assert excinfo.value.remote_traceback == "remote traceback"
 
+    def test_error_model_fields_are_relayed(self, proxy: ClientDriverProxy) -> None:
+        """``error_code``, ``error_kind`` and ``error_details`` reach the ``RpcError``.
+
+        CLIENT_DRIVER_PROTOCOL.md's error object had no ``error_kind`` field, so
+        client-role conformance could never observe a client dropping it --
+        and three clients did.  The shim relays all three verbatim, unknown
+        detail types included, and the typed accessors skip what they do not know.
+        """
+        with pytest.raises(RpcError) as excinfo:
+            proxy.raise_value_error(message="boom")
+        err = excinfo.value
+        assert err.error_code == "UNAVAILABLE"
+        assert err.error_kind == "identity_unavailable"
+        assert [d["@type"] for d in err.error_details] == ["vgi_rpc.RetryInfo", "conformance.Secondary.v1.Probe"]
+        retry = err.retry_info()
+        assert retry is not None and retry.retry_delay_seconds == 7.0
+        assert err.is_retryable()
+
+    def test_absent_error_model_fields_default_empty(self, proxy: ClientDriverProxy) -> None:
+        """A driver that predates the fields reports ``""`` / ``""`` / ``[]``, never ``None``."""
+        with pytest.raises(RpcError) as excinfo:
+            proxy.raise_runtime_error(message="x")
+        assert (excinfo.value.error_code, excinfo.value.error_kind, excinfo.value.error_details) == ("", "", [])
+
     def test_legacy_message_key_is_accepted(self, proxy: ClientDriverProxy) -> None:
         """A driver writing ``message`` instead of ``error_message`` still reports it.
 

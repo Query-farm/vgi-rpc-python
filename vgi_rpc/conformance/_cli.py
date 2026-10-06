@@ -33,6 +33,7 @@ import sys
 
 from vgi_rpc.conformance._impl import ConformanceServiceImpl
 from vgi_rpc.conformance._protocol import ConformanceService
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.rpc import RpcServer, serve_stdio
 
 
@@ -139,6 +140,9 @@ def main() -> None:
         impl,
         enable_describe=args.describe,
         external_location=external_location,
+        # conformance.Secondary.v1, always: every conformance worker hosts it,
+        # in every port, on every transport (MULTI_PROTOCOL_HOSTING.md).
+        extra_protocols=conformance_extra_protocols(),
     )
 
     if args.access_log:

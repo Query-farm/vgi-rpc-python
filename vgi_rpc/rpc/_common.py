@@ -17,6 +17,21 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, cast
 
 import pyarrow as pa
 
+from vgi_rpc.errors import (
+    BadRequest,
+    Code,
+    ErrorDetail,
+    ErrorInfo,
+    Help,
+    LocalizedMessage,
+    PreconditionFailure,
+    PreconditionViolation,
+    QuotaFailure,
+    ResourceInfo,
+    RetryInfo,
+    is_retryable,
+    parse_error_detail,
+)
 from vgi_rpc.log import Level, Message
 
 if TYPE_CHECKING:
@@ -686,15 +701,109 @@ class MethodType(Enum):
 
 
 class RpcError(Exception):
-    """Raised on the client side when the server reports an error."""
+    """Raised on the client side when the server reports an error.
 
-    def __init__(self, error_type: str, error_message: str, remote_traceback: str, *, request_id: str = "") -> None:
-        """Initialize with error details from the remote side."""
+    Carries the three layers of the error model (WIRE_PROTOCOL.md §8):
+
+    - :attr:`error_code` -- the canonical code's name (``"UNAVAILABLE"``), or
+      ``""`` when the server sent none (a server older than the model).
+      :attr:`code` reads it as a :class:`~vgi_rpc.errors.Code`.
+    - :attr:`error_kind` -- the reason a client branches on, or ``""``.
+    - :attr:`error_details` -- the detail objects as received, unknown types
+      included.  The typed accessors (:meth:`retry_info`, :meth:`bad_request`,
+      ...) return the catalog entry of that type, ignoring the rest.
+
+    :meth:`is_retryable` classifies; nothing here retries.  Automatic retry is
+    opt-in because a method may not be idempotent.
+    """
+
+    def __init__(
+        self,
+        error_type: str,
+        error_message: str,
+        remote_traceback: str,
+        *,
+        request_id: str = "",
+        error_code: str = "",
+        error_kind: str = "",
+        error_details: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Initialize with error details from the remote side.
+
+        Args:
+            error_type: The remote exception's class name.
+            error_message: The remote message.
+            remote_traceback: The remote traceback, or ``""`` when the server
+                has tracebacks turned off.
+            request_id: The request correlation ID, when known.
+            error_code: The ``vgi_rpc.error_code`` value, or ``""``.
+            error_kind: The ``vgi_rpc.error_kind`` value, or ``""``.
+            error_details: The decoded ``vgi_rpc.error_details`` objects.
+
+        """
         self.error_type = error_type
         self.error_message = error_message
         self.remote_traceback = remote_traceback
         self.request_id = request_id
+        self.error_code = error_code
+        self.error_kind = error_kind
+        self.error_details: list[dict[str, Any]] = list(error_details) if error_details else []
         super().__init__(f"{error_type}: {error_message}")
+
+    @property
+    def code(self) -> Code:
+        """The canonical code; ``UNKNOWN`` when absent or unrecognised."""
+        return Code.parse(self.error_code or None)
+
+    def is_retryable(self) -> bool:
+        """Whether retrying this call is warranted, by the rule in WIRE_PROTOCOL.md §8.
+
+        ``UNAVAILABLE`` always; ``RESOURCE_EXHAUSTED`` only with ``RetryInfo``.
+        When :meth:`retry_info` is present a retry waits at least that long.
+        """
+        return is_retryable(self.code, self.error_details)
+
+    def details(self) -> list[ErrorDetail]:
+        """Return the details this client understands, in wire order; unknown types skipped."""
+        return [d for d in (parse_error_detail(obj) for obj in self.error_details) if d is not None]
+
+    def _detail[T](self, cls: type[T]) -> T | None:
+        for detail in self.details():
+            if isinstance(detail, cls):
+                return detail
+        return None
+
+    def error_info(self) -> ErrorInfo | None:
+        """Return the ``vgi_rpc.ErrorInfo`` detail, if present."""
+        return self._detail(ErrorInfo)
+
+    def retry_info(self) -> RetryInfo | None:
+        """Return the ``vgi_rpc.RetryInfo`` detail, if present."""
+        return self._detail(RetryInfo)
+
+    def bad_request(self) -> BadRequest | None:
+        """Return the ``vgi_rpc.BadRequest`` detail, if present."""
+        return self._detail(BadRequest)
+
+    def precondition_failure(self) -> PreconditionFailure | None:
+        """Return the ``vgi_rpc.PreconditionFailure`` detail, if present."""
+        return self._detail(PreconditionFailure)
+
+    def quota_failure(self) -> QuotaFailure | None:
+        """Return the ``vgi_rpc.QuotaFailure`` detail, if present."""
+        return self._detail(QuotaFailure)
+
+    def resource_info(self) -> ResourceInfo | None:
+        """Return the ``vgi_rpc.ResourceInfo`` detail, if present."""
+        return self._detail(ResourceInfo)
+
+    def help(self) -> Help | None:
+        """Return the ``vgi_rpc.Help`` detail, if present."""
+        return self._detail(Help)
+
+    def localized_message(self) -> LocalizedMessage | None:
+        """Return the ``vgi_rpc.LocalizedMessage`` detail, if present."""
+        return self._detail(LocalizedMessage)
 
 
 class VersionError(Exception):
@@ -711,6 +820,49 @@ class ProtocolVersionError(VersionError):
     """
 
     error_kind: ClassVar[str] = "protocol_version_mismatch"
+    error_code: ClassVar[Code] = Code.FAILED_PRECONDITION
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        protocol: str = "",
+        client_version: str = "",
+        server_version: str = "",
+    ) -> None:
+        """Build the error, keeping the two versions for the precondition detail.
+
+        Args:
+            message: The directional, human-readable explanation.
+            protocol: The protocol whose version gate refused the call.
+            client_version: What the client declared, or ``""`` when it declared none.
+            server_version: What the server's binding declares.
+
+        """
+        super().__init__(message)
+        self.protocol = protocol
+        self.client_version = client_version
+        self.server_version = server_version
+
+    @property
+    def error_details(self) -> list[PreconditionFailure]:
+        """One ``protocol_version`` violation naming the protocol, when known."""
+        if not self.protocol:
+            return []
+        return [
+            PreconditionFailure(
+                violations=(
+                    PreconditionViolation(
+                        type="protocol_version",
+                        subject=self.protocol,
+                        description=(
+                            f"client declares {self.client_version or '<none>'}, "
+                            f"server requires {self.server_version}; major and minor must match"
+                        ),
+                    ),
+                )
+            )
+        ]
 
 
 class MethodNotImplementedError(AttributeError):
@@ -727,6 +879,7 @@ class MethodNotImplementedError(AttributeError):
     """
 
     error_kind: ClassVar[str] = "method_not_implemented"
+    error_code: ClassVar[Code] = Code.UNIMPLEMENTED
 
 
 class ProtocolError(ValueError):
@@ -754,6 +907,7 @@ class ProtocolNotSpecifiedError(ProtocolError):
     """
 
     error_kind: ClassVar[str] = "protocol_not_specified"
+    error_code: ClassVar[Code] = Code.INVALID_ARGUMENT
 
 
 class ProtocolNotSupportedError(ProtocolError):
@@ -767,6 +921,7 @@ class ProtocolNotSupportedError(ProtocolError):
     """
 
     error_kind: ClassVar[str] = "protocol_not_supported"
+    error_code: ClassVar[Code] = Code.UNIMPLEMENTED
 
 
 class SessionLostError(Exception):
@@ -783,6 +938,7 @@ class SessionLostError(Exception):
     """
 
     error_kind: ClassVar[str] = "session_lost"
+    error_code: ClassVar[Code] = Code.ABORTED
 
 
 class ServerDrainingError(Exception):
@@ -796,6 +952,24 @@ class ServerDrainingError(Exception):
     """
 
     error_kind: ClassVar[str] = "server_draining"
+    error_code: ClassVar[Code] = Code.UNAVAILABLE
+
+    def __init__(self, message: str = "", *, retry_after: float = 1.0) -> None:
+        """Build the error.
+
+        Args:
+            message: Human-readable explanation.
+            retry_after: Seconds before a retry -- which a load balancer will
+                usually route to a worker that is not draining.
+
+        """
+        super().__init__(message)
+        self.retry_after = retry_after
+
+    @property
+    def error_details(self) -> list[RetryInfo]:
+        """The retry hint."""
+        return [RetryInfo(retry_delay_seconds=float(self.retry_after))]
 
 
 # ---------------------------------------------------------------------------

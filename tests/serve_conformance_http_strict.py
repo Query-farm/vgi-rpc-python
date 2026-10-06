@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 
 from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.external import ExternalLocationConfig
 from vgi_rpc.http import serve_http
 from vgi_rpc.rpc import RpcServer
@@ -85,6 +86,7 @@ def main() -> None:
         ConformanceServiceImpl(external_storage=external_location.storage if external_location else None),
         enable_describe=args.describe,
         external_location=external_location,
+        extra_protocols=conformance_extra_protocols(),
     )
     serve_http(
         server,

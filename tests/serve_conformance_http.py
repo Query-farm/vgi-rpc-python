@@ -33,6 +33,7 @@ from vgi_rpc.conformance.identity_fixture import (
     conformance_mint_grant,
     conformance_resolve_token,
 )
+from vgi_rpc.conformance.secondary import conformance_extra_protocols
 from vgi_rpc.external import Compression, ExternalLocationConfig, ExternalStorage, FetchConfig
 from vgi_rpc.http import DrainHandle, drain_handle, make_wsgi_app, serve_http
 from vgi_rpc.rpc import AuthContext, RpcServer
@@ -384,6 +385,7 @@ def main() -> None:
             impl,
             enable_describe=args.describe,
             identity=identity,
+            extra_protocols=conformance_extra_protocols(),
         )
         _maybe_access_log(server, args.access_log)
         if not enable_sticky:
@@ -464,6 +466,7 @@ def main() -> None:
         enable_describe=args.describe,
         external_location=external_location,
         identity=identity,
+        extra_protocols=conformance_extra_protocols(),
     )
     _maybe_access_log(server, args.access_log)
 

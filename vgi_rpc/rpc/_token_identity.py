@@ -55,6 +55,7 @@ import time
 import warnings
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
+from vgi_rpc.errors import AuthUnavailableError, Code, RetryInfo
 from vgi_rpc.utils import ArrowSerializableDataclass
 
 if TYPE_CHECKING:
@@ -119,6 +120,7 @@ class IntrospectionRefusedError(PermissionError):
     """
 
     error_kind: ClassVar[str] = "introspection_refused"
+    error_code: ClassVar[Code] = Code.PERMISSION_DENIED
 
 
 class TokenUnresolvedError(ValueError):
@@ -130,6 +132,7 @@ class TokenUnresolvedError(ValueError):
     """
 
     error_kind: ClassVar[str] = "token_unresolved"
+    error_code: ClassVar[Code] = Code.NOT_FOUND
 
 
 class StaleAuthError(PermissionError):
@@ -141,6 +144,7 @@ class StaleAuthError(PermissionError):
     """
 
     error_kind: ClassVar[str] = "stale_auth"
+    error_code: ClassVar[Code] = Code.UNAUTHENTICATED
 
 
 class GrantRefusedError(PermissionError):
@@ -150,6 +154,7 @@ class GrantRefusedError(PermissionError):
     """
 
     error_kind: ClassVar[str] = "grant_refused"
+    error_code: ClassVar[Code] = Code.PERMISSION_DENIED
 
 
 class IdentityUnavailableError(Exception):
@@ -163,12 +168,23 @@ class IdentityUnavailableError(Exception):
     """
 
     error_kind: ClassVar[str] = "identity_unavailable"
+    error_code: ClassVar[Code] = Code.UNAVAILABLE
 
-    def __init__(self, detail: str = "", *, retry_after: int = 5) -> None:
+    def __init__(self, detail: str = "", *, retry_after: float = 5) -> None:
         """Build the error, carrying how long the caller should wait."""
         super().__init__(detail or "identity lookup unavailable")
         self.detail = detail
         self.retry_after = retry_after
+
+    @property
+    def error_details(self) -> list[RetryInfo]:
+        """The retry hint.  Required on this kind (WIRE_PROTOCOL.md §16).
+
+        ``retry_after`` sat on this class in every port and reached the wire in
+        none, so a caller could tell the answer was transient but not when to
+        ask again.
+        """
+        return [RetryInfo(retry_delay_seconds=float(self.retry_after))]
 
 
 def normalise_principals(principals: Iterable[str] | None) -> frozenset[str]:
@@ -442,7 +458,9 @@ class IdentityImpl:
         Args:
             resolve_token: ``(token) -> TokenIdentity | None``.  ``None`` means
                 the store answered and the credential is unknown; raise
-                :class:`IdentityUnavailableError` for "not knowable".
+                :class:`IdentityUnavailableError` -- or the transport-auth
+                :class:`~vgi_rpc.errors.AuthUnavailableError`, which is
+                translated to it with its retry hint -- for "not knowable".
             mint_grant: ``(principal, purpose, scopes, ttl_seconds) -> IssuedGrant``.
             introspect_principals: Who may call ``introspect_token``.  Required
                 whenever *resolve_token* is supplied; there is no permissive
@@ -500,7 +518,10 @@ class IdentityImpl:
         check_introspector(ctx.auth, self._principals)
         reject_jws_shaped(token)
 
-        identity = self._resolve_token(token)
+        try:
+            identity = self._resolve_token(token)
+        except AuthUnavailableError as exc:
+            raise _unavailable(exc) from exc
         if identity is None:
             # Uniform with malformed and expired: reporting which would confirm
             # that a guessed credential exists.
@@ -515,4 +536,27 @@ class IdentityImpl:
         # The subject is the caller, never a parameter: cross-subject minting
         # is closed by construction rather than by a check that could be
         # forgotten in one of six ports.
-        return self._mint_grant(ctx.auth.principal or "", purpose, scopes, ttl_seconds)
+        try:
+            return self._mint_grant(ctx.auth.principal or "", purpose, scopes, ttl_seconds)
+        except AuthUnavailableError as exc:
+            raise _unavailable(exc) from exc
+
+
+def _unavailable(exc: AuthUnavailableError) -> IdentityUnavailableError:
+    """Translate the transport-auth "could not find out" into ``identity_unavailable``.
+
+    A hook calling the same backing store an authenticator does will raise the
+    error an authenticator raises, and the worker docs tell it to.  Left
+    untranslated it reaches the wire unclassified -- no kind, no retry hint --
+    and a caller can no longer tell an outage from a refusal, which is the one
+    distinction this protocol's error kinds exist to carry.  The retry hint is
+    kept, because the store that is down is the one that knows how long.
+
+    Args:
+        exc: What the hook raised.
+
+    Returns:
+        The equivalent identity error, with the same retry hint.
+
+    """
+    return IdentityUnavailableError(exc.detail or "identity lookup unavailable", retry_after=exc.retry_after)

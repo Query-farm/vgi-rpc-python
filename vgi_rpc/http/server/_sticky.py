@@ -532,7 +532,10 @@ class _StickyMiddleware:
                 # produce, so clients see a clean RpcError(error_type='SessionLostError')
                 # with vgi_rpc.error_kind = "session_lost" in the metadata.
                 # resp.complete signals Falcon to skip route dispatch.
-                _set_error_response(resp, exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+                # No traceback: raised inside the middleware, which holds no
+                # server reference, so the trace would describe only framework
+                # internals and the setting cannot be read here.
+                _set_error_response(resp, exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR, include_traceback=False)
                 resp.complete = True
                 return
             # Acquire the per-session RLock for the duration of dispatch.

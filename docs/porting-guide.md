@@ -22,6 +22,15 @@ See [`WIRE_PROTOCOL.md`](WIRE_PROTOCOL.md). Concretely:
     - **The type-token table is exhaustive on purpose.** A type not in it must raise, never fall back to your Arrow binding's `to_string` — that output differs between ports and across Arrow releases, and a silent fallback is a one-sided hash divergence that surfaces as an unexplained mismatch at somebody else's client.
 - **Exempt reflection from the `protocol_version` gate**, and gate every other protocol against *its own* declared version rather than a server-wide one. Reflection is what a mismatched client calls to find out what mismatched.
 - **Reject a parameter the protocol does not declare**, naming the declared set. A strict version gate on a lenient deserializer is two policies in one codepath.
+- **Let an application host several protocols** ([§3.1, "Hosting several application protocols"](WIRE_PROTOCOL.md)). A public construction-time API that takes any number of `(protocol, implementation)` pairs, fixed for the server's lifetime, hosted identically on every transport. Apply the reserved `vgi_rpc.` prefix check to **every** registered name however it was derived (declared, from a class/interface name, generated); refuse duplicate names; list application protocols in registration order, primary first. No method-subset or feature-token API — the protocol is the unit of optionality.
+- **Emit the error model on every EXCEPTION batch** ([§8, "Error model"](WIRE_PROTOCOL.md)): `vgi_rpc.error_code` always (the code's *name*; `UNKNOWN` when unclassified), `vgi_rpc.error_kind` when classified, and `vgi_rpc.error_details` as a compact JSON array — each mirrored into `log_extra`. Every kind you define declares exactly one code; the table for the framework's kinds is in §8. Enforce the 4096-byte cap on the serialized array by **dropping the whole array**, never a prefix; drop it too when a `@type` repeats.
+- **Give the server a traceback setting** (§8, "Tracebacks"): `log_extra.traceback` / `frames` / `cause` / `context` are **included by default on every transport**; the per-server setting turns them off everywhere. The type, message and error model are sent either way. A language without exception stacks sends a synthesized, non-empty trace (at minimum `<ErrorType>: <message>` and `<protocol>/<method>`).
+- **Seal the hosted protocol set** no later than when the server first starts serving; registering after that MUST fail ([§3.1](WIRE_PROTOCOL.md)).
+- **Run `vgi-rpc-test-hosted` against a worker whose protocol order is not alphabetical**, so a listing sorted by name is caught — the port suite cannot see it ([`MULTI_PROTOCOL_HOSTING.md`](https://github.com/Query-farm/vgi-rpc-python/blob/main/tools/cross-port/specs/MULTI_PROTOCOL_HOSTING.md) §4).
+- **Retry hints reach the wire.** `server_draining` and `identity_unavailable` carry `vgi_rpc.RetryInfo`; the latter is required ([§16](WIRE_PROTOCOL.md)).
+- **Translate the transport-auth "unavailable" error in the identity implementation** (§16): a `resolve_token` or `mint_grant` hook raising it is emitted as `identity_unavailable` with *that error's* retry hint. Check both hooks.
+- **Emit `features` as an empty list** in every reflection summary and description ([§14](WIRE_PROTOCOL.md)); clients ignore it.
+- **Client: surface all three layers on every decode path** — unary, stream init, exchange, externalized error batches — as `error_code` (`""` when absent), `error_kind` (`""`) and `error_details` (`[]`, unknown types kept), with typed accessors for the catalog and an `is_retryable()` that follows §8's rule. Do not retry RPC errors automatically.
 
 ### 2. The CLI surface
 
@@ -51,6 +60,8 @@ This is the conformance proof for observability. The full spec is in [`access-lo
 ### 4. The conformance service
 
 Your repo must include a runnable conformance worker that registers the [`vgi_rpc.conformance.ConformanceService`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/conformance/_protocol.py) protocol. The Python definition is the reference; your port translates each method to native types preserving Arrow schema. Method names, parameter names, and stream-state semantics must match exactly.
+
+It must also host **`conformance.Secondary.v1`** ([`vgi_rpc/conformance/secondary.py`](https://github.com/Query-farm/vgi-rpc-python/blob/main/vgi_rpc/conformance/secondary.py)) as a second application protocol, registered after `ConformanceService`, on every transport. Its hash is pinned and checked by `describe_diff.py`; its behaviour, and the extra runner fixture the shared suite needs (`conformance_protocol_connector`), are specified in [`MULTI_PROTOCOL_HOSTING.md`](https://github.com/Query-farm/vgi-rpc-python/blob/main/tools/cross-port/specs/MULTI_PROTOCOL_HOSTING.md). The client driver must report `error_code`, `error_kind` and `error_details` in its error object ([`CLIENT_DRIVER_PROTOCOL.md`](https://github.com/Query-farm/vgi-rpc-python/blob/main/tools/cross-port/specs/CLIENT_DRIVER_PROTOCOL.md) §2), and the identity fixture must raise the transport-auth unavailable error for `conformance-auth-unavailable-token` and purpose `conformance-auth-unavailable`.
 
 Run `vgi-rpc-test --list` to see the test surface. ~150 tests cover unary, streaming, errors, logging, defaults, enums, optionals, externalized batches, and HTTP-specific behavior.
 
@@ -326,6 +337,9 @@ likely to get subtly wrong:
   as protocol methods every rejection surfaces the same way. A caller that
   negative-caches `identity_unavailable` locks out valid users when a store
   blips.
+- **`identity_unavailable` carries `RetryInfo`, and the transport-auth
+  "unavailable" error raised from either hook is translated to it**, keeping
+  its retry hint. Five of seven ports sent that error unclassified.
 
 ## HTTP proxy proof
 

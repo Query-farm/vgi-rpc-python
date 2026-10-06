@@ -10,11 +10,12 @@ import re
 from contextvars import ContextVar
 from http import HTTPStatus
 from io import BytesIO, IOBase
-from typing import NamedTuple
+from typing import ClassVar, NamedTuple
 
 import falcon
 import pyarrow as pa
 
+from vgi_rpc.errors import Code
 from vgi_rpc.rpc import _EMPTY_SCHEMA, _write_error_batch
 from vgi_rpc.rpc._common import _current_request_batch
 from vgi_rpc.utils import new_ipc_stream
@@ -47,7 +48,13 @@ _current_response_budget: ContextVar[_ResponseBudget] = ContextVar(
 
 
 class ResponseTooLargeError(RuntimeError):
-    """A successful RPC result could not fit the negotiated HTTP limit."""
+    """A successful RPC result could not fit the negotiated HTTP limit.
+
+    ``RESOURCE_EXHAUSTED`` with no ``RetryInfo``, so not retryable: the same
+    call against the same limits produces the same result.
+    """
+
+    error_code: ClassVar[Code] = Code.RESOURCE_EXHAUSTED
 
 
 def _minimum_present(*values: int | None) -> int | None:
@@ -176,7 +183,11 @@ def _check_content_type(req: falcon.Request) -> None:
 
 
 def _error_response_stream(
-    exc: BaseException, schema: pa.Schema = _EMPTY_SCHEMA, server_id: str | None = None
+    exc: BaseException,
+    schema: pa.Schema = _EMPTY_SCHEMA,
+    server_id: str | None = None,
+    *,
+    include_traceback: bool,
 ) -> BytesIO:
     """Serialize an exception as a complete Arrow IPC error stream.
 
@@ -184,6 +195,9 @@ def _error_response_stream(
         exc: The exception to serialize.
         schema: Arrow schema for the error stream (default empty).
         server_id: Optional server identifier injected into error metadata.
+        include_traceback: Whether the batch carries the traceback.  Required,
+            so no call site inherits a default by forgetting to decide --
+            ``RpcServer.include_tracebacks`` is the answer.
 
     Returns:
         A ``BytesIO`` positioned at the start, containing the IPC stream.
@@ -191,7 +205,7 @@ def _error_response_stream(
     """
     buf = BytesIO()
     with new_ipc_stream(buf, schema) as writer:
-        _write_error_batch(writer, schema, exc, server_id=server_id)
+        _write_error_batch(writer, schema, exc, server_id=server_id, include_traceback=include_traceback)
     buf.seek(0)
     return buf
 
@@ -251,8 +265,9 @@ def _set_error_response(
     status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
     schema: pa.Schema = _EMPTY_SCHEMA,
     server_id: str | None = None,
+    include_traceback: bool,
 ) -> None:
     """Set a Falcon response to an Arrow IPC error stream."""
     resp.content_type = _ARROW_CONTENT_TYPE
-    resp.stream = _error_response_stream(exc, schema, server_id=server_id)
+    resp.stream = _error_response_stream(exc, schema, server_id=server_id, include_traceback=include_traceback)
     _set_http_status(resp, status_code)

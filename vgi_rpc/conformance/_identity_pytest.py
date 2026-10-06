@@ -53,6 +53,8 @@ from pyarrow import ipc
 
 from vgi_rpc.conformance.identity_fixture import (
     AUTH_TIME_HEADER,
+    AUTH_UNAVAILABLE_PURPOSE,
+    AUTH_UNAVAILABLE_RETRY_AFTER,
     GRANT_EXPIRES_AT,
     GRANT_ID,
     GRANT_TOKEN_PREFIX,
@@ -72,6 +74,7 @@ from vgi_rpc.conformance.identity_fixture import (
     SUBJECT_TOKEN,
     SUBJECT_TOKEN_NAME,
     SUBJECT_TTL,
+    TOKEN_AUTH_UNAVAILABLE,
     TOKEN_JWS_TRAP,
     TOKEN_MINIMAL,
     TOKEN_PADDED_PROBE,
@@ -79,8 +82,9 @@ from vgi_rpc.conformance.identity_fixture import (
     TOKEN_UNAVAILABLE,
     TOKEN_UNKNOWN,
     TOKEN_ZERO_TTL,
+    UNAVAILABLE_RETRY_AFTER,
 )
-from vgi_rpc.metadata import ERROR_KIND_KEY, LOG_EXTRA_KEY, LOG_LEVEL_KEY
+from vgi_rpc.metadata import ERROR_CODE_KEY, ERROR_DETAILS_KEY, ERROR_KIND_KEY, LOG_EXTRA_KEY, LOG_LEVEL_KEY
 from vgi_rpc.rpc._reflection import ProtocolList, Reflection, ServiceDescription
 from vgi_rpc.rpc._token_identity import Identity, IssuedGrant, TokenIdentity
 
@@ -111,6 +115,17 @@ _ERROR_KINDS = frozenset(
     }
 )
 
+#: The canonical code each identity kind carries (WIRE_PROTOCOL.md §8 and §16).
+#: Spelled out, like the kinds, so a port that maps one differently fails here
+#: rather than passing against a table derived from its own classes.
+_KIND_CODES = {
+    "introspection_refused": "PERMISSION_DENIED",
+    "token_unresolved": "NOT_FOUND",
+    "stale_auth": "UNAUTHENTICATED",
+    "grant_refused": "PERMISSION_DENIED",
+    "identity_unavailable": "UNAVAILABLE",
+}
+
 #: The eight codepoints every port MUST trim before the JWS shape test
 #: (``IDENTITY_V1_SPEC.md`` §4).  A port trimming a narrower set routes a
 #: padded JWS that another port refuses, which is the same hole one level
@@ -138,13 +153,35 @@ _OVERSIZE_PADDED = "x" + " " * 9000
 
 
 class _Rejected(Exception):
-    """A call answered with a typed error rather than a result."""
+    """A call answered with a typed error rather than a result.
 
-    def __init__(self, kind: str | None, error_type: str, message: str) -> None:
+    Carries all three layers of the error model as they arrived in the
+    top-level metadata (WIRE_PROTOCOL.md §8), not only the kind.
+    """
+
+    def __init__(
+        self,
+        kind: str | None,
+        error_type: str,
+        message: str,
+        *,
+        code: str | None = None,
+        details: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.kind = kind
         self.error_type = error_type
         self.message = message
-        super().__init__(f"{error_type}[{kind}]: {message}")
+        self.code = code
+        self.details: list[dict[str, Any]] = details or []
+        super().__init__(f"{error_type}[{code}/{kind}]: {message}")
+
+    def retry_delay(self) -> float | None:
+        """Return the ``vgi_rpc.RetryInfo`` delay, or ``None`` when absent."""
+        for detail in self.details:
+            if detail.get("@type") == "vgi_rpc.RetryInfo":
+                delay = detail.get("retry_delay_seconds")
+                return float(delay) if isinstance(delay, int | float) else None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -215,10 +252,14 @@ def _read_result(response: httpx2.Response, cls: type[Any]) -> Any:
         if meta.get(LOG_LEVEL_KEY.decode(), b"").decode(errors="replace") == "EXCEPTION":
             extra = json.loads(meta.get(LOG_EXTRA_KEY.decode(), b"{}").decode())
             kind_raw = meta.get(ERROR_KIND_KEY.decode())
+            code_raw = meta.get(ERROR_CODE_KEY.decode())
+            details_raw = meta.get(ERROR_DETAILS_KEY.decode())
             raise _Rejected(
                 kind_raw.decode() if kind_raw is not None else None,
                 str(extra.get("exception_type", "")),
                 str(extra.get("exception_message", "")),
+                code=code_raw.decode() if code_raw is not None else None,
+                details=json.loads(details_raw) if details_raw is not None else [],
             )
         if batch.num_rows and batch.schema.names == ["result"]:
             payload = batch.column(0)[0].as_py()
@@ -933,6 +974,59 @@ class TestUnavailableIsTransient:
         )
 
 
+class TestUnavailableCarriesARetryHint:
+    """``identity_unavailable`` says *when* to ask again, not only *that* the answer is transient.
+
+    ``retry_after`` sat on the identity-unavailable error in all seven ports and
+    reached the wire in none: a caller learned the failure was transient and
+    then had to guess the backoff.  WIRE_PROTOCOL.md §16 now requires
+    ``RetryInfo`` on this kind, and the transport-auth "could not find out"
+    error raised from either hook must be translated to it with its own hint.
+    """
+
+    def test_the_identity_error_carries_its_retry_hint(self, request: pytest.FixtureRequest) -> None:
+        """The resolver's own unavailable error reaches the wire with code and hint."""
+        rejected = _refusal(_introspect, _identity_port(request), TOKEN_UNAVAILABLE)
+        assert (rejected.code, rejected.kind) == ("UNAVAILABLE", "identity_unavailable"), (
+            f"a store outage reported code={rejected.code!r} kind={rejected.kind!r}; expected "
+            f"UNAVAILABLE / identity_unavailable"
+        )
+        assert rejected.retry_delay() == UNAVAILABLE_RETRY_AFTER, (
+            f"identity_unavailable carried details {rejected.details!r}; it MUST carry vgi_rpc.RetryInfo "
+            f"with the hook's hint ({UNAVAILABLE_RETRY_AFTER}s). Without it a caller knows to retry but not when."
+        )
+
+    def test_the_transport_auth_error_is_translated_on_introspect(self, request: pytest.FixtureRequest) -> None:
+        """A resolver raising the transport-auth unavailable error yields ``identity_unavailable``.
+
+        The fixture's resolver raises the port's transport-auth error (Python's
+        ``AuthUnavailableError``) with a 7-second hint for this token.
+        Untranslated, it reaches the wire with no kind, and a caller can no
+        longer tell an outage from a refusal.
+        """
+        rejected = _refusal(_introspect, _identity_port(request), TOKEN_AUTH_UNAVAILABLE)
+        assert rejected.kind == "identity_unavailable", (
+            f"a resolver that raised the transport-auth unavailable error surfaced as "
+            f"error_type={rejected.error_type!r} kind={rejected.kind!r}. It MUST be translated to "
+            f"identity_unavailable (WIRE_PROTOCOL.md §16): TypeScript and Rust did, five ports did not."
+        )
+        assert rejected.code == "UNAVAILABLE", f"code={rejected.code!r}"
+        assert rejected.retry_delay() == AUTH_UNAVAILABLE_RETRY_AFTER, (
+            f"the translated error carried details {rejected.details!r}. The hook's own hint "
+            f"({AUTH_UNAVAILABLE_RETRY_AFTER}s) must survive translation; a port substituting its default "
+            f"reports the identity error's hint instead."
+        )
+
+    def test_the_transport_auth_error_is_translated_on_issue_grant(self, request: pytest.FixtureRequest) -> None:
+        """The rule covers both hooks: a minter raising it is translated too."""
+        rejected = _refusal(_issue, _identity_port(request), purpose=AUTH_UNAVAILABLE_PURPOSE)
+        assert (rejected.code, rejected.kind) == ("UNAVAILABLE", "identity_unavailable"), (
+            f"a minter that raised the transport-auth unavailable error surfaced as "
+            f"code={rejected.code!r} kind={rejected.kind!r}; the translation must wrap both hooks."
+        )
+        assert rejected.retry_delay() == AUTH_UNAVAILABLE_RETRY_AFTER, f"details={rejected.details!r}"
+
+
 class TestIntrospectionIsNotThrottled:
     """The allowlist is the control; the protocol does not rate-limit introspection.
 
@@ -1132,3 +1226,25 @@ class TestErrorKindsReachTheWire:
         )
         for expected, got in observed.items():
             assert got == expected, f"expected error_kind={expected!r}, got {got!r}"
+
+    def test_every_kind_carries_its_code(self, request: pytest.FixtureRequest) -> None:
+        """Each kind names exactly one canonical code, and the wire carries it.
+
+        The code is required whenever a kind is set (WIRE_PROTOCOL.md §8).  A
+        client's generic handling -- retry or not, how to show it -- reads the
+        code alone, so a kind with the wrong code is retried when it is final,
+        or cached when it is transient.
+        """
+        port = _identity_port(request)
+        probes = {
+            "introspection_refused": _refusal(_introspect, port, SUBJECT_TOKEN, principal=OUTSIDER_PRINCIPAL),
+            "token_unresolved": _refusal(_introspect, port, TOKEN_UNKNOWN),
+            "identity_unavailable": _refusal(_introspect, port, TOKEN_UNAVAILABLE),
+            "stale_auth": _refusal(_issue, port, auth_time=None),
+            "grant_refused": _refusal(_issue, port, purpose=REFUSED_PURPOSE),
+        }
+        observed = {kind: (rejected.kind, rejected.code) for kind, rejected in probes.items()}
+        expected = {kind: (kind, code) for kind, code in _KIND_CODES.items()}
+        assert observed == expected, (
+            f"kind -> code mapping on the wire: {observed}; required: {expected}. The table is WIRE_PROTOCOL.md §16's."
+        )

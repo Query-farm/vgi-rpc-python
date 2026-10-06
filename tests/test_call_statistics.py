@@ -214,6 +214,7 @@ class TestAccessLogStats:
                 duration_ms=10.0,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
                 stats=stats,
             )
 
@@ -238,6 +239,7 @@ class TestAccessLogStats:
                 duration_ms=10.0,
                 status="ok",
                 protocol_hash=_TEST_PROTOCOL_HASH,
+                error_code="",
             )
 
         record = next(r for r in caplog.records if r.name == "vgi_rpc.access")
