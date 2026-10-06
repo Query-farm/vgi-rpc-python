@@ -2333,6 +2333,40 @@ parsed and never logged. `expires_at` is required *because* the framework cannot
 enforce it: the real lifetime lives inside the opaque token, so this is a
 declaration, and a worker that must state a lifetime has thought about one.
 
+### Accepting identity credentials
+
+A grant is minted to be presented later as an ordinary bearer, and
+`resolve_token` resolves opaque bearers — so both MUST feed back into HTTP
+authentication. The byte-level contract is `IDENTITY_V1_SPEC.md` §9 (with
+vectors in `vgi_rpc/conformance/grant_token_vectors.json`); in summary:
+
+- **Sealed grants, opt-in.** When a grant key is configured
+  (`VGI_RPC_GRANT_KEYS`, base64 of exactly 32 bytes each, first mints / all
+  verify; `--grant-key`), the framework provides `mint_grant` unless the
+  worker supplies one, and accepts its own grants as bearers. Not configured,
+  nothing changes. A malformed key stops the worker at startup.
+- **Format.** `"vgig1." base64url_nopad(kid(8) ‖ envelope)`, the envelope being
+  the state-token XChaCha20-Poly1305 envelope (version `0x01`), AAD
+  `"vgi_rpc.grant.v1"‖0x00‖kid‖audience`, payload a fixed little-endian
+  binary record of `issued_at, expires_at, grant_id, principal, purpose,
+  scopes`. Lifetime ≤ the configured maximum; 60 s clock skew.
+- **AuthContext.** `domain "grant"`, the grant's principal, claims
+  `{grant_id, scopes, purpose}` and **no `auth_time`** — so `issue_grant`
+  refuses a grant-authenticated caller (`stale_auth`): grants never mint grants.
+- **`resolve_token` as a bearer authenticator.** Consulted for bearers the
+  earlier authenticators did not accept: an identity authenticates (`domain
+  "token"`); `None` falls through (401 if nothing accepts); an unavailable
+  error is 503 with `Retry-After`, never 401. Never consulted for a `vgig1.`
+  token, a JWS-shaped one, or one over 4096 bytes.
+- **Order.** The deployment's authenticators (JWT, static) → sealed grants
+  (prefix check; a non-`vgig1.` bearer never reaches the verifier, and a
+  `vgig1.` bearer that fails is 401 and stops the chain) → `resolve_token`.
+- **Errors.** A bad, tampered, wrong-key or expired grant is a 401 on the auth
+  path (`invalid_credential`, or `expired_credential` once authentic) —
+  canonical code `UNAUTHENTICATED`.
+- **Revocation.** Sealed grants are not individually revocable: keep the
+  maximum lifetime short and re-issue; removing a key revokes all its grants.
+
 ### Error kinds
 
 These were an HTTP route whose callers classified definitive-versus-transient on

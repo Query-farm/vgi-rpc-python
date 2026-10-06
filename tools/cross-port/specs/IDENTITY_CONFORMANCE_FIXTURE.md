@@ -616,3 +616,49 @@ something.
 method: it was `5cc768…`, then `4b0269…`, then `05479410…` after
 `published_string`. The value to compare against is always the one pinned in
 `tests/golden/protocol_hash_vector.json`, not a copy quoted in a spec.)
+
+## 10. The grant worker (sealed grants and bearer acceptance)
+
+A **third** identity worker, the runner fixture `conformance_http_grant_port`
+(reference: `tests/serve_conformance_http.py --identity grants`). It differs
+from the both-methods worker in three ways:
+
+- **No mint hook** — the framework mints sealed grants (IDENTITY_V1_SPEC §9).
+- **Grant keys:** current `0x10..0x2f` (mints), previous `0x30..0x4f`
+  (verifies only); audience `"conformance"`; max TTL `3600`; skew 60. These keys
+  are published on purpose: the suite mints with them to test your verifier and
+  decodes your grants to test your minter. Never use them anywhere else.
+- **Hosts `conformance.Whoami.v1`**, `whoami() -> utf8`, returning the caller's
+  `AuthContext` as compact JSON with sorted keys:
+  `{"authenticated":bool,"claims":{…},"domain":str,"principal":str}` (`""` for
+  absent domain/principal). protocol_hash
+  `a280333ba72432020e162cab388a78355969a30aa74f0665ad9d2932d7a10b8f`, preimage
+  `{"methods":[{"has_header":false,"has_return":true,"name":"whoami","params":[],"result":[{"name":"result","nullable":false,"type":"utf8"}],"type":"unary"}],"protocol":"conformance.Whoami.v1"}`.
+
+Resolver, allowlist and `max_auth_age` are as in §3. Authentication: the
+principal-header authenticator, which now **raises "not mine" when there is no
+principal header but an `Authorization` header is present** (so the bearer
+authenticators are reached), and answers anonymous when neither is present;
+then sealed grants; then `resolve_token`.
+
+What the groups assert (`vgi_rpc/conformance/_grant_pytest.py`):
+
+| Probe | Expected |
+|---|---|
+| `issue_grant` as `minter@…` (fresh), then `whoami` with `Bearer <token>` | `{"authenticated":true,"claims":{"grant_id","purpose","scopes"},"domain":"grant","principal":"minter@conformance.example"}` |
+| the same token, reference-verified with the fixture keys | opens; kid = current key's; lifetime capped at 3600 |
+| `issue_grant` with `Bearer <grant>` | `stale_auth` — grants never mint grants |
+| reference-minted grant under current / previous key | accepted (`domain` `grant`) |
+| expired 30 s ago | accepted (skew) |
+| tampered, wrong key, wrong audience, padded | 401, `VGI-Auth-Reason: invalid_credential` |
+| expired beyond skew | 401, `expired_credential` |
+| `vgig2.<body>` and the bare `<body>` | **accepted with `domain` `token`** — reached `resolve_token`, never the grant verifier |
+| `Bearer conformance-opaque-subject-token` | `domain` `token`, subject principal, `{"token_name":"conformance-subject"}` |
+| `Bearer conformance-unknown-token` | 401 |
+| `Bearer conformance-unavailable-token` / `…auth-unavailable-token` | 503, `Retry-After: 5` / `7` |
+| `Bearer <JWS trap>` | 401 — not resolved |
+| no credential | anonymous (`authenticated` false) |
+
+The rejection probes are *resolvable*: the fixture resolver answers for almost
+anything, so a grant that wrongly falls through to `resolve_token` turns a 401
+into a 200 — loud, not vacuous.

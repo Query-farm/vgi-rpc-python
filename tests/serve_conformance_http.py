@@ -30,6 +30,9 @@ from vgi_rpc.conformance.identity_fixture import (
     INTROSPECTOR_PRINCIPAL,
     MAX_AUTH_AGE,
     PRINCIPAL_HEADER,
+    Whoami,
+    WhoamiImpl,
+    conformance_grant_keys,
     conformance_mint_grant,
     conformance_resolve_token,
 )
@@ -68,6 +71,10 @@ def _principal_from_header(req: falcon.Request) -> AuthContext:
     """
     principal = req.get_header(_PRINCIPAL_HEADER)
     if not principal:
+        if req.get_header("Authorization"):
+            # A bearer: not ours.  Fall through to the identity bearer
+            # authenticators make_wsgi_app appends (grants, resolve_token).
+            raise ValueError("no conformance principal header")
         return AuthContext(domain=None, authenticated=False, principal=None)
     claims: dict[str, object] = {}
     auth_time = req.get_header(AUTH_TIME_HEADER)
@@ -312,15 +319,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--identity",
-        choices=("off", "both", "introspect-only"),
+        choices=("off", "both", "introspect-only", "grants"),
         default="off",
         help=(
             "Host vgi_rpc.Identity.v1 under the fixed conformance policy in "
             "vgi_rpc.conformance.identity_fixture. 'both' configures the "
             "resolve and mint hooks; 'introspect-only' configures only the "
             "resolver, so the binding -- and its protocol_hash -- narrows to "
-            "one method. Implies principal-header auth so the allowlist and "
-            "the freshness guard have something to read."
+            "one method. 'grants' configures the resolver and the fixture's "
+            "sealed-grant keys with no mint hook, so the framework mints and "
+            "accepts its own grants, and hosts conformance.Whoami.v1. Implies "
+            "principal-header auth so the allowlist and the freshness guard "
+            "have something to read."
         ),
     )
     parser.add_argument(
@@ -357,8 +367,12 @@ def main() -> None:
             mint_grant=conformance_mint_grant if args.identity == "both" else None,
             introspect_principals=[INTROSPECTOR_PRINCIPAL],
             max_auth_age=MAX_AUTH_AGE,
+            grant_keys=conformance_grant_keys() if args.identity == "grants" else None,
         )
     )
+    extra_protocols = conformance_extra_protocols()
+    if args.identity == "grants":
+        extra_protocols.append((Whoami, WhoamiImpl()))
     enable_sticky = not args.no_sticky
     # Fixed marker the canonical TestSticky::test_echo_header_round_trip
     # captures + replays. Operators wiring up real deployments use
@@ -385,7 +399,7 @@ def main() -> None:
             impl,
             enable_describe=args.describe,
             identity=identity,
-            extra_protocols=conformance_extra_protocols(),
+            extra_protocols=extra_protocols,
         )
         _maybe_access_log(server, args.access_log)
         if not enable_sticky:
@@ -466,7 +480,7 @@ def main() -> None:
         enable_describe=args.describe,
         external_location=external_location,
         identity=identity,
-        extra_protocols=conformance_extra_protocols(),
+        extra_protocols=extra_protocols,
     )
     _maybe_access_log(server, args.access_log)
 

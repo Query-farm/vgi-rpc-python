@@ -77,6 +77,13 @@ from vgi_rpc.http._common import (
 from vgi_rpc.http._common import (
     _UPLOAD_URL_SCHEMA as UPLOAD_URL_RESPONSE_SCHEMA,
 )
+from vgi_rpc.http._grant_auth import (
+    GRANT_AUTH_DOMAIN,
+    TOKEN_AUTH_DOMAIN,
+    compose_identity_authenticate,
+    grant_authenticate,
+    resolve_token_authenticate,
+)
 from vgi_rpc.http._iroh import IROH_ENDPOINT_HEADER, iroh_forwarded_header_provider
 from vgi_rpc.http._mtls import XfccElement, mtls_authenticate_xfcc
 from vgi_rpc.http._oauth import OAuthResourceMetadata
@@ -148,6 +155,11 @@ with contextlib.suppress(ImportError):
     )
 
 __all__ = [
+    "GRANT_AUTH_DOMAIN",
+    "TOKEN_AUTH_DOMAIN",
+    "compose_identity_authenticate",
+    "grant_authenticate",
+    "resolve_token_authenticate",
     "AUTH_PROXY_REQUIRED_HEADER",
     "AUTH_REASON_HEADER",
     "ACCEPT_MAX_RESPONSE_BYTES_HEADER",

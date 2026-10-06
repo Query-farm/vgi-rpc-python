@@ -39,6 +39,7 @@ from vgi_rpc.external import (
     publish_external,
 )
 from vgi_rpc.external_fetch import FetchConfig
+from vgi_rpc.grants import GrantClaims, GrantInvalidError, GrantKeys, mint_grant_token, verify_grant_token
 from vgi_rpc.introspect import (
     MethodDescription,
     ServiceDescription,
@@ -229,6 +230,12 @@ __all__ = [
     "ProtocolVersionError",
     "VersionError",
     "IPCError",
+    # Sealed grants (WIRE_PROTOCOL.md §16)
+    "GrantClaims",
+    "GrantInvalidError",
+    "GrantKeys",
+    "mint_grant_token",
+    "verify_grant_token",
     # Error model (WIRE_PROTOCOL.md §8)
     "AuthUnavailableError",
     "BadRequest",

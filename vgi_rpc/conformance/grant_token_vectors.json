@@ -1,0 +1,204 @@
+{
+  "description": "Sealed-grant test vectors (IDENTITY_V1_SPEC.md §9). A port's minter given minting_key, audience, max_ttl_seconds, nonce, now and request MUST produce exactly `token`; its verifier MUST accept every `accept` case and reject every `reject` case. Unless a case overrides them, verification uses verify_keys=[minting key of 'basic'], audience '', max_ttl_seconds 604800, clock_skew_seconds 60, now = issued_at + 60.",
+  "defaults": {
+    "verify_keys_b64": [
+      "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    ],
+    "audience": "",
+    "max_ttl_seconds": 604800,
+    "clock_skew_seconds": 60,
+    "now": 1767225660
+  },
+  "mint": [
+    {
+      "name": "basic",
+      "minting_key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "audience": "",
+      "max_ttl_seconds": 604800,
+      "nonce_hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+      "now": 1767225600,
+      "request": {
+        "principal": "alice@example.com",
+        "scopes": [
+          "read",
+          "write"
+        ],
+        "purpose": "nightly-report",
+        "ttl_seconds": 3600,
+        "grant_id": "g-0001"
+      },
+      "claims": {
+        "principal": "alice@example.com",
+        "scopes": [
+          "read",
+          "write"
+        ],
+        "purpose": "nightly-report",
+        "grant_id": "g-0001",
+        "issued_at": 1767225600,
+        "expires_at": 1767229200
+      },
+      "kid_hex": "9c8d333473aa0319",
+      "aad_hex": "7667695f7270632e6772616e742e7631009c8d333473aa0319",
+      "payload_hex": "00b955690000000010c75569000000000600672d303030311100616c696365406578616d706c652e636f6d0e006e696768746c792d7265706f7274020004007265616405007772697465",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9"
+    },
+    {
+      "name": "audience_unicode_no_scopes",
+      "minting_key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "audience": "conformance",
+      "max_ttl_seconds": 604800,
+      "nonce_hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+      "now": 1767225600,
+      "request": {
+        "principal": "zoë",
+        "scopes": [],
+        "purpose": "",
+        "ttl_seconds": 60,
+        "grant_id": "g-0002"
+      },
+      "claims": {
+        "principal": "zoë",
+        "scopes": [],
+        "purpose": "",
+        "grant_id": "g-0002",
+        "issued_at": 1767225600,
+        "expires_at": 1767225660
+      },
+      "kid_hex": "9c8d333473aa0319",
+      "aad_hex": "7667695f7270632e6772616e742e7631009c8d333473aa0319636f6e666f726d616e6365",
+      "payload_hex": "00b95569000000003cb95569000000000600672d3030303204007a6fc3ab00000000",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRazTdLXr5xlkpS6yukjaWOobjGHKsqvI5AW-Y045DoLpNDCWD__dALeW0A"
+    },
+    {
+      "name": "ttl_capped_to_max",
+      "minting_key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "audience": "",
+      "max_ttl_seconds": 3600,
+      "nonce_hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+      "now": 1767225600,
+      "request": {
+        "principal": "bob",
+        "scopes": [
+          "admin"
+        ],
+        "purpose": "p",
+        "ttl_seconds": 999999,
+        "grant_id": "g-0003"
+      },
+      "claims": {
+        "principal": "bob",
+        "scopes": [
+          "admin"
+        ],
+        "purpose": "p",
+        "grant_id": "g-0003",
+        "issued_at": 1767225600,
+        "expires_at": 1767229200
+      },
+      "kid_hex": "9c8d333473aa0319",
+      "aad_hex": "7667695f7270632e6772616e742e7631009c8d333473aa0319",
+      "payload_hex": "00b955690000000010c75569000000000600672d303030330300626f620100700100050061646d696e",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOpaTGfKmsFI-AX-QduNPbpeZGTigjSTGmM1i0ai2iW1D_v"
+    },
+    {
+      "name": "minted_by_second_key",
+      "minting_key_b64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+      "audience": "",
+      "max_ttl_seconds": 604800,
+      "nonce_hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+      "now": 1767225600,
+      "request": {
+        "principal": "carol",
+        "scopes": [
+          "read"
+        ],
+        "purpose": "rotation",
+        "ttl_seconds": 600,
+        "grant_id": "g-0004"
+      },
+      "claims": {
+        "principal": "carol",
+        "scopes": [
+          "read"
+        ],
+        "purpose": "rotation",
+        "grant_id": "g-0004",
+        "issued_at": 1767225600,
+        "expires_at": 1767226200
+      },
+      "kid_hex": "d2ba89ab0ab2f7ee",
+      "aad_hex": "7667695f7270632e6772616e742e763100d2ba89ab0ab2f7ee",
+      "payload_hex": "00b955690000000058bb5569000000000600672d3030303405006361726f6c0800726f746174696f6e0100040072656164",
+      "token": "vgig1.0rqJqwqy9-4BQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXOpg4wCZm_d8vxbpR5GPiJf9VoM7mJzJ3MYGiTvxQpRqKWS7HHaGVMGXw9ak-mqh6nymZ2Ur_axlshm1-Vx5Z1jw"
+    }
+  ],
+  "accept": [
+    {
+      "name": "within_skew_after_expiry",
+      "now": 1767229259,
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9"
+    },
+    {
+      "name": "rotation_old_key_verifies",
+      "verify_keys_b64": [
+        "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+      ],
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9"
+    }
+  ],
+  "reject": [
+    {
+      "name": "tampered_ciphertext",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLALUnhjslM9",
+      "expired": false
+    },
+    {
+      "name": "wrong_key",
+      "verify_keys_b64": [
+        "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU="
+      ],
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9",
+      "expired": false
+    },
+    {
+      "name": "wrong_audience",
+      "audience": "elsewhere",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9",
+      "expired": false
+    },
+    {
+      "name": "expired_beyond_skew",
+      "now": 1767229260,
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9",
+      "expired": true
+    },
+    {
+      "name": "not_yet_valid_beyond_skew",
+      "now": 1767225539,
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9",
+      "expired": true
+    },
+    {
+      "name": "wrong_prefix",
+      "token": "vgig2.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9",
+      "expired": false
+    },
+    {
+      "name": "padded_base64",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRafM9LXr5xlkpS6yukjaWOrezGcKWBnRtBzgWMDJf7hPpzdmUIKtLOW8x8RkUL30ezZjnz2E7ZMJj9KnHcUxDeh8Wa831Sn4qRHtLMLUnhjslM9=",
+      "expired": false
+    },
+    {
+      "name": "trailing_payload_byte",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRazTdLXr5xlkpO6ytUTOD_zCVS9IHFlTuB6nCwNOv-FEIez9EgKqL-Q_2sBmuxWSaT3rOucNrhwPqzG",
+      "expired": false
+    },
+    {
+      "name": "lifetime_over_max",
+      "token": "vgig1.nI0zNHOqAxkBQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX1IBQGdDgeRbPD-PXr5xlkpS6yul_Nj39bzGcKWBnRpAW-QLuhy0kBNbqdGiD71j3GNGm",
+      "expired": false
+    }
+  ]
+}

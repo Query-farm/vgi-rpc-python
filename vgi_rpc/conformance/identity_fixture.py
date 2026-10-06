@@ -39,7 +39,12 @@ asserted exactly rather than within a tolerance.
 
 from __future__ import annotations
 
+import json
+from typing import ClassVar, Protocol
+
 from vgi_rpc.errors import AuthUnavailableError
+from vgi_rpc.grants import GrantKeys
+from vgi_rpc.rpc import CallContext
 from vgi_rpc.rpc._token_identity import (
     GrantRefusedError,
     IdentityUnavailableError,
@@ -48,6 +53,16 @@ from vgi_rpc.rpc._token_identity import (
 )
 
 __all__ = [
+    "GRANT_AUDIENCE",
+    "GRANT_KEY_CURRENT",
+    "GRANT_KEY_PREVIOUS",
+    "GRANT_KEY_STRANGER",
+    "GRANT_MAX_TTL",
+    "WHOAMI_PROTOCOL_HASH",
+    "WHOAMI_PROTOCOL_NAME",
+    "Whoami",
+    "WhoamiImpl",
+    "conformance_grant_keys",
     "IDENTITY_BOTH_METHODS_HASH",
     "IDENTITY_GRANT_ONLY_HASH",
     "IDENTITY_INTROSPECT_ONLY_HASH",
@@ -315,3 +330,74 @@ def conformance_mint_grant(principal: str, purpose: str, scopes: list[str], ttl_
     if purpose == MINIMAL_PURPOSE:
         return IssuedGrant(token=token, expires_at=GRANT_EXPIRES_AT)
     return IssuedGrant(token=token, expires_at=GRANT_EXPIRES_AT, grant_id=GRANT_ID)
+
+
+# ---------------------------------------------------------------------------
+# Sealed grants and bearer acceptance (IDENTITY_CONFORMANCE_FIXTURE.md §10)
+# ---------------------------------------------------------------------------
+
+#: The minting key of the grant worker: bytes 0x10..0x2f.  Published on
+#: purpose -- the shared suite mints with it to prove a port's *verifier*
+#: accepts reference-minted grants, and decodes the port's grants to prove its
+#: *minter* matches the format.  A fixture key, never a deployment one.
+GRANT_KEY_CURRENT = bytes(range(0x10, 0x30))
+
+#: The previous key, still configured to verify (rotation): bytes 0x30..0x4f.
+GRANT_KEY_PREVIOUS = bytes(range(0x30, 0x50))
+
+#: A key the grant worker does not hold: 0x77 * 32.
+GRANT_KEY_STRANGER = bytes([0x77]) * 32
+
+#: Audience bound into the grant worker's tokens.
+GRANT_AUDIENCE = "conformance"
+
+#: The grant worker's lifetime ceiling, in seconds.
+GRANT_MAX_TTL = 3600
+
+
+def conformance_grant_keys() -> GrantKeys:
+    """Return the grant worker's configuration: current key mints, both verify."""
+    return GrantKeys(
+        keys=(GRANT_KEY_CURRENT, GRANT_KEY_PREVIOUS),
+        audience=GRANT_AUDIENCE,
+        max_ttl_seconds=GRANT_MAX_TTL,
+    )
+
+
+#: Routing key of the probe that reports how a request was authenticated.
+WHOAMI_PROTOCOL_NAME = "conformance.Whoami.v1"
+
+#: Pinned digest of :class:`Whoami` (IDENTITY_CONFORMANCE_FIXTURE.md §10).
+WHOAMI_PROTOCOL_HASH = "a280333ba72432020e162cab388a78355969a30aa74f0665ad9d2932d7a10b8f"
+
+
+class Whoami(Protocol):
+    """Hosted only by the grant worker: reports what authentication decided."""
+
+    protocol_name: ClassVar[str] = WHOAMI_PROTOCOL_NAME
+
+    def whoami(self) -> str:
+        """Return the caller's ``AuthContext`` as canonical JSON.
+
+        ``{"authenticated": bool, "claims": {...}, "domain": str, "principal": str}``
+        with sorted keys; ``domain`` and ``principal`` are ``""`` when absent.
+        """
+        ...
+
+
+class WhoamiImpl:
+    """Reference implementation of :class:`Whoami`."""
+
+    def whoami(self, ctx: CallContext) -> str:
+        """Report the request's authentication outcome."""
+        auth = ctx.auth
+        return json.dumps(
+            {
+                "authenticated": auth.authenticated,
+                "claims": dict(auth.claims),
+                "domain": auth.domain or "",
+                "principal": auth.principal or "",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )

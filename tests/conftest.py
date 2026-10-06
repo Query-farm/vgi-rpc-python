@@ -723,6 +723,19 @@ def conformance_http_identity_introspect_only_port() -> Iterator[int]:
         yield port
 
 
+@pytest.fixture(scope="session")
+def conformance_http_grant_port() -> Iterator[int]:
+    """Spawn the sealed-grant conformance worker (``--identity grants``).
+
+    Resolver plus the fixture's grant keys and no mint hook, so the framework
+    mints and accepts its own grants; hosts ``conformance.Whoami.v1`` so a test
+    can read back how a bearer was authenticated.  Backs ``TestSealedGrants``
+    and ``TestResolveTokenBearer``.
+    """
+    with _spawn_conformance_http("--identity", "grants") as port:
+        yield port
+
+
 #: Origin the CORS conformance worker is configured to allow. Shared with the
 #: canonical ``TestCors`` group, which sends it as the ``Origin`` request
 #: header; a runner supplying its own worker must allow this exact value.

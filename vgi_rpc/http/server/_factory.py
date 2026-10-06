@@ -121,6 +121,7 @@ def make_wsgi_app(
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
     call_state_cache_entries: int = 4096,
+    identity_bearer: bool = True,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -324,6 +325,13 @@ def make_wsgi_app(
             miss path, so a client that fails to echo
             :data:`~vgi_rpc.metadata.CALL_STATE_KEY` fails immediately
             instead of only once the cache goes cold in production.
+        identity_bearer: When the server hosts ``vgi_rpc.Identity.v1`` with
+            sealed grants configured or a ``resolve_token`` hook, accept
+            those credentials as bearers after *authenticate* (WIRE_PROTOCOL.md
+            §16).  On by default; ``False`` is for a deployment that composes
+            :func:`vgi_rpc.http.grant_authenticate` /
+            :func:`vgi_rpc.http.resolve_token_authenticate` itself -- required
+            when *authenticate* depends on proxy-injected evidence.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
@@ -416,6 +424,16 @@ def make_wsgi_app(
     # wrapper, and reading it after that point would work only because
     # chain_authenticate propagates declarations — depending on that here
     # would be a trap for anyone who later adds a wrapper that does not.
+    if identity_bearer and server.identity is not None:
+        from vgi_rpc.http._grant_auth import compose_identity_authenticate
+
+        # Before the PKCE wrapper below, so the cookie path is an alternative
+        # to the composed chain rather than something inserted inside it.
+        authenticate = compose_identity_authenticate(
+            authenticate,
+            grant_keys=server.identity.grant_keys,
+            resolve_token=server.identity.resolve_token_hook,
+        )
     proxy_hint = build_proxy_hint(
         [
             *(proxy_auth_headers or ()),

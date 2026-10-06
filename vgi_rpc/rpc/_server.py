@@ -18,12 +18,17 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from types import MappingProxyType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.errors import error_code_of
+
+if TYPE_CHECKING:
+    from vgi_rpc.grants import GrantKeys
+
+    from ._token_identity import IdentityImpl
 from vgi_rpc.external import (
     ExternalLocationConfig,
     ExternalRef,
@@ -558,6 +563,7 @@ class RpcServer:
         "_ctx_methods",
         "_dispatch_hook",
         "_external_config",
+        "_identity",
         "_impl",
         "_include_tracebacks",
         "_ipc_validation",
@@ -756,6 +762,7 @@ class RpcServer:
         enable_describe: bool = False,
         ipc_validation: IpcValidation | None = None,
         include_tracebacks: bool = True,
+        grant_keys: GrantKeys | Literal["env"] | None = "env",
     ) -> None:
         """Initialize with a protocol type and its implementation.
 
@@ -804,10 +811,26 @@ class RpcServer:
                 ``False`` to omit them everywhere this server answers.  The
                 exception type, message, code, kind and details are sent
                 either way.  See WIRE_PROTOCOL.md §8.
+            grant_keys: Sealed-grant configuration (WIRE_PROTOCOL.md §16).
+                ``"env"`` (the default) reads ``VGI_RPC_GRANT_KEYS`` and
+                friends -- unset means grants are off and nothing changes.
+                With keys, the framework mints sealed grants through
+                ``issue_grant`` (unless the worker's ``IdentityImpl`` supplies
+                ``mint_grant``) and an HTTP app accepts them back as bearer
+                credentials.  ``None`` turns grants off regardless of the
+                environment.  A malformed key raises here: a worker refuses to
+                start rather than run with a key it misread.
 
         """
         self._protocol = protocol
         self._include_tracebacks = include_tracebacks
+        if grant_keys == "env":
+            from vgi_rpc.grants import GrantKeys as _GrantKeys
+
+            # Read at construction, so a malformed key refuses to start the
+            # worker rather than failing the first mint.
+            grant_keys = _GrantKeys.from_env()
+        resolved_grant_keys: GrantKeys | None = grant_keys if not isinstance(grant_keys, str) else None
         self._impl = implementation
         self._server_version = server_version
         self._ipc_validation = IpcValidation.from_env() if ipc_validation is None else ipc_validation
@@ -847,6 +870,20 @@ class RpcServer:
         # Identity, when the deployment configured it.  Registered after
         # reflection so it appears in reflection's output, and with only the
         # methods whose hooks exist -- see `_build_binding(only=...)`.
+        if resolved_grant_keys is not None:
+            from ._token_identity import IdentityImpl as _IdentityImpl
+
+            if identity is None:
+                # Grants on, no other identity hooks: the framework mints and
+                # accepts its own, and hosts issue_grant alone.
+                identity = _IdentityImpl(grant_keys=resolved_grant_keys)
+            elif isinstance(identity, _IdentityImpl) and identity.grant_keys is None:
+                raise ValueError(
+                    "grant keys were configured (grant_keys= or VGI_RPC_GRANT_KEYS) and an IdentityImpl "
+                    "was passed without them. Pass IdentityImpl(grant_keys=...) so the minter and the "
+                    "verifier use the same keys."
+                )
+        self._identity = identity
         if identity is not None:
             from ._token_identity import Identity, IdentityImpl
 
@@ -1167,6 +1204,17 @@ class RpcServer:
     def protocol_hash(self) -> str:
         """SHA-256 hex digest of the canonical __describe__ payload."""
         return self._protocol_hash
+
+    @property
+    def identity(self) -> IdentityImpl | None:
+        """The hosted ``vgi_rpc.Identity.v1`` implementation, when there is one."""
+        return cast("IdentityImpl | None", self._identity)
+
+    @property
+    def grant_keys(self) -> GrantKeys | None:
+        """The sealed-grant configuration, when grants are on."""
+        identity = self.identity
+        return identity.grant_keys if identity is not None else None
 
     @property
     def include_tracebacks(self) -> bool:

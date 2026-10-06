@@ -177,7 +177,7 @@ else:
         return plaintext
 
 
-def seal_bytes(payload: bytes, key: bytes, *, aad: bytes, version: int = 1) -> bytes:
+def seal_bytes(payload: bytes, key: bytes, *, aad: bytes, version: int = 1, nonce: bytes | None = None) -> bytes:
     """Seal ``payload`` into an authenticated-encrypted envelope.
 
     Args:
@@ -188,6 +188,10 @@ def seal_bytes(payload: bytes, key: bytes, *, aad: bytes, version: int = 1) -> b
             any non-swappable context here.
         version: 1-byte format selector (0-255), echoed as the first output
             byte. Lets a caller version its own envelope format independently.
+        nonce: A fixed 24-byte nonce, **for test vectors only**.  ``None``
+            (always, in production) draws a fresh random nonce; reusing a
+            nonce under one key destroys XChaCha20-Poly1305's confidentiality
+            and authenticity.
 
     Returns:
         The sealed envelope: ``version || nonce || ciphertext+tag``. Identical
@@ -197,7 +201,11 @@ def seal_bytes(payload: bytes, key: bytes, *, aad: bytes, version: int = 1) -> b
     if not 0 <= version <= 255:
         msg = f"version must fit in one byte, got {version}"
         raise ValueError(msg)
-    nonce = os.urandom(_NONCE_LEN)
+    if nonce is None:
+        nonce = os.urandom(_NONCE_LEN)
+    elif len(nonce) != _NONCE_LEN:
+        msg = f"nonce must be {_NONCE_LEN} bytes, got {len(nonce)}"
+        raise ValueError(msg)
     return struct.pack("B", version) + nonce + _seal(payload, normalize_key(key), aad, nonce)
 
 

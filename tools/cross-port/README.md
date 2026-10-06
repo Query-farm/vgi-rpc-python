@@ -26,6 +26,7 @@ implements against, as opposed to the tooling that checks it afterwards.
 | [`REFLECTION_SELF_DESCRIPTION.md`](specs/REFLECTION_SELF_DESCRIPTION.md) | `vgi_rpc.Reflection.v1` must describe its own methods |
 | [`IDENTITY_V1_SPEC.md`](specs/IDENTITY_V1_SPEC.md) | `vgi_rpc.Identity.v1` |
 | [`IDENTITY_CONFORMANCE_FIXTURE.md`](specs/IDENTITY_CONFORMANCE_FIXTURE.md) | The identity fixture every port ships |
+| [`GRANT_AUTHENTICATION.md`](specs/GRANT_AUTHENTICATION.md) | Why sealed grants and `resolve_token` bearer auth close the `issue_grant` loop (contract in `IDENTITY_V1_SPEC.md` §9) |
 | [`MULTI_PROTOCOL_HOSTING.md`](specs/MULTI_PROTOCOL_HOSTING.md) | Hosting several application protocols, the gRPC-shaped error model (`error_code` / `error_kind` / `error_details`), the traceback setting, `conformance.Secondary.v1`, and the hosted-protocols group SDKs run (`vgi-rpc-test-hosted`) |
 | [`DESCRIBE_RETIREMENT_AND_ACCESS_LOG.md`](specs/DESCRIBE_RETIREMENT_AND_ACCESS_LOG.md) | Retirement of `__describe__`, and access-log shape |
 | [`STREAM_RECORDS_AND_REFERENCE_PIN.md`](specs/STREAM_RECORDS_AND_REFERENCE_PIN.md) | Stream access-log records, and pinning the reference |

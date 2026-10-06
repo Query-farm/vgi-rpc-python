@@ -374,3 +374,156 @@ The `/health` capability header goes with it: a client learns whether a worker
 introspects from reflection (`vgi_rpc.Identity.v1` hosted, `introspect_token` in
 its description), which is what the reference and the conformance group use.
 
+
+## 9. Accepting identity credentials as bearers (normative, added 2026-10-06)
+
+`issue_grant` mints a grant to be "presented later by unattended automation as
+an ordinary bearer", and nothing in any port accepted one: the loop was open.
+Two mechanisms close it. Both are in WIRE_PROTOCOL §16 "Accepting identity
+credentials"; this section is the byte-level contract. Decision record:
+[`GRANT_AUTHENTICATION.md`](GRANT_AUTHENTICATION.md). Vectors:
+`vgi_rpc/conformance/grant_token_vectors.json`. Reference:
+`vgi_rpc/grants.py`, `vgi_rpc/http/_grant_auth.py`.
+
+### 9.1 Built-in sealed grants (opt-in)
+
+**Off unless a grant key is configured.** Not configured ⇒ nothing changes: no
+`issue_grant` appears, no bearer is accepted that was not accepted before.
+
+Configured ⇒ the framework (a) provides `mint_grant` unless the worker supplies
+its own, so `issue_grant` is hosted, and (b) on HTTP accepts its own grants as
+bearer credentials. No storage, no author code.
+
+**Configuration.** Environment `VGI_RPC_GRANT_KEYS` = comma-separated keys,
+each standard base64 (padding optional) of **exactly 32 bytes**, minting key
+first; CLI `--grant-key KEY` (repeatable, first mints) where a port has a CLI.
+Optional `VGI_RPC_GRANT_AUDIENCE` (default `""`) and
+`VGI_RPC_GRANT_MAX_TTL_SECONDS` (default `604800`, 7 days). A key that does not
+decode to 32 bytes, duplicate keys, or a non-positive max TTL MUST stop the
+worker at startup. **Rotation:** the first key mints, every key verifies; add
+the new key first, keep the old one until its grants expire, then remove it.
+
+**Token** (ASCII):
+
+```
+token    = "vgig1." base64url_nopad( kid || envelope )
+kid      = SHA-256( "vgi_rpc.grant.kid.v1" 0x00 || key )[0:8]
+envelope = 0x01 || nonce(24) || ciphertext || tag(16)        ; XChaCha20-Poly1305 (libsodium IETF)
+aad      = "vgi_rpc.grant.v1" 0x00 || kid || UTF-8(audience)
+```
+
+The envelope is byte-for-byte the stream-state token envelope (WIRE_PROTOCOL
+§10 "State token binary format"): same cipher, same `version || nonce ||
+ciphertext+tag` layout, version byte `0x01`. No new cipher. The 32-byte key is
+used directly (no stretching). The nonce is random per token.
+
+**Payload** (plaintext; integers little-endian; strings UTF-8 with a `u16`
+byte-length prefix, max 65535 bytes):
+
+| Field | Encoding |
+|---|---|
+| `issued_at` | int64, seconds since the Unix epoch |
+| `expires_at` | int64 |
+| `grant_id` | u16 len ‖ UTF-8 |
+| `principal` | u16 len ‖ UTF-8 |
+| `purpose` | u16 len ‖ UTF-8 |
+| `scope_count` | u16 |
+| `scopes` | `scope_count` × (u16 len ‖ UTF-8), in request order |
+
+No codec byte, no compression (payloads are small), no trailing bytes.
+
+**Minting.** `grant_id` = 16 random bytes as 32 lowercase hex. `issued_at` = now
+(integer seconds). `expires_at = issued_at + min(ttl_seconds,
+max_ttl_seconds)`; `ttl_seconds ≤ 0` ⇒ `grant_refused`. `IssuedGrant.expires_at`
+is `float(expires_at)`. Freshness (§4, `auth_time`) is checked before minting,
+exactly as for a worker-supplied hook.
+
+**Verification — order is normative:**
+
+1. The bearer starts with exactly `vgig1.`; otherwise it is not a grant (the
+   grant authenticator passes, see 9.3). Length ≤ 4096 characters.
+2. The remainder is **canonical unpadded base64url**: alphabet `A–Z a–z 0–9 - _`
+   only, no `=`, length mod 4 ≠ 1, and re-encoding the decoded bytes yields the
+   same text (rejects non-zero trailing bits, so one token has one spelling).
+3. Split `kid` (8 bytes) and envelope; select the configured key with that kid.
+   None ⇒ reject.
+4. Open the envelope with that key and `aad` (the verifier's own audience).
+   Version byte ≠ `0x01`, short envelope, or tag failure ⇒ reject.
+5. Parse the payload strictly (exact lengths, valid UTF-8, no trailing bytes);
+   empty `principal` ⇒ reject.
+6. Lifetime, only now that it is authenticated: `expires_at ≤ issued_at` or
+   `expires_at − issued_at > max_ttl_seconds` ⇒ reject; `issued_at > now +
+   skew` ⇒ reject (not yet valid); `now ≥ expires_at + skew` ⇒ reject
+   (expired). **skew = 60 s.**
+
+Every rejection is one failure; the only distinction surfaced is
+"expired/not-yet-valid" (step 6), which is reported only after authenticity is
+proven and so tells a forger nothing.
+
+**Binding — why key id + audience.** The AEAD key already binds a grant to the
+deployments that hold that key. The audience is bound into the AAD so that two
+deployments that share a key (against advice — staging cloned from production)
+still cannot accept each other's grants when their audiences differ. The kid
+travels in the clear so a verifier selects the key without trial decryption,
+and is bound by the AAD so it cannot be swapped.
+
+**AuthContext of a grant-authenticated request:** `domain = "grant"`,
+`authenticated = true`, `principal` = the grant's principal, `claims =
+{"grant_id": str, "scopes": [str], "purpose": str}`, and **no `auth_time`**.
+Consequence, normative and tested: a grant-authenticated caller that calls
+`issue_grant` is refused `stale_auth` — **grants never mint grants** (§4).
+
+**Revocation:** sealed grants are **not individually revocable**. The levers
+are a short `max_ttl_seconds` with re-issue, and removing a key (revokes every
+grant it minted). There is deliberately no revocation list.
+
+### 9.2 `resolve_token`-backed bearer authentication
+
+When a worker supplies `resolve_token`, the HTTP authenticate chain consults it
+for bearer tokens the earlier authenticators did not accept:
+
+- The hook returns an identity ⇒ authenticated: `domain = "token"`,
+  `principal`, `claims = {"token_name": str}` (no `auth_time`; such callers
+  cannot mint either).
+- `None` ⇒ not accepted: fall through; 401 if nothing later accepts.
+- The hook raises the transport-auth unavailable error, **or the
+  identity-unavailable error** ⇒ **503 with `Retry-After`** = the error's hint.
+  Never 401.
+- The hook is **not** consulted for a `vgig1.` token, a JWS-shaped token (§4),
+  a blank token, or one over 4096 UTF-8 bytes — the introspection shape guards
+  apply.
+
+### 9.3 Order in the authenticate chain
+
+1. The deployment's own authenticators (JWT, static bearer, …).
+2. Sealed grants — a cheap prefix check; a token without the exact `vgig1.`
+   prefix passes to the next member and **never reaches the grant verifier**.
+   A token **with** the prefix that fails verification is a **401 that stops
+   the chain**: it never reaches `resolve_token`.
+3. `resolve_token`.
+
+If the deployment had no authenticator, a request with **no** `Authorization`
+header stays anonymous exactly as before; one with a bearer that nothing
+accepts is 401. A deployment authenticator that depends on proxy-injected
+evidence (a proxy-proof gate, mTLS headers) MUST NOT have these alternatives
+OR-ed beside it — the reference refuses to start and requires explicit
+composition (`require_all(gate, chain(...))`).
+
+**HTTP mapping:** bad / expired / wrong-key / tampered grant ⇒ 401, the
+`unauthorized-spec.md` JSON body, `VGI-Auth-Reason: invalid_credential`
+(`expired_credential` for step 6). This is the auth path, so the 401 envelope
+applies rather than an Arrow EXCEPTION batch; the corresponding canonical code
+is `UNAUTHENTICATED`. Key misconfiguration is a startup error.
+
+### 9.4 What to deliver (per port)
+
+- Mint/verify per 9.1, passing every case in
+  `vgi_rpc/conformance/grant_token_vectors.json` (`mint`: exact token from fixed
+  key/nonce/clock/grant_id; `accept`; `reject` with the `expired` flag).
+- Config by `VGI_RPC_GRANT_KEYS` / `_AUDIENCE` / `_MAX_TTL_SECONDS` (+
+  `--grant-key`), refusing to start on a malformed key.
+- The two authenticators and the chain order of 9.3, wired automatically when
+  the server hosts `vgi_rpc.Identity.v1` with grant keys or `resolve_token`.
+- The grant conformance worker (`IDENTITY_CONFORMANCE_FIXTURE.md` §10) and a
+  green run of `TestSealedGrants`, `TestSealedGrantRejections`,
+  `TestGrantPrefixRouting`, `TestResolveTokenBearer`.

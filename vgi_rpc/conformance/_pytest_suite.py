@@ -57,6 +57,12 @@ from vgi_rpc.conformance._external_pytest import (
     TestExternalRef,  # noqa: F401
     TestExternalStorageUrlPair,  # noqa: F401
 )
+from vgi_rpc.conformance._grant_pytest import (  # noqa: F401
+    TestGrantPrefixRouting,
+    TestResolveTokenBearer,
+    TestSealedGrantRejections,
+    TestSealedGrants,
+)
 from vgi_rpc.conformance._identity_pytest import (  # noqa: F401
     TestErrorKindsReachTheWire,
     TestGrantFreshness,

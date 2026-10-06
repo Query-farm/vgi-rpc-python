@@ -61,6 +61,8 @@ from vgi_rpc.utils import ArrowSerializableDataclass
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from vgi_rpc.grants import GrantKeys
+
     from ._common import AuthContext, CallContext
 
 __all__ = [
@@ -439,7 +441,7 @@ class IdentityImpl:
     credential-to-identity oracle on every existing worker.
     """
 
-    __slots__ = ("_max_auth_age", "_mint_grant", "_principals", "_resolve_token")
+    __slots__ = ("_grant_keys", "_max_auth_age", "_mint_grant", "_principals", "_resolve_token")
 
     _resolve_token: Callable[[str], TokenIdentity | None] | None
     _mint_grant: Callable[[str, str, list[str], int], IssuedGrant] | None
@@ -452,6 +454,7 @@ class IdentityImpl:
         introspect_principals: Iterable[str] | None = None,
         introspect_rate_limit: int | None = None,
         max_auth_age: float = 900.0,
+        grant_keys: GrantKeys | None = None,
     ) -> None:
         """Build the implementation.
 
@@ -472,12 +475,22 @@ class IdentityImpl:
                 and refusing it would stop those workers from starting.
             max_auth_age: How recently a caller must have authenticated to mint
                 a grant.
+            grant_keys: Sealed-grant configuration.  When given and
+                *mint_grant* is not, the framework mints sealed grants itself
+                (:func:`vgi_rpc.grants.sealed_mint_grant`); an HTTP server
+                hosting this identity then also accepts them back as bearer
+                credentials.  ``None`` changes nothing.
 
         Raises:
             ValueError: ``resolve_token`` was supplied without an allowlist.
 
         """
         self._resolve_token = resolve_token
+        self._grant_keys = grant_keys
+        if mint_grant is None and grant_keys is not None:
+            from vgi_rpc.grants import sealed_mint_grant
+
+            mint_grant = sealed_mint_grant(grant_keys)
         self._mint_grant = mint_grant
         self._max_auth_age = max_auth_age
         # Validated at construction, not at first call: a worker that would
@@ -491,6 +504,16 @@ class IdentityImpl:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+    @property
+    def grant_keys(self) -> GrantKeys | None:
+        """The sealed-grant configuration, when this deployment has one."""
+        return self._grant_keys
+
+    @property
+    def resolve_token_hook(self) -> Callable[[str], TokenIdentity | None] | None:
+        """The worker's ``resolve_token``, which an HTTP server also consults for bearers."""
+        return self._resolve_token
 
     def offered_methods(self) -> frozenset[str]:
         """Return the methods this deployment can actually answer.
