@@ -28,14 +28,13 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shlex
-import sys
 from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import urlparse
 
 import pytest
 
+from vgi_rpc._command import split_command
 from vgi_rpc.conformance._secondary_pytest import (  # noqa: F401 -- collected by pytest
     ProtocolTarget,
     TestErrorModelOnTheWire,
@@ -140,7 +139,7 @@ def conformance_protocol_connector() -> Iterator[Callable[..., contextlib.Abstra
 
     subprocess_transport: SubprocessTransport | None = None
     if _TRANSPORT == "pipe":
-        subprocess_transport = SubprocessTransport(shlex.split(_TARGET, posix=sys.platform != "win32"))
+        subprocess_transport = SubprocessTransport(split_command(_TARGET))
 
     def connect(transport: str, protocol: type, on_log: Any = None) -> contextlib.AbstractContextManager[Any]:
         del transport

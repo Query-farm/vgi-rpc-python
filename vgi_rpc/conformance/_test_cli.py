@@ -27,12 +27,12 @@ import contextlib
 import importlib.metadata
 import json
 import logging
-import shlex
 import sys
 from collections.abc import Callable, Iterator
 from io import IOBase
 from typing import Literal
 
+from vgi_rpc._command import split_command
 from vgi_rpc.conformance._protocol import ConformanceService
 from vgi_rpc.conformance._runner import (
     DEFAULT_TEST_TIMEOUT,
@@ -223,7 +223,7 @@ def _open_pipe_transport(
     log_collector: LogCollector,
 ) -> Iterator[ConformanceService]:
     """Create a pipe transport connection to the server under test."""
-    cmd_parts = shlex.split(cmd, posix=sys.platform != "win32")
+    cmd_parts = split_command(cmd)
     transport = SubprocessTransport(cmd_parts)
 
     effective_transport: SubprocessTransport | _ShmTransportWrapper = transport

@@ -36,6 +36,7 @@ import pyarrow as pa
 import typer
 from pyarrow import ipc
 
+from vgi_rpc._command import split_command
 from vgi_rpc.http._common import rpc_path
 from vgi_rpc.introspect import MethodDescription, ServiceDescription, introspect
 from vgi_rpc.log import Message
@@ -883,7 +884,7 @@ def launch(
 
 def _introspect_pipe(cmd: str) -> tuple[ServiceDescription, SubprocessTransport]:
     """Introspect a subprocess transport, returning both description and open transport."""
-    transport = SubprocessTransport(shlex.split(cmd, posix=sys.platform != "win32"))
+    transport = SubprocessTransport(split_command(cmd))
     try:
         desc = introspect(transport)
     except BaseException:
