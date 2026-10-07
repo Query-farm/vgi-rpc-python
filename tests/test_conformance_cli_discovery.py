@@ -35,7 +35,7 @@ _needs_unix = pytest.mark.skipif(
 
 
 def _connect_unix_once(path: str) -> None:
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined, unused-ignore]
     try:
         sock.connect(path)
     finally:
