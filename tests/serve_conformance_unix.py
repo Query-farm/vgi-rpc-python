@@ -25,8 +25,8 @@ def main() -> None:
         enable_describe=True,
         extra_protocols=conformance_extra_protocols(),
     )
-    print(f"UNIX:{path}", flush=True)
-    serve_unix(server, path)
+    # Announce from on_bound: only once the socket is listening can a reader connect.
+    serve_unix(server, path, on_bound=lambda bound: print(f"UNIX:{bound}", flush=True))
 
 
 if __name__ == "__main__":

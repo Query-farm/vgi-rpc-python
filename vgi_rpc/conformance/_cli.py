@@ -178,11 +178,27 @@ def _serve_unix(
     threaded: bool = False,
     max_connections: int | None = None,
 ) -> None:
-    """Start a Unix domain socket server with the given RpcServer."""
+    """Start a Unix domain socket server with the given RpcServer.
+
+    The ``UNIX:<path>`` discovery line is printed from ``on_bound``, after the
+    socket is bound and listening -- the same point the TCP line is printed.
+    Printing it first told a client to connect to a path that did not exist
+    yet, so every port's harness raced the bind (C# papered over it with a
+    connect-retry loop).
+
+    Args:
+        server: The RPC server to dispatch requests.
+        path: Filesystem path for the Unix domain socket.
+        threaded: Serve each connection in a separate daemon thread.
+        max_connections: Maximum simultaneous connections (threaded only).
+
+    """
     from vgi_rpc.rpc import serve_unix
 
-    print(f"UNIX:{path}", flush=True)
-    serve_unix(server, path, threaded=threaded, max_connections=max_connections)
+    def _emit(bound_path: str) -> None:
+        print(f"UNIX:{bound_path}", flush=True)
+
+    serve_unix(server, path, threaded=threaded, max_connections=max_connections, on_bound=_emit)
 
 
 def _serve_tcp(
@@ -245,8 +261,11 @@ def _serve_http(server: RpcServer, port: int) -> None:
             port = int(s.getsockname()[1])
 
     app = make_wsgi_app(server)
+    # create_server binds and listens; announce only after that, for the same
+    # reason as the UNIX line -- a client reading PORT must be able to connect.
+    wsgi_server = waitress.create_server(app, host="127.0.0.1", port=port)
     print(f"PORT:{port}", flush=True)
-    waitress.serve(app, host="127.0.0.1", port=port, _quiet=True)
+    wsgi_server.run()
 
 
 if __name__ == "__main__":  # pragma: no cover - console-script entry point
