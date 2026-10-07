@@ -1321,6 +1321,27 @@ class _HttpProxy:
         # ``None`` = not yet probed; missing fields = server didn't advertise.
         self._capabilities: HttpServerCapabilities | None = None
 
+    def _rebind_protocol(self, protocol: type) -> _HttpProxy:
+        """Return a proxy for *protocol* on this proxy's HTTP client.
+
+        Each protocol is routed under its own path segment, so the new proxy
+        shares the ``httpx2.Client`` (connection pool, auth, cookies), the base
+        prefix, and every per-call setting; it does not own the client, so it
+        closes nothing.  Package-internal: the public route is
+        :func:`vgi_rpc.introspect.list_protocols`.
+        """
+        return _HttpProxy(
+            protocol,
+            self._client,
+            self._base_prefix,
+            self._on_log,
+            external_config=self._external_config,
+            ipc_validation=self._ipc_validation,
+            retry_config=self._retry_config,
+            compression_level=self._compression_level,
+            accepted_max_response_bytes=self._accepted_max_response_bytes,
+        )
+
     def _get_capabilities(self) -> HttpServerCapabilities:
         """Discover and cache the server's externalization capabilities.
 

@@ -41,9 +41,13 @@ from vgi_rpc.external import (
 from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.grants import GrantClaims, GrantInvalidError, GrantKeys, mint_grant_token, verify_grant_token
 from vgi_rpc.introspect import (
+    HostedProtocol,
     MethodDescription,
+    ReflectionNotSupportedError,
     ServiceDescription,
+    describe_protocol,
     introspect,
+    list_protocols,
 )
 from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import REQUEST_VERSION
@@ -277,7 +281,11 @@ __all__ = [
     # Introspection
     "MethodDescription",
     "ServiceDescription",
+    "HostedProtocol",
+    "ReflectionNotSupportedError",
     "introspect",
+    "list_protocols",
+    "describe_protocol",
     "rpc_methods",
     "describe_rpc",
     "MethodType",

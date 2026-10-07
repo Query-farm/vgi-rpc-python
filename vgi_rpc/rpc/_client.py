@@ -348,6 +348,23 @@ class _RpcProxy:
         # so a client generated for one protocol can never address another.
         self._protocol_wire_name: str = _protocol_wire_name(protocol)
 
+    def _rebind_protocol(self, protocol: type) -> _RpcProxy:
+        """Return a proxy for *protocol* on this proxy's connection.
+
+        The server routes by each request's ``vgi_rpc.protocol`` key, so one
+        transport carries every protocol it hosts.  The new proxy shares the
+        transport, log callback, external-location config and validation level;
+        it does not own the transport, so it closes nothing.  Package-internal:
+        the public route is :func:`vgi_rpc.introspect.list_protocols`.
+        """
+        return _RpcProxy(
+            protocol,
+            self._transport,
+            self._on_log,
+            external_config=self._external_config,
+            ipc_validation=self._ipc_validation,
+        )
+
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
         if info is None:

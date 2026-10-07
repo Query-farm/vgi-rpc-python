@@ -11,13 +11,18 @@ wire format -- they were only ever the latter by accident of there having been
 a single encoding.  ``introspect()`` and ``http_introspect()`` speak reflection
 and present the result in this shape, so the CLI, the describe page and the
 conformance runner did not have to change.
+
+``list_protocols()`` and ``describe_protocol()`` are the connection-reusing
+entry points: they take a proxy a caller already holds -- on any transport --
+and ask reflection over that same connection, where ``introspect()`` needs a
+raw transport and ``http_introspect()`` builds its own HTTP calls.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -30,6 +35,7 @@ from vgi_rpc.metadata import (
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     MethodType,
+    RpcError,
     RpcTransport,
     _dispatch_log_or_error,
     _drain_stream,
@@ -47,10 +53,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DESCRIBE_VERSION",
+    "HostedProtocol",
     "MethodDescription",
+    "ReflectionNotSupportedError",
     "ServiceDescription",
     "compute_protocol_hash",
+    "describe_protocol",
     "introspect",
+    "list_protocols",
 ]
 
 # ---------------------------------------------------------------------------
@@ -173,6 +183,213 @@ class ServiceDescription:
                 lines.append(f"    returns: {md.result_schema}")
             lines.append("")
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class HostedProtocol:
+    """One protocol a server hosts, as ``vgi_rpc.Reflection.v1`` lists it.
+
+    A client-side view of the wire ``ProtocolSummary``, returned by
+    :func:`list_protocols` in the server's order: application protocols in
+    registration order (the primary first), then the framework's own
+    (``vgi_rpc.Reflection.v1``, and ``vgi_rpc.Identity.v1`` on an HTTP server
+    that hosts it).
+
+    Attributes:
+        name: The protocol's wire name -- its routing key, carrying its major
+            version, e.g. ``"vgi_rpc.Reflection.v1"``.
+        version: Its declared semver, or ``""`` when it declares none.
+        hash: SHA-256 of its canonical description, as 64 lowercase hex
+            characters.  Equal hashes mean an identical wire surface, in any
+            port, so a caller holding a cached description for this hash can
+            skip :func:`describe_protocol`.
+        deprecated: Whether callers should migrate off this protocol.
+        deprecation_message: What to migrate to; empty unless ``deprecated``.
+        features: Capability tokens the protocol announces.
+
+    """
+
+    name: str
+    version: str
+    hash: str
+    deprecated: bool = False
+    deprecation_message: str = ""
+    features: tuple[str, ...] = ()
+
+
+class ReflectionNotSupportedError(RpcError):
+    """The server does not host ``vgi_rpc.Reflection.v1``.
+
+    Raised by :func:`list_protocols` and :func:`describe_protocol` when the
+    server answers the reflection call with "not hosted" rather than with a
+    listing: a server built without ``enable_describe=True`` (the default),
+    or one that predates reflection.  Such a server still serves its own protocol, so this
+    is a statement about discovery, not about the connection -- the
+    connection remains usable.
+
+    A subclass of :class:`~vgi_rpc.rpc.RpcError` carrying the server's
+    original error fields, so code that already catches ``RpcError`` keeps
+    working; catch this class to branch on "cannot discover" specifically.
+    """
+
+    @classmethod
+    def from_rpc_error(cls, error: RpcError) -> ReflectionNotSupportedError:
+        """Wrap the server's "not hosted" answer, keeping every field.
+
+        Args:
+            error: The error the reflection call raised.
+
+        Returns:
+            An instance carrying *error*'s type, message, traceback, request
+            id, code, kind and details.
+
+        """
+        return cls(
+            error.error_type,
+            error.error_message,
+            error.remote_traceback,
+            request_id=error.request_id,
+            error_code=error.error_code,
+            error_kind=error.error_kind,
+            error_details=error.error_details,
+        )
+
+
+#: ``error_kind`` values meaning "this server does not answer reflection".
+_NOT_HOSTED_KINDS = frozenset({"protocol_not_supported", "method_not_implemented"})
+
+#: Remote exception names for the same, from servers that send no error kind.
+_NOT_HOSTED_TYPES = frozenset({"ProtocolNotSupportedError", "MethodNotImplementedError"})
+
+
+def _reflection_not_hosted(error: RpcError) -> bool:
+    """Whether *error* says the server does not host reflection at all.
+
+    Only meaningful for ``list_protocols``, which is always hosted when
+    reflection is: a "not supported" answer to it can only be about the
+    protocol.  (``describe`` answers ``protocol_not_supported`` for an
+    unknown *argument*, which is why :func:`describe_protocol` lists first.)
+
+    A current server without reflection answers ``protocol_not_supported``;
+    one older than multi-protocol hosting ignores the protocol key and answers
+    an unknown method; both carry ``UNIMPLEMENTED`` when the server sends a
+    code at all.  An HTTP server older than protocol-scoped routes answers a
+    bare 404, which the HTTP client reports as a non-Arrow ``HttpError``.
+    """
+    if error.error_kind in _NOT_HOSTED_KINDS or error.error_code == "UNIMPLEMENTED":
+        return True
+    if error.error_type in _NOT_HOSTED_TYPES:
+        return True
+    return error.error_type == "HttpError" and error.error_message.startswith("HTTP 404")
+
+
+def _reflection_proxy(target: object) -> Any:
+    """Return a ``vgi_rpc.Reflection.v1`` proxy on *target*'s connection.
+
+    Typed ``Any`` because the proxy is the dynamic one every connect function
+    returns; the two methods called on it are fixed by ``Reflection``.
+    """
+    from vgi_rpc.rpc._client import _RpcProxy
+    from vgi_rpc.rpc._reflection import Reflection
+
+    rebind = getattr(target, "_rebind_protocol", None)
+    if callable(rebind):
+        return rebind(Reflection)
+    if isinstance(target, RpcTransport):
+        return _RpcProxy(Reflection, target)
+    raise TypeError(
+        f"cannot reach reflection through a {type(target).__name__}: pass a proxy returned by "
+        f"connect(), serve_pipe(), unix_connect(), tcp_connect(), iroh_connect(), http_connect(), "
+        f"httpi_connect(), WorkerPool.connect() or RpcConnection, or an RpcTransport"
+    )
+
+
+def _list(proxy: Any) -> _WireProtocolList:
+    """Call ``list_protocols`` on a reflection proxy, classifying "not hosted"."""
+    try:
+        listing: _WireProtocolList = proxy.list_protocols()
+    except ReflectionNotSupportedError:
+        raise
+    except RpcError as exc:
+        if _reflection_not_hosted(exc):
+            raise ReflectionNotSupportedError.from_rpc_error(exc) from exc
+        raise
+    return listing
+
+
+def list_protocols(target: object) -> list[HostedProtocol]:
+    """List the protocols a server hosts, over a connection the caller holds.
+
+    One round trip -- ``vgi_rpc.Reflection.v1.list_protocols`` -- on *target*'s
+    own connection; nothing new is opened and nothing is closed.  Over HTTP
+    the call shares the proxy's ``httpx2.Client``, prefix, auth, retry and
+    response-budget settings; over every other transport it shares the
+    proxy's byte stream, which the server demultiplexes by each request's
+    protocol key.  On a pipe-like transport, do not call it while a stream is
+    open on the same connection: the two would interleave on one channel.
+
+    Args:
+        target: A proxy from any connect function -- ``connect``,
+            ``serve_pipe``, ``unix_connect``, ``tcp_connect``,
+            ``iroh_connect``, ``http_connect``, ``httpi_connect``,
+            ``WorkerPool.connect`` or ``RpcConnection`` -- bound to any
+            protocol the server hosts, or a raw ``RpcTransport``.
+
+    Returns:
+        One :class:`HostedProtocol` per hosted protocol, in the server's
+        order: application protocols first, primary leading, then the
+        framework's own.
+
+    Raises:
+        ReflectionNotSupportedError: The server does not host reflection
+            (built without ``enable_describe=True``, or older than it).
+            The connection is still usable.
+        RpcError: The server answered with any other error, or the
+            transport failed.
+        TypeError: *target* is neither a proxy nor an ``RpcTransport``.
+
+    """
+    listing = _list(_reflection_proxy(target))
+    return [
+        HostedProtocol(
+            name=p.protocol,
+            version=p.protocol_version,
+            hash=p.protocol_hash,
+            deprecated=p.deprecated,
+            deprecation_message=p.deprecation_message,
+            features=tuple(p.features),
+        )
+        for p in listing.protocols
+    ]
+
+
+def describe_protocol(target: object, name: str) -> ServiceDescription:
+    """Describe one hosted protocol, over a connection the caller holds.
+
+    Two round trips on *target*'s connection: ``list_protocols`` (for the
+    server identity the description carries, and to tell "no reflection"
+    apart from "no such protocol") then ``describe(name)``.  The connection
+    rules are those of :func:`list_protocols`.
+
+    Args:
+        target: A proxy from any connect function, or a raw
+            ``RpcTransport``; see :func:`list_protocols`.
+        name: The protocol's wire name, as :func:`list_protocols` reports it.
+
+    Returns:
+        A :class:`ServiceDescription` with each method's type and schemas.
+
+    Raises:
+        ReflectionNotSupportedError: The server does not host reflection.
+        RpcError: The server does not host *name* (``error_kind``
+            ``"protocol_not_supported"``), answered with another error, or
+            the transport failed.
+
+    """
+    proxy = _reflection_proxy(target)
+    listing = _list(proxy)
+    described: _WireDescription = proxy.describe(protocol=name)
+    return _adapt_description(described, listing)
 
 
 # ---------------------------------------------------------------------------

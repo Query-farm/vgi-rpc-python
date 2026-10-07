@@ -20,6 +20,7 @@ from typing import Any, cast
 import httpx2
 import pytest
 
+from vgi_rpc.introspect import list_protocols
 from vgi_rpc.iroh import (
     IROH_ARROW_MUX_ALPN,
     IROH_HTTP_ALPN,
@@ -190,7 +191,7 @@ def test_native_raw_iroh_rpc_loopback() -> None:
                 )
                 transport = _AcceptedTransport(session)
                 try:
-                    RpcServer(RpcFixtureService, RpcFixtureServiceImpl()).serve(transport)
+                    RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), enable_describe=True).serve(transport)
                 finally:
                     transport.close()
             except BaseException as exc:
@@ -210,6 +211,8 @@ def test_native_raw_iroh_rpc_loopback() -> None:
             connect_timeout=10,
             io_timeout=10,
         ) as service:
+            # Reflection rides the same bistream as the primary protocol.
+            assert [p.name for p in list_protocols(service)] == ["RpcFixtureService", "vgi_rpc.Reflection.v1"]
             assert service.add(a=3.0, b=4.0) == pytest.approx(7.0)
         thread.join(timeout=10)
         assert not thread.is_alive()

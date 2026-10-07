@@ -283,9 +283,7 @@ print(describe_rpc(Calculator))
 
 ### Runtime introspection
 
-Enable the built-in `__describe__` RPC method to let clients discover a server's methods at runtime — without needing the Python Protocol class. This is useful for dynamic clients, debugging tools, and cross-language interop.
-
-Enable it on the server with `enable_describe=True`:
+The built-in `vgi_rpc.Reflection.v1` protocol lets clients discover what a server hosts and each protocol's methods at runtime — without needing the Python Protocol class. This is useful for dynamic clients, debugging tools, and cross-language interop. Enable it on the server with `enable_describe=True`:
 
 ```python
 from vgi_rpc import RpcServer
@@ -293,16 +291,18 @@ from vgi_rpc import RpcServer
 server = RpcServer(Calculator, CalculatorImpl(), enable_describe=True)
 ```
 
-Query over pipe/subprocess transport with `introspect()`:
+Query it through a connection you already hold, on any transport, with `list_protocols()` and `describe_protocol()`. A server without reflection raises `ReflectionNotSupportedError`:
 
 ```python
-from vgi_rpc import introspect, connect
+from vgi_rpc import connect, describe_protocol, list_protocols
 
 with connect(Calculator, ["python", "worker.py"]) as proxy:
-    desc = introspect(proxy._transport)
+    for p in list_protocols(proxy):
+        print(p.name, p.version, p.hash)
+    desc = describe_protocol(proxy, "Calculator")
     for name, method in desc.methods.items():
         print(f"{name}: {method.method_type.value}")
-        print(f"  params: {method.param_types}")
+        print(f"  params: {method.params_schema}")
         print(f"  has_return: {method.has_return}")
 ```
 
