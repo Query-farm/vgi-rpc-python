@@ -62,11 +62,31 @@ These fields appear when their condition is met and are absent (key not present)
 | `stream_id` | string | Required when `method_type == "stream"`. UUID hex (32 lowercase hex chars, no dashes). MUST be the same value across the `init` record and every continuation record of the same stream call. |
 | `cancelled` | boolean | Present and `true` when the stream was cancelled by the client. Absent on non-stream calls and on streams that completed normally or errored without cancellation. |
 
-### 4.3 Request payload
+### 4.3 Request shape (never the payload)
+
+A record MUST NOT carry any request or response payload value, at any log
+level, in any form (raw, base64, truncated, or hashed). The framework cannot
+know which parameters are secret -- a VGI `catalog_attach` carries API keys
+and passwords in its options -- so a payload in a log is a credential leak
+that fires the moment someone turns on DEBUG. The fields `request_data`,
+`request_state` and `response_state` are **forbidden**; the schema rejects a
+record carrying any of them. No configuration may re-enable them.
 
 | Field | Type | Condition |
 |---|---|---|
-| `request_data` | string | Required on every `unary` record AND every stream `init` record. Absent on stream continuations. The value is base64 (RFC 4648, padding required) of a self-contained Arrow IPC stream (one schema message followed by one record batch message). Round-trip equivalence — not byte equivalence — is the conformance test: the decoded bytes MUST decode through `pyarrow.ipc.open_stream(...)` to yield a `RecordBatch` whose schema and column data match the original request. The Python reference implementation uses `pyarrow.RecordBatch.serialize()`. Other-language implementations MAY use any encoding their Arrow library produces as long as the round-trip property holds. |
+| `request_fields` | array of `{"name": string, "type": string}` | SHOULD be present on every `unary` record and every stream `init` record; absent on stream continuations. One entry per request parameter, in schema order: the field name and its Arrow type rendered as text. Entries carry no other keys -- in particular no value. |
+| `request_rows` | integer | Present exactly when `request_fields` is. The request batch's row count: 1, or 0 for a zero-parameter method. |
+
+The request's size is `request_bytes` (§4.8). Do not add a digest of the
+payload: a hash of a request whose other fields are known is a brute-force
+oracle for a short secret.
+
+> **Changed in 0.50.1.** Earlier versions required `request_data` (the
+> request as base64 Arrow IPC) at DEBUG and `request_state`/`response_state`
+> (the *decrypted* stream state) on HTTP stream records. Both put secrets in
+> logs. An emitter upgrading MUST drop them and SHOULD emit `request_fields`
+> / `request_rows`; `vgi-rpc-test --require-request-data` now fails with an
+> explanation rather than passing.
 
 ### 4.4 HTTP transport
 
@@ -78,65 +98,8 @@ These fields appear on HTTP transports only.
 | `request_id` | string | Per-request correlation ID. Implementations SHOULD propagate inbound `X-Request-ID` if present, otherwise mint a UUID. |
 | `trace_id` | string | W3C trace ID, 32 lowercase hex characters, of the span this call ran under. Present when the server participates in a trace. This is the join key to the surrounding distributed trace — `request_id` only correlates records within one service, so without this a log line and the span describing the same call cannot be matched. Read it from whatever span is current rather than from anything the framework threads through, so a record correlates with an application-opened span as readily as a framework-opened one. |
 | `span_id` | string | W3C span ID, 16 lowercase hex characters. Emitted together with `trace_id` — both or neither. |
-| `request_state` | string | Base64 of the **decrypted** state bytes, in the server's own state encoding, on stream continuations. Absent on `init`. The on-wire token is an opaque AEAD ciphertext; servers MUST log the plaintext state bytes (or an envelope thereof for union-tagged states), not the ciphertext, so log readers can decode the state without holding the server's `token_key`. **The encoding itself is not specified** — see the note below. |
-| `response_state` | string | Base64 of the **decrypted** outbound state bytes, in the server's own state encoding, on stream `init` and continuations that produce a continuation token. Absent on the terminal continuation that closes the stream and on unary calls. Symmetric with `request_state`: log readers see plaintext, not the AEAD ciphertext that travels on the wire. |
-
-> **The state encoding is server-defined and deliberately outside this spec.**
-> A stream state's plaintext encoding is a per-port choice — Go uses gob, Rust
-> bincode, Java CBOR, TypeScript JSON, and the Python reference uses a compact
-> msgpack codec for flat states, falling back to Arrow IPC only for states
-> holding Arrow values. Tokens are not expected to round-trip across ports, so
-> nothing requires them to agree.
->
-> Earlier revisions of this document described these two fields as "the Arrow
-> IPC payload". That was never satisfiable outside one implementation, and
-> since the compact codec landed it is not satisfiable inside it either: a
-> reader reaching for `pyarrow.ipc.open_stream` gets `ArrowInvalid` on the
-> common case. The schema only ever constrained the fields to base64, so no
-> implementation failed — the wording was simply wrong, and would have sent a
-> log reader down a dead end.
->
-> What **is** normative is the property the fields exist for: the value is the
-> decrypted plaintext, never the AEAD ciphertext that travels on the wire, so
-> a reader can decode state without holding the server's `token_key`. Decoding
-> it requires knowing which server wrote the record. Do not assume Arrow.
-
-### 4.5 Server identity & auth
-
-| Field | Type | Condition |
-|---|---|---|
-| `server_version` | string | Present when the implementation knows its server *build* version (e.g. set from a build constant). |
-| `claims` | object | Present and non-empty when `authenticated == true` and the auth provider produced claims. JSON-serializable; nested values follow JSON conventions. **Emitters MUST redact sensitive claim values** — see below. |
-| `peer_identity_status` | string | Present when peer providers ran. Sorted comma-separated `provider:status` values; contains no subject/profile/capability data. |
-| `peer_identity_sources` | string | Present when evidence is available. Sorted comma-separated `provider:evidence_source:assurance` values; contains no subject keys, certificates, or capabilities. |
-
-An access log outlives the token it describes by months or years, and is shipped to systems chosen for searchability rather than for holding personal data. Standard OIDC claims (`email`, `phone_number`, `given_name`, …) and credential-shaped ones (`*_token`, `*_key`, `password`) MUST NOT reach it verbatim.
-
-Redaction is **key-based**: match on the name a value arrived under, never on its content. A claim called `context` holding an email address is not caught, and cannot be without guessing at free text — a boundary worth stating rather than pretending to exceed.
-
-Peer evidence logging is allowlist-based rather than key-redacted. Emit only
-provider outcome, evidence source, and assurance. Raw capabilities, LocalAPI
-tokens, user profile fields, certificate bodies, stable subject keys, and proxy
-credentials MUST NOT appear in these fields.
-
-Replace values, do not drop keys. *Which* claims a credential carried is a question an audit log exists to answer; what they contained is not. The Python reference substitutes `"[redacted]"`, exposes the policy as `vgi_rpc.logging_utils.redact_claims`, and allows replacement via `set_claim_redactor` (with `no_redaction` for services that own their logs end to end). A redactor that raises MUST fail **closed** — drop the claims entirely rather than emit them unredacted.
-
-### 4.6 Call statistics
-
-These six fields appear together. Implementations MAY omit the entire group, but if any one of them is present then ALL six MUST be present. They count work done while serving the call (the input/output direction is from the server's perspective: input = received from client, output = sent to client).
-
-| Field | Type | Condition |
-|---|---|---|
-| `input_batches` | integer | Number of Arrow record batches received. |
-| `output_batches` | integer | Number of Arrow record batches sent. |
-| `input_rows` | integer | Total rows across all input batches. |
-| `output_rows` | integer | Total rows across all output batches. |
-| `input_bytes` | integer | Sum of `RecordBatch.nbytes` across input batches (uncompressed in-memory size). |
-| `output_bytes` | integer | Sum of `RecordBatch.nbytes` across output batches. |
-
-### 4.7 Sticky session lifecycle
-
-When the request flows through a sticky-enabled HTTP transport (see [`sticky-sessions-spec.md`](sticky-sessions-spec.md)), the access record carries two additional fields describing the session lifecycle.
+| `request_state_bytes` | integer | Size in bytes of the state token received on a stream continuation. The token itself MUST NOT be logged (§4.3): it serializes whatever the call was given, and it is replayable. |
+| `response_state_bytes` | integer | Size in bytes of the state token returned on a stream turn that produces one. |
 
 | Field | Type | Condition |
 |---|---|---|
@@ -147,12 +110,13 @@ When the request flows through a sticky-enabled HTTP transport (see [`sticky-ses
 
 ## 5. Method-type rules
 
-All conditional behavior is keyed off `method_type` (and, for streams, whether the record is an init or continuation — distinguishable by the presence of `request_data`). **Rules MUST NOT be keyed off method names.** Method names are application-specific; framework conformance applies uniformly.
+All conditional behavior is keyed off `method_type` (and, for streams, whether the record is an init or continuation — distinguishable by the presence of `request_fields`). **Rules MUST NOT be keyed off method names.** Method names are application-specific; framework conformance applies uniformly.
 
 | Rule | Trigger |
 |---|---|
-| `request_data` present | `method_type == "unary"` OR (`method_type == "stream"` AND record is the init record). |
-| `request_data` absent | Stream continuations. |
+| `request_fields` / `request_rows` present (SHOULD) | `method_type == "unary"` OR (`method_type == "stream"` AND record is the init record). |
+| `request_fields` / `request_rows` absent | Stream continuations. |
+| `request_data` / `request_state` / `response_state` present | Never. |
 | `stream_id` present | `method_type == "stream"`. |
 | `cancelled` present | Stream call cancelled by client. |
 | `error_message` non-empty | `status == "error"`. |
@@ -179,20 +143,15 @@ Downstream log shippers (Vector's `file` source, Fluent Bit's `tail` input) impo
 
 To stay compatible, an emitter MAY enforce a per-record byte cap. When it does, it MUST shed fields in this order and signal the truncation via top-level keys:
 
-1. Drop `request_data` and add `original_request_bytes` (integer, character length of the dropped field). Set `truncated: true`.
-2. Replace `claims` with `{}`. Keep `truncated: true`.
-3. If the record still exceeds the cap, emit a sentinel form: keep all always-required envelope fields plus `error_message` (when `status == "error"`) and set `truncated: "record_too_large"`. All other optional fields are dropped.
+1. Replace `claims` with `{}`. Set `truncated: true`.
+2. If the record still exceeds the cap, emit a sentinel form: keep all always-required envelope fields plus `error_message` (when `status == "error"`) and set `truncated: "record_too_large"`. All other optional fields are dropped.
 
 `error_message` MUST NOT be truncated — operators rely on the full server-side message for debugging. The Python reference implementation uses a default cap of 1 048 576 bytes (1 MiB), configurable via `--access-log-max-record-bytes` or the env var `VGI_RPC_ACCESS_LOG_MAX_RECORD_BYTES`. Pair the cap with shipper configs that raise their per-line limits to match (Vector's `max_line_bytes`, Fluent Bit's `Buffer_Max_Size`).
 
 | Field | Type | Condition |
 |---|---|---|
-| `truncated` | `true`, `"record_too_large"`, or `"payload_omitted"` | Present iff the record does not carry everything it otherwise would. `true` = at least one optional field dropped to fit the size cap. `"record_too_large"` = sentinel form; most optional fields dropped. `"payload_omitted"` = **nothing was lost to a cap** — the emitter is simply not logging request payloads at this level. |
-| `original_request_bytes` | integer | Present when `request_data` was dropped due to truncation. Reports the character length of the dropped string. |
-
-A `unary` record carrying `truncated` is NOT required to also carry `request_data` — the schema relaxes that rule whichever marker is present.
-
-`"payload_omitted"` exists because the other two values were carrying two incompatible meanings. A normally-configured server does not log payloads at INFO, so it set `truncated: true` on essentially every unary record — leaving a consumer scanning for real data loss with nothing to filter on. Emitters that gate payload logging by level MUST use `"payload_omitted"` for that case and reserve `true` for genuine size-driven shedding. Consumers MUST treat the two differently.
+| `truncated` | `true`, `"record_too_large"`, or legacy `"payload_omitted"` | Present iff the record does not carry everything it otherwise would. `true` = at least one optional field dropped to fit the size cap. `"record_too_large"` = sentinel form; most optional fields dropped. `"payload_omitted"` is legacy: it marked a record whose payload was withheld at INFO, back when payloads were logged at DEBUG. Payloads are now never logged, so there is nothing to mark; new emitters MUST NOT use it. The schema still accepts it so an INFO log from an older emitter validates. |
+| `original_request_bytes` | integer | Legacy, paired with `"payload_omitted"`. New emitters MUST NOT emit it; `request_bytes` carries the request size. |
 
 ## 5bb. Sampling
 

@@ -18,8 +18,6 @@ Exit code 0 if all entries pass, 1 if any violations are found.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 import sys
 from dataclasses import dataclass
@@ -50,20 +48,19 @@ def _load_schema() -> dict[str, Any]:
     return schema
 
 
-def _check_request_data(index: int, method: str, entry: dict[str, object]) -> list[Violation]:
-    """Check that ``request_data`` round-trips as an Arrow IPC stream.
+#: Fields that would carry request/response payload values. The schema forbids
+#: them too; this gives the violation a message that says *why*.
+_PAYLOAD_FIELDS = ("request_data", "request_state", "response_state")
 
-    Schema validation cannot reach this: to JSON Schema the field is just a
-    string. But ``docs/access-log-spec.md`` §4.3 calls round-trip
-    equivalence *the* conformance test for it, and until this existed
-    nothing checked — the Python reference shipped
-    ``RecordBatch.serialize()``, a bare encapsulated message with no schema
-    ahead of it, which fails ``open_stream`` outright. Every port could have
-    picked a different wrong answer and all of them would have passed.
 
-    Deliberately checks round-trip, not bytes: a port is free to use
-    whatever encoding its Arrow library produces, so long as a reader gets
-    the batch back.
+def _check_no_payload(index: int, method: str, entry: dict[str, object]) -> list[Violation]:
+    """Reject records that carry request/response payloads at any level.
+
+    ``request_data`` used to be required at DEBUG. That made every server's
+    DEBUG access log a credential store: the framework cannot know which
+    parameters are secret, and VGI's ``catalog_attach`` carries API keys and
+    passwords in its options. Stream state tokens are the same hazard -- they
+    serialize whatever the call was given, and are replayable besides.
 
     Args:
         index: Position of the entry in the log.
@@ -71,65 +68,21 @@ def _check_request_data(index: int, method: str, entry: dict[str, object]) -> li
         entry: The parsed record.
 
     Returns:
-        Violations found (empty when the field is absent or valid).
+        One violation per payload-bearing field present.
 
     """
-    raw = entry.get("request_data")
-    if raw is None:
-        return []
-    if not isinstance(raw, str):
-        return [Violation(index, method, "request_data", f"must be a base64 string, got {type(raw).__name__}")]
-    try:
-        # validate=True rejects non-alphabet characters rather than skipping
-        # them, and strict padding is required by the spec.
-        decoded = base64.b64decode(raw, validate=True)
-    except (ValueError, binascii.Error) as exc:
-        return [Violation(index, method, "request_data", f"not valid base64 (RFC 4648, padding required): {exc}")]
-    if not decoded:
-        return [Violation(index, method, "request_data", "decoded to zero bytes")]
-
-    try:
-        import pyarrow as pa
-        from pyarrow import ipc
-    except ImportError:  # pragma: no cover - pyarrow is a hard dependency
-        return []
-
-    try:
-        reader = ipc.open_stream(pa.BufferReader(decoded))
-    except Exception as exc:
-        return [
-            Violation(
-                index,
-                method,
-                "request_data",
-                f"does not decode as a self-contained Arrow IPC stream "
-                f"(schema message then record batch message): {type(exc).__name__}: {exc}. "
-                f"A single encapsulated message -- what RecordBatch.serialize() produces -- is not a stream.",
-            )
-        ]
-    try:
-        batch = reader.read_next_batch()
-    except StopIteration:
-        return [Violation(index, method, "request_data", "stream decoded but contained no record batch")]
-    except Exception as exc:
-        return [
-            Violation(index, method, "request_data", f"record batch could not be read: {type(exc).__name__}: {exc}")
-        ]
-    # A no-argument method's request batch is legitimately empty in both
-    # dimensions -- `_write_request` builds it from an empty schema, so it
-    # carries no row. The wire reader states the same rule (`_wire.py`: a row
-    # is required only when the schema has fields), and demanding one here
-    # would reject the reference implementation's own `void_noop` records.
-    if len(batch.schema) > 0 and batch.num_rows != 1:
-        return [
-            Violation(
-                index,
-                method,
-                "request_data",
-                f"request batch must carry exactly one row of parameters, got {batch.num_rows}",
-            )
-        ]
-    return []
+    return [
+        Violation(
+            index,
+            method,
+            name,
+            f"{name} must not appear in an access log at any level: it carries request/response "
+            f"payload values, which can include secrets. Log request_fields/request_rows "
+            f"(and *_state_bytes for state tokens) instead.",
+        )
+        for name in _PAYLOAD_FIELDS
+        if name in entry
+    ]
 
 
 def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
@@ -149,7 +102,7 @@ def validate_access_logs(entries: list[dict[str, object]]) -> list[Violation]:
         for err in validator.iter_errors(entry):
             path = "/".join(str(p) for p in err.absolute_path) or "<root>"
             violations.append(Violation(i, method, path, err.message))
-        violations.extend(_check_request_data(i, method, entry))
+        violations.extend(_check_no_payload(i, method, entry))
     return violations
 
 
@@ -188,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         if not path.exists():
             print(f"ERROR: File not found: {path}", file=sys.stderr)
             return 1
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     else:
         if args and args[0] in ("--help", "-h"):
             print(__doc__ or "")

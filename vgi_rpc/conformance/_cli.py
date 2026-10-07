@@ -21,8 +21,9 @@ implementation never checked against its own rules: other ports could be run
 through ``vgi-rpc-test --access-log`` and Python could not, which is how a
 validator rule that rejects Python's own ``void_noop`` records shipped.
 
-``--access-log-debug`` raises the logger to DEBUG, which is the only level
-that emits ``request_data`` — the field carrying the rule in question.
+``--access-log-debug`` raises the logger to DEBUG. That adds nothing to the
+records -- no level logs request payloads -- but proves it: the reference's
+own tests validate a DEBUG log and find no ``request_data`` in it.
 
 """
 
@@ -83,7 +84,7 @@ def main() -> None:
     parser.add_argument(
         "--access-log-debug",
         action="store_true",
-        help="Log the access channel at DEBUG, which is what emits request_data",
+        help="Log the access channel at DEBUG (request payloads are never logged at any level)",
     )
     parser.add_argument(
         "--fake-storage",

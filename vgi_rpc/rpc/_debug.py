@@ -20,6 +20,8 @@ import logging
 
 import pyarrow as pa
 
+from vgi_rpc.metadata import CALL_STATE_KEY, LOCATION_KEY, STATE_KEY
+
 # ---------------------------------------------------------------------------
 # Logger hierarchy: vgi_rpc.wire.*
 # ---------------------------------------------------------------------------
@@ -47,7 +49,13 @@ wire_http_logger = logging.getLogger("vgi_rpc.wire.http")
 # ---------------------------------------------------------------------------
 
 _MAX_VALUE_LEN = 80
-"""Maximum repr length for individual values in fmt_metadata / fmt_kwargs."""
+"""Maximum length for individual metadata values rendered by fmt_metadata."""
+
+#: Metadata whose values are rendered as a size only. State tokens serialize
+#: whatever the call was given (secrets included) and are replayable; an
+#: external location is commonly a presigned URL whose query string is the
+#: credential. An 80-character prefix of either is still too much to log.
+_OPAQUE_METADATA_KEYS = frozenset({STATE_KEY, CALL_STATE_KEY, LOCATION_KEY})
 
 
 def fmt_schema(schema: pa.Schema) -> str:
@@ -82,6 +90,9 @@ def fmt_metadata(metadata: pa.KeyValueMetadata | None) -> str:
     parts: list[str] = []
     for k, v in metadata.items():
         key = k.decode("utf-8", errors="replace")
+        if k in _OPAQUE_METADATA_KEYS:
+            parts.append(f"{key}=<{len(v)} bytes>")
+            continue
         val = v.decode("utf-8", errors="replace")
         if len(val) > _MAX_VALUE_LEN:
             val = val[:_MAX_VALUE_LEN] + "..."
@@ -105,21 +116,21 @@ def fmt_batch(batch: pa.RecordBatch) -> str:
 
 
 def fmt_kwargs(kwargs: dict[str, object]) -> str:
-    """Format keyword arguments compactly.
+    """Format keyword arguments as names and Python types -- never values.
+
+    This feeds the ``vgi_rpc.wire.request`` DEBUG lines on both client and
+    server. It used to render ``repr(value)``, which put every parameter --
+    passwords and API keys included -- into the log of anyone who turned on
+    wire debugging. The framework cannot tell a secret parameter from any
+    other, so no value is rendered at all.
 
     Args:
-        kwargs: Mapping of argument name to value to render.
+        kwargs: Mapping of argument name to value to describe.
 
     Returns:
-        ``"a=1.0, b=2.0"`` with long repr values truncated.
+        ``"a: float, b: str"``.
 
     """
     if not kwargs:
         return ""
-    parts: list[str] = []
-    for k, v in kwargs.items():
-        r = repr(v)
-        if len(r) > _MAX_VALUE_LEN:
-            r = r[:_MAX_VALUE_LEN] + "..."
-        parts.append(f"{k}={r}")
-    return ", ".join(parts)
+    return ", ".join(f"{k}: {type(v).__name__}" for k, v in kwargs.items())

@@ -55,7 +55,7 @@ This is the conformance proof for observability. The full spec is in [`access-lo
 - JSON-Lines (NDJSON), UTF-8.
 - 12 always-required fields: `server_id`, `protocol`, `protocol_hash`, `method`, `method_type`, `principal`, `auth_domain`, `authenticated`, `remote_addr`, `duration_ms`, `status`, `error_type` plus the four envelope fields `timestamp` (RFC 3339 UTC ms-precision), `level` (`"INFO"`), `logger` (`"vgi_rpc.access"`), `message` — 16 keys in total on every record. `protocol_hash` is the one most easily missed: it is what lets a consumer reading archived JSONL decide whether a cached schema decoder still applies, so it is required even though nothing in a single record's own content needs it.
 - Conditional fields keyed off `method_type` and `status` — never off method names.
-- `request_data`: base64 of a self-contained Arrow IPC stream of the request batch. Round-trip equivalence is the test, not byte equivalence — your Arrow library's serialization is fine.
+- **No payload values, at any level.** `request_data`, `request_state` and `response_state` are forbidden (the schema rejects them): the framework cannot know which parameters are secret. Describe the request with `request_fields` (`[{name, type}]`) and `request_rows`; report state tokens by `request_state_bytes` / `response_state_bytes`. The same applies to your debug/wire logging and to OTel/Sentry attributes.
 
 ### 4. The conformance service
 
@@ -77,27 +77,23 @@ Run `vgi-rpc-test --list` to see the test surface. ~150 tests cover unary, strea
 4. Exit code 0 means: every test passed AND every access-log record validated.
 5. Wire that command into your CI.
 
-### Run it at DEBUG, and require the payload
+### Run it at DEBUG too
 
 ```bash
 vgi-rpc-test --cmd "./your-worker --access-log /tmp/conformance.log --access-log-debug" \
-             --access-log /tmp/conformance.log \
-             --require-request-data
+             --access-log /tmp/conformance.log
 ```
 
-Two additions, and both exist because of a bug that shipped:
-
-`request_data` is the heaviest field in the record and most emitters gate it
-behind DEBUG. Validate at INFO and the field is simply absent, so every rule
-governing it goes unexercised — the validator checks it is *well-formed when
-present*, which a log that never carries it satisfies trivially. `--require-request-data`
-turns that into a failure. It is the same shape as asserting a CORS expose
-list without ever asserting the header: the rule is enforced everywhere except
-where it applies.
+DEBUG is where a payload leak would show up, so validate that log as well as
+the INFO one. Up to 0.50.0 the guidance here was the opposite: DEBUG records
+had to carry `request_data`, enforced by `--require-request-data`. That made
+every port's DEBUG log a store of whatever credentials its callers passed.
+The flag now fails with an explanation -- drop it from CI.
 
 Include a **zero-parameter method** in the filter (`void*`). A method with no
-arguments sends an empty schema and no row — see §4.3 — and a validator that
-demands one row unconditionally rejects it. That is not hypothetical: v0.36.1
+arguments sends an empty schema and no row (`request_fields: []`,
+`request_rows: 0`), and a validator that demands one row unconditionally
+rejects it. That is not hypothetical: v0.36.1
 shipped exactly that rule, failed the Python reference's own `void_noop`
 records, and reported a correct Java port as non-conformant. Nothing caught it
 because `vgi-rpc-conformance` had no `--access-log` flag, so the reference
@@ -241,7 +237,7 @@ ignore the budget.
 
 ## Gotchas
 
-- **Arrow dictionary encoding.** Across language Arrow libraries, the placement of dictionary messages in IPC streams differs. The schema's `request_data` round-trip rule was chosen specifically to absorb this — don't try to byte-match Python.
+- **Arrow type names.** `request_fields[].type` is your Arrow library's text rendering of the type; it is not compared across ports, so don't try to byte-match Python's.
 - **Custom metadata key ordering.** Some Arrow libraries do not preserve insertion order. Test your reader against batches produced by Python.
 - **HTTP state-token format.** Tokens are AEAD-sealed (XChaCha20-Poly1305 or ChaCha20-Poly1305, depending on what's available natively in the target language). Each port is free to choose its own plaintext encoding — Python uses a compact msgpack codec for flat states and falls back to length-prefixed Arrow IPC for states holding Arrow values, Go uses gob, TypeScript uses JSON+BigInt, Java uses CBOR, Rust uses length-prefixed bytes — because tokens are not expected to round-trip across language ports. The behavioral contract is per-port: round-trip integrity, cross-principal replay protection (via AEAD AAD or per-principal key derivation), and TTL enforcement after authenticity. See `vgi_rpc/http/server/_state_token.py` for the Python reference.
 - **Token payloads MUST be compressed inside the seal.** Codec is your choice — zstd if the runtime has it, deflate/gzip otherwise — but the *placement* is not: compressing after sealing accomplishes nothing, because a sealed token is ciphertext and the body codec then recovers only the base64 slack (~76–80%), never the state's structure. Inside the seal it reaches the real redundancy; the reference records a 7,800-byte call state packing to 1,872, taking the token from 10,820 bytes to 2,552. Prefix a self-describing codec tag, emit the raw tag and skip compression when it does not shrink (a small token must never grow), bound the decompressed size, and reject an unknown tag or a failed decompress as the same uniform 400 as any other token failure. Together with the call/cursor split this is what keeps continuation payloads small — splitting alone still pays full freight per turn if each half ships uncompressed. **None of this is visible on the wire, so the shared conformance suite cannot check it** — cover it with a language-local test over your own seal/open path: compression engages on a large payload, a tiny payload stays raw, a corrupt payload 400s.

@@ -3408,7 +3408,7 @@ class TestRequestId:
             if log_path.exists():
                 ids = [
                     str(rec.get("request_id", ""))
-                    for line in log_path.read_text().splitlines()
+                    for line in log_path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
                     for rec in [json.loads(line)]
                     if rec.get("logger") == "vgi_rpc.access"
@@ -3478,7 +3478,7 @@ class TestRequestId:
             if log_path.exists():
                 records = [
                     rec
-                    for line in log_path.read_text().splitlines()
+                    for line in log_path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
                     for rec in [json.loads(line)]
                     if rec.get("logger") == "vgi_rpc.access"
@@ -3513,7 +3513,7 @@ class TestRequestId:
 
         ``access-log-spec.md`` is explicit: one record per RPC call, and for a
         stream that means the ``init`` and every continuation, all sharing a
-        ``stream_id``, with ``request_data`` on the init record only.
+        ``stream_id``, with the request shape (``request_fields``) on the init record only.
 
         Nothing caught a port that emitted *nothing* for streams, because the
         record validator only checks records that exist -- a port with no
@@ -3534,7 +3534,7 @@ class TestRequestId:
 
         before = 0
         if log_path.exists():
-            before = len([ln for ln in log_path.read_text().splitlines() if ln.strip()])
+            before = len([ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()])
 
         # The whole stream is consumed through the reference client, not by
         # POSTing /init by hand.  An init-only probe cannot tell a port that
@@ -3563,7 +3563,7 @@ class TestRequestId:
         stream_records: list[dict[str, Any]] = []
         while time.time() < deadline:
             if log_path.exists():
-                lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
+                lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
                 stream_records = [
                     rec
                     for ln in lines[before:]

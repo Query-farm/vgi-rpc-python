@@ -41,7 +41,7 @@ Both rotation handlers use the standard rename-then-reopen pattern, which Vector
 
 Downstream log shippers impose per-line ceilings (Vector `file` source default 100 KiB, Fluent Bit `Buffer_Max_Size` default 256 KiB). Lines exceeding the ceiling are silently dropped, which is the worst possible failure mode for an audit log.
 
-The Python emitter caps each record at 1 MiB by default — well above realistic record sizes but bounded so a runaway `request_data` blob can't produce a 50 MB log line that the shipper drops.
+The Python emitter caps each record at 1 MiB by default — well above realistic record sizes but bounded so a runaway field (a huge claims set, say) can't produce a 50 MB log line that the shipper drops.
 
 | Flag | Env | Default |
 |---|---|---|
@@ -49,9 +49,8 @@ The Python emitter caps each record at 1 MiB by default — well above realistic
 
 When a record would exceed the cap, the formatter sheds fields in this order:
 
-1. Drop `request_data`. Add `original_request_bytes` (character length of the dropped string) and set `truncated: true`.
-2. Empty `claims`. Keep `truncated: true`.
-3. Fall back to a sentinel form: keep all always-required envelope fields plus `error_message` (when `status == "error"`) and set `truncated: "record_too_large"`. Everything else is dropped.
+1. Empty `claims` and set `truncated: true`.
+2. Fall back to a sentinel form: keep all always-required envelope fields plus `error_message` (when `status == "error"`) and set `truncated: "record_too_large"`. Everything else is dropped.
 
 `error_message` is **never** truncated — operators rely on the full server-side message for debugging.
 
@@ -84,27 +83,36 @@ Ready-to-adapt shipper configs live under [`docs/log-shipping/`](https://github.
 
 Cloud authentication is picked up from the environment (instance profile, workload identity, managed identity) — the configs do not embed static credentials.
 
-## Decoding `request_data`
+## Request payloads are never logged
 
-The `request_data` field on unary records and stream `init` records contains base64-encoded Arrow IPC stream bytes. Each column in the batch is a method parameter:
+No access-log record carries a request or response payload value, at any
+log level. The framework cannot know which parameters are secret -- a VGI
+`catalog_attach` carries API keys and passwords in its options -- so any
+payload in a log is a credential leak waiting for someone to turn on DEBUG.
+There is no flag to turn payload logging back on.
 
-```python
-import base64
-import pyarrow as pa
+Up to 0.50.0 the access log carried `request_data` (the whole request as
+base64 Arrow IPC) and the HTTP `request_state`/`response_state` tokens at
+DEBUG. Those fields are gone, and the schema now rejects them. Instead a
+record describes the request:
 
-batch_bytes = base64.b64decode(record["request_data"])
-reader = pa.ipc.open_stream(batch_bytes)
-batch = reader.read_all().to_batches()[0]
-print(batch.to_pydict())
-```
+| Field | Meaning |
+|---|---|
+| `request_fields` | `[{"name": ..., "type": ...}, ...]` -- parameter names and Arrow types, in schema order. Unary and stream `init` records. |
+| `request_rows` | Row count of the request batch: 1, or 0 for a zero-parameter method. |
+| `request_bytes` | On-wire size of the request body (HTTP). |
+| `request_state_bytes` / `response_state_bytes` | Size of the state token received / returned on an HTTP stream turn. |
 
-A truncated record (`truncated: true`) will have `request_data` absent and `original_request_bytes` set to the original character length of the dropped field.
+The `vgi_rpc.wire.*` DEBUG loggers follow the same rule: kwargs render as
+`name: type`, and state-token and external-location metadata render as a
+byte count.
 
-If your Protocol carries sensitive parameters (passwords, API keys, PII), strip them in a downstream pipeline step before ingestion into a log aggregation system — the framework does not redact `request_data`.
+No digest of the payload is logged either: a hash of a request whose other
+fields are known is a brute-force oracle for a short secret.
 
 ## Correlating stream requests
 
-A single client query may produce multiple HTTP exchanges: one stream `init` plus zero or more `exchange`/`produce` continuations. Every record from the same logical stream carries the same `stream_id` (32-char UUID hex). Continuation records do not carry `request_data` — the call parameters were logged on `init`.
+A single client query may produce multiple HTTP exchanges: one stream `init` plus zero or more `exchange`/`produce` continuations. Every record from the same logical stream carries the same `stream_id` (32-char UUID hex). Continuation records do not carry `request_fields` — the request shape was logged on `init`.
 
 ```sql
 -- Reconstruct one stream's full execution
@@ -173,7 +181,9 @@ Exit code is `0` if every record passes, `1` if any record fails, `2` if the run
   "error_type": "",
   "request_id": "f41f090e23b84789",
   "http_status": 200,
-  "request_data": "QVJST1cxAAA..."
+  "request_fields": [{"name": "name", "type": "string"}],
+  "request_rows": 1,
+  "request_bytes": 412
 }
 ```
 
@@ -197,7 +207,7 @@ Exit code is `0` if every record passes, `1` if any record fails, `2` if the run
   "duration_ms": 412.7,
   "status": "ok",
   "error_type": "",
-  "truncated": true,
-  "original_request_bytes": 8388608
+  "claims": {},
+  "truncated": true
 }
 ```

@@ -321,10 +321,8 @@ class VgiAccessLogFormatter(VgiJsonFormatter):
     formatter enforces a configurable cap by progressively shedding the
     largest fields:
 
-    1. Drop ``request_data`` (the usual offender — base64'd Arrow IPC bytes)
-       and set ``truncated: true`` plus ``original_request_bytes``.
-    2. Drop ``error_message`` and ``claims``.
-    3. Fall back to a minimal sentinel record carrying only the
+    1. Empty ``claims``.
+    2. Fall back to a minimal sentinel record carrying only the
        always-required envelope fields plus ``truncated: "record_too_large"``.
 
     The default cap (1 MiB) is large enough for almost any realistic record
@@ -362,14 +360,6 @@ class VgiAccessLogFormatter(VgiJsonFormatter):
         obj = self._build_payload(record)
         if self._encoded_len(obj) <= self.max_record_bytes:
             return json.dumps(obj, default=str)
-
-        request_data = obj.get("request_data")
-        if isinstance(request_data, str):
-            obj["original_request_bytes"] = len(request_data)
-            del obj["request_data"]
-            obj["truncated"] = True
-            if self._encoded_len(obj) <= self.max_record_bytes:
-                return json.dumps(obj, default=str)
 
         claims = obj.get("claims")
         if claims is not None:

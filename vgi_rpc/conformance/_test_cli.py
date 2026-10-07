@@ -415,9 +415,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--require-request-data",
         action="store_true",
         help=(
-            "Also require that unary records actually carry request_data. Without "
-            "this the field is only checked when present, so a worker that never "
-            "emits it passes. Run the worker's access log at DEBUG."
+            "Removed: request_data is no longer permitted in an access log at any "
+            "level (it leaked secrets). Passing this flag fails the run with an "
+            "explanation so a stale CI invocation cannot pass silently."
         ),
     )
 
@@ -437,8 +437,11 @@ def _validate_access_log(path: str, *, require_request_data: bool = False) -> bo
 
     Args:
         path: Path to a JSONL file written by the worker under test.
-        require_request_data: Also require unary records to carry
-            ``request_data``, not merely to be valid when present.
+        require_request_data: The retired ``--require-request-data`` flag.
+            When set the run fails with an explanation: the rule it enforced
+            -- unary records must carry their request payload -- is now the
+            opposite of the spec, and a no-op would let a stale CI
+            invocation keep passing while asserting nothing.
 
     Returns:
         True if every ``vgi_rpc.access`` entry in the file conforms,
@@ -453,36 +456,26 @@ def _validate_access_log(path: str, *, require_request_data: bool = False) -> bo
         validate_access_logs,
     )
 
+    if require_request_data:
+        sys.stderr.write(
+            "--require-request-data: removed. Access-log records must not carry request_data "
+            "(or request_state/response_state) at any level -- payload values can include "
+            "secrets. Emit request_fields/request_rows instead and drop this flag.\n"
+        )
+        return False
+
     file_path = _Path(path)
     if not file_path.exists():
         sys.stderr.write(f"--access-log: file not found: {path}\n")
         return False
 
-    lines = file_path.read_text().splitlines()
+    # UTF-8 explicitly: the platform default on Windows is a code page, and a
+    # principal or error message outside it would fail to decode.
+    lines = file_path.read_text(encoding="utf-8").splitlines()
     entries = _filter_access_logs(_parse_json_log_lines(lines))
     if not entries:
         sys.stderr.write(f"--access-log: no vgi_rpc.access entries found in {path}\n")
         return False
-
-    if require_request_data:
-        # Presence, not just validity. The schema lets a record opt out of
-        # request_data by declaring `truncated`, which every emitter does at
-        # INFO -- so a validator that only checks well-formed-when-present
-        # passes a log that never carries the field at all. That is the same
-        # shape as checking a CORS expose list without checking the header:
-        # the rule is enforced everywhere except where it applies.
-        unary = [e for e in entries if e.get("method_type") == "unary"]
-        if not unary:
-            sys.stderr.write("--require-request-data: no unary records to check\n")
-            return False
-        missing = [e for e in unary if "request_data" not in e]
-        if missing:
-            methods = sorted({str(e.get("method", "?")) for e in missing})
-            sys.stderr.write(
-                f"--require-request-data: {len(missing)}/{len(unary)} unary records carry no "
-                f"request_data (methods: {', '.join(methods[:6])}). Emit the access log at DEBUG.\n"
-            )
-            return False
 
     violations = validate_access_logs(entries)
     if violations:

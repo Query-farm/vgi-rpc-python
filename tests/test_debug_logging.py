@@ -110,6 +110,25 @@ class TestFmtBatch:
         assert "bytes=" in result
 
 
+class TestFmtMetadataOpaqueKeys:
+    """State tokens and external locations render as sizes."""
+
+    def test_state_and_location_values_hidden(self) -> None:
+        """A state token or presigned URL is never rendered, not even a prefix."""
+        md = pa.KeyValueMetadata(
+            {
+                b"vgi_rpc.stream_state#b64": b"c2VjcmV0LXN0YXRl",
+                b"vgi_rpc.location": b"https://bucket/obj?X-Amz-Signature=abc",
+                b"vgi_rpc.method": b"add",
+            }
+        )
+        result = fmt_metadata(md)
+        assert "c2VjcmV0" not in result
+        assert "Signature" not in result
+        assert "vgi_rpc.stream_state#b64=<16 bytes>" in result
+        assert "vgi_rpc.method='add'" in result
+
+
 class TestFmtKwargs:
     """Tests for fmt_kwargs."""
 
@@ -117,15 +136,11 @@ class TestFmtKwargs:
         """Empty kwargs returns empty string."""
         assert fmt_kwargs({}) == ""
 
-    def test_simple(self) -> None:
-        """Simple kwargs are formatted as key=value pairs."""
-        result = fmt_kwargs({"a": 1.0, "b": 2.0})
-        assert result == "a=1.0, b=2.0"
-
-    def test_long_value_truncated(self) -> None:
-        """Long repr values are truncated with ellipsis."""
-        result = fmt_kwargs({"data": "x" * 200})
-        assert "..." in result
+    def test_names_and_types_only(self) -> None:
+        """Kwargs render as name: type -- values never appear."""
+        result = fmt_kwargs({"a": 1.0, "api_key": "hunter2"})
+        assert result == "a: float, api_key: str"
+        assert "hunter2" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +213,7 @@ class TestDebugLoggingUnary:
         # _send_request logs defaults_applied
         assert any("Send request" in m and "method=add" in m for m in msgs), f"Expected Send request log: {msgs}"
         # _read_request (server-side) logs parsed kwargs
-        assert any("Parsed request" in m and "a=" in m for m in msgs), f"Expected parsed kwargs: {msgs}"
+        assert any("Parsed request" in m and "a: float" in m for m in msgs), f"Expected parsed kwargs: {msgs}"
 
     def test_response_logger_fires(self, caplog: pytest.LogCaptureFixture) -> None:
         """wire.response logs result batch and return type for unary call."""

@@ -136,9 +136,35 @@
       "minimum": 100,
       "maximum": 599
     },
+    "request_fields": {
+      "type": "array",
+      "description": "Shape of the request batch: one entry per parameter, in schema order, giving its name and Arrow type. Present on unary and stream init records. Never carries a value.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "request_rows": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Row count of the request batch: 1 for a call with parameters, 0 for a zero-parameter call. Present whenever request_fields is."
+    },
     "request_data": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+      "description": "Forbidden. Request and response payload values -- and serialized stream state, which can hold them -- MUST NOT appear in an access log at any level: the framework cannot know which parameters are secret (API keys, passwords), and a log outlives and outreaches the call. Describe the request with request_fields/request_rows/request_bytes instead.",
+      "not": {}
     },
     "stream_id": {
       "type": "string",
@@ -148,12 +174,22 @@
       "type": "object"
     },
     "request_state": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+      "description": "Forbidden. Request and response payload values -- and serialized stream state, which can hold them -- MUST NOT appear in an access log at any level: the framework cannot know which parameters are secret (API keys, passwords), and a log outlives and outreaches the call. Describe the request with request_fields/request_rows/request_bytes instead.",
+      "not": {}
+    },
+    "request_state_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Size in bytes of the state token the client sent on this HTTP stream turn. The token itself is never logged."
     },
     "response_state": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+      "description": "Forbidden. Request and response payload values -- and serialized stream state, which can hold them -- MUST NOT appear in an access log at any level: the framework cannot know which parameters are secret (API keys, passwords), and a log outlives and outreaches the call. Describe the request with request_fields/request_rows/request_bytes instead.",
+      "not": {}
+    },
+    "response_state_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Size in bytes of the state token returned on this HTTP stream turn. The token itself is never logged."
     },
     "input_batches": {
       "type": "integer",
@@ -195,7 +231,7 @@
       "description": "Bytes uploaded to external storage during this call. These never appear in the HTTP body -- only a pointer batch does -- so they are invisible to transport-level accounting and are frequently the largest of the three byte figures. Absent when nothing was externalised."
     },
     "truncated": {
-      "description": "Set when the record does not carry everything it otherwise would. true = the formatter shed fields to fit a per-record size cap. \"record_too_large\" = the sentinel form, where most optional fields were dropped. \"payload_omitted\" = nothing was lost to a cap; the emitter is simply not logging request payloads at this level. Consumers looking for real data loss MUST distinguish \"payload_omitted\" from the other two, since it is the common case on a normally-configured server.",
+      "description": "Set when the record does not carry everything it otherwise would. true = the formatter shed fields to fit a per-record size cap. \"record_too_large\" = the sentinel form, where most optional fields were dropped. \"payload_omitted\" is legacy (emitted by servers that logged request payloads at DEBUG and omitted them otherwise); payloads are no longer logged at any level, so new emitters MUST NOT use it.",
       "oneOf": [
         {
           "const": true
@@ -217,7 +253,7 @@
     "original_request_bytes": {
       "type": "integer",
       "minimum": 0,
-      "description": "Length in characters of the request_data field that was dropped due to truncation."
+      "description": "Legacy: the character length of a request_data field that was omitted. request_data is no longer permitted, so new emitters MUST NOT emit this; request_bytes carries the request size."
     },
     "session_id": {
       "type": "string",
@@ -307,29 +343,6 @@
       }
     },
     {
-      "description": "method_type=unary requires request_data unless the record was truncated",
-      "if": {
-        "properties": {
-          "method_type": {
-            "const": "unary"
-          }
-        },
-        "required": [
-          "method_type"
-        ],
-        "not": {
-          "required": [
-            "truncated"
-          ]
-        }
-      },
-      "then": {
-        "required": [
-          "request_data"
-        ]
-      }
-    },
-    {
       "description": "Call statistics: all six fields present together or all absent",
       "anyOf": [
         {
@@ -377,6 +390,33 @@
             "input_bytes",
             "output_bytes"
           ]
+        }
+      ]
+    },
+    {
+      "description": "request_rows is present exactly when request_fields is",
+      "anyOf": [
+        {
+          "required": [
+            "request_fields",
+            "request_rows"
+          ]
+        },
+        {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "request_fields"
+                ]
+              },
+              {
+                "required": [
+                  "request_rows"
+                ]
+              }
+            ]
+          }
         }
       ]
     }

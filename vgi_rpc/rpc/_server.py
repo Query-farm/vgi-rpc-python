@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import dataclasses
 import inspect
@@ -16,7 +15,6 @@ import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from io import BytesIO
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -218,35 +216,39 @@ def _current_trace_context() -> tuple[str, str]:
         return "", ""
 
 
-def _request_wire_bytes(captured: object) -> bytes:
-    """Return the request as a self-contained Arrow IPC stream.
+def _request_shape(captured: object) -> tuple[list[dict[str, str]], int]:
+    """Describe the request batch without exposing any of its values.
 
-    ``docs/access-log-spec.md`` §4.3 requires ``request_data`` to decode
-    through ``pyarrow.ipc.open_stream``. ``RecordBatch.serialize()`` does not
-    satisfy that: it writes a single encapsulated *message*, with no schema
-    message ahead of it, so a conformant reader fails with "Expected IPC
-    message of type schema". It also drops the batch's custom_metadata, which
-    is where the dispatch method and request version live.
+    The access log used to carry the whole request as base64 Arrow IPC
+    (``request_data``) at DEBUG. The framework cannot know which parameters
+    are secret -- a VGI ``catalog_attach`` carries API keys and passwords in
+    its options -- so any payload in the log is a credential leak waiting for
+    someone to turn DEBUG on. The record now says only what the request
+    *looked like*: parameter names, Arrow types and the row count. Its size
+    is already on the record as ``request_bytes``.
 
-    So transports that have the original bytes hand them straight through --
-    free, byte-faithful, and metadata intact. Only transports that cannot
-    (pipe/unix read from a shared stream with no discrete body) fall back to
-    re-framing the batch, and that path is reached solely at DEBUG.
+    Deliberately no digest of the bytes either: a hash of a payload whose
+    other fields are known is a brute-force oracle for a short secret.
 
     Args:
-        captured: Raw wire bytes, or the parsed request batch.
+        captured: Raw wire bytes (HTTP), or the parsed request batch.
 
     Returns:
-        Bytes that decode through ``pyarrow.ipc.open_stream``.
+        ``([{"name": ..., "type": ...}, ...], num_rows)``.
 
     """
     if isinstance(captured, bytes):
-        return captured
-    batch = cast("pa.RecordBatch", captured)
-    buf = BytesIO()
-    with new_ipc_stream(buf, batch.schema) as writer:
-        writer.write_batch(batch, custom_metadata=_current_request_metadata.get())
-    return buf.getvalue()
+        reader = ipc.open_stream(pa.py_buffer(captured))
+        schema = reader.schema
+        try:
+            rows = reader.read_next_batch().num_rows
+        except StopIteration:
+            rows = 0
+    else:
+        batch = cast("pa.RecordBatch", captured)
+        schema = batch.schema
+        rows = batch.num_rows
+    return [{"name": f.name, "type": str(f.type)} for f in schema], rows
 
 
 def _emit_access_log(
@@ -322,34 +324,14 @@ def _emit_access_log(
             extra["span_id"] = span_id
         if http_status is not None:
             extra["http_status"] = http_status
-        # Raw request batch bytes (set by _read_request for unary/stream-init).
-        # Only emit the full base64 payload when the access logger is at
-        # DEBUG. At INFO this field is by far the heaviest in the record
-        # (an init RPC commonly logs 8+ KiB of base64 per call), and audit
-        # consumers rarely need the bytes — they care about who/what/when.
-        # When omitted, mark the record `truncated: true` and surface the
-        # original size so the access-log schema's "unary requires
-        # request_data unless truncated" invariant holds.
+        # Request shape (set by _read_request for unary/stream-init). Never
+        # the values: see _request_shape for why no payload is logged at any
+        # level.
         request_batch = _current_request_batch.get()
         if request_batch is not None:
-            # Serialized here rather than at read time: this whole function
-            # already returned early when the access logger is off, so the
-            # cost now falls only on servers that asked for it.
-            raw = _request_wire_bytes(request_batch)
-            if _access_logger.isEnabledFor(logging.DEBUG):
-                extra["request_data"] = base64.b64encode(raw).decode()
-            else:
-                # base64 length is a pure function of the byte count, so
-                # encoding the payload just to measure it is work for a
-                # number that is one multiplication away.
-                encoded_len = 4 * ((len(raw) + 2) // 3)
-                # Distinct from the formatter's size-driven `true`: this
-                # record lost nothing to a cap, the deployment simply does
-                # not log payloads at INFO. Sharing one value made the
-                # marker fire on essentially every record and stop meaning
-                # anything to a consumer looking for real data loss.
-                extra["original_request_bytes"] = encoded_len
-                extra["truncated"] = "payload_omitted"
+            fields, rows = _request_shape(request_batch)
+            extra["request_fields"] = fields
+            extra["request_rows"] = rows
         # Stream correlation ID
         stream_id = _current_stream_id.get()
         if stream_id:
@@ -378,18 +360,14 @@ def _emit_access_log(
             redacted = apply_claim_redaction(auth.claims)
             if redacted:
                 extra["claims"] = redacted
-        # State tokens (HTTP transport only). Same DEBUG-gating as
-        # request_data above: these are base64'd opaque blobs encoding the
-        # worker's serialized cross-POST context — typically 8-12 KiB per
-        # record on streaming methods. Useful for replay/audit at DEBUG;
-        # at INFO they dominate the log volume without giving operators
-        # anything they can read. Schema makes both fields optional, so we
-        # can simply omit (no truncated marker needed).
-        if _access_logger.isEnabledFor(logging.DEBUG):
-            if request_state is not None:
-                extra["request_state"] = base64.b64encode(request_state).decode()
-            if response_state is not None:
-                extra["response_state"] = base64.b64encode(response_state).decode()
+        # State tokens (HTTP transport only). Sizes, never the tokens: a token
+        # is the worker's serialized stream state -- which may hold anything
+        # the call was given, secrets included -- and a logged token is also
+        # a replayable continuation. Neither belongs in a log at any level.
+        if request_state is not None:
+            extra["request_state_bytes"] = len(request_state)
+        if response_state is not None:
+            extra["response_state_bytes"] = len(response_state)
         # Egress accounting. `input_bytes`/`output_bytes` below measure
         # logical Arrow buffers -- what the worker processed. These measure
         # what actually crossed the network, which is a different number in

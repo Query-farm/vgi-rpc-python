@@ -726,9 +726,8 @@ class _CompressionMiddleware:
             # every read. Measured 26-31% off open_stream+read_batch, with
             # the gap widening as the body grows.
             req.context.decompressed_stream = pa.BufferReader(decompressed)
-            # The decompressed body *is* the self-contained IPC stream the
-            # access log is specified to carry. Capturing it costs nothing
-            # and is exactly what the client sent.
+            # Captured so the access log can describe the request's shape
+            # (names, types, rows). Its values are never logged.
             _current_request_batch.set(decompressed)
         except DecompressionLimitExceeded as exc:
             raise falcon.HTTPContentTooLarge(

@@ -164,21 +164,8 @@ class _Impl:
 # ---------------------------------------------------------------------------
 
 
-def _valid_request_data() -> str:
-    """Return a spec-valid ``request_data``: base64 of a real Arrow IPC stream.
-
-    The fixtures used ``"QQ=="`` — base64 of the single byte ``"A"`` — which
-    passed only because nothing decoded the field. Now that the validator
-    round-trips it, a fixture has to carry something a reader can actually
-    open, which is also what makes these tests mean anything.
-    """
-    import base64
-
-    batch = pa.record_batch([pa.array(["x"])], schema=pa.schema([pa.field("v", pa.string())]))
-    buf = io.BytesIO()
-    with pa.ipc.new_stream(buf, batch.schema) as writer:
-        writer.write_batch(batch)
-    return base64.b64encode(buf.getvalue()).decode()
+#: A spec-valid request shape: what replaced ``request_data`` on the record.
+_REQUEST_SHAPE: dict[str, Any] = {"request_fields": [{"name": "v", "type": "string"}], "request_rows": 1}
 
 
 def _format_record(record: logging.LogRecord) -> dict[str, Any]:
@@ -234,7 +221,7 @@ class TestValidator:
             "duration_ms": 1.23,
             "status": "ok",
             "error_type": "",
-            "request_data": _valid_request_data(),
+            **_REQUEST_SHAPE,
         }
 
     def test_minimal_unary_record_passes(self) -> None:
@@ -266,12 +253,38 @@ class TestValidator:
         violations = validate_access_logs([rec])
         assert any("stream_id" in v.message for v in violations)
 
-    def test_unary_record_requires_request_data(self) -> None:
-        """method_type=unary without request_data is a violation."""
+    @pytest.mark.parametrize("field", ["request_data", "request_state", "response_state"])
+    def test_payload_fields_are_rejected(self, field: str) -> None:
+        """A record carrying a request/response payload fails, at any level.
+
+        ``request_data`` used to be *required* at DEBUG, which made every
+        server's DEBUG access log a credential store: VGI's
+        ``catalog_attach`` carries API keys in its options, and the framework
+        cannot tell a secret parameter from any other.
+        """
         rec = self._good_unary_record()
-        rec.pop("request_data", None)
+        rec[field] = "QQ=="
         violations = validate_access_logs([rec])
-        assert any("request_data" in v.message for v in violations)
+        assert any(v.path == field and "must not appear" in v.message for v in violations), violations
+
+    def test_unary_record_without_shape_passes(self) -> None:
+        """The shape fields are optional -- absence is not a leak."""
+        rec = self._good_unary_record()
+        rec.pop("request_fields")
+        rec.pop("request_rows")
+        assert validate_access_logs([rec]) == []
+
+    def test_request_fields_without_rows_rejected(self) -> None:
+        """request_fields and request_rows travel together."""
+        rec = self._good_unary_record()
+        rec.pop("request_rows")
+        assert validate_access_logs([rec])
+
+    def test_request_fields_items_carry_no_value(self) -> None:
+        """An entry is exactly {name, type}; a smuggled ``value`` is rejected."""
+        rec = self._good_unary_record()
+        rec["request_fields"] = [{"name": "api_key", "type": "string", "value": "hunter2"}]
+        assert any("request_fields" in v.path for v in validate_access_logs([rec]))
 
     def test_partial_call_statistics_rejected(self) -> None:
         """If any of the six stats fields is present they must all be present."""
@@ -498,7 +511,7 @@ _MINIMAL_RECORD: dict[str, Any] = {
     "duration_ms": 1.23,
     "status": "ok",
     "error_type": "",
-    "request_data": _valid_request_data(),
+    **_REQUEST_SHAPE,
 }
 
 
@@ -581,14 +594,11 @@ class TestReferenceWorkerValidatesItself:
     """
 
     def test_zero_parameter_method_validates(self) -> None:
-        """A zero-parameter call's ``request_data`` is conformant.
+        """A zero-parameter call's record is conformant: no fields, no row.
 
-        The empty-schema exemption, asserted directly: a method with no
-        arguments has nothing to put in a row, so requiring one contradicts
-        the wire format.
+        A method with no arguments has nothing to put in a row, so its shape
+        is ``request_fields == []`` and ``request_rows == 0``.
         """
-        import base64
-
         records: list[logging.LogRecord] = []
 
         class _Capture(logging.Handler):
@@ -617,13 +627,9 @@ class TestReferenceWorkerValidatesItself:
 
         emitted = [r for r in records if getattr(r, "method", None) == "void_noop"]
         assert emitted, "no access-log record for void_noop"
-        raw = getattr(emitted[0], "request_data", None)
-        assert isinstance(raw, str), "request_data missing at DEBUG"
-
-        decoded = base64.b64decode(raw)
-        batch = pa.ipc.open_stream(pa.BufferReader(decoded)).read_next_batch()
-        assert batch.num_columns == 0, "void_noop takes no parameters"
-        assert batch.num_rows == 0, "an empty schema carries no row"
+        assert not hasattr(emitted[0], "request_data"), "no payload at DEBUG either"
+        assert getattr(emitted[0], "request_fields", None) == [], "void_noop takes no parameters"
+        assert getattr(emitted[0], "request_rows", None) == 0, "an empty schema carries no row"
 
         record = _format_record(emitted[0])
         violations = validate_access_logs([record])
@@ -632,16 +638,9 @@ class TestReferenceWorkerValidatesItself:
     def test_shipped_reference_worker_validates_end_to_end(self, tmp_path: Path) -> None:
         """Drive the *shipped* reference worker through the reference validator.
 
-        The pre-existing end-to-end test used a ``tests/`` fixture worker at
-        INFO, where ``request_data`` is never emitted — so it validated
-        records in which the field was absent, and the rule governing it went
-        unexercised. Four people then verified this by hand, which is not a
-        mechanism.
-
-        This runs ``vgi-rpc-conformance`` itself, at DEBUG, with
-        ``--require-request-data`` so a log that simply never carries the
-        field fails rather than passes. It covers ``void_*``, which is where
-        the zero-parameter rule bites.
+        At DEBUG -- the level that used to emit ``request_data`` -- so the
+        record that would leak is the one checked. Covers ``void_*``, where
+        the zero-parameter shape applies.
         """
         log_path = tmp_path / "reference.log"
         worker = f"{sys.executable} -m vgi_rpc.conformance._cli --access-log {log_path} --access-log-debug"
@@ -654,7 +653,6 @@ class TestReferenceWorkerValidatesItself:
                 worker,
                 "--access-log",
                 str(log_path),
-                "--require-request-data",
                 "--filter",
                 "scalar*,void*",
                 "--format",
@@ -662,25 +660,26 @@ class TestReferenceWorkerValidatesItself:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=180,
         )
         assert proc.returncode == 0, f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}"
         assert "--access-log: PASS" in proc.stderr
 
-        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         unary = [r for r in records if r.get("method_type") == "unary"]
         assert unary, "no unary records emitted"
-        assert all("request_data" in r for r in unary), "DEBUG must emit request_data on every unary record"
+        assert not [r for r in records if {"request_data", "request_state", "response_state"} & r.keys()]
+        assert all("request_fields" in r and "request_rows" in r for r in unary), "DEBUG must describe every request"
         assert any(str(r.get("method", "")).startswith("void") for r in unary), (
-            "a zero-parameter method must be exercised — that is the case the shipped rule rejected"
+            "a zero-parameter method must be exercised"
         )
 
-    def test_require_request_data_fails_a_log_without_it(self, tmp_path: Path) -> None:
-        """The new flag must actually fail, or it is decoration.
+    def test_retired_require_request_data_flag_fails_loudly(self, tmp_path: Path) -> None:
+        """``--require-request-data`` now fails with an explanation.
 
-        At INFO the reference omits ``request_data`` legitimately (the schema
-        permits opting out via ``truncated``), so this is exactly the log the
-        old test was passing.
+        Every port's CI passes it. A silent no-op would keep those runs green
+        while asserting nothing; failing tells each port the rule inverted.
         """
         log_path = tmp_path / "info.log"
         worker = f"{sys.executable} -m vgi_rpc.conformance._cli --access-log {log_path}"
@@ -701,10 +700,11 @@ class TestReferenceWorkerValidatesItself:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=180,
         )
-        assert proc.returncode != 0, "a log with no request_data must fail --require-request-data"
-        assert "--require-request-data" in proc.stderr
+        assert proc.returncode != 0
+        assert "--require-request-data: removed" in proc.stderr
 
     def test_conformance_cli_can_emit_an_access_log(self) -> None:
         """The reference worker exposes the flag that makes the above testable.
@@ -721,95 +721,164 @@ class TestReferenceWorkerValidatesItself:
             timeout=60,
         ).stdout
         assert "--access-log" in out
-        assert "--access-log-debug" in out, "request_data only appears at DEBUG"
+        assert "--access-log-debug" in out
 
 
-class TestRequestDataRoundTrip:
-    """``request_data`` must decode through ``pyarrow.ipc.open_stream``.
+_SECRET = "sk-live-SENTINEL-7f3a9c2e-do-not-log"
 
-    Spec §4.3 calls round-trip equivalence "the conformance test", and
-    nothing checked it: the validator does not inspect the field's content
-    and the fixtures above use the placeholder ``"QQ=="``. The reference
-    implementation emitted ``RecordBatch.serialize()`` -- a bare
-    encapsulated message with no schema ahead of it -- so a reader following
-    the spec got ``OSError: Expected IPC message of type schema``, and the
-    batch's ``vgi_rpc.method`` / ``vgi_rpc.request_version`` metadata was
-    dropped on the way.
+
+class _SecretSvc(Protocol):
+    """A protocol whose parameters carry a credential, as VGI's catalog_attach does."""
+
+    def attach(self, api_key: str, host: str) -> str:
+        """Unary call carrying a secret."""
+        ...
+
+    def tail(self, api_key: str) -> Stream[_SecretState]:
+        """Exchange stream holding the secret in serialized state."""
+        ...
+
+
+@dataclass
+class _SecretState(StreamState):
+    """Stream state that keeps the credential, so state tokens carry it."""
+
+    api_key: str
+    seen: int = 0
+
+    def process(self, input_batch: Any, out: OutputCollector, ctx: Any) -> None:
+        """Echo the input row count."""
+        self.seen += 1
+        out.emit(pa.record_batch([pa.array([self.seen])], schema=_COUNT_SCHEMA))
+
+
+class _SecretImpl:
+    """Implementation of :class:`_SecretSvc`."""
+
+    def attach(self, api_key: str, host: str) -> str:
+        """Return something that is not the key."""
+        return f"attached to {host}"
+
+    def tail(self, api_key: str) -> Stream[_SecretState]:
+        """Open an exchange stream holding the key in state."""
+        return Stream(output_schema=_COUNT_SCHEMA, state=_SecretState(api_key=api_key), input_schema=_COUNT_SCHEMA)
+
+
+def _drive_secret_calls(proxy: Any) -> None:
+    """One unary call and two exchange turns, all carrying the secret."""
+    from vgi_rpc import AnnotatedBatch
+
+    proxy.attach(api_key=_SECRET, host="db.example")
+    with proxy.tail(api_key=_SECRET) as session:
+        for _ in range(2):
+            session.exchange(AnnotatedBatch(batch=pa.record_batch([pa.array([1])], schema=_COUNT_SCHEMA)))
+
+
+class TestNoPayloadInLogs:
+    """No request/response payload value reaches any log, at DEBUG, on any transport.
+
+    The access log used to carry ``request_data`` (the full request as base64
+    Arrow IPC) and the HTTP state tokens at DEBUG, and the
+    ``vgi_rpc.wire.request`` DEBUG lines rendered every kwarg's ``repr``. A
+    VGI ``catalog_attach`` carries API keys in its options, so turning on
+    DEBUG wrote them to disk in plaintext. These tests run calls whose
+    arguments carry a sentinel secret with *every* ``vgi_rpc`` logger at
+    DEBUG and assert the sentinel appears nowhere in the formatted output --
+    base64 forms included, since that is how ``request_data`` carried it.
     """
 
     @staticmethod
-    def _emitted_request_data(use_http: bool) -> bytes:
-        """Drive one real call at DEBUG and return the decoded ``request_data``."""
-        import base64
-
-        records: list[logging.LogRecord] = []
+    def _run_at_debug(use_http: bool) -> tuple[str, list[dict[str, Any]]]:
+        """Drive unary + stream calls at DEBUG; return all log text and access records."""
+        stream = io.StringIO()
+        text_handler = logging.StreamHandler(stream)
+        text_handler.setFormatter(VgiJsonFormatter())
+        access: list[logging.LogRecord] = []
 
         class _Capture(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:
-                records.append(record)
+                if record.name == "vgi_rpc.access":
+                    access.append(record)
 
-        logger = logging.getLogger("vgi_rpc.access")
-        handler = _Capture()
-        previous = logger.level
-        logger.addHandler(handler)
-        logger.setLevel(logging.DEBUG)
+        capture = _Capture()
+        root = logging.getLogger("vgi_rpc")
+        access_logger = logging.getLogger("vgi_rpc.access")
+        saved = (root.level, access_logger.level, access_logger.propagate)
+        root.addHandler(text_handler)
+        root.addHandler(capture)
+        root.setLevel(logging.DEBUG)
+        access_logger.setLevel(logging.DEBUG)
+        access_logger.propagate = True
         try:
             if use_http:
                 from vgi_rpc.http import http_connect
                 from vgi_rpc.http._testing import make_sync_client
 
-                client = make_sync_client(RpcServer(_Svc, _Impl()), token_key=b"k" * 32)
+                # Exchange turns carry the state token in both directions.
+                client = make_sync_client(RpcServer(_SecretSvc, _SecretImpl()), token_key=b"k" * 32)
                 try:
-                    with http_connect(_Svc, "http://x", client=client) as proxy:
-                        proxy.greet(name="World")
+                    with http_connect(_SecretSvc, "http://x", client=client) as proxy:
+                        _drive_secret_calls(proxy)
                 finally:
                     client.close()
             else:
-                with serve_pipe(_Svc, _Impl()) as proxy:
-                    proxy.greet(name="World")
-            greets = [r for r in records if getattr(r, "method", None) == "greet"]
-            assert greets, "no access-log record for greet"
-            raw = getattr(greets[0], "request_data", None)
-            assert isinstance(raw, str), "request_data missing at DEBUG"
-            return base64.b64decode(raw)
+                with serve_pipe(_SecretSvc, _SecretImpl()) as proxy:
+                    _drive_secret_calls(proxy)
         finally:
-            logger.removeHandler(handler)
-            logger.setLevel(previous)
+            root.removeHandler(text_handler)
+            root.removeHandler(capture)
+            root.setLevel(saved[0])
+            access_logger.setLevel(saved[1])
+            access_logger.propagate = saved[2]
+        return stream.getvalue(), [_format_record(r) for r in access]
+
+    @staticmethod
+    def _secret_forms() -> list[str]:
+        """Return the sentinel plus its base64 encodings at each of the three alignments."""
+        import base64
+
+        raw = _SECRET.encode()
+        forms = [_SECRET]
+        for pad in range(3):
+            enc = base64.b64encode(b"\0" * pad + raw).decode()
+            # Drop the chars that straddle the alignment boundary on each end.
+            forms.append(enc[4:-4])
+        return forms
 
     @pytest.mark.parametrize("use_http", [True, False], ids=["http", "pipe"])
-    def test_decodes_through_open_stream(self, use_http: bool) -> None:
-        """The bytes a consumer receives must open as an Arrow IPC stream."""
-        from pyarrow import ipc
-
-        data = self._emitted_request_data(use_http)
-        reader = ipc.open_stream(pa.BufferReader(data))
-        batch, _ = reader.read_next_batch_with_custom_metadata()
-        assert batch.num_rows == 1
-
-    @pytest.mark.parametrize("use_http", [True, False], ids=["http", "pipe"])
-    def test_preserves_dispatch_metadata(self, use_http: bool) -> None:
-        """The method and request version survive into the log.
-
-        Re-serializing the parsed batch dropped these; the raw wire bytes
-        carry them, and a reader replaying an archived request needs them.
-        """
-        from pyarrow import ipc
-
-        data = self._emitted_request_data(use_http)
-        reader = ipc.open_stream(pa.BufferReader(data))
-        _batch, md = reader.read_next_batch_with_custom_metadata()
-        keys = {k.decode() for k in dict(md or {})}
-        assert "vgi_rpc.method" in keys, f"dispatch metadata lost: {sorted(keys)}"
+    def test_sentinel_absent_from_all_debug_output(self, use_http: bool) -> None:
+        """Neither the secret nor any base64 of it is written by any vgi_rpc logger."""
+        text, records = self._run_at_debug(use_http)
+        assert records, "no access records captured -- the test would pass vacuously"
+        assert "Parsed request" in text, "wire DEBUG lines missing -- the test would pass vacuously"
+        for form in self._secret_forms():
+            assert form not in text, f"secret leaked into DEBUG log output as {form!r}"
 
     @pytest.mark.parametrize("use_http", [True, False], ids=["http", "pipe"])
-    def test_column_data_matches_the_request(self, use_http: bool) -> None:
-        """Round-trip equivalence: the decoded batch is the call's arguments."""
-        from pyarrow import ipc
+    def test_access_records_carry_shape_not_payload(self, use_http: bool) -> None:
+        """Records describe the request (names, types, rows), and validate."""
+        _text, records = self._run_at_debug(use_http)
+        for r in records:
+            assert not {"request_data", "request_state", "response_state"} & r.keys(), r
+        attach = next(r for r in records if r["method"] == "attach")
+        assert attach["request_fields"] == [
+            {"name": "api_key", "type": "string"},
+            {"name": "host", "type": "string"},
+        ]
+        assert attach["request_rows"] == 1
+        assert "truncated" not in attach, "nothing is omitted any more, so nothing is marked"
+        assert validate_access_logs(records) == []
 
-        data = self._emitted_request_data(use_http)
-        reader = ipc.open_stream(pa.BufferReader(data))
-        batch, _ = reader.read_next_batch_with_custom_metadata()
-        assert batch.column("name")[0].as_py() == "World"
+    def test_http_state_tokens_logged_as_sizes(self) -> None:
+        """State tokens are reported by size only."""
+        _text, records = self._run_at_debug(use_http=True)
+        sized = [r for r in records if "response_state_bytes" in r or "request_state_bytes" in r]
+        assert sized, "expected exchange turns carrying state tokens"
+        assert any("request_state_bytes" in r for r in sized), "an exchange turn sends a token back"
+        assert all(
+            isinstance(r.get("response_state_bytes", 0), int) and isinstance(r.get("request_state_bytes", 0), int)
+            for r in sized
+        )
 
 
 class TestClaimRedaction:
@@ -912,9 +981,8 @@ class TestTruncationMarker:
     """`truncated` distinguishes real loss from a configured omission."""
 
     def test_schema_accepts_payload_omitted(self) -> None:
-        """The new value validates."""
+        """The legacy value still validates: ports emitting it at INFO leaked nothing."""
         rec = {**_MINIMAL_RECORD, "truncated": "payload_omitted"}
-        rec.pop("request_data")
         rec["original_request_bytes"] = 4096
         jsonschema.validate(rec, _load_schema())
 
@@ -923,7 +991,6 @@ class TestTruncationMarker:
         schema = _load_schema()
         for value in (True, "record_too_large"):
             rec = {**_MINIMAL_RECORD, "truncated": value}
-            rec.pop("request_data")
             jsonschema.validate(rec, schema)
 
     def test_schema_rejects_an_unknown_marker(self) -> None:

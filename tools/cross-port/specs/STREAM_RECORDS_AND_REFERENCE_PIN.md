@@ -13,8 +13,9 @@
 |---|---|
 | `method_type` | `"stream"` |
 | `stream_id` | required; 32 lowercase hex, no dashes; **identical across init and every continuation of the same call** |
-| `request_data` | required on the **init** record; **absent** on continuations |
-| `response_state` | base64 of the *decrypted* outbound state on init and on any continuation that produces a continuation token; absent on the terminal continuation |
+| `request_fields` / `request_rows` | SHOULD be on the **init** record; absent on continuations |
+| `response_state_bytes` | size of the outbound state token on init and on any continuation that produces one |
+| `request_data` / `request_state` / `response_state` | **forbidden** (0.50.1): payloads and decrypted state put secrets in logs. See `docs/access-log-spec.md` §4.3 |
 
 ## Why nothing caught this
 

@@ -509,11 +509,9 @@ def _read_request(
     # tear down the worker connection.
     _drain_stream(reader)
     _current_request_metadata.set(custom_metadata)
-    # Stash the batch for access-log enrichment -- but only when the
-    # transport has not already captured the raw wire bytes, which are
-    # cheaper and more faithful (see _request_wire_bytes). Serializing here
-    # would also charge every request for a payload the access log discards
-    # at INFO and never asks for when disabled, which is the default.
+    # Stash the batch so the access log can describe the request's shape
+    # (field names, types, rows -- never values; see _request_shape) --
+    # unless the transport already captured the raw wire bytes.
     if _current_request_batch.get() is None:
         _current_request_batch.set(batch)
     _record_input(batch)

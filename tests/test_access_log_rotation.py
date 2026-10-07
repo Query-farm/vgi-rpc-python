@@ -52,7 +52,8 @@ def _required_envelope(**overrides: object) -> dict[str, object]:
         "duration_ms": 1.23,
         "status": "ok",
         "error_type": "",
-        "request_data": "QQ==",
+        "request_fields": [{"name": "name", "type": "string"}],
+        "request_rows": 1,
     }
     base.update(overrides)
     return base
@@ -65,21 +66,19 @@ def test_formatter_under_cap_round_trips() -> None:
     line = fmt.format(record)
     obj = json.loads(line)
     assert obj["method"] == "greet"
-    assert obj["request_data"] == "QQ=="
+    assert obj["request_rows"] == 1
     assert "truncated" not in obj
 
 
-def test_formatter_drops_request_data_when_over_cap() -> None:
-    """Oversize records have request_data dropped and original size recorded."""
-    fmt = VgiAccessLogFormatter(max_record_bytes=512)
-    big = "A" * 4096
-    record = _make_record(**_required_envelope(request_data=big))
+def test_formatter_empties_claims_when_over_cap() -> None:
+    """Oversize records shed their claims first and say so."""
+    fmt = VgiAccessLogFormatter(max_record_bytes=800)
+    record = _make_record(**_required_envelope(claims={"pad": "A" * 4096}))
     line = fmt.format(record)
     obj = json.loads(line)
-    assert "request_data" not in obj
+    assert obj["claims"] == {}
     assert obj["truncated"] is True
-    assert obj["original_request_bytes"] == len(big)
-    assert len(line.encode("utf-8")) <= 512
+    assert len(line.encode("utf-8")) <= 800
 
 
 def test_formatter_falls_back_to_sentinel() -> None:
@@ -90,7 +89,7 @@ def test_formatter_falls_back_to_sentinel() -> None:
             status="error",
             error_type="ValueError",
             error_message="A" * 2048,
-            request_data="B" * 2048,
+            claims={"pad": "B" * 2048},
         )
     )
     line = fmt.format(record)
@@ -109,10 +108,10 @@ def test_formatter_handles_non_json_serializable_extras() -> None:
 
 
 def test_truncated_record_validates_against_schema() -> None:
-    """A truncated unary record (no request_data) still validates."""
+    """A truncated unary record still validates."""
     schema = _load_schema()
-    fmt = VgiAccessLogFormatter(max_record_bytes=400)
-    record = _make_record(**_required_envelope(request_data="X" * 4096))
+    fmt = VgiAccessLogFormatter(max_record_bytes=600)
+    record = _make_record(**_required_envelope(claims={"pad": "X" * 4096}))
     obj = json.loads(fmt.format(record))
     obj.setdefault("timestamp", "2026-04-26T15:30:45.123Z")
     obj.setdefault("level", "INFO")
@@ -130,7 +129,7 @@ def test_sentinel_record_validates_against_schema() -> None:
             status="error",
             error_type="ValueError",
             error_message="A" * 2048,
-            request_data="B" * 2048,
+            claims={"pad": "B" * 2048},
         )
     )
     obj = json.loads(fmt.format(record))
@@ -258,7 +257,7 @@ def test_size_rotation_actually_rotates(tmp_path: Path) -> None:
         server_id="serverA",
     )
     access = logging.getLogger("vgi_rpc.access")
-    payload = _required_envelope(request_data="A" * 256)
+    payload = _required_envelope(claims={"pad": "A" * 256})
     for _ in range(20):
         access.info("ConformanceService.greet ok", extra=payload)
     rotated = sorted(p.name for p in tmp_path.iterdir())
