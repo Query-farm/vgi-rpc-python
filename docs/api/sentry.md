@@ -68,6 +68,8 @@ When `record_request_context=True` (the default), each Sentry event carries:
 
 Unhandled exceptions are sent via `sentry_sdk.capture_exception()` unless their type appears in `SentryConfig.ignored_exceptions` (e.g. ignore `PermissionError` for noisy auth-failure events).
 
+Errors whose canonical code ([WIRE_PROTOCOL.md §8](../WIRE_PROTOCOL.md)) says the caller was wrong or the condition is transient are expected outcomes, not server faults, and are not reported: `SentryConfig.ignored_error_codes` defaults to `CLIENT_ERROR_CODES | TRANSIENT_ERROR_CODES` from `vgi_rpc.errors`, which leaves `UNKNOWN` (any unclassified exception), `INTERNAL` and `DATA_LOSS`. Pass `ignored_error_codes=frozenset()` to report everything. With `enable_performance=True` the transaction status is Sentry's name for the code (`not_found`, `unavailable`, ...; `UNKNOWN` and `INTERNAL` map to `internal_error`).
+
 ## Transaction naming
 
 By default vgi-rpc replaces Sentry's WSGI-derived transaction name (a literal route template like `/{method}` from Falcon) with `rpc {method}`, so transactions group by RPC method in Sentry's Performance dashboard. Disable with `SentryConfig(set_transaction_name=False)` if you have alerts pinned to the route-template names.

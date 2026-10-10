@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import pyarrow as pa
 from pyarrow import ipc
 
-from vgi_rpc.errors import error_code_of
+from vgi_rpc.errors import CLIENT_ERROR_CODES, TRANSIENT_ERROR_CODES, error_code_of, error_kind_of
 
 if TYPE_CHECKING:
     from vgi_rpc.grants import GrantKeys
@@ -146,7 +146,19 @@ def _truncate_error_message(exc: BaseException | None, limit: int = _ACCESS_LOG_
 
 
 def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc: BaseException) -> str:
-    """Log an RPC method error and return the exception class name.
+    """Log an RPC method error at a level chosen by its canonical code.
+
+    The level follows who was at fault (WIRE_PROTOCOL.md §8):
+
+    * :data:`~vgi_rpc.errors.CLIENT_ERROR_CODES` (the caller was wrong) --
+      ``INFO``, one line, no traceback.
+    * :data:`~vgi_rpc.errors.TRANSIENT_ERROR_CODES` (unavailable, overloaded,
+      timed out, aborted) -- ``WARNING``, one line, no traceback.
+    * ``UNKNOWN``, ``INTERNAL``, ``DATA_LOSS`` -- ``ERROR`` with the traceback.
+
+    Only the server log changes: whether a traceback travels on the wire is
+    still the server-wide traceback setting, and the access log still records
+    ``error_code``.
 
     Args:
         protocol_name: Name of the Protocol the method belongs to.
@@ -159,16 +171,40 @@ def _log_method_error(protocol_name: str, method_name: str, server_id: str, exc:
 
     """
     error_type = type(exc).__name__
-    extra: dict[str, object] = {"server_id": server_id, "method": method_name, "error_type": error_type}
+    code = error_code_of(exc)
+    kind = error_kind_of(exc)
+    extra: dict[str, object] = {
+        "server_id": server_id,
+        "method": method_name,
+        "error_type": error_type,
+        "error_code": code.value,
+    }
+    if kind is not None:
+        extra["error_kind"] = kind
     request_id = _current_request_id.get()
     if request_id:
         extra["request_id"] = request_id
+    if code in CLIENT_ERROR_CODES or code in TRANSIENT_ERROR_CODES:
+        level = logging.INFO if code in CLIENT_ERROR_CODES else logging.WARNING
+        if _logger.isEnabledFor(level):
+            _logger.log(
+                level,
+                "Error in %s.%s: %s%s %s: %s",
+                protocol_name,
+                method_name,
+                code.value,
+                f" ({kind})" if kind is not None else "",
+                error_type,
+                exception_str(exc),
+                extra=extra,
+            )
+        return error_type
     _logger.error(
         "Error in %s.%s: %s",
         protocol_name,
         method_name,
         exception_str(exc),
-        exc_info=True,
+        exc_info=exc,
         extra=extra,
     )
     return error_type

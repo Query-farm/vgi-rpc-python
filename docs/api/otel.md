@@ -44,7 +44,10 @@ Each span carries the following attributes:
 | `rpc.vgi_rpc.output_rows` | `int` | Total rows across all output batches |
 | `rpc.vgi_rpc.input_bytes` | `int` | Approximate logical bytes across all input batches |
 | `rpc.vgi_rpc.output_bytes` | `int` | Approximate logical bytes across all output batches |
-| `rpc.vgi_rpc.error_type` | `str` | Exception class name (error spans only) |
+| `rpc.vgi_rpc.error_type` | `str` | Exception class name (failed calls only) |
+| `rpc.vgi_rpc.error_code` | `str` | Canonical error code, e.g. `NOT_FOUND` (failed calls only) |
+
+Span status follows OpenTelemetry's [gRPC semantic conventions](https://opentelemetry.io/docs/specs/semconv/rpc/grpc/) for server spans: only `UNKNOWN` (any unclassified exception), `DEADLINE_EXCEEDED`, `UNIMPLEMENTED`, `INTERNAL`, `UNAVAILABLE` and `DATA_LOSS` set `ERROR`; any other code leaves the status unset. The exception is still recorded on the span (subject to `record_exceptions`).
 
 The I/O statistics attributes (`input_batches` through `output_bytes`) are populated from `CallStatistics` — see [CallStatistics](core.md#callstatistics) for counting semantics.
 

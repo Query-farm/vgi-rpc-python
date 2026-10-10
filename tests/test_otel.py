@@ -27,6 +27,7 @@ from pyarrow import ipc
 
 from tests._aiomock import aiointercept
 from tests._aiomock import mock_aiohttp as aiointercept_ctx
+from vgi_rpc.errors import OTEL_SERVER_ERROR_CODES, Code, StatusError
 from vgi_rpc.external import (
     ExternalLocationConfig,
     ExternalStorage,
@@ -1401,3 +1402,53 @@ class TestServiceLabelFollowsResolvedProtocol:
             assert token.service == "PrimaryProtocol"
         finally:
             hook.on_dispatch_end(token, info, None, stats=None)
+
+
+class _CodedService(Protocol):
+    """Protocol whose single method raises with a caller-chosen code."""
+
+    def raise_code(self, code: str) -> None:
+        """Raise a StatusError carrying *code*."""
+        ...
+
+
+class _CodedServiceImpl:
+    """Implementation of _CodedService."""
+
+    def raise_code(self, code: str) -> None:
+        """Raise a StatusError carrying *code*."""
+        raise StatusError(f"raised {code}", code=code)
+
+
+class TestSpanStatusByCode:
+    """Server span status follows OpenTelemetry's gRPC semantic conventions."""
+
+    @pytest.mark.parametrize("code", list(Code))
+    def test_status_by_code(
+        self,
+        otel_providers: tuple[TracerProvider, SdkMeterProvider, InMemorySpanExporter, InMemoryMetricReader],
+        code: Code,
+    ) -> None:
+        """Only server-fault codes set ERROR; the code and exception are always recorded."""
+        tracer_provider, meter_provider, exporter, _ = otel_providers
+        config = OtelConfig(tracer_provider=tracer_provider, meter_provider=cast("MeterProvider", meter_provider))
+        client_transport, server_transport = make_pipe_pair()
+        server = RpcServer(_CodedService, _CodedServiceImpl())
+        instrument_server(server, config)
+        thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+        thread.start()
+        try:
+            with RpcConnection(_CodedService, client_transport) as proxy, pytest.raises(RpcError):
+                proxy.raise_code(code=code.value)
+        finally:
+            client_transport.close()
+            thread.join(timeout=5)
+            server_transport.close()
+
+        (span,) = exporter.get_finished_spans()
+        expected = StatusCode.ERROR if code in OTEL_SERVER_ERROR_CODES else StatusCode.UNSET
+        assert span.status.status_code == expected
+        attrs = dict(span.attributes or {})
+        assert attrs["rpc.vgi_rpc.error_code"] == code.value
+        assert attrs["rpc.vgi_rpc.error_type"] == "StatusError"
+        assert "exception" in [e.name for e in span.events]

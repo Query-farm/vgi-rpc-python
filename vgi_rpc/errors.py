@@ -43,7 +43,10 @@ from enum import StrEnum
 from typing import Any, ClassVar, Self
 
 __all__ = [
+    "CLIENT_ERROR_CODES",
     "MAX_ERROR_DETAILS_BYTES",
+    "OTEL_SERVER_ERROR_CODES",
+    "TRANSIENT_ERROR_CODES",
     "AuthUnavailableError",
     "BadRequest",
     "Code",
@@ -119,6 +122,49 @@ class Code(StrEnum):
             except ValueError:
                 return cls.UNKNOWN
         return cls.UNKNOWN
+
+
+#: Codes that say the *caller* was wrong: the request, its credentials, or the
+#: state it assumed.  An expected outcome, not a server fault -- the server logs
+#: these at INFO without a traceback and the Sentry hook does not report them.
+CLIENT_ERROR_CODES: frozenset[Code] = frozenset(
+    {
+        Code.INVALID_ARGUMENT,
+        Code.NOT_FOUND,
+        Code.ALREADY_EXISTS,
+        Code.OUT_OF_RANGE,
+        Code.FAILED_PRECONDITION,
+        Code.PERMISSION_DENIED,
+        Code.UNAUTHENTICATED,
+        Code.UNIMPLEMENTED,
+        Code.CANCELLED,
+    }
+)
+
+#: Codes for transient or capacity conditions.  Worth noticing in aggregate, not
+#: worth a traceback each -- the server logs these at WARNING without one and
+#: the Sentry hook does not report them.
+TRANSIENT_ERROR_CODES: frozenset[Code] = frozenset(
+    {
+        Code.UNAVAILABLE,
+        Code.DEADLINE_EXCEEDED,
+        Code.RESOURCE_EXHAUSTED,
+        Code.ABORTED,
+    }
+)
+
+#: Codes that OpenTelemetry's gRPC semantic conventions treat as errors on a
+#: *server* span.  Every other code leaves the span status unset.
+OTEL_SERVER_ERROR_CODES: frozenset[Code] = frozenset(
+    {
+        Code.UNKNOWN,
+        Code.DEADLINE_EXCEEDED,
+        Code.UNIMPLEMENTED,
+        Code.INTERNAL,
+        Code.UNAVAILABLE,
+        Code.DATA_LOSS,
+    }
+)
 
 
 # ---------------------------------------------------------------------------

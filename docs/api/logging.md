@@ -71,6 +71,18 @@ Every completed RPC call emits one structured INFO record on the `vgi_rpc.access
 
 > **Note:** Byte counts use `pa.RecordBatch.get_total_buffer_size()` — logical Arrow buffer sizes without IPC framing overhead.
 
+### Method error log levels
+
+When a method raises, the framework logs one record on `vgi_rpc.rpc` whose level follows the error's canonical code ([WIRE_PROTOCOL.md §8](../WIRE_PROTOCOL.md)), so expected outcomes do not fill logs with tracebacks:
+
+| Codes | Level | Traceback |
+|---|---|---|
+| `INVALID_ARGUMENT`, `NOT_FOUND`, `ALREADY_EXISTS`, `OUT_OF_RANGE`, `FAILED_PRECONDITION`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `UNIMPLEMENTED`, `CANCELLED` (the caller was wrong) | `INFO` | no |
+| `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, `ABORTED` (transient) | `WARNING` | no |
+| `UNKNOWN` (any unclassified exception), `INTERNAL`, `DATA_LOSS` | `ERROR` | yes |
+
+The one-line form reads `Error in <Protocol>.<method>: <CODE> (<kind>) <ExceptionType>: <message>`; every record carries `error_code` (and `error_kind` when set) as extra fields. The sets are exported as `vgi_rpc.errors.CLIENT_ERROR_CODES` and `TRANSIENT_ERROR_CODES`. This affects only the server log: whether EXCEPTION batches carry a traceback is still the server-wide traceback setting, and the access log still records `error_code`.
+
 ### Logger hierarchy
 
 | Logger name | Purpose |

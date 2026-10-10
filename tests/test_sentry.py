@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pytest
 
+from vgi_rpc.errors import CLIENT_ERROR_CODES, TRANSIENT_ERROR_CODES, Code, StatusError
 from vgi_rpc.http import http_connect, make_sync_client
 from vgi_rpc.rpc import (
     AuthContext,
@@ -21,6 +22,7 @@ from vgi_rpc.rpc import (
     OutputCollector,
     ProducerState,
     RpcConnection,
+    RpcError,
     RpcServer,
     Stream,
     _current_transport,
@@ -1440,3 +1442,92 @@ class TestWellKnownAutoTagging:
         hex_tag = {c[0][0]: c[0][1] for c in mock_scope_hex.set_tag.call_args_list}["vgi.attach_id"]
 
         assert bytes_tag == hex_tag
+
+
+# ---------------------------------------------------------------------------
+# Code-based filtering
+# ---------------------------------------------------------------------------
+
+
+class _CodedService(Protocol):
+    """Protocol whose single method raises with a caller-chosen code."""
+
+    def raise_code(self, code: str) -> None:
+        """Raise a StatusError carrying *code*."""
+        ...
+
+
+class _CodedServiceImpl:
+    """Implementation of _CodedService."""
+
+    def raise_code(self, code: str) -> None:
+        """Raise a StatusError carrying *code*."""
+        raise StatusError(f"raised {code}", code=code)
+
+
+def _run_coded_call(server: RpcServer, code: Code) -> None:
+    client_transport, server_transport = make_pipe_pair()
+    thread = threading.Thread(target=server.serve, args=(server_transport,), daemon=True)
+    thread.start()
+    try:
+        with RpcConnection(_CodedService, client_transport) as proxy, pytest.raises(RpcError):
+            proxy.raise_code(code=code.value)
+    finally:
+        client_transport.close()
+        thread.join(timeout=5)
+        server_transport.close()
+
+
+class TestSentryErrorCodeFiltering:
+    """Client-error and transient codes are not reported; server faults are."""
+
+    @pytest.mark.parametrize("code", sorted(CLIENT_ERROR_CODES | TRANSIENT_ERROR_CODES))
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_expected_codes_not_captured(self, mock_sdk: MagicMock, code: Code) -> None:
+        """Codes in the default ignored set create no Sentry event."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(_CodedService, _CodedServiceImpl())
+        instrument_server_sentry(server)
+        _run_coded_call(server, code)
+        mock_sdk.capture_exception.assert_not_called()
+
+    @pytest.mark.parametrize("code", [Code.UNKNOWN, Code.INTERNAL, Code.DATA_LOSS])
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_server_fault_codes_captured(self, mock_sdk: MagicMock, code: Code) -> None:
+        """UNKNOWN, INTERNAL and DATA_LOSS are still reported."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(_CodedService, _CodedServiceImpl())
+        instrument_server_sentry(server)
+        _run_coded_call(server, code)
+        mock_sdk.capture_exception.assert_called_once()
+        assert isinstance(mock_sdk.capture_exception.call_args[0][0], StatusError)
+
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_ignored_error_codes_configurable(self, mock_sdk: MagicMock) -> None:
+        """An empty ``ignored_error_codes`` reports every error."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        server = RpcServer(_CodedService, _CodedServiceImpl())
+        instrument_server_sentry(server, SentryConfig(ignored_error_codes=frozenset()))
+        _run_coded_call(server, Code.NOT_FOUND)
+        mock_sdk.capture_exception.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("code", "status"),
+        [
+            (Code.NOT_FOUND, "not_found"),
+            (Code.UNAVAILABLE, "unavailable"),
+            (Code.INTERNAL, "internal_error"),
+            (Code.UNKNOWN, "internal_error"),
+        ],
+    )
+    @patch("vgi_rpc.sentry.sentry_sdk")
+    def test_transaction_status_follows_code(self, mock_sdk: MagicMock, code: Code, status: str) -> None:
+        """The transaction status is Sentry's name for the canonical code."""
+        mock_sdk.get_current_scope.return_value = MagicMock()
+        mock_sdk.get_current_span.return_value = None
+        mock_transaction = MagicMock()
+        mock_sdk.start_transaction.return_value = mock_transaction
+        server = RpcServer(_CodedService, _CodedServiceImpl())
+        instrument_server_sentry(server, SentryConfig(enable_performance=True))
+        _run_coded_call(server, code)
+        mock_transaction.set_status.assert_called_with(status)

@@ -31,6 +31,7 @@ from opentelemetry.context import Context
 from opentelemetry.metrics import Counter, Histogram, Meter, MeterProvider, get_meter_provider
 from opentelemetry.trace import SpanKind, StatusCode, Tracer, TracerProvider, get_tracer_provider
 
+from vgi_rpc.errors import OTEL_SERVER_ERROR_CODES, error_code_of
 from vgi_rpc.rpc._common import (
     AuthContext,
     CallStatistics,
@@ -63,7 +64,11 @@ class OtelConfig:
         meter_provider: Custom ``MeterProvider``; uses the global provider when ``None``.
         enable_tracing: Enable span creation (default ``True``).
         enable_metrics: Enable counter/histogram recording (default ``True``).
-        record_exceptions: Record exceptions on error spans (default ``True``).
+        record_exceptions: Record the exception on the span of every failed call (default ``True``).
+            Span status follows OpenTelemetry's gRPC server conventions: only
+            ``UNKNOWN``, ``DEADLINE_EXCEEDED``, ``UNIMPLEMENTED``, ``INTERNAL``,
+            ``UNAVAILABLE`` and ``DATA_LOSS`` set ``ERROR``; other codes leave it unset.
+            The code is recorded as ``rpc.vgi_rpc.error_code``.
         custom_attributes: Extra span/metric attributes merged into every dispatch.
         claim_attributes: Maps claim keys to span attribute names, e.g.
             ``{"tenant_id": "rpc.vgi_rpc.auth.claim.tenant_id"}``.  Claims go
@@ -350,8 +355,14 @@ class _OtelDispatchHook:
         try:
             if token.span is not None:
                 if error is not None:
-                    token.span.set_status(StatusCode.ERROR, str(error))
+                    code = error_code_of(error)
+                    # OpenTelemetry's gRPC semantic conventions: on a server
+                    # span only server-fault codes are errors; a code that says
+                    # the caller was wrong leaves the status unset.
+                    if code in OTEL_SERVER_ERROR_CODES:
+                        token.span.set_status(StatusCode.ERROR, str(error))
                     token.span.set_attribute("rpc.vgi_rpc.error_type", type(error).__name__)
+                    token.span.set_attribute("rpc.vgi_rpc.error_code", code.value)
                     if self._config.record_exceptions:
                         token.span.record_exception(error)
                 else:

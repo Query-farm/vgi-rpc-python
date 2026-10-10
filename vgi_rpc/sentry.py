@@ -89,6 +89,7 @@ from typing import TYPE_CHECKING, Any
 import sentry_sdk
 import sentry_sdk.tracing
 
+from vgi_rpc.errors import CLIENT_ERROR_CODES, TRANSIENT_ERROR_CODES, Code, error_code_of
 from vgi_rpc.rpc._common import (
     AuthContext,
     CallStatistics,
@@ -120,6 +121,19 @@ _PARAM_PRIMITIVE = (str, bool, int, float)
 
 _TAG_VALUE_MAX_LEN = 200
 """Sentry tag value cap (chars).  Longer values are clipped."""
+
+
+def _sentry_span_status(code: Code) -> str:
+    """Map a canonical code to Sentry's span status (gRPC-derived names).
+
+    Sentry's statuses are gRPC's codes in lower case, except ``INTERNAL``,
+    which Sentry spells ``internal_error``.  ``UNKNOWN`` -- an unclassified
+    exception -- also maps to ``internal_error``: Sentry's failure rate does
+    not count ``unknown``, and an unclassified exception is a server fault.
+    """
+    if code is Code.INTERNAL or code is Code.UNKNOWN:
+        return "internal_error"
+    return code.value.lower()
 
 
 def short_hash(value: bytes | str | None, *, length: int = 12) -> str | None:
@@ -215,6 +229,12 @@ class SentryConfig:
             and authentication info (default ``True``).
         custom_tags: Extra tags applied to every Sentry event.
         ignored_exceptions: Exception types to skip when reporting (e.g. ``PermissionError``).
+        ignored_error_codes: Canonical error codes (WIRE_PROTOCOL.md §8) to skip
+            when reporting.  Defaults to every client-error and transient code
+            (:data:`~vgi_rpc.errors.CLIENT_ERROR_CODES` |
+            :data:`~vgi_rpc.errors.TRANSIENT_ERROR_CODES`), so only ``UNKNOWN``,
+            ``INTERNAL`` and ``DATA_LOSS`` -- server faults -- create events.
+            Pass ``frozenset()`` to report every error.
         op_name: Sentry transaction operation name (default ``"rpc.server"``).
         claim_tags: Maps claim keys to Sentry tag names, e.g.
             ``{"tenant_id": "auth.tenant_id"}``.
@@ -253,6 +273,7 @@ class SentryConfig:
     record_request_context: bool = True
     custom_tags: Mapping[str, str] = field(default_factory=dict)
     ignored_exceptions: tuple[type[BaseException], ...] = ()
+    ignored_error_codes: frozenset[Code] = CLIENT_ERROR_CODES | TRANSIENT_ERROR_CODES
     op_name: str = "rpc.server"
     claim_tags: Mapping[str, str] = field(default_factory=dict)
     user_claim_map: Mapping[str, str] = field(
@@ -585,16 +606,18 @@ class _SentryDispatchHook:
         if not isinstance(token, _SentryHookToken):
             return
 
+        code = error_code_of(error) if error is not None else None
         if (
             error is not None
             and self._config.enable_error_capture
             and not isinstance(error, self._config.ignored_exceptions)
+            and code not in self._config.ignored_error_codes
         ):
             sentry_sdk.capture_exception(error)
 
         if token.transaction is not None:
-            if error is not None:
-                token.transaction.set_status("internal_error")
+            if code is not None:
+                token.transaction.set_status(_sentry_span_status(code))
             else:
                 token.transaction.set_status("ok")
             token.transaction.finish()
