@@ -1,7 +1,7 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cross-language conformance for ``vgi_rpc.Identity.v1``.
+"""Cross-language conformance for ``vgi_rpc.Identity.v2``.
 
 The protocol is implemented in every port and, until this module, was
 exercised by the shared suite **not at all**.  Its wire shape was pinned only
@@ -56,6 +56,7 @@ from vgi_rpc.conformance.identity_fixture import (
     AUTH_UNAVAILABLE_PURPOSE,
     AUTH_UNAVAILABLE_RETRY_AFTER,
     GRANT_EXPIRES_AT,
+    GRANT_EXPIRES_AT_MICROS,
     GRANT_ID,
     GRANT_TOKEN_PREFIX,
     IDENTITY_BOTH_METHODS_HASH,
@@ -83,6 +84,7 @@ from vgi_rpc.conformance.identity_fixture import (
     TOKEN_UNKNOWN,
     TOKEN_ZERO_TTL,
     UNAVAILABLE_RETRY_AFTER,
+    check_issued_grant_wire_shape,
 )
 from vgi_rpc.metadata import ERROR_CODE_KEY, ERROR_DETAILS_KEY, ERROR_KIND_KEY, LOG_EXTRA_KEY, LOG_LEVEL_KEY
 from vgi_rpc.rpc._reflection import ProtocolList, Reflection, ServiceDescription
@@ -102,7 +104,7 @@ _ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 _IDENTITY_FIXTURE = "conformance_http_identity_port"
 _NARROWED_FIXTURE = "conformance_http_identity_introspect_only_port"
 
-#: The closed set of ``error_kind`` strings ``IDENTITY_V1_SPEC.md`` §3 puts on
+#: The closed set of ``error_kind`` strings ``IDENTITY_V2_SPEC.md`` §3 puts on
 #: the wire.  Spelled out rather than derived from the exception classes, so a
 #: port silently renaming one in Python would still fail here.
 _ERROR_KINDS = frozenset(
@@ -127,7 +129,7 @@ _KIND_CODES = {
 }
 
 #: The eight codepoints every port MUST trim before the JWS shape test
-#: (``IDENTITY_V1_SPEC.md`` §4).  A port trimming a narrower set routes a
+#: (``IDENTITY_V2_SPEC.md`` §4).  A port trimming a narrower set routes a
 #: padded JWS that another port refuses, which is the same hole one level
 #: down.  ``U+0085`` is excluded by JavaScript's and Java's idea of
 #: whitespace, ``U+00A0`` by an ASCII-only hand-rolled matcher -- those two
@@ -264,6 +266,8 @@ def _read_result(response: httpx2.Response, cls: type[Any]) -> Any:
         if batch.num_rows and batch.schema.names == ["result"]:
             payload = batch.column(0)[0].as_py()
     assert payload is not None, "a successful call carried no result payload"
+    if cls is IssuedGrant:
+        check_issued_grant_wire_shape(payload)
     return cls.deserialize_from_bytes(payload)
 
 
@@ -438,7 +442,7 @@ class TestIdentityWireShape:
         assert summary.protocol_hash == IDENTITY_BOTH_METHODS_HASH, (
             f"a worker hosting both identity methods reports protocol_hash="
             f"{summary.protocol_hash!r}, not {IDENTITY_BOTH_METHODS_HASH!r}. The canonical preimage "
-            f"is in IDENTITY_V1_SPEC.md §1 -- diff against it. The likeliest cause is scopes' list "
+            f"is in IDENTITY_V2_SPEC.md §1 -- diff against it. The likeliest cause is scopes' list "
             f"item declared non-nullable (it is nullable), then field declaration order."
         )
 
@@ -1092,8 +1096,9 @@ class TestGrantIssuance:
             f"passed the hook and the scopes it received."
         )
         assert got.expires_at == GRANT_EXPIRES_AT, (
-            f"expires_at {got.expires_at!r}, expected {GRANT_EXPIRES_AT!r} exactly -- a float64 that "
-            f"does not round-trip is a lifetime nobody agreed to"
+            f"expires_at {got.expires_at!r}, expected {GRANT_EXPIRES_AT!r} "
+            f"({GRANT_EXPIRES_AT_MICROS} microseconds since the epoch) exactly -- a timestamp that is "
+            f"off by a unit (seconds, milliseconds) is a lifetime nobody agreed to"
         )
         assert got.grant_id == GRANT_ID, f"grant_id {got.grant_id!r}"
 

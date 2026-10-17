@@ -1,9 +1,22 @@
-# `vgi_rpc.Identity.v1` — normative port contract
+# `vgi_rpc.Identity.v2` — normative port contract
 
 Reference implementation: `vgi-rpc-python/vgi_rpc/rpc/_token_identity.py` (515 lines),
 tests in `vgi-rpc-python/tests/test_token_identity.py` (29 tests).
 Read both before writing code. This file is the contract; where it and your
 intuition disagree, this file wins.
+
+**Revision 2026-10-17 — `Identity.v1` → `Identity.v2`.** `IssuedGrant.expires_at`
+changed from `float64` unix seconds to `timestamp[us, tz="UTC"]` non-null, so the
+protocol name's major version moved (the protocol carries no `protocol_version`;
+the name *is* its version, so a v1 peer fails discovery instead of mis-decoding a
+float as a timestamp). v1 is replaced, not kept alongside. The protocol hash
+moved with the name (§1); `introspect_token`, `TokenIdentity` and the
+`issue_grant` parameters are unchanged, and so is the sealed-grant payload (§9 —
+its `expires_at` stays an int64 of seconds). The in-language type is the
+idiomatic UTC instant (Python tz-aware `datetime`, Go `time.Time`, Java
+`Instant`, C# `DateTimeOffset`, ...). The conformance suite checks the nested
+`IssuedGrant` record's column type directly, because the protocol hash sees only
+`result: binary`.
 
 **Revision 2026-09-18.** Two removals every port must make: introspection is
 **no longer rate limited** (§4, "No rate limiter"), and the pre-0.46
@@ -13,7 +26,7 @@ remove the route it replaced, so every port kept serving both.
 
 ## 1. Wire shape — must match byte for byte in the hash
 
-Protocol name: `vgi_rpc.Identity.v1` (reserved `vgi_rpc.` prefix — register it the
+Protocol name: `vgi_rpc.Identity.v2` (reserved `vgi_rpc.` prefix — register it the
 way your port registers `vgi_rpc.Reflection.v1`, with the reserved-prefix escape).
 
 Both methods are UNARY, `has_return = true`, `has_header = false`.
@@ -34,7 +47,7 @@ TokenIdentity:  principal: utf8 nn         (no default — required)
                 ttl_seconds: int64 nn      default 300
 
 IssuedGrant:    token: utf8 nn             (no default — required)
-                expires_at: float64 nn     (no default — required)
+                expires_at: timestamp[us, tz="UTC"] nn   (no default — required)
                 grant_id: utf8 nn          default ""
 ```
 
@@ -49,14 +62,14 @@ and are not negotiable:
 
 | methods hosted | protocol_hash |
 |---|---|
-| both | `8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5` |
-| `introspect_token` only | `27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385` |
-| `issue_grant` only | `c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8` |
+| both | `145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3` |
+| `introspect_token` only | `4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac` |
+| `issue_grant` only | `4199df7403c9ca1a02c4c524b405a999eb1489614a1480873ffc23a0e5b0d312` |
 
 Canonical preimage for the both-methods case (diff against this if a digest is wrong):
 
 ```json
-{"methods":[{"has_header":false,"has_return":true,"name":"introspect_token","params":[{"name":"token","nullable":false,"type":"utf8"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"},{"has_header":false,"has_return":true,"name":"issue_grant","params":[{"name":"purpose","nullable":false,"type":"utf8"},{"name":"scopes","nullable":false,"type":"list<item?:utf8>"},{"name":"ttl_seconds","nullable":false,"type":"int64"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"}],"protocol":"vgi_rpc.Identity.v1"}
+{"methods":[{"has_header":false,"has_return":true,"name":"introspect_token","params":[{"name":"token","nullable":false,"type":"utf8"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"},{"has_header":false,"has_return":true,"name":"issue_grant","params":[{"name":"purpose","nullable":false,"type":"utf8"},{"name":"scopes","nullable":false,"type":"list<item?:utf8>"},{"name":"ttl_seconds","nullable":false,"type":"int64"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"}],"protocol":"vgi_rpc.Identity.v2"}
 ```
 
 The two single-method digests are not decoration: they prove **method-level
@@ -361,17 +374,17 @@ verified across all seven ports. If your change moves it, you broke something.
 ## 8. Retired: the `__introspect_token__` HTTP route
 
 `POST {prefix}/__introspect_token__` -- the JSON route introspection was before
-`vgi_rpc.Identity.v1` -- is **retired**. The Python reference deleted it when it
+`vgi_rpc.Identity.v2` -- is **retired**. The Python reference deleted it when it
 moved to the protocol (vgi-rpc 0.46, commit 66f0696); a port MUST NOT serve it.
 
 Delete the route, its handler, its own allowlist/limiter plumbing, its
 `VGI-Token-Introspection` capability header, and its server options -- not just
-its registration. `Identity.v1` is the only introspection surface. Two surfaces
+its registration. `Identity.v2` is the only introspection surface. Two surfaces
 means two sets of guards to keep identical, and the second was already drifting:
 it kept a rate limiter after the protocol dropped one.
 
 The `/health` capability header goes with it: a client learns whether a worker
-introspects from reflection (`vgi_rpc.Identity.v1` hosted, `introspect_token` in
+introspects from reflection (`vgi_rpc.Identity.v2` hosted, `introspect_token` in
 its description), which is what the reference and the conformance group use.
 
 
@@ -435,7 +448,8 @@ No codec byte, no compression (payloads are small), no trailing bytes.
 **Minting.** `grant_id` = 16 random bytes as 32 lowercase hex. `issued_at` = now
 (integer seconds). `expires_at = issued_at + min(ttl_seconds,
 max_ttl_seconds)`; `ttl_seconds ≤ 0` ⇒ `grant_refused`. `IssuedGrant.expires_at`
-is `float(expires_at)`. Freshness (§4, `auth_time`) is checked before minting,
+is the instant `expires_at` seconds after the epoch (`expires_at × 1_000_000`
+microseconds as `timestamp[us, tz="UTC"]`). Freshness (§4, `auth_time`) is checked before minting,
 exactly as for a worker-supplied hook.
 
 **Verification — order is normative:**
@@ -523,7 +537,7 @@ is `UNAUTHENTICATED`. Key misconfiguration is a startup error.
 - Config by `VGI_RPC_GRANT_KEYS` / `_AUDIENCE` / `_MAX_TTL_SECONDS` (+
   `--grant-key`), refusing to start on a malformed key.
 - The two authenticators and the chain order of 9.3, wired automatically when
-  the server hosts `vgi_rpc.Identity.v1` with grant keys or `resolve_token`.
+  the server hosts `vgi_rpc.Identity.v2` with grant keys or `resolve_token`.
 - The grant conformance worker (`IDENTITY_CONFORMANCE_FIXTURE.md` §10) and a
   green run of `TestSealedGrants`, `TestSealedGrantRejections`,
   `TestGrantPrefixRouting`, `TestResolveTokenBearer`.

@@ -82,7 +82,7 @@ def write_request(
         params_schema: The method's parameter schema.
         kwargs: The parameter values, keyed by field name.
         protocol: The ``vgi_rpc.protocol`` routing key to stamp — the hosted
-            protocol the call addresses (e.g. ``"vgi_rpc.Identity.v1"``).
+            protocol the call addresses (e.g. ``"vgi_rpc.Identity.v2"``).
             Carried as given, not validated: an intermediary forwards the
             client's key verbatim and leaves refusing a malformed one to the
             server, rather than failing the re-frame. Leave ``None`` for a

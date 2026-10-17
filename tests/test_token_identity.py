@@ -1,6 +1,6 @@
 # Copyright 2025, 2026 Query Farm LLC - https://query.farm
 
-"""``vgi_rpc.Identity.v1`` — resolving a credential, and minting a grant.
+"""``vgi_rpc.Identity.v2`` — resolving a credential, and minting a grant.
 
 The two methods are guarded very differently and the difference is the point,
 so most of what is tested here is the *asymmetry*: introspection answers a
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -51,7 +52,9 @@ def _resolver(token: str) -> TokenIdentity | None:
 
 
 def _minter(principal: str, purpose: str, scopes: list[str], ttl_seconds: int) -> IssuedGrant:
-    return IssuedGrant(token=f"grant-for-{principal}", expires_at=time.time() + ttl_seconds, grant_id="g1")
+    return IssuedGrant(
+        token=f"grant-for-{principal}", expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds), grant_id="g1"
+    )
 
 
 class TestRegistration:
@@ -61,7 +64,7 @@ class TestRegistration:
         """A dependency upgrade must not grow an oracle on every worker."""
         from tests.test_rpc import RpcFixtureService, RpcFixtureServiceImpl
 
-        assert "vgi_rpc.Identity.v1" not in RpcServer(RpcFixtureService, RpcFixtureServiceImpl()).bindings
+        assert "vgi_rpc.Identity.v2" not in RpcServer(RpcFixtureService, RpcFixtureServiceImpl()).bindings
 
     def test_only_methods_with_hooks_are_hosted(self) -> None:
         """What the server hosts describes what it actually does.
@@ -250,7 +253,7 @@ class TestIssuanceIsNotAnOracle:
         impl = IdentityImpl(mint_grant=_minter)
         grant = impl.issue_grant("reports", ["read"], 3600, _ctx(_auth("alice", auth_time=time.time())))
         assert grant.token == "grant-for-alice"
-        assert grant.expires_at > time.time()
+        assert grant.expires_at > datetime.now(UTC)
 
     def test_the_subject_is_the_caller_and_is_not_a_parameter(self) -> None:
         """Cross-subject minting is closed by construction, not by a check.
@@ -525,3 +528,32 @@ class TestJwsShapeTestSurvivesTranslation:
         ctx = _ctx(_auth("proxy"))
         impl.introspect_token("  padded-opaque-token  ", ctx)
         assert seen == ["  padded-opaque-token  "]
+
+
+class TestIssuedGrantExpiry:
+    """``expires_at`` is a UTC instant on the wire: ``timestamp[us, tz="UTC"]``, non-null."""
+
+    def test_wire_type_is_a_non_null_utc_microsecond_timestamp(self) -> None:
+        """The derived schema is the one ``Identity.v2`` pins."""
+        import pyarrow as pa
+
+        field = IssuedGrant.ARROW_SCHEMA.field("expires_at")
+        assert field.type == pa.timestamp("us", tz="UTC")
+        assert not field.nullable
+
+    def test_round_trips_exactly(self) -> None:
+        """Microsecond precision survives, and the instant comes back UTC-aware."""
+        when = datetime(2030, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)
+        got = IssuedGrant.deserialize_from_bytes(IssuedGrant(token="t", expires_at=when).serialize_to_bytes())
+        assert got.expires_at == when
+        assert got.expires_at.utcoffset() == timedelta(0)
+
+    def test_a_naive_datetime_is_refused(self) -> None:
+        """Arrow would read a naive value as UTC -- silently wrong for local time."""
+        with pytest.raises(ValueError, match="timezone-aware"):
+            IssuedGrant(token="t", expires_at=datetime(2030, 1, 1))
+
+    def test_a_number_is_refused(self) -> None:
+        """The ``Identity.v1`` float of unix seconds is no longer accepted."""
+        with pytest.raises(TypeError, match="must be a datetime"):
+            IssuedGrant(token="t", expires_at=1893456000.0)  # type: ignore[arg-type]

@@ -1,7 +1,7 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bearer authenticators that close the ``vgi_rpc.Identity.v1`` loop.
+"""Bearer authenticators that close the ``vgi_rpc.Identity.v2`` loop.
 
 ``issue_grant`` mints a credential "presented later by unattended automation
 as an ordinary bearer", and ``resolve_token`` answers which principal an opaque
@@ -14,7 +14,7 @@ Two authenticators do (WIRE_PROTOCOL.md §16, "Accepting identity credentials"):
 :func:`compose_identity_authenticate` puts them after the deployment's own
 authenticator, in the normative order -- JWT / static first, then sealed grants
 (a cheap prefix check), then ``resolve_token`` -- and ``make_wsgi_app`` calls it
-automatically for a server hosting ``vgi_rpc.Identity.v1``.
+automatically for a server hosting ``vgi_rpc.Identity.v2``.
 
 Routing is by prefix and is strict in both directions.  A token without the
 ``vgig1.`` prefix never reaches the grant verifier.  A token *with* it that does

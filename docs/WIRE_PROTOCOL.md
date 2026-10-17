@@ -179,7 +179,7 @@ protocol claiming it, because an application that could claim
 `vgi_rpc.Reflection.v1` could shadow the one surface a client trusts before it
 knows anything else about the server.
 
-**The major version is part of the name** — `vgi_rpc.Identity.v1`,
+**The major version is part of the name** — `vgi_rpc.Identity.v2`,
 `vgi_rpc.Reflection.v1` — following gRPC (AIP-185), Kubernetes API groups and
 D-Bus. Two consequences, both deliberate:
 
@@ -266,7 +266,7 @@ worker to fork the framework.
   protocols ([Section 14](#14-introspection-vgi_rpcreflectionv1) reserves
   `features`). A capability that may be absent is its own protocol, so a
   client learns whether it is present from `list_protocols` rather than by
-  calling and reading an error. (`vgi_rpc.Identity.v1`'s hook-driven method
+  calling and reading an error. (`vgi_rpc.Identity.v2`'s hook-driven method
   narrowing, [Section 16](#16-identity-vgi_rpcidentityv1), is framework-owned
   and unaffected.)
 - **The registered set is fixed for the server's lifetime.** It may be computed
@@ -280,7 +280,7 @@ worker to fork the framework.
 - **The same set is hosted on every transport** the server is offered on.
   A protocol reachable over stdio but not HTTP (or the reverse) is a different
   server wearing one name. Framework protocols that are transport-scoped by
-  definition — `vgi_rpc.Identity.v1` on transports that authenticate callers —
+  definition — `vgi_rpc.Identity.v2` on transports that authenticate callers —
   are the only exception, and are not application protocols.
 - **The reserved-prefix rule applies to every registered protocol, however its
   name was derived** — declared explicitly, taken from a class or interface
@@ -2086,7 +2086,7 @@ the likeliest place for six ports to diverge — never applies. Keep it that way
 The preimage:
 
 ```json
-{"protocol":"vgi_rpc.Identity.v1","methods":[
+{"protocol":"vgi_rpc.Identity.v2","methods":[
   {"name":"introspect_token","type":"unary","has_return":true,
    "has_header":false,
    "params":[{"name":"token","nullable":false,"type":"utf8"}],
@@ -2223,7 +2223,7 @@ treat the zero-row pointer as empty input.
 
 ---
 
-## 16. Identity (`vgi_rpc.Identity.v1`)
+## 16. Identity (`vgi_rpc.Identity.v2`)
 
 Two methods, optional and independently so, hosted as an ordinary co-hosted
 protocol. It was previously an HTTP JSON route, `POST
@@ -2326,7 +2326,9 @@ Unlike the introspection rejections, these are deliberately **actionable**: they
 are always about the caller themselves, so naming the reason leaks nothing, and
 it is the only way a console learns to re-prompt.
 
-`IssuedGrant` carries `token`, `expires_at` and `grant_id`. **The token format
+`IssuedGrant` carries `token: utf8`, `expires_at: timestamp[us, tz="UTC"]`
+(non-null; `float64` unix seconds in the retired `vgi_rpc.Identity.v1`) and
+`grant_id: utf8` (default `""`). **The token format
 is the worker's entirely** — a sealed envelope, a database row, or a credential
 brokered from the IdP are equally valid and equally invisible here. It is never
 parsed and never logged. `expires_at` is required *because* the framework cannot
@@ -2337,7 +2339,7 @@ declaration, and a worker that must state a lifetime has thought about one.
 
 A grant is minted to be presented later as an ordinary bearer, and
 `resolve_token` resolves opaque bearers — so both MUST feed back into HTTP
-authentication. The byte-level contract is `IDENTITY_V1_SPEC.md` §9 (with
+authentication. The byte-level contract is `IDENTITY_V2_SPEC.md` §9 (with
 vectors in `vgi_rpc/conformance/grant_token_vectors.json`); in summary:
 
 - **Sealed grants, opt-in.** When a grant key is configured

@@ -695,7 +695,7 @@ def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Ite
 
 @pytest.fixture(scope="session")
 def conformance_http_identity_port() -> Iterator[int]:
-    """Spawn a conformance HTTP worker hosting ``vgi_rpc.Identity.v1``, both methods.
+    """Spawn a conformance HTTP worker hosting ``vgi_rpc.Identity.v2``, both methods.
 
     Backs the shared ``TestIdentity`` group.  It needs its own worker because
     the protocol is not hosted unless a deployment configures a hook -- which

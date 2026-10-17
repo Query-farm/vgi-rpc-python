@@ -50,7 +50,7 @@ too.
 `list_protocols()` returns one `HostedProtocol` per hosted protocol, in the
 server's order: application protocols in registration order (the primary
 first), then the framework's own (`vgi_rpc.Reflection.v1`, and
-`vgi_rpc.Identity.v1` on an HTTP server that hosts it). `hash` is the
+`vgi_rpc.Identity.v2` on an HTTP server that hosts it). `hash` is the
 protocol's canonical SHA-256, identical in every port for the same wire
 surface, so a client that cached a description for that hash can skip
 `describe_protocol()`. Use the listing to discover an optional protocol before

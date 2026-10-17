@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit ``vgi_rpc.Identity.v1`` for cross-port consistency.
+"""Audit ``vgi_rpc.Identity.v2`` for cross-port consistency.
 
 ``describe_diff.py`` compares what the ports put *on the wire* -- and for the
 wire shape it is authoritative, because the canonical ``protocol_hash`` covers
@@ -69,17 +69,17 @@ CHECKS: tuple[tuple[str, str, str], ...] = (
     # --- wire shape: proves the port actually verified the digests ---
     (
         "hash:both",
-        r"8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5",
+        r"145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3",
         "the both-methods digest is not asserted anywhere, so the wire shape is unverified",
     ),
     (
         "hash:introspect-only",
-        r"27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385",
+        r"4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac",
         "method-level narrowing is not pinned: hosting a refusing method would pass",
     ),
     (
         "hash:grant-only",
-        r"c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8",
+        r"4199df7403c9ca1a02c4c524b405a999eb1489614a1480873ffc23a0e5b0d312",
         "method-level narrowing is not pinned in the other direction",
     ),
     # --- constants: a different value is a different security posture ---
@@ -202,7 +202,7 @@ def identity_sources(root: Path, globs: tuple[str, ...]) -> list[Path]:
             except OSError:
                 continue
             by_path = "identity" in p.as_posix().lower() and "peer" not in p.as_posix().lower()
-            by_content = "Identity.v1" in text or "introspect_token" in text or "issue_grant" in text
+            by_content = "Identity.v2" in text or "introspect_token" in text or "issue_grant" in text
             if by_path or by_content:
                 hits.append(p)
     return hits
@@ -280,7 +280,7 @@ def main() -> int:
 
     print()
     for p in unimplemented:
-        print(f"NOT IMPLEMENTED: {p} -- no source mentions vgi_rpc.Identity.v1")
+        print(f"NOT IMPLEMENTED: {p} -- no source mentions vgi_rpc.Identity.v2")
     for p in missing_ports:
         print(f"ABSENT: {p} -- repository not found")
 
@@ -310,7 +310,7 @@ def main() -> int:
         )
         return 1
 
-    print("\nRESULT: all ports implement vgi_rpc.Identity.v1 and agree on every checked invariant")
+    print("\nRESULT: all ports implement vgi_rpc.Identity.v2 and agree on every checked invariant")
     print("(source-level only -- behaviour is established by each port's own suite)")
     return 0
 

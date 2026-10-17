@@ -136,7 +136,7 @@ PROTOCOL_VERSION_KEY = b"vgi_rpc.protocol_version"
 # host several, so this selects the binding and hence the method table, the
 # implementation, the version to gate against and the hash to log.
 #
-# The *major* version belongs in this name (``vgi_rpc.Identity.v1``), following
+# The *major* version belongs in this name (``vgi_rpc.Identity.v2``), following
 # gRPC/AIP-185, Kubernetes API groups and D-Bus: an incompatible major is then a
 # different name, so it is a routing answer a proxy can act on without parsing
 # Arrow, and `v1` and `v2` can be served side by side while clients migrate.

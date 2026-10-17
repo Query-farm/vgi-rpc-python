@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +57,7 @@ from vgi_rpc.conformance.identity_fixture import (
     UNAVAILABLE_RETRY_AFTER,
     WHOAMI_PROTOCOL_NAME,
     Whoami,
+    check_issued_grant_wire_shape,
     conformance_grant_keys,
 )
 from vgi_rpc.grants import GRANT_TOKEN_PREFIX, GrantKeys, grant_key_id, mint_grant_token, verify_grant_token
@@ -77,7 +79,7 @@ def _port(request: pytest.FixtureRequest) -> int:
         return int(request.getfixturevalue(_FIXTURE))
     except pytest.FixtureLookupError:
         pytest.skip(
-            f"runner provides no {_FIXTURE!r}: an HTTP worker hosting vgi_rpc.Identity.v1 with the fixture "
+            f"runner provides no {_FIXTURE!r}: an HTTP worker hosting vgi_rpc.Identity.v2 with the fixture "
             f"resolver and grant keys, no mint hook, and {WHOAMI_PROTOCOL_NAME} "
             f"(IDENTITY_CONFORMANCE_FIXTURE.md §10). A skip here is an open deliverable, not a pass."
         )
@@ -146,6 +148,7 @@ def _mint(port: int, *, scopes: list[str], purpose: str, ttl: int) -> IssuedGran
     headers = {PRINCIPAL_HEADER: MINTER_PRINCIPAL, AUTH_TIME_HEADER: str(time.time() - 60)}
     value, kind = _result(_post(port, Identity.protocol_name, "issue_grant", body, headers))
     assert kind is None, f"issue_grant refused with {kind!r}; the grant worker must mint sealed grants"
+    check_issued_grant_wire_shape(value)
     grant = IssuedGrant.deserialize_from_bytes(value)
     assert isinstance(grant, IssuedGrant)
     return grant
@@ -196,7 +199,9 @@ class TestSealedGrants:
         claims = verify_grant_token(conformance_grant_keys(), grant.token)
         assert claims.principal == MINTER_PRINCIPAL
         assert claims.expires_at - claims.issued_at == GRANT_MAX_TTL, "the requested lifetime must be capped"
-        assert float(claims.expires_at) == grant.expires_at
+        assert grant.expires_at == datetime.fromtimestamp(claims.expires_at, tz=UTC), (
+            "IssuedGrant.expires_at must be the sealed claim's expires_at seconds, as a UTC instant"
+        )
         assert claims.grant_id == grant.grant_id
         from vgi_rpc.grants import _b64url_strict
 

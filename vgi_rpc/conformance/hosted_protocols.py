@@ -47,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--identity",
         action="store_true",
-        help="The worker hosts vgi_rpc.Identity.v1 with the IDENTITY_CONFORMANCE_FIXTURE.md policy (HTTP only)",
+        help="The worker hosts vgi_rpc.Identity.v2 with the IDENTITY_CONFORMANCE_FIXTURE.md policy (HTTP only)",
     )
     parser.add_argument("pytest_args", nargs="*", help="Extra pytest arguments, after --")
     return parser

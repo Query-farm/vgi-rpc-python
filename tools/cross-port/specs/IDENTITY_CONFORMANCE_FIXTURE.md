@@ -1,6 +1,6 @@
-# `vgi_rpc.Identity.v1` — conformance fixture contract
+# `vgi_rpc.Identity.v2` — conformance fixture contract
 
-Companion to `IDENTITY_V1_SPEC.md`, which is the normative contract for the
+Companion to `IDENTITY_V2_SPEC.md`, which is the normative contract for the
 *implementation*. This is the normative contract for the *fixture* a port must
 provide so the shared conformance group can run against it, and a statement of
 what that group asserts.
@@ -14,7 +14,7 @@ read either — everything normative is below.
 
 ## 0. Why a fixture is needed at all
 
-`vgi_rpc.Identity.v1` is almost entirely *guards*, and every guard reads
+`vgi_rpc.Identity.v2` is almost entirely *guards*, and every guard reads
 deployment policy: who may introspect, what a credential resolves to, whether a
 grant is minted, how recently the caller authenticated. Against a worker whose
 allowlist and hooks are unknown, no cross-port assertion exists — every answer
@@ -204,8 +204,8 @@ mint_grant(principal, purpose, scopes, ttl_seconds) ->
     purpose == "conformance-auth-unavailable"
                                       -> raise AuthUnavailable("conformance: grant store unreachable", retry_after=7)
     purpose == "conformance-refused"  -> raise GrantRefused("conformance: this purpose is refused")
-    purpose == "conformance-minimal"  -> Grant(token=T, expires_at=1893456000.0)            # grant_id OMITTED
-    anything else                     -> Grant(token=T, expires_at=1893456000.0, grant_id="conformance-grant-id")
+    purpose == "conformance-minimal"  -> Grant(token=T, expires_at=2030-01-01T00:00:00Z)            # grant_id OMITTED
+    anything else                     -> Grant(token=T, expires_at=2030-01-01T00:00:00Z, grant_id="conformance-grant-id")
 
 where T = "conformance-grant-for:" + principal + "|" + join(scopes, ",")
 ```
@@ -213,9 +213,11 @@ where T = "conformance-grant-for:" + principal + "|" + join(scopes, ",")
 - **`ttl_seconds` is ignored.** It is a request, the returned `expires_at` is
   authoritative, and honouring it would need a clock and make the value
   unassertable.
-- **`expires_at` is the fixed constant `1893456000.0`** (2030-01-01T00:00:00Z),
+- **`expires_at` is the fixed instant 2030-01-01T00:00:00Z** — on the wire
+  `timestamp[us, tz="UTC"]` non-null, raw value `1893456000000000` microseconds —
   not `now + ttl`. A constant can be asserted exactly, which also pins the
-  float64 round trip. `expires_at` is a declaration rather than an enforcement
+  unit (a port that writes seconds or milliseconds, or a float64 — the
+  `Identity.v1` shape — fails the column-type check or the value check). `expires_at` is a declaration rather than an enforcement
   — the real lifetime lives inside the opaque token — so nothing is lost.
 - **The token embeds the caller's principal**, which is how "the subject is the
   caller, never a parameter" becomes observable: two callers making identical
@@ -266,8 +268,8 @@ proves the wire shape. Drive `vgi_rpc.Reflection.v1`:
 
 | Assertion | Mechanism |
 |---|---|
-| the protocol is hosted under `vgi_rpc.Identity.v1` | `list_protocols` includes it |
-| both-methods `protocol_hash` = `8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5` | `list_protocols` |
+| the protocol is hosted under `vgi_rpc.Identity.v2` | `list_protocols` includes it |
+| both-methods `protocol_hash` = `145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3` | `list_protocols` |
 | `describe` lists exactly `introspect_token`, `issue_grant`, both `unary`, both `has_return`, neither `has_header` | `describe` |
 | **`issue_grant` publishes exactly `["purpose", "scopes", "ttl_seconds"]`** — no subject parameter, in that order | parameter schema decoded from the IPC the server sent |
 | `scopes`'s **list item is nullable** | same schema |
@@ -282,7 +284,7 @@ adding it to the other, in either direction.
 | Assertion | Expected |
 |---|---|
 | the narrowed worker still hosts the protocol | present in `list_protocols` |
-| its `protocol_hash` = `27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385` | one-method digest |
+| its `protocol_hash` = `4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac` | one-method digest |
 | `describe` lists only `introspect_token` | — |
 | calling `issue_grant` on it does not succeed | either a transport-level 404 or a typed refusal; **the shape is deliberately not pinned** |
 | the two workers' hashes **differ** | stated separately, because a port could pin both digests to one wrong constant and pass them individually |
@@ -291,7 +293,7 @@ adding it to the other, in either direction.
 
 | Assertion | Expected |
 |---|---|
-| a worker with no hooks does not list `vgi_rpc.Identity.v1` | absent from `list_protocols` |
+| a worker with no hooks does not list `vgi_rpc.Identity.v2` | absent from `list_protocols` |
 
 Not hosted, not hosted-and-refusing. This is the property that lets the
 protocol exist in the framework without every deployment inheriting a
@@ -413,7 +415,7 @@ roughly `now - 60`, unless stated.
 
 | Probe | Expected |
 |---|---|
-| purpose `conformance`, scopes `["read","write"]` | token `conformance-grant-for:minter@conformance.example\|read,write`, `expires_at == 1893456000.0` exactly, `grant_id == "conformance-grant-id"` |
+| purpose `conformance`, scopes `["read","write"]` | token `conformance-grant-for:minter@conformance.example\|read,write`, `expires_at` is `timestamp[us, tz="UTC"]` non-null and `== 2030-01-01T00:00:00Z` (1893456000000000 µs) exactly, `grant_id == "conformance-grant-id"` |
 | the same call as two different principals | two **different** tokens, each prefixed with its own caller |
 | scopes `[]`, `["read"]`, `["read","write","admin"]` | echoed portion of the token equals `join(scopes, ",")` |
 | purpose `conformance-minimal` | `grant_id == ""` |
@@ -487,7 +489,7 @@ omissions for oversights.
 ## 7. A bug this found, which every port should check
 
 Writing the group surfaced a framework bug in the reference that had made
-`vgi_rpc.Identity.v1` **completely uncallable over every transport**, unnoticed,
+`vgi_rpc.Identity.v2` **completely uncallable over every transport**, unnoticed,
 since it landed.
 
 `CallContext` injection resolved "does this method want a ctx?" against the
@@ -560,7 +562,7 @@ Neither would have been found by reading the tests. Mutate these at minimum:
 ## 9. Constants, in one block
 
 ```
-protocol            vgi_rpc.Identity.v1
+protocol            vgi_rpc.Identity.v2
 
 headers             X-Conformance-Principal
                     X-Conformance-Auth-Time          (verbatim into claims["auth_time"])
@@ -592,12 +594,12 @@ purposes            conformance-refused                 -> GrantRefused
                     (anything else)                     -> full grant
 
 grant token         "conformance-grant-for:" + principal + "|" + join(scopes, ",")
-expires_at          1893456000.0
+expires_at          2030-01-01T00:00:00Z  (timestamp[us, tz="UTC"], raw 1893456000000000)
 grant_id            conformance-grant-id
 
-digests             both            8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5
-                    introspect only 27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385
-                    grant only      c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8
+digests             both            145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3
+                    introspect only 4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac
+                    grant only      4199df7403c9ca1a02c4c524b405a999eb1489614a1480873ffc23a0e5b0d312
 
 trim floor          U+0009 U+000A U+000B U+000C U+000D U+0020 U+0085 U+00A0
 cap                 4096 UTF-8 bytes
@@ -623,7 +625,7 @@ A **third** identity worker, the runner fixture `conformance_http_grant_port`
 (reference: `tests/serve_conformance_http.py --identity grants`). It differs
 from the both-methods worker in three ways:
 
-- **No mint hook** — the framework mints sealed grants (IDENTITY_V1_SPEC §9).
+- **No mint hook** — the framework mints sealed grants (IDENTITY_V2_SPEC §9).
 - **Grant keys:** current `0x10..0x2f` (mints), previous `0x30..0x4f`
   (verifies only); audience `"conformance"`; max TTL `3600`; skew 60. These keys
   are published on purpose: the suite mints with them to test your verifier and

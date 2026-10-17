@@ -16,7 +16,7 @@ Comparing every hosted protocol, rather than just the application one, closes
 two gaps.  ``vgi_rpc.Reflection.v1`` is the protocol this tool *speaks* in
 order to compare, and until now it was the one protocol never compared -- a
 port could describe everything else identically while disagreeing about
-description itself.  ``vgi_rpc.Identity.v1``, where hosted, rested on each port
+description itself.  ``vgi_rpc.Identity.v2``, where hosted, rested on each port
 asserting digests against constants in a spec document, which establishes
 agreement with the document but never compares the ports to each other.
 

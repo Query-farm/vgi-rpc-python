@@ -800,7 +800,7 @@ class RpcServer:
                 landing page titles, and what framework endpoints with no owning
                 protocol log against. It is never a routing fallback.
             identity: An :class:`~vgi_rpc.rpc._identity.IdentityImpl` to host
-                ``vgi_rpc.Identity.v1``.  Absent by default, and absent rather
+                ``vgi_rpc.Identity.v2``.  Absent by default, and absent rather
                 than routed-and-refusing when omitted: that is what keeps a
                 dependency upgrade from growing a credential-to-identity oracle
                 on every existing worker.
@@ -999,7 +999,7 @@ class RpcServer:
         two protocols may define the same method name and only one may want a
         :class:`CallContext` -- but every dispatch path read the *primary's*
         set, so a secondary protocol whose methods all take ``ctx`` got none of
-        them.  ``vgi_rpc.Identity.v1`` is exactly that shape: both its methods
+        them.  ``vgi_rpc.Identity.v2`` is exactly that shape: both its methods
         need the caller's :class:`AuthContext` to apply their guards, and
         neither could be called at all until this looked at the right binding.
         """
@@ -1221,7 +1221,7 @@ class RpcServer:
 
     @property
     def identity(self) -> IdentityImpl | None:
-        """The hosted ``vgi_rpc.Identity.v1`` implementation, when there is one."""
+        """The hosted ``vgi_rpc.Identity.v2`` implementation, when there is one."""
         return cast("IdentityImpl | None", self._identity)
 
     @property

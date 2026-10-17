@@ -1,7 +1,7 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sealed grants (IDENTITY_V1_SPEC.md §9) in the reference implementation.
+"""Sealed grants (IDENTITY_V2_SPEC.md §9) in the reference implementation.
 
 The vector file is what every port's tests consume; these tests are what keep
 the reference itself pinned to it.
@@ -213,7 +213,7 @@ def test_a_proxy_dependent_authenticator_refuses_composition() -> None:
 
 
 def test_make_wsgi_app_accepts_a_minted_grant_end_to_end() -> None:
-    """Mint through Identity.v1 over HTTP, then present it as a bearer."""
+    """Mint through Identity.v2 over HTTP, then present it as a bearer."""
     from vgi_rpc.conformance.identity_fixture import Whoami, WhoamiImpl
     from vgi_rpc.http import http_connect, make_sync_client
     from vgi_rpc.rpc._token_identity import Identity

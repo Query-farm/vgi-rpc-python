@@ -3,7 +3,7 @@
 
 r"""Sealed grants: the framework's own ``issue_grant`` credential, and its verifier.
 
-``vgi_rpc.Identity.v1``'s ``issue_grant`` mints a standing delegation that
+``vgi_rpc.Identity.v2``'s ``issue_grant`` mints a standing delegation that
 unattended automation later presents *as an ordinary bearer*.  Until this
 module nothing accepted one: the loop was open in every port.  A sealed grant
 closes it without storage and without author code.  When a deployment
@@ -12,7 +12,7 @@ worker supplies its own ``mint_grant``) and accepts them back as bearer
 credentials.  When it does not, nothing changes -- absent beats
 hosted-and-refusing, so no worker grows a credential issuer by upgrading.
 
-Normative: ``tools/cross-port/specs/IDENTITY_V1_SPEC.md`` §9 and
+Normative: ``tools/cross-port/specs/IDENTITY_V2_SPEC.md`` §9 and
 ``docs/WIRE_PROTOCOL.md`` §16.  Every port mints and verifies byte-identically;
 ``vgi_rpc/conformance/grant_token_vectors.json`` pins it.
 
@@ -486,6 +486,8 @@ def sealed_mint_grant(keys: GrantKeys) -> Callable[[str, str, list[str], int], I
         ``(principal, purpose, scopes, ttl_seconds) -> IssuedGrant``.
 
     """
+    from datetime import UTC, datetime
+
     from vgi_rpc.rpc._token_identity import GrantRefusedError, IssuedGrant
 
     def mint(principal: str, purpose: str, scopes: list[str], ttl_seconds: int) -> IssuedGrant:
@@ -497,6 +499,8 @@ def sealed_mint_grant(keys: GrantKeys) -> Callable[[str, str, list[str], int], I
             )
         except ValueError as exc:
             raise GrantRefusedError(str(exc)) from exc
-        return IssuedGrant(token=token, expires_at=float(claims.expires_at), grant_id=claims.grant_id)
+        return IssuedGrant(
+            token=token, expires_at=datetime.fromtimestamp(claims.expires_at, tz=UTC), grant_id=claims.grant_id
+        )
 
     return mint

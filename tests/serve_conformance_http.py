@@ -56,7 +56,7 @@ def _principal_from_header(req: falcon.Request) -> AuthContext:
     (``GET /health``, ``OPTIONS /__capabilities__``) keep working.
 
     ``X-Conformance-Auth-Time`` rides along as the ``auth_time`` claim, which
-    is what ``vgi_rpc.Identity.v1``'s freshness guard reads.  The value is
+    is what ``vgi_rpc.Identity.v2``'s freshness guard reads.  The value is
     placed in the claim map **verbatim and unparsed**: parsing it here and
     dropping what will not parse would collapse "carries an unusable
     auth_time" into "carries no auth_time", and the guard would then be
@@ -322,7 +322,7 @@ def main() -> None:
         choices=("off", "both", "introspect-only", "grants"),
         default="off",
         help=(
-            "Host vgi_rpc.Identity.v1 under the fixed conformance policy in "
+            "Host vgi_rpc.Identity.v2 under the fixed conformance policy in "
             "vgi_rpc.conformance.identity_fixture. 'both' configures the "
             "resolve and mint hooks; 'introspect-only' configures only the "
             "resolver, so the binding -- and its protocol_hash -- narrows to "

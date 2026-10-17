@@ -40,8 +40,8 @@ discovers it with the `list_protocols` call it already makes. `features` stays
 in the schema (removing a column is a breaking change) but carries nothing, so
 a future token cannot change what a current client does.
 
-`vgi_rpc.Identity.v1` keeps its hook-driven narrowing, untouched. It is
-framework-owned, its narrowed hashes are pinned in `IDENTITY_V1_SPEC.md`, and
+`vgi_rpc.Identity.v2` keeps its hook-driven narrowing, untouched. It is
+framework-owned, its narrowed hashes are pinned in `IDENTITY_V2_SPEC.md`, and
 the narrowing exists to keep an oracle *absent* — a property, not a feature.
 
 ### D2. A list of `(protocol, implementation)` pairs at construction, fixed for the process

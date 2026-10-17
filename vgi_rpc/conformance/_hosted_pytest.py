@@ -19,7 +19,7 @@ variables, so a pytest run here is one worker on one transport:
 ``VGI_HOSTED_TARGET``       command line, socket path, or base URL
 ``VGI_HOSTED_PREFIX``       HTTP route prefix (default ``""``)
 ``VGI_HOSTED_EXPECT``       comma-separated application protocols, in order
-``VGI_HOSTED_IDENTITY``     ``1``: the worker hosts ``vgi_rpc.Identity.v1`` with
+``VGI_HOSTED_IDENTITY``     ``1``: the worker hosts ``vgi_rpc.Identity.v2`` with
                             the ``IDENTITY_CONFORMANCE_FIXTURE.md`` policy
 =========================== ====================================================
 """
@@ -187,6 +187,6 @@ class TestHostedProtocolList:
     def test_identity_is_listed_when_opted_in(self, protocol_target: ProtocolTarget) -> None:  # noqa: F811
         """Over HTTP, a worker that opts into Identity lists it."""
         if not _IDENTITY:
-            pytest.skip("the worker was not declared to host vgi_rpc.Identity.v1 (--identity)")
+            pytest.skip("the worker was not declared to host vgi_rpc.Identity.v2 (--identity)")
         hosted = [p.protocol for p in list_protocols(protocol_target).protocols]
-        assert "vgi_rpc.Identity.v1" in hosted, f"--identity was given but the worker hosts {hosted}"
+        assert "vgi_rpc.Identity.v2" in hosted, f"--identity was given but the worker hosts {hosted}"

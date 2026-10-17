@@ -1,7 +1,7 @@
 # Grant authentication — decision record (2026-10-06)
 
 Normative text: `docs/WIRE_PROTOCOL.md` §16 "Accepting identity credentials"
-and `IDENTITY_V1_SPEC.md` §9. Fixture: `IDENTITY_CONFORMANCE_FIXTURE.md` §10.
+and `IDENTITY_V2_SPEC.md` §9. Fixture: `IDENTITY_CONFORMANCE_FIXTURE.md` §10.
 Vectors: `vgi_rpc/conformance/grant_token_vectors.json`.
 
 **Finding.** `issue_grant` mints a credential for automation to present later

@@ -299,7 +299,7 @@ class TestPreimageShape:
 
 
 class TestIdentityV1IsACrossPortVector:
-    """``vgi_rpc.Identity.v1``'s digests, pinned as the ports' shared vector.
+    """``vgi_rpc.Identity.v2``'s digests, pinned as the ports' shared vector.
 
     Identity is the first protocol every port implements from a written
     contract rather than by translating the reference line by line, so these
@@ -317,11 +317,11 @@ class TestIdentityV1IsACrossPortVector:
     """
 
     #: Both methods hosted.
-    BOTH = "8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5"
+    BOTH = "145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3"
     #: Only ``introspect_token`` -- a worker that resolves but does not mint.
-    INTROSPECT_ONLY = "27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385"
+    INTROSPECT_ONLY = "4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac"
     #: Only ``issue_grant`` -- a worker that mints but does not resolve.
-    GRANT_ONLY = "c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8"
+    GRANT_ONLY = "4199df7403c9ca1a02c4c524b405a999eb1489614a1480873ffc23a0e5b0d312"
 
     @staticmethod
     def _methods(*only: str) -> dict[str, Any]:
@@ -376,5 +376,5 @@ class TestIdentityV1IsACrossPortVector:
         from vgi_rpc.rpc._token_identity import Identity
 
         blob = canonical_json(protocol_description(Identity.protocol_name, self._methods()))
-        assert json.loads(blob)["protocol"] == "vgi_rpc.Identity.v1"
+        assert json.loads(blob)["protocol"] == "vgi_rpc.Identity.v2"
         assert [m["name"] for m in json.loads(blob)["methods"]] == ["introspect_token", "issue_grant"]

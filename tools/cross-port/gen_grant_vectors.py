@@ -155,7 +155,7 @@ def main() -> None:
     ]
     doc = {
         "description": (
-            "Sealed-grant test vectors (IDENTITY_V1_SPEC.md §9). A port's minter given minting_key, "
+            "Sealed-grant test vectors (IDENTITY_V2_SPEC.md §9). A port's minter given minting_key, "
             "audience, max_ttl_seconds, nonce, now and request MUST produce exactly `token`; its verifier "
             "MUST accept every `accept` case and reject every `reject` case. Unless a case overrides "
             "them, verification uses verify_keys=[minting key of 'basic'], audience '', max_ttl_seconds "

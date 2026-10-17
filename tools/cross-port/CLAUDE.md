@@ -38,7 +38,7 @@ This is intentionally minimal — a Makefile and two small Python scripts.
 
 - Python is always the reference. Features are ported FROM Python TO Go/TypeScript.
 - The conformance test suite (48 methods, ~217 tests) is defined in Python (`vgi_rpc.conformance`) and drives tests against Go/TS workers via subprocess.
-- **All six non-Python ports are pre-2.0 as of 2026-09-15.** Python has landed multi-protocol hosting: dispatch resolves `(vgi_rpc.protocol, vgi_rpc.method)`, introspection is the co-hosted `vgi_rpc.Reflection.v1` rather than a `__describe__` method name, identity is `vgi_rpc.Identity.v1` rather than an HTTP JSON route, and `protocol_hash` is defined over canonical JSON so it is comparable across ports. `describe_diff.py` reports each port's state; Go, TypeScript and Rust connect and answer "does not host vgi_rpc.Reflection.v1", which is the expected pre-port state. See `~/.claude/plans/okay-so-write-up-binary-russell.md`.
+- **All six non-Python ports are pre-2.0 as of 2026-09-15.** Python has landed multi-protocol hosting: dispatch resolves `(vgi_rpc.protocol, vgi_rpc.method)`, introspection is the co-hosted `vgi_rpc.Reflection.v1` rather than a `__describe__` method name, identity is `vgi_rpc.Identity.v2` rather than an HTTP JSON route, and `protocol_hash` is defined over canonical JSON so it is comparable across ports. `describe_diff.py` reports each port's state; Go, TypeScript and Rust connect and answer "does not host vgi_rpc.Reflection.v1", which is the expected pre-port state. See `~/.claude/plans/okay-so-write-up-binary-russell.md`.
 - Go conformance worker: built via `make build` in vgi-rpc-go, binary at `conformance-worker`
 - TS conformance worker: `bun run examples/conformance.ts` in vgi-rpc-typescript
 

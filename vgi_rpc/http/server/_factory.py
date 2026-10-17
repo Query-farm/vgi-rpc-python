@@ -325,7 +325,7 @@ def make_wsgi_app(
             miss path, so a client that fails to echo
             :data:`~vgi_rpc.metadata.CALL_STATE_KEY` fails immediately
             instead of only once the cache goes cold in production.
-        identity_bearer: When the server hosts ``vgi_rpc.Identity.v1`` with
+        identity_bearer: When the server hosts ``vgi_rpc.Identity.v2`` with
             sealed grants configured or a ``resolve_token`` hook, accept
             those credentials as bearers after *authenticate* (WIRE_PROTOCOL.md
             §16).  On by default; ``False`` is for a deployment that composes

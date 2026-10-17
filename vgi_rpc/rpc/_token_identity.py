@@ -1,6 +1,6 @@
 # Copyright 2025, 2026 Query Farm LLC - https://query.farm
 
-"""``vgi_rpc.Identity.v1`` -- resolving a credential, and minting a grant.
+"""``vgi_rpc.Identity.v2`` -- resolving a credential, and minting a grant.
 
 Identity lives here, at the RPC layer, rather than in any application
 protocol: a bearer token is not a VGI concept, the auth primitives it builds on
@@ -53,10 +53,13 @@ import hashlib
 import re
 import time
 import warnings
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from datetime import datetime
+from typing import TYPE_CHECKING, Annotated, ClassVar, Protocol
+
+import pyarrow as pa
 
 from vgi_rpc.errors import AuthUnavailableError, Code, RetryInfo
-from vgi_rpc.utils import ArrowSerializableDataclass
+from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -327,8 +330,11 @@ class IssuedGrant(ArrowSerializableDataclass):
             the format entirely (a sealed envelope, a database row, or a
             credential brokered from the IdP are all equally valid and equally
             invisible here).  Never parsed, never logged.
-        expires_at: Unix timestamp after which the worker will stop honouring
-            the grant.  Required *because* the framework cannot enforce it: the
+        expires_at: The UTC instant after which the worker will stop honouring
+            the grant -- a timezone-aware :class:`~datetime.datetime`, carried
+            on the wire as ``timestamp[us, tz="UTC"]`` (non-null).  A naive
+            datetime is refused at construction: Arrow would read it as UTC,
+            which silently shifts a local-time value.  Required *because* the framework cannot enforce it: the
             real lifetime lives inside the opaque token, so this is a
             declaration rather than an enforcement.  A worker that must state a
             lifetime has thought about one.
@@ -338,8 +344,15 @@ class IssuedGrant(ArrowSerializableDataclass):
     """
 
     token: str
-    expires_at: float
+    expires_at: Annotated[datetime, ArrowType(pa.timestamp("us", tz="UTC"))]
     grant_id: str = ""
+
+    def __post_init__(self) -> None:
+        """Refuse a naive ``expires_at``, which has no defined instant."""
+        if not isinstance(self.expires_at, datetime):
+            raise TypeError(f"IssuedGrant.expires_at must be a datetime, got {type(self.expires_at).__name__}")
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise ValueError("IssuedGrant.expires_at must be timezone-aware (UTC)")
 
 
 class Identity(Protocol):
@@ -350,7 +363,7 @@ class Identity(Protocol):
     mints one for the caller.
     """
 
-    protocol_name: ClassVar[str] = "vgi_rpc.Identity.v1"
+    protocol_name: ClassVar[str] = "vgi_rpc.Identity.v2"
 
     def introspect_token(self, token: str) -> TokenIdentity:
         """Resolve an opaque bearer credential to the identity it authenticates as.

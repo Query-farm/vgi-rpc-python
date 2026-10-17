@@ -192,7 +192,7 @@ class HostedProtocol:
     A client-side view of the wire ``ProtocolSummary``, returned by
     :func:`list_protocols` in the server's order: application protocols in
     registration order (the primary first), then the framework's own
-    (``vgi_rpc.Reflection.v1``, and ``vgi_rpc.Identity.v1`` on an HTTP server
+    (``vgi_rpc.Reflection.v1``, and ``vgi_rpc.Identity.v2`` on an HTTP server
     that hosts it).
 
     Attributes:

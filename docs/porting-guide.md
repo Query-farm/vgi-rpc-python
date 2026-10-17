@@ -313,7 +313,7 @@ This is the same gap the CORS work turned up twice — the suite asserted `X-Req
 ## HTTP token introspection
 
 **Optional, and each method independently so.** Identity is
-`vgi_rpc.Identity.v1` ([WIRE_PROTOCOL §16](WIRE_PROTOCOL.md)), an ordinary
+`vgi_rpc.Identity.v2` ([WIRE_PROTOCOL §16](WIRE_PROTOCOL.md)), an ordinary
 co-hosted protocol — not, any longer, an HTTP JSON route. A port that does not
 implement it simply does not host it, and a caller gets the same
 `protocol_not_supported` it gets for any protocol a server does not speak. There
@@ -333,7 +333,7 @@ likely to get subtly wrong:
   as protocol methods every rejection surfaces the same way. A caller that
   negative-caches `identity_unavailable` locks out valid users when a store
   blips.
-- **Close the grant loop** ([§16 "Accepting identity credentials"](WIRE_PROTOCOL.md), `IDENTITY_V1_SPEC.md` §9): opt-in sealed grants (`VGI_RPC_GRANT_KEYS`) minted and accepted by the framework, byte-identical to `vgi_rpc/conformance/grant_token_vectors.json`; and `resolve_token` consulted as a bearer authenticator, after the deployment's own and after sealed grants.
+- **Close the grant loop** ([§16 "Accepting identity credentials"](WIRE_PROTOCOL.md), `IDENTITY_V2_SPEC.md` §9): opt-in sealed grants (`VGI_RPC_GRANT_KEYS`) minted and accepted by the framework, byte-identical to `vgi_rpc/conformance/grant_token_vectors.json`; and `resolve_token` consulted as a bearer authenticator, after the deployment's own and after sealed grants.
 - **`identity_unavailable` carries `RetryInfo`, and the transport-auth
   "unavailable" error raised from either hook is translated to it**, keeping
   its retry hint. Five of seven ports sent that error unclassified.

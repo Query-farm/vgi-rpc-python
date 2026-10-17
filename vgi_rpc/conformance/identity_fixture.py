@@ -1,9 +1,9 @@
 # © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fixed deployment policy for the ``vgi_rpc.Identity.v1`` conformance group.
+"""Fixed deployment policy for the ``vgi_rpc.Identity.v2`` conformance group.
 
-``vgi_rpc.Identity.v1`` is nearly all *guards*, and every guard reads
+``vgi_rpc.Identity.v2`` is nearly all *guards*, and every guard reads
 deployment policy: who may introspect, what a credential resolves to, whether a
 grant is minted, how recently the caller authenticated.  A cross-port
 assertion is impossible unless every port's conformance worker configures the
@@ -40,7 +40,10 @@ asserted exactly rather than within a tolerance.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import ClassVar, Protocol
+
+import pyarrow as pa
 
 from vgi_rpc.errors import AuthUnavailableError
 from vgi_rpc.grants import GrantKeys
@@ -57,6 +60,7 @@ __all__ = [
     "GRANT_KEY_CURRENT",
     "GRANT_KEY_PREVIOUS",
     "GRANT_KEY_STRANGER",
+    "GRANT_EXPIRES_AT_MICROS",
     "GRANT_MAX_TTL",
     "WHOAMI_PROTOCOL_HASH",
     "WHOAMI_PROTOCOL_NAME",
@@ -71,6 +75,7 @@ __all__ = [
     "AUTH_UNAVAILABLE_PURPOSE",
     "AUTH_UNAVAILABLE_RETRY_AFTER",
     "GRANT_EXPIRES_AT",
+    "GRANT_EXPIRES_AT_TYPE",
     "GRANT_ID",
     "GRANT_TOKEN_PREFIX",
     "INTROSPECTOR_PRINCIPAL",
@@ -95,22 +100,23 @@ __all__ = [
     "UNAVAILABLE_RETRY_AFTER",
     "TOKEN_UNKNOWN",
     "TOKEN_ZERO_TTL",
+    "check_issued_grant_wire_shape",
     "conformance_mint_grant",
     "conformance_resolve_token",
 ]
 
 #: Routing key of the protocol under test.
-IDENTITY_PROTOCOL_NAME = "vgi_rpc.Identity.v1"
+IDENTITY_PROTOCOL_NAME = "vgi_rpc.Identity.v2"
 
-#: The three pinned digests from ``IDENTITY_V1_SPEC.md`` §1.  Restated here so
+#: The three pinned digests from ``IDENTITY_V2_SPEC.md`` §1.  Restated here so
 #: the shared suite can assert them against what a worker *reports over the
 #: wire* through reflection, rather than each port asserting a constant against
 #: a constant of its own.  A digest computed locally and compared to a copied
 #: literal proves the copy was made; only reading it back off a running server
 #: proves the wire shape.
-IDENTITY_BOTH_METHODS_HASH = "8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5"
-IDENTITY_INTROSPECT_ONLY_HASH = "27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385"
-IDENTITY_GRANT_ONLY_HASH = "c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8"
+IDENTITY_BOTH_METHODS_HASH = "145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3"
+IDENTITY_INTROSPECT_ONLY_HASH = "4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac"
+IDENTITY_GRANT_ONLY_HASH = "4199df7403c9ca1a02c4c524b405a999eb1489614a1480873ffc23a0e5b0d312"
 
 # ---------------------------------------------------------------------------
 # Authentication: two request headers, no identity provider
@@ -276,10 +282,48 @@ GRANT_TOKEN_PREFIX = "conformance-grant-for:"
 SCOPE_SEPARATOR = "|"
 
 #: Fixed rather than ``now + ttl``: a constant can be asserted exactly, which
-#: also pins the float64 round trip.  ``expires_at`` is a declaration rather
-#: than an enforcement (the real lifetime lives inside the opaque token), so
-#: nothing is lost by making it a constant.  2030-01-01T00:00:00Z.
-GRANT_EXPIRES_AT = 1893456000.0
+#: also pins the ``timestamp[us, tz="UTC"]`` round trip (a port that sends
+#: seconds, or milliseconds, or a non-UTC zone shows up as a wrong value or a
+#: wrong type).  ``expires_at`` is a declaration rather than an enforcement
+#: (the real lifetime lives inside the opaque token), so nothing is lost by
+#: making it a constant.  2030-01-01T00:00:00Z.
+GRANT_EXPIRES_AT = datetime(2030, 1, 1, tzinfo=UTC)
+
+#: :data:`GRANT_EXPIRES_AT` as the raw int64 the wire carries (microseconds
+#: since the Unix epoch).
+GRANT_EXPIRES_AT_MICROS = 1_893_456_000_000_000
+
+#: ``IssuedGrant.expires_at``'s wire type.  ``Identity.v1`` carried a float64
+#: of unix seconds; ``v2`` carries a UTC instant at microsecond precision.
+GRANT_EXPIRES_AT_TYPE = pa.timestamp("us", tz="UTC")
+
+
+def check_issued_grant_wire_shape(payload: bytes) -> None:
+    """Assert an ``IssuedGrant`` payload declares ``expires_at`` as ``v2`` does.
+
+    Checked on the raw nested IPC rather than after decoding: the protocol
+    hash sees only ``result: binary``, so the nested record's column types are
+    invisible to it, and a lenient decoder would coerce a float64 or a
+    millisecond timestamp into *something* rather than fail.
+
+    Args:
+        payload: The serialized ``IssuedGrant`` record from the ``result`` column.
+
+    """
+    inner = pa.ipc.open_stream(payload).read_all()
+    field = inner.schema.field("expires_at") if "expires_at" in inner.schema.names else None
+    assert field is not None, f"IssuedGrant carried no expires_at column (schema {inner.schema})"
+    assert field.type == GRANT_EXPIRES_AT_TYPE, (
+        f"IssuedGrant.expires_at is {field.type}, expected {GRANT_EXPIRES_AT_TYPE} -- "
+        f"{IDENTITY_PROTOCOL_NAME} carries a UTC instant at microsecond precision; a float64 of unix "
+        f"seconds is vgi_rpc.Identity.v1's shape"
+    )
+    assert not field.nullable, (
+        "IssuedGrant.expires_at must be declared non-nullable -- a grant always states a lifetime"
+    )
+    assert inner.num_rows == 1, f"an IssuedGrant payload carries exactly one row, got {inner.num_rows}"
+    assert inner.column("expires_at").null_count == 0, "IssuedGrant.expires_at was null"
+
 
 #: Correlation handle a full grant carries.
 GRANT_ID = "conformance-grant-id"
