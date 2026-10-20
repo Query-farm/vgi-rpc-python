@@ -196,6 +196,22 @@ class TestMakeExternalLocationBatch:
         batch, cm = make_external_location_batch(_SCHEMA, "mock://test")
         assert is_external_location_batch(batch, cm) is True
 
+    def test_union_and_extension_columns(self) -> None:
+        """Types ``pa.array([], type=...)`` cannot build still get a pointer batch."""
+        schema = pa.schema(
+            [
+                pa.field("sparse", pa.sparse_union([pa.field("a", pa.int32()), pa.field("b", pa.string())])),
+                pa.field("dense", pa.dense_union([pa.field("a", pa.int32()), pa.field("b", pa.string())])),
+                pa.field("uuid", pa.uuid()),
+                pa.field("uuid_map", pa.map_(pa.uuid(), pa.string())),
+                pa.field("nested", pa.struct([("u", pa.sparse_union([pa.field("a", pa.int8())]))])),
+            ]
+        )
+        batch, cm = make_external_location_batch(schema, "mock://test")
+        assert batch.num_rows == 0
+        assert batch.schema == schema
+        assert is_external_location_batch(batch, cm) is True
+
 
 # ===========================================================================
 # Unit tests — resolution

@@ -90,7 +90,7 @@ from vgi_rpc.metadata import (
     LOG_LEVEL_KEY,
     merge_metadata,
 )
-from vgi_rpc.utils import IpcValidation, ValidatedReader, new_ipc_stream
+from vgi_rpc.utils import IpcValidation, ValidatedReader, empty_batch, new_ipc_stream
 
 try:
     from opentelemetry import trace as _otel_trace
@@ -461,10 +461,9 @@ def make_external_location_batch(
         optionally ``vgi_rpc.location.sha256``).
 
     """
-    batch = pa.RecordBatch.from_arrays(
-        [pa.array([], type=f.type) for f in schema],
-        schema=schema,
-    )
+    # empty_batch, not pa.array([], type=...): that has no builder for union
+    # or extension types, so externalizing such an output failed.
+    batch = empty_batch(schema)
     meta: dict[bytes, bytes] = {LOCATION_KEY: url.encode()}
     if sha256 is not None:
         meta[LOCATION_SHA256_KEY] = sha256.encode()

@@ -413,8 +413,7 @@ def deserialize_record_batch(
             # empty value — e.g. a scan function with no arguments. Return a 0-row
             # batch of the declared schema instead of raising.
             schema = reader.schema
-            empty = pa.RecordBatch.from_arrays([pa.array([], type=f.type) for f in schema], schema=schema)
-            return empty, None
+            return empty_batch(schema), None
 
         return batch, custom_metadata
 
