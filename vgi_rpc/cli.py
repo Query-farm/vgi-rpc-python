@@ -25,7 +25,7 @@ import select
 import shlex
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from io import BytesIO, IOBase, TextIOWrapper
@@ -526,7 +526,7 @@ def _emit_rpc_error(e: RpcError) -> None:
 
 
 @contextlib.contextmanager
-def _open_arrow_dest(config: _CliConfig) -> Iterator[IOBase]:
+def _open_arrow_dest(config: _CliConfig) -> Generator[IOBase]:
     """Open the arrow output destination as a context manager.
 
     Yields a binary writable stream: a file when ``--output`` is set,
@@ -553,7 +553,7 @@ def _write_arrow_output(config: _CliConfig, batch: pa.RecordBatch) -> None:
 
 
 @contextlib.contextmanager
-def _open_text_dest(config: _CliConfig) -> Iterator[TextIOWrapper | None]:
+def _open_text_dest(config: _CliConfig) -> Generator[TextIOWrapper | None]:
     """Open a text output destination when ``--output`` is set.
 
     Yields the file handle, or ``None`` when writing to stdout.

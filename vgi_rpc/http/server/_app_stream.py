@@ -10,7 +10,7 @@ import logging
 import secrets
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO, IOBase
@@ -137,7 +137,7 @@ def _dispatch_telemetry(
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
     kwargs: Mapping[str, Any] | None = None,
-) -> Iterator[_DispatchOutcome]:
+) -> Generator[_DispatchOutcome]:
     """Wrap a stream-call shell with shared start/end telemetry.
 
     On enter: optionally invokes ``hook.on_dispatch_start`` (when an

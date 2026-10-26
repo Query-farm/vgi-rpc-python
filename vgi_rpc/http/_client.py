@@ -13,7 +13,7 @@ import contextlib
 import json
 import logging
 import struct
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO
@@ -964,7 +964,7 @@ def http_connect[P](
     retry: HttpRetryConfig | None = None,
     compression_level: int | None = 1,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
     Args:
@@ -1846,7 +1846,7 @@ class _SessionTrackingClient:
         return resp
 
     @contextlib.contextmanager
-    def stream(self, method: str, url: str, **kwargs: Any) -> Iterator[Any]:
+    def stream(self, method: str, url: str, **kwargs: Any) -> Generator[Any]:
         """Forward a streaming request while preserving session header handling."""
         kwargs["headers"] = self._merge_headers(kwargs.get("headers"))
         with self._inner.stream(method, url, **kwargs) as resp:  # type: ignore[union-attr]  # ty: ignore[unresolved-attribute]
@@ -1980,7 +1980,7 @@ class _SessionView:
 def _open_session_view(
     outer: _HttpProxy,
     token: str | None,
-) -> Iterator[_SessionView]:
+) -> Generator[_SessionView]:
     """Context-manager body for :meth:`_HttpProxy.with_session_token`."""
     view = _SessionView(outer, initial_token=token)
     try:

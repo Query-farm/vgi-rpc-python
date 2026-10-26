@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -146,7 +146,7 @@ def conformance_protocol_connector() -> Iterator[Callable[..., contextlib.Abstra
         if subprocess_transport is not None:
 
             @contextlib.contextmanager
-            def _pipe() -> Iterator[Any]:
+            def _pipe() -> Generator[Any]:
                 yield _RpcProxy(protocol, subprocess_transport, on_log)
 
             return _pipe()

@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from io import IOBase
 
@@ -229,7 +229,7 @@ class WorkerPool:
         on_log: Callable[[Message], None] | None = None,
         external_location: ExternalLocationConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
-    ) -> Iterator[P]:
+    ) -> Generator[P]:
         """Borrow a worker, yield a typed proxy, return the worker on exit.
 
         If the pool was created with ``shm_size``, each borrow gets its own

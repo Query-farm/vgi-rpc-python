@@ -40,7 +40,7 @@ import json
 import os
 import shlex
 import subprocess
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self, cast, overload
 
@@ -465,7 +465,7 @@ class ClientDriver:
         prefix: str | None = None,
         client: object = None,
         **_ignored: object,
-    ) -> Iterator[ClientDriverProxy]:
+    ) -> Generator[ClientDriverProxy]:
         """Stand in for :func:`vgi_rpc.http.http_connect`, routed through the driver.
 
         Args:
@@ -1054,7 +1054,7 @@ class ClientDriverProxy:
         """
 
         @contextlib.contextmanager
-        def _scope() -> Iterator[DriverSessionView]:
+        def _scope() -> Generator[DriverSessionView]:
             self.admin("session_begin", token=token)
             try:
                 yield DriverSessionView(self)
