@@ -32,7 +32,7 @@ import math
 import re
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -400,7 +400,7 @@ async def _request_following_redirects(
     url_validator: Callable[[str], None] | None,
     *,
     headers: Mapping[str, str] | None = None,
-) -> AsyncIterator[aiohttp.ClientResponse]:
+) -> AsyncGenerator[aiohttp.ClientResponse]:
     """Issue one request, manually validating and bounding every redirect."""
     current_url = url
     response: aiohttp.ClientResponse | None = None

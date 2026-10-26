@@ -80,7 +80,7 @@ import os
 import ssl
 import sys
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 
 from vgi_rpc.external import ExternalLocationConfig
 from vgi_rpc.log import Message
@@ -806,7 +806,7 @@ def connect[P](
     stderr: StderrMode = StderrMode.INHERIT,
     stderr_logger: logging.Logger | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Connect to a subprocess RPC server.
 
     Context manager that spawns a subprocess, yields a typed proxy, and
@@ -846,7 +846,7 @@ def serve_pipe[P](
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation | None = None,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Start an in-process pipe server and yield a typed client proxy.
 
     Useful for tests and demos — no subprocess needed.  A background thread
@@ -898,7 +898,7 @@ def unix_connect[P](
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Connect to a Unix domain socket RPC server and yield a typed proxy.
 
     Args:
@@ -945,7 +945,7 @@ def tcp_connect[P](
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Connect to a TCP RPC server and yield a typed proxy.
 
     Without ``tls_context`` the raw framing protocol carries no authentication
@@ -1053,7 +1053,7 @@ def serve_unix_pipe[P](
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation | None = None,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Start an in-process Unix socket server and yield a typed client proxy.
 
     Like :func:`serve_pipe` but uses a Unix ``socketpair()`` instead of

@@ -13,7 +13,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -603,7 +603,7 @@ __all__ = [
 
 
 @contextlib.contextmanager
-def _external_proxy(port: int) -> Iterator[ConformanceService]:
+def _external_proxy(port: int) -> Generator[ConformanceService]:
     """Connect an ordinary external-config client with an owned fetch pool."""
     from vgi_rpc.external import ExternalLocationConfig
     from vgi_rpc.http import http_connect

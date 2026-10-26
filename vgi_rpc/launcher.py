@@ -45,7 +45,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final
 
@@ -387,7 +387,7 @@ def resolve_and_connect[P](
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Launch (or reuse) a worker and connect to it, tolerating a stale socket.
 
     `launch()` returns a socket path it has just verified live via a connect

@@ -18,7 +18,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from io import BufferedReader, IOBase, RawIOBase
@@ -613,7 +613,7 @@ def iroh_connect[P](
     on_log: Callable[[Message], None] | None = None,
     external_location: ExternalLocationConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Connect a typed VGI proxy to an ``iroh://`` worker."""
     transport = IrohTransport(
         endpoint,
@@ -961,7 +961,7 @@ def httpi_connect[P](
     retry: HttpRetryConfig | None = None,
     compression_level: int | None = 1,
     accepted_max_response_bytes: int | None = 256 * 1024 * 1024,
-) -> Iterator[P]:
+) -> Generator[P]:
     """Connect a typed VGI HTTP proxy through ``iroh-http/2``."""
     import httpx2
 
@@ -1000,7 +1000,7 @@ def httpi_connect[P](
 
 
 @contextlib.contextmanager
-def endpoint_connect[P](protocol: type[P], endpoint: str, **options: Any) -> Iterator[P]:
+def endpoint_connect[P](protocol: type[P], endpoint: str, **options: Any) -> Generator[P]:
     """Dispatch an Iroh endpoint URI to its native raw or HTTP client."""
     target = parse_iroh_uri(endpoint)
     connector = iroh_connect if target.scheme == "iroh" else httpi_connect

@@ -13,7 +13,7 @@ import contextlib
 import datetime as _dt
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -615,7 +615,7 @@ class SessionCounterExchangeState(ExchangeState):
 
 
 @contextlib.contextmanager
-def _probe_file_lock(f: IO[str], *, exclusive: bool) -> Iterator[None]:
+def _probe_file_lock(f: IO[str], *, exclusive: bool) -> Generator[None]:
     """Cross-platform advisory file lock for the conformance probe file.
 
     Uses ``fcntl.flock`` on POSIX and ``msvcrt.locking`` on Windows so the

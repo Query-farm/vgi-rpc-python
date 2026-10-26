@@ -28,7 +28,7 @@ import importlib.metadata
 import json
 import logging
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from io import IOBase
 from typing import Literal
 
@@ -221,7 +221,7 @@ def _open_pipe_transport(
     cmd: str,
     shm_size: int | None,
     log_collector: LogCollector,
-) -> Iterator[ConformanceService]:
+) -> Generator[ConformanceService]:
     """Create a pipe transport connection to the server under test."""
     cmd_parts = split_command(cmd)
     transport = SubprocessTransport(cmd_parts)
@@ -251,7 +251,7 @@ def _open_http_transport(
     url: str,
     prefix: str,
     log_collector: LogCollector,
-) -> Iterator[ConformanceService]:
+) -> Generator[ConformanceService]:
     """Create an HTTP transport connection to the server under test."""
     try:
         from vgi_rpc.http import http_connect
@@ -276,7 +276,7 @@ def _open_http_transport(
 def _open_unix_transport(
     path: str,
     log_collector: LogCollector,
-) -> Iterator[ConformanceService]:
+) -> Generator[ConformanceService]:
     """Create a Unix socket transport connection to the server under test."""
     from vgi_rpc.rpc import unix_connect
 
@@ -288,7 +288,7 @@ def _open_unix_transport(
 def _open_tcp_transport(
     address: str,
     log_collector: LogCollector,
-) -> Iterator[ConformanceService]:
+) -> Generator[ConformanceService]:
     """Create a TCP transport connection to the server under test.
 
     Args:
