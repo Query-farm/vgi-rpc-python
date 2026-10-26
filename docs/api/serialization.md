@@ -36,6 +36,21 @@ assert m == m2
 
 These dataclasses work directly as RPC parameters and return types. They're also the base class for [`StreamState`](streaming.md) — any field you add to a stream state is automatically serialized between calls.
 
+RPC parameters and unary results are decoded through the class's
+`deserialize_from_bytes(data, ipc_validation)` method. The default decoder
+requires a complete single-batch IPC value: physical EOF and the legacy or
+modern Arrow EOS marker are accepted; extra messages, trailing bytes and
+truncated endings are rejected. These checks also apply when batch validation
+is disabled. The low-level `deserialize_record_batch` helper continues to accept
+empty bytes and schema-only streams as empty nested values.
+
+A subclass can override `deserialize_from_bytes` to apply a raw byte limit or
+validate a custom envelope before decoding. The override receives the original
+bytes and validation level and is responsible for complete envelope validation.
+Calling `super().deserialize_from_bytes(data, ipc_validation)` retains the
+default framing checks. This does not add a global size limit or change the
+framing of streaming RPC inputs and results.
+
 ### Type mappings
 
 | Python type | Arrow type |

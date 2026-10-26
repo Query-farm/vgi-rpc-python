@@ -380,7 +380,12 @@ def deserialize_record_batch(
     data: bytes,
     ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
-    """Deserialize bytes back to a RecordBatch with custom metadata.
+    """Deserialize a complete single-batch IPC value with custom metadata.
+
+    The batch may end at physical EOF or at a legacy/modern Arrow EOS marker.
+    Additional messages, truncated endings and trailing bytes are rejected.
+    Empty bytes and schema-only streams remain valid empty nested values.
+    This bounded-value check does not apply to concatenated transport streams.
 
     Args:
         data: Bytes containing a serialized RecordBatch in Arrow IPC stream format.
@@ -391,7 +396,7 @@ def deserialize_record_batch(
         if no custom metadata was attached to the batch.
 
     Raises:
-        IPCError: If no batches are found in a (non-empty) IPC stream.
+        IPCError: If the value has extra messages or invalid trailing framing.
 
     """
     # A 0-length buffer means "empty" — a lenient producer (the Rust/Go/Java SDKs,
@@ -401,10 +406,13 @@ def deserialize_record_batch(
     # choking in open_stream ("was null or length 0").
     if not data:
         return pa.record_batch([], schema=pa.schema([])), None
-    # Hand pyarrow the bytes directly: wrapping them in a BufferReader first
-    # costs an extra object and sends pyarrow down its path-like probe
-    # (_stringify_path) before it gets to the buffer. Measured 7.6us -> 5.7us.
-    with ValidatedReader(ipc.open_stream(data, options=IPC_READ_OPTIONS), ipc_validation) as reader:
+    # Keep the byte position: a stream reader's StopIteration alone does not
+    # prove that a bounded value ended cleanly or that all bytes were consumed.
+    with (
+        pa.BufferReader(data) as source,
+        ValidatedReader(ipc.open_stream(source, options=IPC_READ_OPTIONS), ipc_validation) as reader,
+    ):
+        after_schema = source.tell()
         try:
             batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
         except StopIteration:
@@ -412,10 +420,26 @@ def deserialize_record_batch(
             # (the Rust/Go/Java SDKs, tolerated by the DuckDB C++ client) encode an
             # empty value — e.g. a scan function with no arguments. Return a 0-row
             # batch of the declared schema instead of raising.
+            _check_record_batch_end(data, after_schema)
             schema = reader.schema
             return empty_batch(schema), None
 
+        _check_record_batch_end(data, source.tell())
         return batch, custom_metadata
+
+
+def _check_record_batch_end(data: bytes, position: int) -> None:
+    """Require EOF or exactly one complete Arrow EOS after a bounded value."""
+    remaining = len(data) - position
+    if remaining == 0:
+        return
+    # Check the length before slicing, so malformed oversized tails are not
+    # copied and a second record batch is never decoded merely to reject it.
+    if remaining == 4 and data[position:] == b"\x00\x00\x00\x00":
+        return
+    if remaining == 8 and data[position:] == b"\xff\xff\xff\xff\x00\x00\x00\x00":
+        return
+    raise IPCError("Expected a single complete record batch with no trailing data")
 
 
 def read_single_record_batch(
@@ -1625,6 +1649,10 @@ class ArrowSerializableDataclass:
     def deserialize_from_bytes(cls, data: bytes, ipc_validation: IpcValidation = IpcValidation.FULL) -> Self:
         """Deserialize an instance from Arrow IPC bytes.
 
+        RPC parameters and unary results use this hook, including subclass
+        overrides. A custom codec can reject oversized raw bytes before Arrow
+        decoding; it is responsible for validating its complete envelope.
+
         Args:
             data: Arrow IPC stream bytes containing a single-row RecordBatch.
             ipc_validation: Validation level for the deserialized batch.
@@ -1634,7 +1662,7 @@ class ArrowSerializableDataclass:
 
         Raises:
             ValueError: If the batch is invalid (wrong row count or missing fields).
-            IPCError: If the IPC stream is malformed or truncated.
+            IPCError: If the IPC value contains extra messages or invalid trailing framing.
             TypeError: If a field value has an unexpected type during conversion.
             KeyError: If an Enum name cannot be resolved.
 
