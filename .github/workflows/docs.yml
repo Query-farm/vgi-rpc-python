@@ -8,13 +8,24 @@ on:
       - "mkdocs.yml"
       - "vgi_rpc/**"
       - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "vgi_rpc/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: pages
+  group: pages-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -39,6 +50,7 @@ jobs:
         run: uv run mkdocs build --strict
 
       - name: Deploy to Cloudflare Pages
+        if: github.event_name != 'pull_request'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1,6 +1,6 @@
 [project]
 name = "vgi-rpc"
-version = "0.52.1"
+version = "0.52.2"
 description = "Vector Gateway Interface - RPC framework based on Apache Arrow"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -294,7 +294,7 @@ pytest_add_cli_args = ["--timeout=50", "--no-header", "-o", "addopts=", "-o", "p
 docs = [
     "mkdocs>=1.6",
     "mkdocs-material>=9.5",
-    "mkdocstrings[python]>=0.27",
+    "mkdocstrings[python]>=1.0.8",
     "mkdocs-section-index>=0.3",
     "mkdocs-d2-plugin>=1.4",
     "pygments>=2.20",
