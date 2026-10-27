@@ -250,7 +250,7 @@ def test_http_rejects_bad_typed_value_as_client_error(kind: str) -> None:
     assert impl.calls == [42]
 
 
-@pytest.mark.parametrize("kind", ["extra_batch", "trailing_byte", "truncated_eos_4"])
+@pytest.mark.parametrize("kind", ["extra_batch", "trailing_byte", "truncated_eos_4", "truncated_body"])
 def test_client_classifies_malformed_typed_result_as_transport_error(kind: str) -> None:
     """Typed result corruption keeps the client's established RpcError contract."""
     schema = rpc_methods(_ResultProtocol)["retrieve"].result_schema

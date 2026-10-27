@@ -408,24 +408,30 @@ def deserialize_record_batch(
         return pa.record_batch([], schema=pa.schema([])), None
     # Keep the byte position: a stream reader's StopIteration alone does not
     # prove that a bounded value ended cleanly or that all bytes were consumed.
-    with (
-        pa.BufferReader(data) as source,
-        ValidatedReader(ipc.open_stream(source, options=IPC_READ_OPTIONS), ipc_validation) as reader,
-    ):
-        after_schema = source.tell()
-        try:
-            batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
-        except StopIteration:
-            # A schema-only stream (no batch message) is how lenient producers
-            # (the Rust/Go/Java SDKs, tolerated by the DuckDB C++ client) encode an
-            # empty value — e.g. a scan function with no arguments. Return a 0-row
-            # batch of the declared schema instead of raising.
-            _check_record_batch_end(data, after_schema)
-            schema = reader.schema
-            return empty_batch(schema), None
+    try:
+        with (
+            pa.BufferReader(data) as source,
+            ValidatedReader(ipc.open_stream(source, options=IPC_READ_OPTIONS), ipc_validation) as reader,
+        ):
+            after_schema = source.tell()
+            try:
+                batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
+            except StopIteration:
+                # A schema-only stream (no batch message) is how lenient producers
+                # (the Rust/Go/Java SDKs, tolerated by the DuckDB C++ client) encode an
+                # empty value — e.g. a scan function with no arguments. Return a 0-row
+                # batch of the declared schema instead of raising.
+                _check_record_batch_end(data, after_schema)
+                schema = reader.schema
+                return empty_batch(schema), None
 
-        _check_record_batch_end(data, source.tell())
-        return batch, custom_metadata
+            _check_record_batch_end(data, source.tell())
+            return batch, custom_metadata
+    except OSError as exc:
+        # Arrow reports a truncated message body as a plain OSError. This
+        # reader only consumes in-memory bytes, so this is malformed IPC, not
+        # an external I/O failure. Keep custom byte-codec exceptions untouched.
+        raise IPCError(f"Error reading record batch IPC value: {exc}") from exc
 
 
 def _check_record_batch_end(data: bytes, position: int) -> None:
