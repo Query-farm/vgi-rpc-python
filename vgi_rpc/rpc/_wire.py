@@ -70,6 +70,7 @@ from vgi_rpc.rpc._types import AnnotatedBatch, RpcMethodInfo, Stream
 from vgi_rpc.shm import ShmSegment, is_shm_pointer_batch, maybe_write_to_shm, resolve_shm_batch
 from vgi_rpc.utils import (
     ArrowSerializableDataclass,
+    IPCError,
     IpcValidation,
     ValidatedReader,
     _annotation_details,
@@ -798,9 +799,15 @@ def _deserialize_value(value: object, type_hint: object, ipc_validation: IpcVali
     if isinstance(base, type) and issubclass(base, ArrowSerializableDataclass):
         if not isinstance(value, bytes):
             raise TypeError(f"Expected bytes for {base.__name__} deserialization, got {type(value).__name__}")
-        reader = ValidatedReader(ipc.open_stream(value), ipc_validation)
-        batch, metadata = reader.read_next_batch_with_custom_metadata()
-        return base.deserialize_from_batch(batch, metadata, ipc_validation=ipc_validation)
+        # Use the same bytes hook as nested values. A custom codec can bound
+        # the raw payload before Arrow decoding, and the default codec checks
+        # the complete single-record envelope instead of accepting its prefix.
+        try:
+            return base.deserialize_from_bytes(value, ipc_validation)
+        except (IPCError, pa.ArrowException) as exc:
+            # HTTP treats ArrowInvalid as a bad request, and clients preserve
+            # their existing TransportError handling for malformed unary results.
+            raise pa.ArrowInvalid(f"Invalid {base.__name__} IPC value: {exc}") from exc
     if isinstance(base, type) and issubclass(base, Enum) and not isinstance(value, str):
         raise TypeError(f"Expected str for {base.__name__} deserialization, got {type(value).__name__}")
     return ArrowSerializableDataclass._convert_value_for_deserialization(value, type_hint, ipc_validation)
