@@ -386,6 +386,21 @@ class _ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
     #: load can have more than five connections in flight against one fixture.
     request_queue_size = 64
 
+    def server_bind(self) -> None:
+        """Bind without ``HTTPServer``'s reverse DNS lookup of the host.
+
+        ``HTTPServer.server_bind`` calls ``socket.getfqdn(host)`` only to fill
+        in ``SERVER_NAME``, and this fixture has no use for the answer.  That
+        lookup took 35 seconds for ``127.0.0.1`` on GitHub's macOS runners, and
+        the port is announced after it, so a client waiting for the port gave
+        up first.
+        """
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+        self.setup_environ()
+
 
 def serve_in_thread(host: str = "127.0.0.1", port: int = 0) -> tuple[str, Callable[[], None]]:
     """Start the fake storage on a background thread and return ``(base_url, shutdown)``.
