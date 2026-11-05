@@ -333,7 +333,7 @@ dev = [
     # Keep ty below the next unvalidated release: earlier versions hung on
     # the sibling vgi-python tree. Version 0.0.91 passes this package's CI,
     # including its updated context-manager generator annotations.
-    "ty>=0.0.8,<0.0.92",
+    "ty>=0.0.8,<0.0.96",
     "typer>=0.9",
     "waitress>=2.0",
     "opentelemetry-api>=1.20",
