@@ -65,9 +65,11 @@ catches a writer that never loops at all.
 `large_payload.echo_binary_128mib` is past the chunk size a reader or writer
 typically splits on, so it catches chunking bugs that lose or reorder a piece,
 including ones that depend on how much has been buffered. Each MiB of the payload is
-distinct, and the whole body is compared. A byte-stream transport must round-trip
-it. HTTP may answer with a typed error instead, because HTTP has its own size limits.
-It is also in the shared pytest suite, so it runs against a port's client as well.
+distinct, and the whole body is compared. Every language can hold this size, so a
+refusal fails the test. It runs on byte-stream transports against a port's server, in
+the runner and in the shared pytest suite. It does not run through a client driver,
+whose JSON control channel cannot carry a payload this size, so client read paths are
+not covered at this size.
 
 `large_payload.echo_binary_over_int32_max` allocates over 2 GiB on both the
 client and the worker, takes seconds to run, and is **required** — it is the

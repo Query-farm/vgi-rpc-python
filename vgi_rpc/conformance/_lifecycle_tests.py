@@ -141,46 +141,29 @@ def assert_cancel_close_ordering_safe(proxy: ConformanceService) -> None:
     _assert_same_proxy_healthy(proxy)
 
 
-#: Past the 64 MiB read and write chunks ports commonly split on, and small enough
-#: to run on every transport in every lane.
+#: Past the 64 MiB read and write chunks ports commonly split on.
 MID_SIZE_PAYLOAD_BYTES = 128 * 1024 * 1024
 
 
-def mid_size_payload() -> bytes:
-    """Build the mid-size payload, each MiB distinct so a lost or moved chunk shows."""
-    mib = 1024 * 1024
-    return b"".join(i.to_bytes(8, "little") * (mib // 8) for i in range(MID_SIZE_PAYLOAD_BYTES // mib))
-
-
-def assert_mid_size_echo(proxy: ConformanceService, *, may_refuse: bool) -> str | None:
+def assert_mid_size_echo(proxy: ConformanceService) -> None:
     """Echo :data:`MID_SIZE_PAYLOAD_BYTES` and require every byte back in place.
 
-    Every language can hold this size, so a byte-stream transport has to carry
-    it.  HTTP has its own request and response limits and may refuse instead,
-    as long as the connection can still serve a call afterwards.
+    Every language can hold this size, so unlike the >2 GiB case a refusal is a
+    failure.  Each MiB is distinct so a lost or moved chunk shows, not only a
+    short body.
 
     Args:
-        proxy: The service under test.
-        may_refuse: Whether a typed error is an acceptable answer.
-
-    Returns:
-        A description of the refusal, or ``None`` if the payload round-tripped.
+        proxy: The service under test, on a byte-stream transport.
 
     Raises:
-        AssertionError: If the bytes differ, or a refusal broke the connection.
+        AssertionError: If the bytes differ.
 
     """
-    payload = mid_size_payload()
-    try:
-        result = proxy.echo_large_binary(value=payload)
-    except RpcError as exc:
-        if not may_refuse:
-            raise
-        _assert_same_proxy_healthy(proxy)
-        return f"payload refused, connection survived: {exc.error_type}: {exc.error_message}"
+    mib = 1024 * 1024
+    payload = b"".join(i.to_bytes(8, "little") * (mib // 8) for i in range(MID_SIZE_PAYLOAD_BYTES // mib))
+    result = proxy.echo_large_binary(value=payload)
     # Not a bare ``==`` in the assert: a failure must not render 128 MiB of diff.
     assert len(result) == len(payload), f"expected {len(payload)} bytes back, got {len(result)}"
     if result != payload:
         offset = next(i for i, (a, b) in enumerate(zip(result, payload, strict=True)) if a != b)
         raise AssertionError(f"echoed bytes differ from offset {offset}")
-    return None

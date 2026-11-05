@@ -861,14 +861,18 @@ def _test_echo_binary_4mib(proxy: ConformanceService, logs: LogCollector) -> Non
     assert result == payload
 
 
-@_conformance_test(category="large_payload", name="echo_binary_128mib", timeout=120.0)
+@_conformance_test(
+    category="large_payload",
+    name="echo_binary_128mib",
+    # As for the >2 GiB case below, HTTP has its own path and size limits.
+    transports=("pipe", "unix", "tcp"),
+    timeout=120.0,
+)
 def _test_echo_binary_128mib(proxy: ConformanceService, logs: LogCollector) -> None:
     # Bigger than a typical read or write chunk, so a chunking bug that needs
     # several chunks in flight has room to show. The 4 MiB case is too small for
     # one, and the >2 GiB case lets a port pass by refusing before any are read.
-    refusal = assert_mid_size_echo(proxy, may_refuse=logs.http_base_url is not None)
-    if refusal is not None:
-        _note(refusal)
+    assert_mid_size_echo(proxy)
 
 
 @_conformance_test(
