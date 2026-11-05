@@ -36,6 +36,7 @@ from vgi_rpc.conformance._lifecycle_tests import (
     assert_cancel_idempotent_once,
     assert_cancel_producer_once,
     assert_exchange_error_recovery,
+    assert_mid_size_echo,
     assert_producer_error_recovery,
     assert_unary_error_recovery,
 )
@@ -858,6 +859,16 @@ def _test_echo_binary_4mib(proxy: ConformanceService, logs: LogCollector) -> Non
     result = proxy.echo_large_binary(value=payload)
     assert len(result) == len(payload), f"expected {len(payload)} bytes back, got {len(result)}"
     assert result == payload
+
+
+@_conformance_test(category="large_payload", name="echo_binary_128mib", timeout=120.0)
+def _test_echo_binary_128mib(proxy: ConformanceService, logs: LogCollector) -> None:
+    # Bigger than a typical read or write chunk, so a chunking bug that needs
+    # several chunks in flight has room to show. The 4 MiB case is too small for
+    # one, and the >2 GiB case lets a port pass by refusing before any are read.
+    refusal = assert_mid_size_echo(proxy, may_refuse=logs.http_base_url is not None)
+    if refusal is not None:
+        _note(refusal)
 
 
 @_conformance_test(

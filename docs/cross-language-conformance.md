@@ -62,6 +62,13 @@ vgi-rpc-test --cmd "./my-worker" --filter '!large_payload.echo_binary_over_int32
 `large_payload.echo_binary_4mib` crosses the pipe buffer many times over. It
 catches a writer that never loops at all.
 
+`large_payload.echo_binary_128mib` is past the chunk size a reader or writer
+typically splits on, so it catches chunking bugs that lose or reorder a piece,
+including ones that depend on how much has been buffered. Each MiB of the payload is
+distinct, and the whole body is compared. A byte-stream transport must round-trip
+it. HTTP may answer with a typed error instead, because HTTP has its own size limits.
+It is also in the shared pytest suite, so it runs against a port's client as well.
+
 `large_payload.echo_binary_over_int32_max` allocates over 2 GiB on both the
 client and the worker, takes seconds to run, and is **required** — it is the
 only test that reaches the size where a single `write(2)` / `send(2)` stops

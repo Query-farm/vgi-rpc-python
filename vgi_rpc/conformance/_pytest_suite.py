@@ -86,6 +86,7 @@ from vgi_rpc.conformance._lifecycle_tests import (
     assert_cancel_idempotent_once,
     assert_cancel_producer_once,
     assert_exchange_error_recovery,
+    assert_mid_size_echo,
     assert_producer_error_recovery,
     assert_unary_error_recovery,
 )
@@ -1028,6 +1029,12 @@ class TestLargeData:
                 inp = AnnotatedBatch.from_pydict({"value": values})
                 out = session.exchange(inp)
                 assert out.batch.num_rows == 5_000
+
+    @pytest.mark.timeout(120)
+    def test_echo_binary_128mib(self, conformance_conn: ConnFactory, request: pytest.FixtureRequest) -> None:
+        """Round-trip a body larger than the chunks ports read and write in."""
+        with conformance_conn() as proxy:
+            assert_mid_size_echo(proxy, may_refuse=_uses_http(request))
 
     def test_many_small_batches(self, conformance_conn: ConnFactory) -> None:
         """Produce 100 single-row batches."""

@@ -147,7 +147,7 @@ class TestListConformanceTests:
     def test_exclusion_beats_inclusion(self) -> None:
         """An exclusion should win over an include that also matches."""
         tests = list_conformance_tests(["large_payload*", "!*over_int32_max"])
-        assert tests == ["large_payload.echo_binary_4mib"]
+        assert tests == ["large_payload.echo_binary_128mib", "large_payload.echo_binary_4mib"]
 
     def test_exclusion_matches_a_whole_category(self) -> None:
         """Category-level globs should exclude as well as include."""
