@@ -25,6 +25,18 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
     result = proxy.echo(message="hello")  # proxy is typed as MyService
 ```
 
+The client waits 30 seconds on each of connect, read, write and pool acquisition. A read waits for the next bytes, so that is also how long a method can run before it starts to reply. Pass `timeout` to change it:
+
+```python
+import httpx2
+
+with http_connect(MyService, url, timeout=120.0) as proxy: ...  # all four limits
+with http_connect(MyService, url, timeout=None) as proxy: ...  # no limit
+with http_connect(MyService, url, timeout=httpx2.Timeout(120.0, connect=5.0)) as proxy: ...
+```
+
+`http_introspect`, `http_capabilities`, `request_upload_urls` and the OAuth metadata functions take the same argument. When you pass your own `client`, it keeps its own timeout.
+
 ### Testing (no real server)
 
 `make_sync_client` wraps a Falcon `TestClient` so you can test the full HTTP stack in-process:

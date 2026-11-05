@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import re
+import socket
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -36,6 +38,7 @@ from vgi_rpc.external import (
 )
 from vgi_rpc.http import (
     _ARROW_CONTENT_TYPE,
+    DEFAULT_HTTP_TIMEOUT,
     MAX_REQUEST_BYTES_HEADER,
     HttpServerCapabilities,
     HttpStreamSession,
@@ -43,6 +46,7 @@ from vgi_rpc.http import (
     _SyncTestResponse,
     http_capabilities,
     http_connect,
+    http_introspect,
     make_sync_client,
     make_wsgi_app,
     request_upload_urls,
@@ -3968,3 +3972,68 @@ class TestProducerTickMetadata:
                 )
         finally:
             client.close()
+
+
+class TestClientTimeout:
+    """The clients these functions build take their timeout from the caller."""
+
+    @staticmethod
+    def _silent_server() -> socket.socket:
+        """Listen on a loopback port, accept nothing, and never reply."""
+        return socket.create_server(("127.0.0.1", 0))
+
+    def test_default_is_not_httpx2s_five_seconds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An omitted timeout means DEFAULT_HTTP_TIMEOUT on every entry point."""
+        import httpx2
+
+        from vgi_rpc.http import fetch_auth_server_metadata, fetch_oauth_metadata, http_oauth_metadata
+
+        built: list[httpx2.Timeout] = []
+        real = httpx2.Client
+
+        class _Stop(Exception):
+            pass
+
+        def spy(*args: object, **kwargs: object) -> httpx2.Client:
+            built.append(real(*args, **kwargs).timeout)  # type: ignore[arg-type]
+            raise _Stop
+
+        monkeypatch.setattr(httpx2, "Client", spy)
+        calls: list[Callable[[], object]] = [
+            lambda: http_capabilities("http://x"),
+            lambda: http_introspect("http://x"),
+            lambda: http_oauth_metadata("http://x"),
+            lambda: request_upload_urls("http://x"),
+            lambda: fetch_oauth_metadata("http://x"),
+            lambda: fetch_auth_server_metadata("http://x"),
+        ]
+        for call in calls:
+            with pytest.raises(_Stop):
+                call()
+        with pytest.raises(_Stop), http_connect(RpcFixtureService, "http://x"):
+            pass
+        assert len(built) == 7
+        assert all(t == httpx2.Timeout(DEFAULT_HTTP_TIMEOUT) for t in built)
+        assert DEFAULT_HTTP_TIMEOUT == 30.0
+
+    def test_caller_timeout_reaches_a_real_request(self) -> None:
+        """A short timeout makes a silent server fail quickly, as a timeout."""
+        import httpx2
+
+        with self._silent_server() as server:
+            port = server.getsockname()[1]
+            started = time.monotonic()
+            with pytest.raises(httpx2.ReadTimeout):
+                http_capabilities(f"http://127.0.0.1:{port}", timeout=0.2)
+            assert time.monotonic() - started < 3.0
+
+    def test_provided_client_keeps_its_own_timeout(self) -> None:
+        """The argument only configures a client this function builds."""
+        import httpx2
+
+        with self._silent_server() as server:
+            base_url = f"http://127.0.0.1:{server.getsockname()[1]}"
+            started = time.monotonic()
+            with httpx2.Client(base_url=base_url, timeout=0.2) as client, pytest.raises(httpx2.ReadTimeout):
+                http_capabilities(client=client, timeout=60.0)
+            assert time.monotonic() - started < 3.0

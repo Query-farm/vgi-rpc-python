@@ -32,6 +32,7 @@ from vgi_rpc.http._bearer import (
     require_all,
 )
 from vgi_rpc.http._client import (
+    DEFAULT_HTTP_TIMEOUT,
     HttpServerCapabilities,
     HttpStreamSession,
     OAuthResourceMetadataResponse,
@@ -155,6 +156,7 @@ with contextlib.suppress(ImportError):
     )
 
 __all__ = [
+    "DEFAULT_HTTP_TIMEOUT",
     "GRANT_AUTH_DOMAIN",
     "TOKEN_AUTH_DOMAIN",
     "compose_identity_authenticate",

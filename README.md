@@ -178,6 +178,7 @@ Stream methods with headers display the header before data rows: as a `{"__heade
 | `--cmd` | `-c` | Subprocess command |
 | `--unix` | | Unix domain socket path |
 | `--prefix` | `-p` | URL path prefix (default `/vgi`) |
+| `--timeout` | | HTTP connect, read and write timeout in seconds (default 30) |
 | `--format` | `-f` | Output format: `auto`, `json`, `table`, or `arrow` |
 | `--output` | `-o` | Output file path (default: stdout) |
 | `--verbose` | `-v` | Show server log messages on stderr |

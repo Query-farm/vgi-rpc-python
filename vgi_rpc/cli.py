@@ -123,6 +123,10 @@ _KNOWN_LOGGERS: tuple[tuple[str, str, str], ...] = (
 # ---------------------------------------------------------------------------
 
 
+#: Duplicated from ``vgi_rpc.http`` so the CLI still loads without the ``http`` extra.
+_DEFAULT_HTTP_TIMEOUT = 30.0
+
+
 @dataclass
 class _CliConfig:
     """Holds resolved CLI options."""
@@ -139,6 +143,7 @@ class _CliConfig:
     log_level: LogLevel | None = None
     log_loggers: list[str] = field(default_factory=list)
     log_format: LogFormat = LogFormat.text
+    timeout: float = _DEFAULT_HTTP_TIMEOUT
 
 
 app = typer.Typer(
@@ -252,6 +257,9 @@ def _main(
     cmd: Annotated[str | None, typer.Option("--cmd", "-c", help="Subprocess command")] = None,
     unix: Annotated[str | None, typer.Option("--unix", help="Unix domain socket path")] = None,
     prefix: Annotated[str, typer.Option("--prefix", "-p", help="URL path prefix")] = "",
+    timeout: Annotated[
+        float, typer.Option("--timeout", min=0.001, help="HTTP connect, read and write timeout in seconds")
+    ] = _DEFAULT_HTTP_TIMEOUT,
     fmt: Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format")] = OutputFormat.auto,
     output: Annotated[str | None, typer.Option("--output", "-o", help="Output file path (default: stdout)")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show server log messages on stderr")] = False,
@@ -280,6 +288,7 @@ def _main(
         cmd=cmd,
         unix=unix,
         prefix=prefix,
+        timeout=timeout,
         format=fmt,
         output=output,
         verbose=verbose,
@@ -912,11 +921,11 @@ def _introspect_unix(path: str) -> tuple[ServiceDescription, UnixTransport]:
     return desc, transport
 
 
-def _introspect_http(url: str, prefix: str) -> ServiceDescription:
+def _introspect_http(url: str, prefix: str, timeout: float) -> ServiceDescription:
     """Introspect an HTTP transport."""
     from vgi_rpc.http import http_introspect
 
-    return http_introspect(url, prefix=prefix)
+    return http_introspect(url, prefix=prefix, timeout=timeout)
 
 
 def _get_service_description(
@@ -939,7 +948,7 @@ def _get_service_description(
     if config.unix:
         return _introspect_unix(config.unix)
     assert config.url is not None
-    return _introspect_http(config.url, config.prefix), None
+    return _introspect_http(config.url, config.prefix, config.timeout), None
 
 
 # ---------------------------------------------------------------------------
@@ -975,7 +984,7 @@ def describe(ctx: typer.Context) -> None:
             try:
                 from vgi_rpc.http import http_capabilities
 
-                caps = http_capabilities(config.url, prefix=config.prefix)
+                caps = http_capabilities(config.url, prefix=config.prefix, timeout=config.timeout)
                 output += "\nCapabilities:\n"
                 output += f"  max_request_bytes: {caps.max_request_bytes}\n"
                 output += f"  upload_url_support: {caps.upload_url_support}\n"
@@ -1006,7 +1015,7 @@ def describe(ctx: typer.Context) -> None:
             try:
                 from vgi_rpc.http import http_capabilities
 
-                caps = http_capabilities(config.url, prefix=config.prefix)
+                caps = http_capabilities(config.url, prefix=config.prefix, timeout=config.timeout)
                 data["capabilities"] = {
                     "max_request_bytes": caps.max_request_bytes,
                     "upload_url_support": caps.upload_url_support,
@@ -1105,7 +1114,7 @@ def _call_unary_http(
         req_buf, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version
     )
 
-    client = httpx2.Client(base_url=url, follow_redirects=True)
+    client = httpx2.Client(base_url=url, follow_redirects=True, timeout=config.timeout)
     try:
         resp = client.post(
             rpc_path(protocol or "", method.name, prefix=prefix),
@@ -1145,7 +1154,7 @@ def _call_stream_http(
         req_buf, method.name, method.params_schema, kwargs, protocol=protocol, protocol_version=protocol_version
     )
 
-    client = httpx2.Client(base_url=url, follow_redirects=True)
+    client = httpx2.Client(base_url=url, follow_redirects=True, timeout=config.timeout)
     try:
         resp = client.post(
             rpc_path(protocol or "", method.name, prefix=prefix, suffix="/init"),

@@ -951,6 +951,13 @@ class HttpStreamSession:
         self.close()
 
 
+#: Seconds an internally built HTTP client waits on each of connect, read, write
+#: and pool acquisition.  A read waits for the next bytes, so this is also how long
+#: a handler may run before it starts to reply.  httpx2's own default of 5s failed
+#: healthy calls with ``ReadTimeout``.
+DEFAULT_HTTP_TIMEOUT = 30.0
+
+
 @contextlib.contextmanager
 def http_connect[P](
     protocol: type[P],
@@ -964,6 +971,7 @@ def http_connect[P](
     retry: HttpRetryConfig | None = None,
     compression_level: int | None = 1,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
+    timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> Generator[P]:
     """Connect to an HTTP RPC server and yield a typed proxy.
 
@@ -994,6 +1002,10 @@ def http_connect[P](
         accepted_max_response_bytes: Hard response-body limit advertised on
             every RPC request. The native Python default is 256 MiB. Pass
             ``None`` to omit the header for legacy unbounded behavior.
+        timeout: Seconds to wait on each of connect, read, write and pool
+            acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
+            for no limit.  Used only when this function builds the client; a
+            provided *client* keeps its own timeout.
 
     Yields:
         A typed RPC proxy supporting all methods defined on *protocol*.
@@ -1006,7 +1018,7 @@ def http_connect[P](
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx2.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True, timeout=timeout)
 
     # Auto-detect prefix from _SyncTestClient when not explicitly provided
     url_prefix = getattr(client, "prefix", "") if prefix is None else prefix
@@ -1039,6 +1051,7 @@ def http_introspect(
     retry: HttpRetryConfig | None = None,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
     external_location: ExternalLocationConfig | None = None,
+    timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> ServiceDescription:
     """Describe a server's primary protocol over HTTP.
 
@@ -1062,6 +1075,10 @@ def http_introspect(
             transport's payload handling like any other method's.  The old
             ``__describe__`` fast path was exempt only by accident of
             answering before dispatch.
+        timeout: Seconds to wait on each of connect, read, write and pool
+            acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
+            for no limit.  Used only when this function builds the client; a
+            provided *client* keeps its own timeout.
 
     Returns:
         A ``ServiceDescription`` with all method metadata.
@@ -1080,7 +1097,7 @@ def http_introspect(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx2.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True, timeout=timeout)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
@@ -2073,6 +2090,7 @@ def http_capabilities(
     client: httpx2.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
     accepted_max_response_bytes: int | None = None,
+    timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> HttpServerCapabilities:
     """Discover server capabilities via ``OPTIONS {prefix}/health``.
 
@@ -2094,6 +2112,10 @@ def http_capabilities(
         accepted_max_response_bytes: Optional decoded response cap to advertise
             on the discovery request. Values must be between 65536 and
             9007199254740991 inclusive.
+        timeout: Seconds to wait on each of connect, read, write and pool
+            acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
+            for no limit.  Used only when this function builds the client; a
+            provided *client* keeps its own timeout.
 
     Returns:
         An ``HttpServerCapabilities`` with discovered values.
@@ -2108,7 +2130,7 @@ def http_capabilities(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx2.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True, timeout=timeout)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
@@ -2240,6 +2262,7 @@ def request_upload_urls(
     client: httpx2.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
+    timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> list[UploadUrl]:
     """Request pre-signed upload URLs from the server's ``__upload_url__`` endpoint.
 
@@ -2256,6 +2279,10 @@ def request_upload_urls(
         retry: Optional retry configuration for transient HTTP failures.
         accepted_max_response_bytes: Hard decoded response limit advertised
             after mandatory server capability discovery.
+        timeout: Seconds to wait on each of connect, read, write and pool
+            acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
+            for no limit.  Used only when this function builds the client; a
+            provided *client* keeps its own timeout.
 
     Returns:
         A list of ``UploadUrl`` objects with pre-signed PUT and GET URLs.
@@ -2270,7 +2297,7 @@ def request_upload_urls(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx2.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True, timeout=timeout)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
@@ -2401,6 +2428,7 @@ def http_oauth_metadata(
     *,
     prefix: str | None = None,
     client: httpx2.Client | _SyncTestClient | None = None,
+    timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> OAuthResourceMetadataResponse | None:
     """Discover OAuth Protected Resource Metadata (RFC 9728).
 
@@ -2415,6 +2443,10 @@ def http_oauth_metadata(
             Must match the ``prefix`` passed to ``make_wsgi_app()`` on the
             server side — a mismatch will result in a 404 (``None`` return).
         client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
+        timeout: Seconds to wait on each of connect, read, write and pool
+            acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
+            for no limit.  Used only when this function builds the client; a
+            provided *client* keeps its own timeout.
 
     Returns:
         An ``OAuthResourceMetadataResponse`` with discovered metadata, or
@@ -2429,7 +2461,7 @@ def http_oauth_metadata(
     if client is None:
         if base_url is None:
             raise ValueError("base_url is required when client is not provided")
-        client = httpx2.Client(base_url=base_url, follow_redirects=True)
+        client = httpx2.Client(base_url=base_url, follow_redirects=True, timeout=timeout)
     if prefix is None:
         prefix = getattr(client, "prefix", "")
 
@@ -2669,6 +2701,7 @@ def fetch_oauth_metadata(
     metadata_url: str,
     *,
     client: httpx2.Client | _SyncTestClient | None = None,
+    timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> OAuthResourceMetadataResponse:
     """Fetch OAuth metadata from a URL extracted from a 401 ``WWW-Authenticate`` header.
 
@@ -2681,6 +2714,10 @@ def fetch_oauth_metadata(
         metadata_url: Full URL to the metadata document (e.g.
             ``https://api.example.com/.well-known/oauth-protected-resource/vgi``).
         client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
+        timeout: Seconds to wait on each of connect, read, write and pool
+            acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
+            for no limit.  Used only when this function builds the client; a
+            provided *client* keeps its own timeout.
 
     Returns:
         An ``OAuthResourceMetadataResponse`` with the server's OAuth metadata.
@@ -2692,7 +2729,7 @@ def fetch_oauth_metadata(
     """
     own_client = client is None
     if client is None:
-        client = httpx2.Client(follow_redirects=True)
+        client = httpx2.Client(follow_redirects=True, timeout=timeout)
 
     try:
         resp: httpx2.Response | _SyncTestResponse = client.get(metadata_url)
@@ -2758,6 +2795,7 @@ def fetch_auth_server_metadata(
     issuer_url: str,
     *,
     client: httpx2.Client | _SyncTestClient | None = None,
+    timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> OAuthServerMetadata:
     """Discover an authorization server's OIDC/OAuth metadata (RFC 8414).
 
@@ -2767,6 +2805,10 @@ def fetch_auth_server_metadata(
         issuer_url: The authorization server's issuer URL (typically an
             ``OAuthResourceMetadataResponse.authorization_servers[0]`` entry).
         client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
+        timeout: Seconds to wait on each of connect, read, write and pool
+            acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
+            for no limit.  Used only when this function builds the client; a
+            provided *client* keeps its own timeout.
 
     Returns:
         The parsed ``OAuthServerMetadata``.
@@ -2780,7 +2822,7 @@ def fetch_auth_server_metadata(
     """
     own_client = client is None
     if client is None:
-        client = httpx2.Client(follow_redirects=True)
+        client = httpx2.Client(follow_redirects=True, timeout=timeout)
 
     try:
         url = issuer_url[:-1] if issuer_url.endswith("/") else issuer_url
