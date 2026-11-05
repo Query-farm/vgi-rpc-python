@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import socket
 import ssl
 import subprocess
 import sys
@@ -635,6 +636,23 @@ def test_tls_worker_mode_publishes_ca_and_requires_trust() -> None:
         with httpx2.Client(base_url=base_url, verify=trusted_context, trust_env=False) as trusted:
             description = http_introspect(client=trusted, prefix="/vgi")
             assert description.protocol_name == "ClientConformanceService"
+
+
+def test_tls_worker_mode_ends_a_response_with_close_notify() -> None:
+    """A body that ends at connection close must end with a TLS ``close_notify``."""
+    with _running_worker("--prefix", "/vgi", "--tls", tls=True) as (base_url, ca_path):
+        assert ca_path is not None
+        context = ssl.create_default_context(cafile=ca_path)
+        _wait_ready(base_url, prefix="/vgi", verify=context)
+        port = int(base_url.rsplit(":", 1)[1])
+        with (
+            socket.create_connection(("127.0.0.1", port), timeout=5) as raw,
+            context.wrap_socket(raw, server_hostname="127.0.0.1", suppress_ragged_eofs=False) as tls,
+        ):
+            tls.sendall(b"GET /vgi/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+            # Raises ssl.SSLEOFError if the server closed without close_notify.
+            while tls.recv(65536):
+                pass
 
 
 def test_stdio_worker_exposes_raw_client_surface_and_dynamic_shm(monkeypatch: pytest.MonkeyPatch) -> None:

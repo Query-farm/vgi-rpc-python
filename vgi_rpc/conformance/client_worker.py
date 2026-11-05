@@ -449,6 +449,20 @@ class _QuietRequestHandler(WSGIRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         """Discard the default stderr access log."""
 
+    def finish(self) -> None:
+        """End TLS with ``close_notify`` before the socket closes.
+
+        ``wsgiref`` answers HTTP/1.0 with no ``Content-Length``, so the connection
+        closing is what ends the body.  Without ``close_notify`` that looks like a
+        truncation attack, and curl 8.18 on OpenSSL 3.5 correctly rejects it.
+        """
+        super().finish()
+        if isinstance(self.connection, ssl.SSLSocket):
+            # A peer that never answers must not hold up this one-at-a-time server.
+            self.connection.settimeout(2.0)
+            with contextlib.suppress(OSError):
+                self.connection.unwrap()
+
 
 def _write_tls_material(directory: Path, host: str) -> tuple[Path, Path]:
     """Generate a self-signed localhost certificate for the optional TLS lane."""
