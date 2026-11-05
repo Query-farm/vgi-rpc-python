@@ -35,10 +35,10 @@ import pytest
 
 from vgi_rpc.rpc import RpcError
 
-pytestmark = pytest.mark.timeout(50)
-
 _MIB = 1024 * 1024
 _REPORT_ENV = "VGI_RPC_SOAK_REPORT_DIR"
+_BASE_TIME_LIMIT_SECONDS = 50.0
+_TIME_LIMIT_SECONDS_PER_SCALE = 10.0
 
 
 class ResourceSoakStream(Protocol):
@@ -76,8 +76,10 @@ class ResourceSoakLimits:
     Attributes:
         rss_growth_bytes: Maximum last-sample RSS growth above baseline.
         rss_slope_bytes_per_epoch: Maximum median retained RSS per epoch.
-        descriptor_growth: Maximum file-descriptor or Windows-handle growth.
-        thread_growth: Maximum worker thread growth.
+        descriptor_growth: Maximum file-descriptor or Windows-handle growth,
+            not counting the largest single-epoch step.
+        thread_growth: Maximum worker thread growth, not counting the largest
+            single-epoch step.
         child_growth: Maximum descendant-process growth.
 
     """
@@ -207,6 +209,36 @@ def _scale() -> int:
     return scale
 
 
+def _time_limit() -> float:
+    """Return the per-test time limit in seconds for the selected scale.
+
+    An invalid scale keeps the base limit here, so that it is reported by the
+    test that reads it instead of breaking collection of the whole suite.
+
+    """
+    try:
+        extra_scale = _scale() - 1
+    except pytest.UsageError:
+        extra_scale = 0
+    return _BASE_TIME_LIMIT_SECONDS + _TIME_LIMIT_SECONDS_PER_SCALE * extra_scale
+
+
+pytestmark = pytest.mark.timeout(_time_limit())
+
+
+def _growth_beyond_largest_step(start: int, samples: Iterable[int]) -> int:
+    """Return growth across the samples, not counting the largest single step.
+
+    A pool that grows once and then holds steady is not a leak, and it can grow
+    during any epoch. A leak keeps growing after that step, so what remains
+    still exceeds the limit.
+
+    """
+    values = [start, *samples]
+    largest_step = max(0, *(current - previous for previous, current in pairwise(values)))
+    return values[-1] - start - largest_step
+
+
 def _settled_sample(target: ResourceSoakTarget) -> ProcessResourceSnapshot:
     """Allow request teardown to quiesce, then sample the worker."""
     time.sleep(0.05)
@@ -252,12 +284,19 @@ def _assert_report(report: ResourceSoakReport, limits: ResourceSoakLimits) -> No
             f"RSS slope is {report.rss_slope_bytes_per_epoch:.0f} bytes/epoch "
             f"(limit {limits.rss_slope_bytes_per_epoch})"
         )
-    for label, actual, start, limit in (
-        ("descriptors", final.descriptors, baseline.descriptors, limits.descriptor_growth),
-        ("threads", final.threads, baseline.threads, limits.thread_growth),
-        ("children", final.children, baseline.children, limits.child_growth),
+    for label, growth, limit in (
+        (
+            "descriptors",
+            _growth_beyond_largest_step(baseline.descriptors, (sample.descriptors for sample in report.samples)),
+            limits.descriptor_growth,
+        ),
+        (
+            "threads",
+            _growth_beyond_largest_step(baseline.threads, (sample.threads for sample in report.samples)),
+            limits.thread_growth,
+        ),
+        ("children", final.children - baseline.children, limits.child_growth),
     ):
-        growth = actual - start
         if growth > limit:
             problems.append(f"{label} retained {growth} (limit {limit})")
     assert not problems, "; ".join(problems) + "\n" + report.as_json()
@@ -293,7 +332,7 @@ def _run_epochs(
     return _build_report(target, scenario, operations, baseline, samples)
 
 
-@pytest.mark.timeout(50)
+@pytest.mark.timeout(_time_limit())
 class TestResourceSoak:
     """Fast black-box resource-retention checks for an isolated worker."""
 

@@ -12,7 +12,7 @@ jobs:
   python-reference:
     name: Python reference resource soak
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7

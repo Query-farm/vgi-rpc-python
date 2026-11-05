@@ -366,7 +366,9 @@ feature. A runner opts in with a **function-scoped**
 - `pid` identifies one newly started, otherwise idle worker process;
 - `connect()` returns a fresh context-managed `ConformanceService` client;
 - `limits` supplies runtime-specific RSS budgets while descriptor/handle,
-  thread, and child-process drift stays near exact; and
+  thread, and child-process drift stays near exact. The largest single-epoch
+  step in descriptors/handles or threads is not counted, because a pool may
+  grow once at any point in the soak; child processes get no such allowance; and
 - `warmup_multiplier` may be raised for runtimes whose allocator, JIT, or
   thread pools need more representative traffic before reaching steady state.
   Warm-up is one full measured workload times this value, so it remains
@@ -381,11 +383,12 @@ result meaningless.
 
 The default PR-scale tranche runs 1,000 unary operations, 150 stream
 completion/error/cancellation operations, and 100 fresh connections. Set
-`VGI_RPC_SOAK_SCALE` to an integer from 1 through 20 to multiply each epoch
-without letting any one pytest case exceed the suite's 50-second ceiling.
+`VGI_RPC_SOAK_SCALE` to an integer from 1 through 20 to multiply each epoch.
+Each test's time limit grows with it: 50 seconds at scale 1, plus 10 seconds
+per further step, so 240 seconds at scale 20.
 `VGI_RPC_SOAK_REPORT_DIR` writes one JSON file per scenario containing the
-post-warm-up baseline, every epoch sample, operation count, and least-squares
-RSS slope. CI should retain these reports when a job fails so a threshold
+post-warm-up baseline, every epoch sample, operation count, and median RSS
+slope. CI should retain these reports when a job fails so a threshold
 failure is diagnosable rather than merely red.
 
 The portable sampler observes RSS, Unix file descriptors or Windows handles,
