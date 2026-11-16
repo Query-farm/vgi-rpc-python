@@ -22,7 +22,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import sys
+from unittest import mock
 from collections.abc import Mapping
 
 
@@ -89,6 +91,30 @@ CASES: tuple[Case, ...] = (
             "VGI_RPC_BUCKET": "my-bucket",
         },
     ),
+    # Non-ASCII: json.dumps' default ensure_ascii=True emits \uXXXX (UTF-16
+    # surrogate pairs above the BMP), and escapes DEL too.
+    Case("argv_latin1_bmp", ("python", "/opt/café/wörker.py"), "/tmp", {}),
+    Case("argv_cjk", ("python", "数据.py"), "/tmp", {}),
+    Case("argv_non_bmp", ("python", "emoji-\U0001f600-\U00010348"), "/tmp", {}),
+    Case("argv_del_and_controls", ("echo", "a\x7fb\x01c\u2028d"), "/tmp", {}),
+    Case("cwd_non_ascii", ("python",), "/home/josé/проект", {}),
+    Case("env_non_ascii_value", ("python",), "/tmp", {"VGI_RPC_NAME": "Zoë"}),
+    # Invalid UTF-8 reaches Python as surrogateescape lone surrogates
+    # (os.fsdecode of argv / cwd / environ), which json.dumps emits as \udcXX.
+    Case(
+        "argv_invalid_utf8",
+        ("python", os.fsdecode(b"bad\xff\xe4\xb8A\xed\xa0\x80\xc0\xaf\xf4\x90\x80\x80")),
+        os.fsdecode(b"/tmp/\x80dir"),
+        {},
+    ),
+    # sort_keys orders by code point: U+00E9 sorts before the escaped byte
+    # U+DC80, although byte 0x80 sorts before 0xC3.
+    Case(
+        "env_keys_code_point_order",
+        ("python",),
+        "/tmp",
+        {os.fsdecode(b"VGI_RPC_\x80"): "raw", "VGI_RPC_é": "accented"},
+    ),
 )
 
 
@@ -108,19 +134,33 @@ def compute_hash(case: Case) -> str:
 
 
 def cpp_string_literal(s: str) -> str:
-    """Emit a C++ raw-string-safe quoted literal."""
+    """Emit a quoted C++ literal of the bytes ``os.fsencode(s)`` would produce.
+
+    Non-printable bytes use 3-digit octal escapes, which (unlike ``\\x``)
+    cannot swallow a following hex-digit character.
+    """
     out = ['"']
-    for ch in s:
-        if ch == "\\":
+    for b in s.encode("utf-8", "surrogateescape"):
+        if b == 0x5C:
             out.append("\\\\")
-        elif ch == '"':
+        elif b == 0x22:
             out.append('\\"')
-        elif ord(ch) < 0x20 or ord(ch) > 0x7E:
-            out.append(f"\\x{ord(ch):02x}")
+        elif b < 0x20 or b > 0x7E:
+            out.append(f"\\{b:03o}")
         else:
-            out.append(ch)
+            out.append(chr(b))
     out.append('"')
     return "".join(out)
+
+
+def check_against_launcher(case: Case, expected: str) -> None:
+    """Fail unless ``vgi_rpc.launcher.compute_hash`` itself yields ``expected``."""
+    from vgi_rpc.launcher import compute_hash as launcher_compute_hash
+
+    with mock.patch.dict(os.environ, case.env, clear=True):
+        actual = launcher_compute_hash(case.argv, cwd=case.cwd)
+    if actual != expected:
+        raise SystemExit(f"{case.name}: launcher.compute_hash={actual}, generator={expected}")
 
 
 def emit_header() -> str:
@@ -153,6 +193,7 @@ def emit_header() -> str:
     lines.append("\tstatic const std::vector<ParityVector> kVectors = {")
     for case in CASES:
         h = compute_hash(case)
+        check_against_launcher(case, h)
         argv_lit = ", ".join(cpp_string_literal(a) for a in case.argv)
         env_lit = ", ".join(f"{{{cpp_string_literal(k)}, {cpp_string_literal(v)}}}" for k, v in case.env.items())
         lines.append("\t    {")
