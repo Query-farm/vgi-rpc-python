@@ -58,6 +58,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, Literal, NoReturn
+from urllib.parse import urlsplit
 
 import httpx2
 
@@ -67,6 +68,14 @@ from ._client import (
     fetch_auth_server_metadata,
     fetch_oauth_metadata,
     parse_www_authenticate_params,
+)
+from ._oauth_delegation import (
+    DELEGATED_CLIENT_ID,
+    DelegationError,
+    canonical_resource,
+    check_field_address,
+    delegation_allowed_for_issuer,
+    rewrite_to_field,
 )
 from ._pkce_math import decode_jwt_payload_unverified
 
@@ -259,6 +268,8 @@ class OAuthTokenSet:
             ``use_id_token_as_bearer`` flag, not decided per-token.
         identity: Parsed claims from ``id_token`` (``present=False`` if
             there was no id_token or it didn't parse).
+        location: The token response's ``vgi_location`` (location
+            delegation's Field Address), "" when absent.
 
     """
 
@@ -269,6 +280,7 @@ class OAuthTokenSet:
     expires_at: float | None = None
     use_id_token: bool = False
     identity: OAuthIdentity = field(default_factory=OAuthIdentity)
+    location: str = ""
 
     def is_valid(self, *, skew: float = _TOKEN_REFRESH_SKEW_SECONDS, now: float | None = None) -> bool:
         """Whether this token set is still usable *skew* seconds from now."""
@@ -327,6 +339,11 @@ class OAuthRefreshContext:
     scope: str = ""
     use_id_token: bool = False
     resource_metadata_url: str = ""
+    #: Location delegation: the canonical Desk Address sent as RFC 8707
+    #: ``resource`` on every token request ("" when not delegating).
+    resource: str = ""
+    #: Location delegation: the checked issuer whose allowed hosts bound ``vgi_location``.
+    issuer: str = ""
 
 
 def parse_oauth_challenge(www_authenticate: str) -> OAuthChallenge | None:
@@ -455,6 +472,7 @@ def _parse_token_response(resp: httpx2.Response, *, use_id_token: bool) -> OAuth
         id_token=id_token,
         scope=body.get("scope", "") or "",
         use_id_token=use_id_token,
+        location=str(body.get("vgi_location", "") or ""),
     )
     expires_in = body.get("expires_in")
     if isinstance(expires_in, (int, float)):
@@ -500,6 +518,8 @@ def attempt_token_refresh(
         data["client_secret"] = ctx.client_secret
     if ctx.scope:
         data["scope"] = ctx.scope
+    if ctx.resource:
+        data["resource"] = ctx.resource
     logger.debug(
         "vgi_rpc.oauth: refreshing token endpoint=%s client_id=%s refresh_token=%s",
         ctx.token_endpoint,
@@ -779,6 +799,8 @@ class VgiOAuthAuth(httpx2.Auth):
         self._error_message = ""
         self._owner: int | None = None
         self._interactive = False
+        # Location delegation: the Field Address requests are routed to, once known.
+        self._field = ""
 
         # Deliberately separate from any client this Auth is attached to --
         # see the class docstring's re-entrancy note. *transport* is exposed
@@ -791,19 +813,46 @@ class VgiOAuthAuth(httpx2.Auth):
         self._flow_http_client.close()
 
     def sync_auth_flow(self, request: httpx2.Request) -> Generator[httpx2.Request, httpx2.Response]:
-        """Attach a cached token; on a 401 OAuth challenge, log in and retry once."""
+        """Attach a cached token; on a 401 OAuth challenge, log in and retry once.
+
+        Under location delegation every request is routed to the Field
+        Address, and a Field Worker's 401 is answered by one refresh against
+        the token endpoint fixed at sign-in. Its challenge, if any, is
+        ignored, so a Field Worker can't send the client to another
+        authorization server.
+        """
         token = self._get_cached_token()
         if token:
             request.headers["Authorization"] = f"Bearer {token}"
+        self._route(request)
         response = yield request
         if response.status_code != HTTPStatus.UNAUTHORIZED:
             return
-        challenge = parse_oauth_challenge(response.headers.get("www-authenticate", ""))
+        with self._lock:
+            delegated = (
+                self._refresh_ctx if (self._field and self._refresh_ctx and self._refresh_ctx.resource) else None
+            )
+        if delegated is not None:
+            challenge: OAuthChallenge | None = OAuthChallenge(resource_metadata_url=delegated.resource_metadata_url)
+        else:
+            challenge = parse_oauth_challenge(response.headers.get("www-authenticate", ""))
         if challenge is None:
             return  # Not an OAuth-protected-resource challenge -- let the 401 propagate as-is.
-        new_token = self._handle_unauthorized(challenge)
+        new_token = self._handle_unauthorized(challenge, rejected=token)
         request.headers["Authorization"] = f"Bearer {new_token}"
+        self._route(request)
         yield request
+
+    def _route(self, request: httpx2.Request) -> None:
+        """Send *request* to the Field Address instead of the Desk Address, once delegated."""
+        with self._lock:
+            field_address = self._field
+        if not field_address:
+            return
+        target = rewrite_to_field(str(request.url), self._base_url, field_address)
+        if target is not None:
+            request.url = httpx2.URL(target)
+            request.headers["Host"] = request.url.netloc.decode("ascii")
 
     def _get_cached_token(self) -> str:
         with self._lock:
@@ -811,9 +860,31 @@ class VgiOAuthAuth(httpx2.Auth):
                 return ""
             return self._token.bearer_token()
 
-    def _handle_unauthorized(self, challenge: OAuthChallenge) -> str:
-        """Obtain a valid bearer token, refreshing or logging in as needed. Blocks. Thread-safe."""
+    def _handle_unauthorized(self, challenge: OAuthChallenge, *, rejected: str = "") -> str:
+        """Obtain a valid bearer token, refreshing or logging in as needed. Blocks. Thread-safe.
+
+        Args:
+            challenge: The parsed (or, when delegated, synthesised) challenge.
+            rejected: The bearer the failed request carried. If another thread
+                has already replaced it, the current token is returned without
+                refreshing again, so N parallel 401s cause one refresh.
+
+        Returns:
+            A bearer token to retry the request with.
+
+        Raises:
+            OAuthTokenError: If refreshing or logging in failed.
+            AssertionError: On an impossible internal state.
+
+        """
         with self._lock:
+            if (
+                rejected
+                and self._status == _AuthStatus.COMPLETE
+                and self._token.is_valid()
+                and self._token.bearer_token() != rejected
+            ):
+                return self._token.bearer_token()
             if self._status in (_AuthStatus.IDLE, _AuthStatus.FAILED, _AuthStatus.COMPLETE):
                 self._status = _AuthStatus.IN_PROGRESS
                 self._owner = threading.get_ident()
@@ -869,9 +940,21 @@ class VgiOAuthAuth(httpx2.Auth):
                 self._cv.notify_all()
             raise
 
+        field_address = ""
+        if refresh_ctx.resource:
+            try:
+                field_address = check_field_address(refresh_ctx.issuer, tokens.location)
+            except DelegationError as exc:
+                with self._lock:
+                    self._status = _AuthStatus.FAILED
+                    self._error_message = str(exc)
+                    self._owner = None
+                    self._cv.notify_all()
+                raise OAuthTokenError(str(exc)) from exc
         with self._lock:
             self._token = tokens
             self._refresh_ctx = refresh_ctx
+            self._field = field_address
             self._interactive = self._interactive or interactive
             self._status = _AuthStatus.COMPLETE
             self._owner = None
@@ -899,7 +982,7 @@ class VgiOAuthAuth(httpx2.Auth):
                     )
                     ctx = None
                 else:
-                    ctx = OAuthRefreshContext(
+                    ctx = self._delegated_context(challenge, resource_meta, server_meta) or OAuthRefreshContext(
                         token_endpoint=_resolve_token_endpoint(resource_meta, server_meta),
                         client_id=resource_meta.client_id or challenge.client_id,
                         client_secret=((resource_meta.client_secret or "") if not resource_meta.token_endpoint else ""),
@@ -915,6 +998,55 @@ class VgiOAuthAuth(httpx2.Auth):
         resource_meta, server_meta = _fetch_resource_and_server_metadata(challenge, http_client=self._flow_http_client)
         tokens, new_ctx = self._perform_flow(challenge, resource_meta, server_meta)
         return tokens, new_ctx, True
+
+    def _delegated_context(
+        self,
+        challenge: OAuthChallenge,
+        resource_meta: OAuthResourceMetadataResponse,
+        server_meta: OAuthServerMetadata,
+    ) -> OAuthRefreshContext | None:
+        """Return the refresh context for a delegating server, or ``None`` if it doesn't delegate.
+
+        Delegation is on when the authorization server advertises RFC 8707
+        resource indicators and the resource metadata's ``resource`` equals the
+        URL this client was given. The issuer must then be an allowed
+        delegating issuer, its token endpoint must be on the issuer's origin,
+        and resource-metadata overrides (``token_endpoint``, ``client_id``,
+        ``client_secret``, ``use_id_token_as_bearer``) are ignored.
+
+        Args:
+            challenge: The challenge that started discovery.
+            resource_meta: The protected resource's metadata.
+            server_meta: Its authorization server's metadata.
+
+        Returns:
+            The delegated refresh context, or ``None``.
+
+        Raises:
+            DelegationError: If the server claims delegation but breaks its rules.
+
+        """
+        if not server_meta.resource_indicators_supported:
+            return None
+        desk = canonical_resource(self._base_url)
+        if desk is None or canonical_resource(resource_meta.resource) != desk:
+            return None
+        issuer = (server_meta.issuer or "").rstrip("/")
+        if not issuer or issuer != (resource_meta.authorization_servers[0] or "").rstrip("/"):
+            raise DelegationError("delegating authorization server's issuer doesn't match the resource metadata")
+        if not delegation_allowed_for_issuer(issuer):
+            raise DelegationError(f"{issuer} is not an allowed delegating issuer")
+        token_origin = urlsplit(server_meta.token_endpoint)
+        issuer_origin = urlsplit(issuer)
+        if (token_origin.scheme, token_origin.netloc) != (issuer_origin.scheme, issuer_origin.netloc):
+            raise DelegationError("delegating token endpoint must be on the issuer's origin")
+        return OAuthRefreshContext(
+            token_endpoint=server_meta.token_endpoint,
+            client_id=DELEGATED_CLIENT_ID,
+            resource_metadata_url=challenge.resource_metadata_url,
+            resource=desk,
+            issuer=issuer,
+        )
 
     def _perform_flow(
         self,

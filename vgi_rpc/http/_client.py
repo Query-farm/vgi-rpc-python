@@ -2770,6 +2770,9 @@ class OAuthServerMetadata:
         grant_types_supported: Grant types the server advertises support
             for. An empty tuple means "unspecified" -- ``supports_grant_type``
             treats that as unrestricted rather than as "supports nothing".
+        issuer: The server's ``issuer`` value, "" when absent.
+        resource_indicators_supported: Whether the server advertises RFC 8707
+            resource indicators -- the switch for location delegation.
 
     """
 
@@ -2777,6 +2780,8 @@ class OAuthServerMetadata:
     token_endpoint: str = ""
     device_authorization_endpoint: str = ""
     grant_types_supported: tuple[str, ...] = ()
+    issuer: str = ""
+    resource_indicators_supported: bool = False
 
     def supports_grant_type(self, grant_type: str) -> bool:
         """Whether the server advertises support for *grant_type*.
@@ -2839,6 +2844,8 @@ def fetch_auth_server_metadata(
             token_endpoint=token_endpoint,
             device_authorization_endpoint=body.get("device_authorization_endpoint", ""),
             grant_types_supported=tuple(body.get("grant_types_supported", ())),
+            issuer=str(body.get("issuer", "") or ""),
+            resource_indicators_supported=body.get("resource_indicators_supported") is True,
         )
         if not metadata.authorization_endpoint and not metadata.device_authorization_endpoint:
             raise ValueError(
