@@ -28,7 +28,13 @@ import httpx2
 
 try:
     from joserfc import jwt
-    from joserfc.errors import ExpiredTokenError, InvalidHeaderValueError, InvalidKeyIdError, JoseError
+    from joserfc.errors import (
+        ExpiredTokenError,
+        InvalidClaimError,
+        InvalidHeaderValueError,
+        InvalidKeyIdError,
+        JoseError,
+    )
     from joserfc.jwk import KeySet
 except ImportError as _exc:
     raise ImportError("jwt_authenticate requires joserfc: pip install vgi-rpc[oauth]") from _exc
@@ -100,6 +106,7 @@ def jwt_authenticate(
     algorithms: Collection[str] | None = None,
     required_typ: str | None = None,
     require_exp: bool = False,
+    single_audience: bool = False,
     leeway: int = 0,
     jwks_max_age: float | None = None,
     jwks_refresh_min_interval: float | None = None,
@@ -142,6 +149,9 @@ def jwt_authenticate(
             case-insensitively and with the ``application/`` prefix optional.
         require_exp: When ``True``, a token without ``exp`` is rejected.
             An ``exp`` that is present is always checked.
+        single_audience: When ``True``, the token's ``aud`` must be exactly
+            one value (a string, or a one-element list). A token naming
+            several audiences is refused even if one of them matches.
         leeway: Clock skew in seconds allowed on ``exp`` and ``nbf``.
         jwks_max_age: Hard upper bound, in seconds, on how long fetched keys
             are used.  A shorter ``Cache-Control: max-age`` on the JWKS
@@ -299,6 +309,10 @@ def jwt_authenticate(
                 raise InvalidHeaderValueError(f"JOSE header 'typ' must be {required_typ!r}")
         registry = jwt.JWTClaimsRegistry(leeway=leeway, **base_claims_options)
         registry.validate(decoded.claims)
+        if single_audience:
+            aud = decoded.claims.get("aud")
+            if not (isinstance(aud, str) or (isinstance(aud, list) and len(aud) == 1)):
+                raise InvalidClaimError("aud")
         return dict(decoded.claims)
 
     def _reject(token: str, exc: JoseError) -> AuthFailure:

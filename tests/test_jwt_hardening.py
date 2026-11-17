@@ -274,6 +274,15 @@ class TestTokenChecks:
         """A token for another Desk Address is rejected."""
         assert _rejected(_hosted(), _token(aud="https://desk.example.com/d/other")) is AuthReason.INVALID_CREDENTIAL
 
+    def test_single_audience(self, jwks: _Jwks) -> None:
+        """With single_audience, an aud list naming several audiences is refused even if one matches."""
+        multi = _token(aud=[AUD, "https://desk.example.com/d/other"])
+        assert _rejected(_hosted(single_audience=True), multi) is AuthReason.INVALID_CREDENTIAL
+        assert _hosted(single_audience=True)(_req(_token(aud=[AUD]))).authenticated
+        assert _hosted(single_audience=True)(_req(_token())).authenticated
+        # Off by default: joserfc's usual rule accepts a list containing the expected audience.
+        assert _hosted()(_req(multi)).authenticated
+
     def test_wrong_iss(self, jwks: _Jwks) -> None:
         """A token from another issuer is rejected."""
         assert _rejected(_hosted(), _token(iss="https://evil.example.com")) is AuthReason.INVALID_CREDENTIAL
