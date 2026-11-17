@@ -24,8 +24,8 @@ import hashlib
 import json
 import os
 import sys
-from unittest import mock
 from collections.abc import Mapping
+from unittest import mock
 
 
 @dataclasses.dataclass(frozen=True)
@@ -134,7 +134,7 @@ def compute_hash(case: Case) -> str:
 
 
 def cpp_string_literal(s: str) -> str:
-    """Emit a quoted C++ literal of the bytes ``os.fsencode(s)`` would produce.
+    r"""Emit a quoted C++ literal of the bytes ``os.fsencode(s)`` would produce.
 
     Non-printable bytes use 3-digit octal escapes, which (unlike ``\\x``)
     cannot swallow a following hex-digit character.
