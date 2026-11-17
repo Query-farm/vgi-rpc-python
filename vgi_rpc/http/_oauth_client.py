@@ -550,6 +550,7 @@ def perform_device_code_flow(
     http_client: httpx2.Client,
     timeout_seconds: float,
     on_prompt: Callable[[str], None] | None = None,
+    delegated: OAuthRefreshContext | None = None,
 ) -> tuple[OAuthTokenSet, OAuthRefreshContext]:
     """Run the full RFC 8628 device-code flow and return the resulting tokens.
 
@@ -565,6 +566,10 @@ def perform_device_code_flow(
         timeout_seconds: How long to wait for the human to complete login.
         on_prompt: Optional callback invoked with the "visit this URL, enter
             this code" message, in addition to the default stderr/log output.
+        delegated: Under location delegation, the delegated refresh context:
+            its built-in client id and RFC 8707 ``resource`` are used on the
+            device authorization request and every poll, with no scope and no
+            secret, and resource-metadata client overrides are ignored.
 
     Returns:
         The obtained token set, and the refresh context to use for future
@@ -581,32 +586,34 @@ def perform_device_code_flow(
     if not server_meta.supports_grant_type(_DEVICE_CODE_GRANT_TYPE):
         raise ValueError("server does not advertise support for the device_code grant type")
 
-    client_id, client_secret = select_device_code_client(
-        device_client_id=resource_meta.device_code_client_id or "",
-        device_client_secret=resource_meta.device_code_client_secret or "",
-        client_id=resource_meta.client_id or "",
-        client_secret=resource_meta.client_secret or "",
-        challenge_client_id=challenge.client_id,
-    )
-    if not client_id:
-        raise ValueError("no client_id available for the device code flow")
+    if delegated is not None:
+        client_id, client_secret = delegated.client_id, ""
+        refresh_ctx = delegated
+        device_request = {"client_id": client_id, "resource": delegated.resource}
+    else:
+        client_id, client_secret = select_device_code_client(
+            device_client_id=resource_meta.device_code_client_id or "",
+            device_client_secret=resource_meta.device_code_client_secret or "",
+            client_id=resource_meta.client_id or "",
+            client_secret=resource_meta.client_secret or "",
+            challenge_client_id=challenge.client_id,
+        )
+        if not client_id:
+            raise ValueError("no client_id available for the device code flow")
 
-    refresh_ctx = OAuthRefreshContext(
-        token_endpoint=_resolve_token_endpoint(resource_meta, server_meta),
-        client_id=client_id,
-        # Never carry a local secret once a secret-less proxy token_endpoint is in play.
-        client_secret=client_secret if not resource_meta.token_endpoint else "",
-        use_id_token=resource_meta.use_id_token_as_bearer,
-        resource_metadata_url=challenge.resource_metadata_url,
-        scope=_build_scope_string(resource_meta),
-    )
+        refresh_ctx = OAuthRefreshContext(
+            token_endpoint=_resolve_token_endpoint(resource_meta, server_meta),
+            client_id=client_id,
+            # Never carry a local secret once a secret-less proxy token_endpoint is in play.
+            client_secret=client_secret if not resource_meta.token_endpoint else "",
+            use_id_token=resource_meta.use_id_token_as_bearer,
+            resource_metadata_url=challenge.resource_metadata_url,
+            scope=_build_scope_string(resource_meta),
+        )
+        device_request = {"client_id": client_id, "scope": refresh_ctx.scope}
 
     # Step 1: request a device code.
-    resp = _post_form(
-        http_client,
-        server_meta.device_authorization_endpoint,
-        {"client_id": client_id, "scope": refresh_ctx.scope},
-    )
+    resp = _post_form(http_client, server_meta.device_authorization_endpoint, device_request)
     if resp.status_code != HTTPStatus.OK:
         _raise_token_error("device authorization request", resp)
     device_resp: dict[str, Any] = json.loads(resp.content)
@@ -638,6 +645,8 @@ def perform_device_code_flow(
         "device_code": device_code,
         "client_id": client_id,
     }
+    if delegated is not None:
+        poll_data["resource"] = delegated.resource
     if client_secret:
         # Unconditionally the raw device-selected secret -- unlike refresh_ctx.client_secret
         # (which is nulled when a proxy token_endpoint exists), device-code polling never
@@ -683,7 +692,9 @@ def perform_device_code_flow(
             continue
 
         if poll_resp.status_code == HTTPStatus.OK:
-            tokens = _parse_token_response(poll_resp, use_id_token=resource_meta.use_id_token_as_bearer)
+            tokens = _parse_token_response(
+                poll_resp, use_id_token=False if delegated is not None else resource_meta.use_id_token_as_bearer
+            )
             logger.warning("Authentication successful.")
             _print_prompt_if_colab("Authentication successful.", on_prompt)
             return tokens, refresh_ctx
@@ -1054,6 +1065,21 @@ class VgiOAuthAuth(httpx2.Auth):
         resource_meta: OAuthResourceMetadataResponse,
         server_meta: OAuthServerMetadata,
     ) -> tuple[OAuthTokenSet, OAuthRefreshContext]:
+        delegated = self._delegated_context(challenge, resource_meta, server_meta)
+        if delegated is not None:
+            # Location delegation: the Python client signs in with device code (it has no
+            # browser PKCE flow yet), sending resource and the built-in client id.
+            if self._flow == "pkce":
+                raise NotImplementedError("the PKCE (browser) flow isn't implemented in the Python client yet")
+            return perform_device_code_flow(
+                challenge,
+                resource_meta,
+                server_meta,
+                http_client=self._flow_http_client,
+                timeout_seconds=self._timeout_seconds,
+                on_prompt=self._on_prompt,
+                delegated=delegated,
+            )
         has_device_ep = bool(server_meta.device_authorization_endpoint) and server_meta.supports_grant_type(
             _DEVICE_CODE_GRANT_TYPE
         )
