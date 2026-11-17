@@ -931,7 +931,7 @@ class TestJwtAuthenticate:
         instead of stampeding the auth server.
         """
         import threading
-        from typing import Any
+        from typing import Any, ClassVar
         from unittest.mock import patch
 
         priv, pub = _make_rsa_key()
@@ -948,6 +948,7 @@ class TestJwtAuthenticate:
 
         class _FakeResp:
             status_code = 200
+            headers: ClassVar[dict[str, str]] = {}
 
             def raise_for_status(self) -> None:
                 pass
