@@ -144,6 +144,9 @@ class _MaxRequestBytesMiddleware:
         )
 
 
+_DRAIN_CHUNK_BYTES = 64 * 1024
+
+
 class _DrainRequestMiddleware:
     """Falcon middleware that drains unconsumed request body data.
 
@@ -161,9 +164,16 @@ class _DrainRequestMiddleware:
         resource: object,
         req_succeeded: bool,
     ) -> None:
-        """Drain any unread request body data."""
+        """Drain any unread request body data.
+
+        Read in fixed-size chunks and discarded, so draining the body of a
+        request that was refused (for example an unauthenticated one under
+        ``strict_auth``) never holds the whole body in memory.
+        """
         with contextlib.suppress(Exception):
-            req.bounded_stream.read()
+            stream = req.bounded_stream
+            while stream.read(_DRAIN_CHUNK_BYTES):
+                pass
 
 
 class _RequestIdMiddleware:
@@ -259,6 +269,16 @@ def _request_source_endpoint(req: falcon.Request) -> str | None:
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
+def _is_cors_preflight(req: falcon.Request) -> bool:
+    """Return True for a CORS preflight: ``OPTIONS`` naming the method it precedes.
+
+    Browsers never attach credentials to a preflight, so a server that
+    authenticates every other request must still let these through for
+    cross-origin callers to work at all. A preflight runs no handler code.
+    """
+    return req.method == "OPTIONS" and bool(req.get_header("Access-Control-Request-Method"))
+
+
 class _AuthMiddleware:
     """Falcon middleware: populates transport metadata and optionally authenticates.
 
@@ -290,6 +310,7 @@ class _AuthMiddleware:
         "_peer_provider_slots",
         "_peer_resolution_timeout",
         "_service_name",
+        "_strict_head_paths",
         "_www_authenticate",
     )
 
@@ -304,8 +325,14 @@ class _AuthMiddleware:
         service_name: str | None = None,
         peer_resolution_timeout: float = 5.0,
         peer_provider_concurrency: int = 64,
+        strict_head_paths: tuple[str, ...] | None = None,
     ) -> None:
         self._authenticate = authenticate
+        # Strict mode (``strict_head_paths`` is not None): the only requests
+        # that skip authentication are ``HEAD`` on exactly these paths and
+        # CORS preflights. ``exempt_prefixes`` and ``/.well-known/`` are
+        # ignored, so nothing else is ever served anonymously.
+        self._strict_head_paths = strict_head_paths
         self._www_authenticate = www_authenticate
         self._on_auth_failure = on_auth_failure
         self._exempt_prefixes = exempt_prefixes
@@ -420,11 +447,14 @@ class _AuthMiddleware:
         """
         transport_metadata = _build_transport_metadata(req)
         path = req.path
-        exempt = (
-            req.method == "OPTIONS"
-            or path.startswith("/.well-known/")
-            or any(path == pfx or path.startswith(pfx + "/") for pfx in self._exempt_prefixes)
-        )
+        if self._strict_head_paths is not None:
+            exempt = (req.method == "HEAD" and path in self._strict_head_paths) or _is_cors_preflight(req)
+        else:
+            exempt = (
+                req.method == "OPTIONS"
+                or path.startswith("/.well-known/")
+                or any(path == pfx or path.startswith(pfx + "/") for pfx in self._exempt_prefixes)
+            )
         if exempt:
             tc = _TransportContext(
                 auth=_ANONYMOUS,

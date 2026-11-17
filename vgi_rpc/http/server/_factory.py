@@ -122,6 +122,8 @@ def make_wsgi_app(
     sticky_echo_headers: Mapping[str, str] | None = None,
     call_state_cache_entries: int = 4096,
     identity_bearer: bool = True,
+    strict_auth: bool = False,
+    www_authenticate: str | None = None,
 ) -> falcon.App[falcon.Request, falcon.Response]:
     """Create a Falcon WSGI app that serves RPC requests over HTTP.
 
@@ -332,11 +334,41 @@ def make_wsgi_app(
             :func:`vgi_rpc.http.grant_authenticate` /
             :func:`vgi_rpc.http.resolve_token_authenticate` itself -- required
             when *authenticate* depends on proxy-injected evidence.
+        strict_auth: Authenticate every request. Only ``HEAD {prefix}/health``
+            and CORS preflights (``OPTIONS`` carrying
+            ``Access-Control-Request-Method``) are exempt; ``GET /health``,
+            other ``OPTIONS`` requests, ``/.well-known/`` paths, the landing
+            and describe pages and unknown paths all require a credential.
+            Authentication also moves ahead of request-size enforcement and
+            request decompression, so no request body is read before the
+            caller is authenticated. Requires *authenticate*; incompatible
+            with *oauth_resource_metadata* and *peer_authentication_policy*
+            (which can admit a request that presented no credential).
+        www_authenticate: Explicit ``WWW-Authenticate`` challenge for every
+            401, e.g. ``'Bearer error="invalid_token"'``. Mutually exclusive
+            with *oauth_resource_metadata*, which builds its own challenge.
 
     Returns:
         A Falcon application with routes for unary and stream RPC calls.
 
+    Raises:
+        ValueError: When *strict_auth* is combined with a missing
+            *authenticate* or an incompatible option, or *www_authenticate*
+            is combined with *oauth_resource_metadata*.
+
     """
+    if strict_auth:
+        if authenticate is None:
+            raise ValueError("strict_auth requires an authenticate callback")
+        if oauth_resource_metadata is not None:
+            raise ValueError("strict_auth is incompatible with oauth_resource_metadata")
+        if peer_authentication_policy is not None:
+            raise ValueError("strict_auth is incompatible with peer_authentication_policy")
+    if www_authenticate is not None:
+        if oauth_resource_metadata is not None:
+            raise ValueError("pass either www_authenticate or oauth_resource_metadata, not both")
+        if not www_authenticate.strip() or "\r" in www_authenticate or "\n" in www_authenticate:
+            raise ValueError("www_authenticate must be a non-empty single-line header value")
     # Deprecated alias: ``max_stream_response_bytes`` was renamed to
     # ``max_response_bytes`` once the cap stopped being stream-only.
     if max_stream_response_bytes is not None:
@@ -456,6 +488,13 @@ def make_wsgi_app(
         # that incoming session tokens were minted by THIS worker. Must run
         # before the sticky middleware itself.
         middleware.append(_ServerIdEnvMiddleware(server.server_id))
+
+    # Strict auth runs before anything that reads the request body (the size
+    # cap reads chunked bodies; decompression reads every encoded body), so an
+    # unauthenticated caller never gets bytes buffered or decompressed. The
+    # middleware itself is built further down, once its inputs exist; this is
+    # its slot in the list.
+    strict_auth_slot = len(middleware) if strict_auth else None
 
     # Enforce the advertised max_request_bytes cap server-side.  The upload
     # URL control route accepts a tiny valid request, but it is still an
@@ -610,7 +649,6 @@ def make_wsgi_app(
     from vgi_rpc.http._oauth import OAuthResourceMetadata as _OAuthMeta
     from vgi_rpc.http._oauth import _build_www_authenticate
 
-    www_authenticate: str | None = None
     _validated_oauth_metadata: _OAuthMeta | None = None
     if oauth_resource_metadata is not None:
         if not isinstance(oauth_resource_metadata, _OAuthMeta):
@@ -695,19 +733,30 @@ def make_wsgi_app(
 
         assert isinstance(otel_config, _OtelCfg)  # validated above
         on_auth_failure = make_auth_failure_counter(otel_config, server.protocol_name)
-    middleware.append(
-        _AuthMiddleware(
-            authenticate,
-            www_authenticate=www_authenticate,
-            on_auth_failure=on_auth_failure,
-            exempt_prefixes=tuple(_exempt_prefixes_list),
-            peer_identity_providers=tuple(peer_identity_providers),
-            peer_authentication_policy=peer_authentication_policy,
-            service_name=peer_service_name,
-            peer_resolution_timeout=peer_resolution_timeout,
-            peer_provider_concurrency=peer_provider_concurrency,
-        )
+    strict_head_paths: tuple[str, ...] | None = None
+    if strict_auth:
+        strict_head_paths = (f"{prefix}/health",) if enable_health_endpoint else ()
+    auth_middleware = _AuthMiddleware(
+        authenticate,
+        www_authenticate=www_authenticate,
+        on_auth_failure=on_auth_failure,
+        exempt_prefixes=tuple(_exempt_prefixes_list),
+        peer_identity_providers=tuple(peer_identity_providers),
+        peer_authentication_policy=peer_authentication_policy,
+        service_name=peer_service_name,
+        peer_resolution_timeout=peer_resolution_timeout,
+        peer_provider_concurrency=peer_provider_concurrency,
+        strict_head_paths=strict_head_paths,
     )
+    if strict_auth_slot is not None:
+        middleware.insert(strict_auth_slot, auth_middleware)
+        if otel_config is not None:
+            # Keep the OTel span around authentication, as in the default order.
+            otel_mw = next(m for m in middleware if type(m).__name__ == "_OtelFalconMiddleware")
+            middleware.remove(otel_mw)
+            middleware.insert(strict_auth_slot, otel_mw)
+    else:
+        middleware.append(auth_middleware)
     # Sticky middleware runs AFTER auth so AAD binding sees the authenticated
     # principal. The health endpoint is exempt because it must remain
     # cheap and auth-free even when sticky is on.

@@ -230,11 +230,55 @@ auth = jwt_authenticate(
 | `claims_options` | `Mapping \| None` | `None` | Additional Authlib claim options |
 | `principal_claim` | `str` | `"sub"` | JWT claim for `AuthContext.principal` |
 | `domain` | `str` | `"jwt"` | Domain for `AuthContext` |
+| `algorithms` | `Collection[str] \| None` | `None` | Allow-list of JWS `alg` values; `none` and `HS*` are refused at construction. `None` keeps joserfc's recommended set |
+| `required_typ` | `str \| None` | `None` | Required JOSE `typ` (e.g. `"at+jwt"`), compared case-insensitively with the `application/` prefix optional |
+| `require_exp` | `bool` | `False` | Reject tokens without `exp` (a present `exp` is always checked) |
+| `leeway` | `int` | `0` | Clock skew in seconds for `exp` / `nbf` |
+| `jwks_max_age` | `float \| None` | `None` | Hard maximum age of cached keys; a shorter `Cache-Control: max-age` wins. Fails closed |
+| `jwks_refresh_min_interval` | `float \| None` | `None` | Minimum seconds between unknown-`kid` re-fetches |
+| `jwks_fetch_timeout` | `float \| None` | `None` | Timeout for each discovery / JWKS request (`None`: the HTTP client's default) |
 
-**JWKS caching**: Keys are fetched lazily on first request and cached in-process.
-On unknown `kid` (decode error), keys are automatically refreshed once. Other
-validation failures (expired token, wrong issuer/audience) fail immediately
-without a network round-trip.
+Claims reach `AuthContext.claims` exactly as decoded from the token's JSON, so
+booleans stay booleans.
+
+**JWKS caching**: Keys are fetched lazily on first request. By default they are
+cached for the life of the process and an unknown `kid` refreshes them once.
+Other validation failures (expired token, wrong issuer/audience) fail
+immediately without a network round-trip. With `jwks_max_age`, keys older than
+that are discarded; if the re-fetch fails, verification fails rather than
+using stale keys. With `jwks_refresh_min_interval`, an unknown `kid` within the
+interval of the last fetch is rejected without contacting the JWKS endpoint. A
+JWKS fetch that fails raises `AuthUnavailableError`, which `make_wsgi_app`
+answers with 503 and `Retry-After`, not 401.
+
+An RFC 9068 access-token verifier, for example:
+
+```python
+auth = jwt_authenticate(
+    issuer="https://auth.example.com",
+    audience="https://desk.example.com/d/dep_123",
+    jwks_uri="https://auth.example.com/.well-known/jwks.json",
+    algorithms=["ES256"],
+    required_typ="at+jwt",
+    require_exp=True,
+    leeway=60,
+    jwks_max_age=600,
+    jwks_refresh_min_interval=60,
+)
+```
+
+### Strict authentication
+
+`make_wsgi_app(strict_auth=True, www_authenticate='Bearer error="invalid_token"')`
+authenticates every request: only `HEAD {prefix}/health` and CORS preflights
+(`OPTIONS` with `Access-Control-Request-Method`) are exempt. `GET /health`,
+other `OPTIONS` requests, `/.well-known/` paths, the landing and describe pages
+and unknown paths all need a credential. Authentication also moves ahead of the
+request-size check and request decompression, so an unauthenticated body is
+never read. `strict_auth` requires `authenticate` and refuses
+`oauth_resource_metadata` and `peer_authentication_policy`.
+`www_authenticate` sets the challenge on every 401 and cannot be combined with
+`oauth_resource_metadata`.
 
 Requires `pip install vgi-rpc[oauth]` — raises a clear `ImportError` with
 install instructions if Authlib is not available.
