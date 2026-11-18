@@ -2773,6 +2773,9 @@ class OAuthServerMetadata:
         issuer: The server's ``issuer`` value, "" when absent.
         resource_indicators_supported: Whether the server advertises RFC 8707
             resource indicators -- the switch for location delegation.
+        vgi_field_address_patterns: Orchard: the issuer's published Field
+            Address host patterns, unvalidated (see
+            ``field_address_patterns`` in ``_oauth_delegation``).
 
     """
 
