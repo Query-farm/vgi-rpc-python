@@ -75,6 +75,7 @@ from ._oauth_delegation import (
     canonical_resource,
     check_field_address,
     delegation_allowed_for_issuer,
+    field_address_patterns,
     rewrite_to_field,
 )
 from ._pkce_math import decode_jwt_payload_unverified
@@ -344,6 +345,9 @@ class OAuthRefreshContext:
     resource: str = ""
     #: Location delegation: the checked issuer whose allowed hosts bound ``vgi_location``.
     issuer: str = ""
+    #: Location delegation: the issuer's validated published Field Address patterns
+    #: (empty: the built-in defaults apply).
+    field_address_patterns: tuple[str, ...] = ()
 
 
 def parse_oauth_challenge(www_authenticate: str) -> OAuthChallenge | None:
@@ -954,7 +958,9 @@ class VgiOAuthAuth(httpx2.Auth):
         field_address = ""
         if refresh_ctx.resource:
             try:
-                field_address = check_field_address(refresh_ctx.issuer, tokens.location)
+                field_address = check_field_address(
+                    refresh_ctx.issuer, tokens.location, published=refresh_ctx.field_address_patterns or None
+                )
             except DelegationError as exc:
                 with self._lock:
                     self._status = _AuthStatus.FAILED
@@ -1057,6 +1063,7 @@ class VgiOAuthAuth(httpx2.Auth):
             resource_metadata_url=challenge.resource_metadata_url,
             resource=desk,
             issuer=issuer,
+            field_address_patterns=field_address_patterns(list(server_meta.vgi_field_address_patterns)) or (),
         )
 
     def _perform_flow(

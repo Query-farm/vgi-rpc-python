@@ -2782,6 +2782,8 @@ class OAuthServerMetadata:
     grant_types_supported: tuple[str, ...] = ()
     issuer: str = ""
     resource_indicators_supported: bool = False
+    #: Orchard: the issuer's ``vgi_field_address_patterns`` as published (unvalidated).
+    vgi_field_address_patterns: tuple[str, ...] = ()
 
     def supports_grant_type(self, grant_type: str) -> bool:
         """Whether the server advertises support for *grant_type*.
@@ -2846,6 +2848,11 @@ def fetch_auth_server_metadata(
             grant_types_supported=tuple(body.get("grant_types_supported", ())),
             issuer=str(body.get("issuer", "") or ""),
             resource_indicators_supported=body.get("resource_indicators_supported") is True,
+            vgi_field_address_patterns=tuple(
+                p for p in (body.get("vgi_field_address_patterns") or ()) if isinstance(p, str)
+            )
+            if isinstance(body.get("vgi_field_address_patterns"), list)
+            else (),
         )
         if not metadata.authorization_endpoint and not metadata.device_authorization_endpoint:
             raise ValueError(

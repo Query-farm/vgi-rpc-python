@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from urllib.parse import urlsplit
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "DelegationError",
     "canonical_resource",
     "check_field_address",
+    "field_address_patterns",
     "delegation_allowed_for_issuer",
     "rewrite_to_field",
 ]
@@ -79,6 +81,44 @@ def _host_matches(host: str, pattern: str) -> bool:
     return host == pattern
 
 
+_LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+_MAX_PATTERNS = 16
+
+
+def field_address_patterns(published: object) -> tuple[str, ...] | None:
+    """Validate an issuer's published ``vgi_field_address_patterns``.
+
+    Each pattern must be ``*.<suffix>`` (exactly one label) or ``**.<suffix>``
+    (one or more), where the fixed suffix has at least two DNS labels, so a
+    misconfigured issuer can't open ``*.com``. Any invalid entry rejects the
+    whole list.
+
+    Args:
+        published: The metadata value, as decoded from JSON.
+
+    Returns:
+        The patterns, or ``None`` if the value is absent or unusable.
+
+    """
+    if not isinstance(published, list) or not published or len(published) > _MAX_PATTERNS:
+        return None
+    out: list[str] = []
+    for pattern in published:
+        if not isinstance(pattern, str) or len(pattern) > 253:
+            return None
+        if pattern.startswith("**."):
+            suffix = pattern[3:]
+        elif pattern.startswith("*."):
+            suffix = pattern[2:]
+        else:
+            return None
+        labels = suffix.split(".")
+        if len(labels) < 2 or not all(_LABEL.match(label) for label in labels):
+            return None
+        out.append(pattern)
+    return tuple(out)
+
+
 def _loopback_allowed() -> bool:
     return os.environ.get(_TEST_LOOPBACK_ENV, "") == "1"
 
@@ -94,13 +134,21 @@ def delegation_allowed_for_issuer(issuer: str, allowed: dict[str, tuple[str, ...
     return False
 
 
-def check_field_address(issuer: str, location: str, allowed: dict[str, tuple[str, ...]] | None = None) -> str:
+def check_field_address(
+    issuer: str,
+    location: str,
+    allowed: dict[str, tuple[str, ...]] | None = None,
+    published: tuple[str, ...] | None = None,
+) -> str:
     """Validate a ``vgi_location`` for *issuer*; return it without a trailing slash.
 
     Args:
         issuer: The checked delegating issuer the token response came from.
         location: The token response's ``vgi_location``.
         allowed: Issuer → host patterns; ``None`` uses the built-in default.
+        published: The issuer's own validated ``vgi_field_address_patterns``
+            (see :func:`field_address_patterns`); when given they replace the
+            built-in patterns, so a new hosting provider needs no client release.
 
     Returns:
         The Field Address, without a trailing slash.
@@ -126,7 +174,7 @@ def check_field_address(issuer: str, location: str, allowed: dict[str, tuple[str
         pass
     else:
         raise DelegationError(f"vgi_location may not be an IP address: {location!r}")
-    patterns = table.get(issuer.rstrip("/"), ())
+    patterns = published or table.get(issuer.rstrip("/"), ())
     if not any(_host_matches(host, p) for p in patterns):
         raise DelegationError(f"vgi_location {host!r} is not an allowed delegation host for {issuer}")
     return location.rstrip("/")

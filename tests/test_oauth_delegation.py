@@ -18,6 +18,7 @@ from vgi_rpc.http._oauth_delegation import (
     DelegationError,
     canonical_resource,
     check_field_address,
+    field_address_patterns,
     rewrite_to_field,
 )
 
@@ -30,9 +31,12 @@ METADATA = "https://desk.queryfarm.cloud/.well-known/oauth-protected-resource/d/
 class FrontDesk:
     """Mock Desk Address + authorization server + Field Worker."""
 
-    def __init__(self, *, location: str = FIELD, issuer: str = ISSUER, resource: str = DESK) -> None:
+    def __init__(
+        self, *, location: str = FIELD, issuer: str = ISSUER, resource: str = DESK, patterns: object = None
+    ) -> None:
         """Configure what the mock server answers."""
         self.location = location
+        self.patterns = patterns
         self.issuer = issuer
         self.resource = resource
         self.refreshes: list[dict[str, list[str]]] = []
@@ -55,6 +59,7 @@ class FrontDesk:
                     "authorization_endpoint": f"{ISSUER}/authorize",
                     "token_endpoint": f"{ISSUER}/token",
                     "resource_indicators_supported": True,
+                    **({} if self.patterns is None else {"vgi_field_address_patterns": self.patterns}),
                 },
             )
         if url == f"{ISSUER}/token":
@@ -200,6 +205,58 @@ def test_orchard_field_hosts(location: str, ok: bool) -> None:
         else:
             with pytest.raises(DelegationError):
                 check_field_address(issuer, location)
+
+
+def test_published_patterns_admit_a_new_provider() -> None:
+    """An issuer's published patterns admit a host the built-in list doesn't know."""
+    desk = FrontDesk(location="https://w-abc123.run.app", patterns=["*.run.app", "*.fly.dev"])
+    client, _ = _client(desk)
+    assert client.post(f"{DESK}/vgi.v3/catalog_attach").status_code == 200
+    assert desk.field_calls == ["https://w-abc123.run.app/vgi.v3/catalog_attach"]
+
+
+def test_published_patterns_replace_the_defaults() -> None:
+    """Published patterns are authoritative: a default host they omit is refused."""
+    desk = FrontDesk(patterns=["*.fly.dev"])
+    client, _ = _client(desk)
+    with pytest.raises(OAuthTokenError, match="not an allowed delegation host"):
+        client.post(f"{DESK}/vgi.v3/catalog_attach")
+
+
+@pytest.mark.parametrize(
+    "patterns",
+    [
+        ["*.com"],
+        ["**.dev"],
+        ["*"],
+        ["evil.example.com"],
+        ["*.run.app", "*.com"],
+        ["*.Run.app"],
+        ["*.-bad.example"],
+        "*.run.app",
+        [],
+        [1],
+        ["*.x.example"] * 17,
+    ],
+)
+def test_unusable_published_patterns_fall_back_to_the_defaults(patterns: object) -> None:
+    """Any invalid entry rejects the whole list; the built-in defaults then apply."""
+    assert field_address_patterns(patterns) is None
+    ok = FrontDesk(patterns=patterns)
+    client, _ = _client(ok)
+    assert client.post(f"{DESK}/vgi.v3/catalog_attach").status_code == 200
+    evil = FrontDesk(location="https://w-abc123.run.app", patterns=patterns)
+    client, _ = _client(evil)
+    with pytest.raises(OAuthTokenError, match="not an allowed delegation host"):
+        client.post(f"{DESK}/vgi.v3/catalog_attach")
+
+
+def test_field_address_patterns_shape() -> None:
+    """Valid lists come back as tuples, one or two kinds of wildcard."""
+    assert field_address_patterns(["**.field.queryfarm.cloud", "*.fly.dev"]) == (
+        "**.field.queryfarm.cloud",
+        "*.fly.dev",
+    )
 
 
 def test_loopback_only_with_the_test_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
