@@ -177,6 +177,31 @@ def test_field_address_rules(location: str) -> None:
         check_field_address(ISSUER, location)
 
 
+@pytest.mark.parametrize(
+    ("location", "ok"),
+    [
+        ("https://k7f2q9xw.field.queryfarm.cloud", True),
+        ("https://abc.wt12.field.queryfarm.cloud:8443", True),
+        ("https://o-3to7u3vuka9q2xw1mzp4.fly.dev", True),
+        ("https://fly.dev", False),
+        ("https://a.b.fly.dev", False),
+        ("https://evil-fly.dev", False),
+        ("https://app.fly.dev.evil.com", False),
+        ("https://field.queryfarm.cloud", False),
+        ("https://a..field.queryfarm.cloud", False),
+        ("https://evil.example.com", False),
+    ],
+)
+def test_orchard_field_hosts(location: str, ok: bool) -> None:
+    """Orchard may hand out its own field hosts or exactly one label under fly.dev."""
+    for issuer in (ISSUER, "https://auth.staging.queryfarm.cloud"):
+        if ok:
+            assert check_field_address(issuer, location) == location
+        else:
+            with pytest.raises(DelegationError):
+                check_field_address(issuer, location)
+
+
 def test_loopback_only_with_the_test_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Loopback delegation needs the test-only environment switch."""
     with pytest.raises(DelegationError):

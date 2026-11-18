@@ -17,7 +17,6 @@ advertises ``resource_indicators_supported: true`` and the metadata's
 
 from __future__ import annotations
 
-import fnmatch
 import ipaddress
 import os
 from urllib.parse import urlsplit
@@ -35,9 +34,12 @@ __all__ = [
 DELEGATED_CLIENT_ID = "vgi-duckdb"
 
 #: Issuer → host patterns its ``vgi_location`` may name. The built-in default;
-#: any other issuer may not delegate.
+#: any other issuer may not delegate. ``*.`` matches exactly one DNS label,
+#: ``**.`` one or more. A Fly.io app host is one label under ``fly.dev``.
+_ORCHARD_FIELD_HOSTS: tuple[str, ...] = ("**.field.queryfarm.cloud", "*.fly.dev")
 DEFAULT_ALLOWED_DELEGATION_HOSTS: dict[str, tuple[str, ...]] = {
-    "https://auth.queryfarm.cloud": ("*.field.queryfarm.cloud",),
+    "https://auth.queryfarm.cloud": _ORCHARD_FIELD_HOSTS,
+    "https://auth.staging.queryfarm.cloud": _ORCHARD_FIELD_HOSTS,
 }
 
 _TEST_LOOPBACK_ENV = "VGI_TEST_ALLOW_LOOPBACK_DELEGATION"
@@ -63,6 +65,18 @@ def canonical_resource(url: str) -> str | None:
     port = parts.port
     netloc = host if port in (None, 443) else f"{host}:{port}"
     return f"https://{netloc}{parts.path.rstrip('/')}"
+
+
+def _host_matches(host: str, pattern: str) -> bool:
+    """Match *host* against ``*.suffix`` (one label), ``**.suffix`` (one or more) or an exact host."""
+    for prefix, single in (("**.", False), ("*.", True)):
+        if pattern.startswith(prefix):
+            suffix = pattern[len(prefix) - 1 :]  # keeps the leading dot
+            if not host.endswith(suffix):
+                return False
+            labels = host[: -len(suffix)].split(".")
+            return all(labels) and (not single or len(labels) == 1)
+    return host == pattern
 
 
 def _loopback_allowed() -> bool:
@@ -113,7 +127,7 @@ def check_field_address(issuer: str, location: str, allowed: dict[str, tuple[str
     else:
         raise DelegationError(f"vgi_location may not be an IP address: {location!r}")
     patterns = table.get(issuer.rstrip("/"), ())
-    if not any(fnmatch.fnmatchcase(host, p) for p in patterns):
+    if not any(_host_matches(host, p) for p in patterns):
         raise DelegationError(f"vgi_location {host!r} is not an allowed delegation host for {issuer}")
     return location.rstrip("/")
 
