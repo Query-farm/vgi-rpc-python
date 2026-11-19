@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable, Mapping
 
 import falcon
 
+from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, RpcServer
 
 from ._factory import make_wsgi_app
@@ -77,6 +78,8 @@ def serve_http(
     cors_origins: str | Iterable[str] | None = None,
     cors_max_age: int | None = 7200,
     cors_resource_policy: str | None = "cross-origin",
+    upload_url_provider: UploadUrlProvider | None = None,
+    max_upload_bytes: int | None = None,
 ) -> None:
     """Serve an ``RpcServer`` over HTTP using waitress.
 
@@ -159,6 +162,13 @@ def serve_http(
         cors_resource_policy: ``Cross-Origin-Resource-Policy`` value; needed
             by callers under ``Cross-Origin-Embedder-Policy: require-corp``.
             See :func:`make_wsgi_app`.
+        upload_url_provider: Provider of pre-signed upload URL pairs; enables
+            ``__upload_url__/init`` so clients can send requests larger than
+            ``max_request_bytes`` through object storage.  See
+            :func:`make_wsgi_app`.
+        max_upload_bytes: Upload size advertised to clients via
+            ``VGI-Max-Upload-Bytes`` (advertisement only).  See
+            :func:`make_wsgi_app`.
 
     """
     if max_stream_response_bytes is not None:
@@ -201,6 +211,8 @@ def serve_http(
         cors_origins=cors_origins,
         cors_max_age=cors_max_age,
         cors_resource_policy=cors_resource_policy,
+        upload_url_provider=upload_url_provider,
+        max_upload_bytes=max_upload_bytes,
     )
 
     if install_signal_handlers and enable_sticky:

@@ -275,9 +275,114 @@ EOF
 ) gs://MY_BUCKET
 ```
 
+## Blob Vendor
+
+The *blob vendor* is a small HTTP service that holds the object-storage
+credentials so workers never do. A worker asks it for a pre-signed URL for one
+object of a declared size and SHA-256, uploads straight to storage, and hands on
+a download URL. The storage (Cloudflare R2) enforces the signed
+`Content-Length` and `x-amz-checksum-sha256`, so whatever sits at the object's
+key is exactly the declared bytes. Buckets are per region (EU / US
+jurisdictions, or a location hint), chosen by the vendor from the caller's key,
+never from the request.
+
+`VendorStorage` implements both `ExternalStorage` (server-side externalization)
+and `UploadUrlProvider` (client upload URLs):
+
+```python
+from vgi_rpc.vendor import VendorStorage, external_config_from_env
+
+storage = VendorStorage("https://blobs.example.com", token)
+
+# Or, from the environment (returns None when VGI_BLOB_VENDOR_URL is unset):
+config = external_config_from_env()
+server = RpcServer(MyService, MyServiceImpl(), external_location=config)
+app = make_wsgi_app(
+    server,
+    max_request_bytes=8 * 1024 * 1024,
+    upload_url_provider=config.storage if config else None,
+)
+```
+
+`serve_http()` takes the same `upload_url_provider` / `max_upload_bytes`
+arguments, and `run_server()` applies the environment automatically under
+`--http`.
+
+For raw bytes that the caller references itself (e.g. large values in a
+key-value store), `VendorBlobClient` stores and verifies blobs by `BlobRef`:
+
+```python
+from vgi_rpc.vendor import BlobScope, VendorBlobClient
+
+with VendorBlobClient.from_env() as blobs:
+    # Scope fields: 1-128 chars of [A-Za-z0-9._:-], so hex-encode binary ids.
+    ref = blobs.put_bytes(value, scope=BlobScope(shard="s1", execution_id=exec_id_hex), idempotency_key="attempt-7:0")
+    assert blobs.get_bytes(ref) == value  # size + SHA-256 checked against ref
+    blobs.delete_scope("s1", exec_id_hex)
+```
+
+### Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `VGI_BLOB_VENDOR_URL` | Vendor base URL. Unset: the `*_from_env` configs return `None`. |
+| `VGI_BLOB_VENDOR_TOKEN` | Bearer token; falls back to `VGI_CF_DO_TOKEN`. |
+| `VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES` | Result size above which the server externalizes (default 1 MiB). |
+| `VGI_RPC_EXTERNAL_COMPRESSION` | `none` (default), `zstd` or `gzip`, optionally `:<level>`. |
+| `VGI_RPC_MAX_UPLOAD_BYTES` | Upload size advertised to clients (`VGI-Max-Upload-Bytes`). |
+
+### Host pinning
+
+Configs built from the environment do not use `https_only_validator`, which
+accepts any host. They pin pointer and upload URLs to the vendor's storage
+hosts and URL prefixes (the region's bucket), read from its `GET /v1/info` and
+cached for ten minutes; a failed
+refresh keeps the last good list, and with no list at all every URL is
+rejected. `VendorStorage` also checks the URLs the vendor itself returns before
+using them. Build a pin by hand with `pinned_hosts_validator`:
+
+```python
+from vgi_rpc.vendor import pinned_hosts_validator
+
+validate = pinned_hosts_validator(["acct.eu.r2.cloudflarestorage.com"])
+```
+
+An entry matches only that exact host (no subdomains) on the default `https`
+port, or the port it names. Only `https` passes; plain `http` is accepted only
+when the vendor URL itself is a loopback `http` URL (a local test vendor).
+
+### Retries and secrets
+
+Vendor and signed-URL requests retry transport errors, 429 and 5xx with
+exponential backoff (3 attempts by default); 4xx responses are not retried.
+Failures raise `VendorError` with the HTTP `status` and the vendor's `code`
+(`not_found`, `not_uploaded`, `quota_exceeded`, `object_too_large`,
+`idempotency_conflict`, ...) or the storage's (`BadDigest`). Pass
+`idempotency_key` to `put_bytes` so a retried logical write reuses one object.
+The bearer token goes only to the vendor, never to a signed URL, and vgi-rpc's
+own logs and errors show URLs through `redact_url` (scheme, host, port and path
+only). Note that httpx2's own `httpx2` logger records full request URLs at
+`INFO`; keep it at `WARNING` in deployments that log at `INFO`.
+
+### Testing
+
+`vgi_rpc.conformance.fake_vendor` is an in-process fake of the vendor API and
+of R2's signed-URL enforcement (declared size and checksum, method-bound
+signatures, range GETs), with fault injection:
+
+```python
+from vgi_rpc.conformance.fake_vendor import serve_fake_vendor
+
+with serve_fake_vendor({"tok": "tenant-a"}) as fake:
+    storage = VendorStorage(fake.url, "tok")
+    fake.vendor.fail_next("/v1/blobs/put", status=503)
+```
+
 ## URL Validation
 
-By default, external location URLs are validated with `https_only_validator`, which rejects non-HTTPS URLs. This prevents pointer batches from being used to probe internal networks. You can provide a custom validator via `ExternalLocationConfig.url_validator`.
+By default, external location URLs are validated with `https_only_validator`, which rejects non-HTTPS URLs. This prevents pointer batches from being used to probe internal networks. You can provide a custom validator via `ExternalLocationConfig.url_validator`; for the blob vendor use the host-pinned validators described in [Host pinning](#host-pinning).
+
+Client uploads to a vended URL are sent with `Content-Type: application/octet-stream`, the type pre-signed URLs that sign the content type (such as `GCSStorage.generate_upload_url`) expect.
 
 ## API Reference
 
@@ -318,3 +423,27 @@ Requires `pip install vgi-rpc[s3]`.
 Requires `pip install vgi-rpc[gcs]`.
 
 ::: vgi_rpc.gcs.GCSStorage
+
+### Blob Vendor
+
+Requires `pip install vgi-rpc[http,external]`.
+
+::: vgi_rpc.vendor.VendorStorage
+
+::: vgi_rpc.vendor.VendorBlobClient
+
+::: vgi_rpc.vendor.BlobRef
+
+::: vgi_rpc.vendor.BlobScope
+
+::: vgi_rpc.vendor.VendorError
+
+::: vgi_rpc.vendor.pinned_hosts_validator
+
+::: vgi_rpc.vendor.vendor_url_validator
+
+::: vgi_rpc.vendor.external_config_from_env
+
+::: vgi_rpc.vendor.client_external_config_from_env
+
+::: vgi_rpc.vendor.max_upload_bytes_from_env

@@ -479,6 +479,13 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
     - ``--max-stream-response-bytes N`` — **Deprecated**; alias for
       ``--max-response-bytes``.
 
+    With ``--http`` and ``VGI_BLOB_VENDOR_URL`` set, large results are
+    externalized through the blob vendor and client upload URLs are vended
+    by it (see :func:`vgi_rpc.vendor.external_config_from_env`).  When an
+    ``RpcServer`` is passed, its own ``external_location`` is kept; upload
+    URLs are vended only when that config's storage is a
+    :class:`~vgi_rpc.vendor.VendorStorage`.
+
     Without ``--http`` the server runs over stdin/stdout pipes (the
     default, suitable for ``SubprocessTransport``).
 
@@ -684,14 +691,29 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
                 f"HTTP-only and cannot be combined with {raw_flag}"
             )
 
+    # Blob-vendor external storage (VGI_BLOB_VENDOR_URL) is HTTP-only: hosted
+    # workers serve HTTP, and a pipe/socket worker's client is co-located.
+    vendor_config = None
+    if args.http:
+        from vgi_rpc.vendor import external_config_from_env
+
+        vendor_config = external_config_from_env()
+
     if isinstance(protocol_or_server, RpcServer):
         if implementation is not None:
             raise TypeError("implementation must be None when passing an RpcServer")
         server = protocol_or_server
+        if vendor_config is not None and server.external_config is None:
+            logging.getLogger("vgi_rpc.rpc").warning(
+                "VGI_BLOB_VENDOR_URL is set but the RpcServer was built without external_location; "
+                "pass external_location=vgi_rpc.vendor.external_config_from_env() to enable it"
+            )
     elif isinstance(protocol_or_server, type):
         if implementation is None:
             raise TypeError("implementation is required when passing a Protocol class")
-        server = RpcServer(protocol_or_server, implementation, enable_describe=args.describe)
+        server = RpcServer(
+            protocol_or_server, implementation, enable_describe=args.describe, external_location=vendor_config
+        )
     else:
         raise TypeError(f"Expected a Protocol class or RpcServer, got {type(protocol_or_server).__name__}")
 
@@ -714,13 +736,30 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         except ImportError:
             print("HTTP transport requires vgi-rpc[http]: pip install vgi-rpc[http]", file=sys.stderr)
             sys.exit(1)
-        serve_http(
-            server,
-            host=args.host,
-            port=args.port,
-            max_response_bytes=args.max_response_bytes,
-            max_externalized_response_bytes=args.max_externalized_response_bytes,
-        )
+        from vgi_rpc.vendor import VendorStorage, max_upload_bytes_from_env
+
+        # Vend client upload URLs only when this server's own external config
+        # is the vendor's: it is also what resolves (and host-pins) the
+        # pointers those uploads come back as.
+        server_storage = server.external_config.storage if server.external_config is not None else None
+        if isinstance(server_storage, VendorStorage):
+            serve_http(
+                server,
+                host=args.host,
+                port=args.port,
+                max_response_bytes=args.max_response_bytes,
+                max_externalized_response_bytes=args.max_externalized_response_bytes,
+                upload_url_provider=server_storage,
+                max_upload_bytes=max_upload_bytes_from_env(),
+            )
+        else:
+            serve_http(
+                server,
+                host=args.host,
+                port=args.port,
+                max_response_bytes=args.max_response_bytes,
+                max_externalized_response_bytes=args.max_externalized_response_bytes,
+            )
     elif args.unix is not None:
         threaded = True if args.threaded is None else args.threaded
         idle_timeout: float | None = args.idle_timeout if args.idle_timeout > 0 else None
