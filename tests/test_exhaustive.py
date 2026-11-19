@@ -1264,6 +1264,7 @@ class TestRunServerArgParsing:
             port: int = 0,
             max_response_bytes: int | None = None,
             max_externalized_response_bytes: int | None = None,
+            **_other: object,
         ) -> None:
             called_with.append((server, host, port))
 
@@ -1300,6 +1301,7 @@ class TestRunServerArgParsing:
             port: int = 0,
             max_response_bytes: int | None = None,
             max_externalized_response_bytes: int | None = None,
+            **_other: object,
         ) -> None:
             called_with.append((server, host, port))
 

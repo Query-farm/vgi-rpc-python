@@ -330,6 +330,7 @@ with VendorBlobClient.from_env() as blobs:
 | `VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES` | Result size above which the server externalizes (default 1 MiB). |
 | `VGI_RPC_EXTERNAL_COMPRESSION` | `none` (default), `zstd` or `gzip`, optionally `:<level>`. |
 | `VGI_RPC_MAX_UPLOAD_BYTES` | Upload size advertised to clients (`VGI-Max-Upload-Bytes`). |
+| `VGI_RPC_MAX_REQUEST_BYTES` | Request-body cap for `run_server --http` (`--max-request-bytes`); clients send larger requests through vendor upload URLs. Without a cap, clients never upload. |
 
 ### Host pinning
 
@@ -359,10 +360,20 @@ Failures raise `VendorError` with the HTTP `status` and the vendor's `code`
 (`not_found`, `not_uploaded`, `quota_exceeded`, `object_too_large`,
 `idempotency_conflict`, ...) or the storage's (`BadDigest`). Pass
 `idempotency_key` to `put_bytes` so a retried logical write reuses one object.
-The bearer token goes only to the vendor, never to a signed URL, and vgi-rpc's
-own logs and errors show URLs through `redact_url` (scheme, host, port and path
-only). Note that httpx2's own `httpx2` logger records full request URLs at
-`INFO`; keep it at `WARNING` in deployments that log at `INFO`.
+The bearer token goes only to the vendor, never to a signed URL. Every request
+to a storage host (the vendor clients' PUTs, and the HTTP client's upload of a
+large request) goes on a bare, single-purpose client: never the caller's
+`httpx2.Client`, so its default headers, cookies, auth flow and event hooks
+cannot reach the storage host. A `session=` passed to the vendor clients
+supplies only the transport for vendor API calls.
+
+vgi-rpc's own logs and errors show URLs through `redact_url` (scheme, host, port
+and path only). httpx2 logs every request with its full URL at `INFO` on the
+global `httpx2` logger, and for a signed URL the query string is the
+credential, so the vendor clients and the upload path install a filter on that
+logger (`vgi_rpc.external_fetch.redact_httpx_logging()`, idempotent) that
+redacts the URLs in those lines. The lines are still logged at the same level;
+call the helper yourself to cover other httpx2 use in the process.
 
 ### Testing
 

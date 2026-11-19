@@ -401,6 +401,10 @@ class ClientExternalConfig:
     url_validator: Callable[[str], None] | None = field(default=https_only_validator)
 
 
+#: Either side's config: everything that only *resolves* pointers (clients,
+#: and the server's inbound path) reads just the fields the two share.
+AnyExternalConfig = ServerExternalConfig | ClientExternalConfig
+
 # Deprecated alias retained until cross-language ports migrate.  All
 # new code should pick ServerExternalConfig or ClientExternalConfig
 # explicitly to make the trust boundary unforgeable.
@@ -483,7 +487,7 @@ _OnLog = Callable[[Message], None] | None
 def resolve_external_location(
     batch: pa.RecordBatch,
     custom_metadata: pa.KeyValueMetadata | None,
-    config: ExternalLocationConfig | None,
+    config: AnyExternalConfig | None,
     on_log: _OnLog = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
@@ -593,7 +597,7 @@ def resolve_external_location(
 def _fetch_and_resolve(
     expected_schema: pa.Schema,
     url: str,
-    config: ExternalLocationConfig,
+    config: AnyExternalConfig,
     on_log: _OnLog,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     expected_sha256: str | None = None,

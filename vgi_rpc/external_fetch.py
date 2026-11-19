@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 __all__ = [
     "FetchConfig",
     "fetch_url",
+    "redact_httpx_logging",
     "redact_url",
 ]
 
@@ -76,6 +77,50 @@ def redact_url(url: str) -> str:
         return urlunparse((parsed.scheme, rendered_host, parsed.path, "", "", ""))
     except (TypeError, ValueError):
         return "<invalid-url>"
+
+
+class _RedactHttpxUrlsFilter(logging.Filter):
+    """Rewrite URL arguments of a log record through :func:`redact_url`."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and record.args:
+            record.args = tuple(_redact_log_arg(arg) for arg in record.args)
+        return True
+
+
+def _redact_log_arg(arg: object) -> object:
+    if not isinstance(arg, str) and type(arg).__name__ != "URL":
+        return arg
+    text = str(arg)
+    if text.startswith(("http://", "https://")) and any(c in text for c in "?#@"):
+        return redact_url(text)
+    return arg
+
+
+_HTTPX_REDACTION_LOCK = threading.Lock()
+
+
+def redact_httpx_logging(logger_name: str = "httpx2") -> None:
+    """Strip query strings and userinfo from URLs that httpx2 logs.
+
+    httpx2 logs every request as ``HTTP Request: <METHOD> <full URL> ...`` at
+    ``INFO`` on the ``httpx2`` logger.  For a pre-signed storage URL the query
+    string *is* the credential, so a deployment that logs at ``INFO`` would
+    write usable signed URLs to its logs.  This installs a filter on that
+    logger which rewrites URL arguments through :func:`redact_url` (scheme,
+    host, port and path only).  The lines are still logged, at the same level;
+    only their secrets are removed.  Idempotent, process-wide (the logger is
+    global), and installed automatically by :mod:`vgi_rpc.vendor` and by the
+    HTTP client's upload path.
+
+    Args:
+        logger_name: The logger to filter.
+
+    """
+    target = logging.getLogger(logger_name)
+    with _HTTPX_REDACTION_LOCK:
+        if not any(isinstance(f, _RedactHttpxUrlsFilter) for f in target.filters):
+            target.addFilter(_RedactHttpxUrlsFilter())
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ import contextlib
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -128,7 +128,7 @@ def deployment(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Deployment]:
 def test_large_unary_result_is_externalized_and_resolved(deployment: _Deployment) -> None:
     """A result over the threshold goes through a sized vendor grant; the client resolves it."""
     client_cfg = client_external_config_from_env()
-    with http_connect(_Svc, deployment.base_url, external_location=client_cfg) as proxy:  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+    with http_connect(_Svc, deployment.base_url, external_location=client_cfg) as proxy:
         assert proxy.big(n=50_000) == "v" * 50_000
         assert proxy.big(n=10) == "v" * 10
     stats = deployment.fake.vendor.stats()
@@ -140,7 +140,7 @@ def test_large_unary_result_is_externalized_and_resolved(deployment: _Deployment
 def test_large_stream_output_is_externalized(deployment: _Deployment) -> None:
     """A producer-stream batch over the threshold is externalized too."""
     client_cfg = client_external_config_from_env()
-    with http_connect(_Svc, deployment.base_url, external_location=client_cfg) as proxy:  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+    with http_connect(_Svc, deployment.base_url, external_location=client_cfg) as proxy:
         batches = list(proxy.big_stream(size=10_000))
     assert sum(ab.batch.num_rows for ab in batches) == 10_000
     assert any(
@@ -153,7 +153,7 @@ def test_large_client_request_goes_through_vendor_upload_urls(deployment: _Deplo
     """A request over max_request_bytes is PUT to a vendor upload URL and resolved by the server."""
     client_cfg = client_external_config_from_env()
     payload = "q" * (_MAX_REQUEST * 2)
-    with http_connect(_Svc, deployment.base_url, external_location=client_cfg, compression_level=None) as proxy:  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+    with http_connect(_Svc, deployment.base_url, external_location=client_cfg, compression_level=None) as proxy:
         assert proxy.length(data=payload) == len(payload)
     vendor = deployment.fake.vendor
     assert vendor.stats()["/v1/upload_urls"] == 1
@@ -165,15 +165,14 @@ def test_large_client_request_goes_through_vendor_upload_urls(deployment: _Deplo
 def test_client_upload_put_is_octet_stream(deployment: _Deployment, monkeypatch: pytest.MonkeyPatch) -> None:
     """The client's PUT to a vended upload URL declares application/octet-stream."""
     seen: list[str] = []
-    original_put = httpx2.Client.put
+    original_send = httpx2.Client.send
 
-    def spy(self: httpx2.Client, url: str, **kwargs: object) -> httpx2.Response:
-        headers = kwargs.get("headers")
-        if isinstance(headers, dict):
-            seen.append(str(headers.get("Content-Type")))
-        return original_put(self, url, **kwargs)  # type: ignore[arg-type]
+    def spy(self: httpx2.Client, request: httpx2.Request, **kwargs: object) -> httpx2.Response:
+        if request.method == "PUT":
+            seen.append(str(request.headers.get("Content-Type")))
+        return original_send(self, request, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(httpx2.Client, "put", spy)
+    monkeypatch.setattr(httpx2.Client, "send", spy)
     with http_connect(_Svc, deployment.base_url, compression_level=None) as proxy:
         assert proxy.length(data="z" * (_MAX_REQUEST * 2)) == _MAX_REQUEST * 2
     assert seen == ["application/octet-stream"]
@@ -244,12 +243,14 @@ def test_run_server_http_applies_vendor_env(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("VGI_BLOB_VENDOR_URL", "https://blobs.example")
     monkeypatch.setenv("VGI_BLOB_VENDOR_TOKEN", "t")
     monkeypatch.setenv("VGI_RPC_MAX_UPLOAD_BYTES", "1234")
+    monkeypatch.setenv("VGI_RPC_MAX_REQUEST_BYTES", "65536")
     run_server(_Svc, _SvcImpl())
     ((server, kwargs),) = calls
     assert server.external_config is not None
     assert isinstance(server.external_config.storage, VendorStorage)
     assert kwargs["upload_url_provider"] is server.external_config.storage
     assert kwargs["max_upload_bytes"] == 1234
+    assert kwargs["max_request_bytes"] == 65536
     server.external_config.storage.close()
 
 
@@ -268,4 +269,78 @@ def test_run_server_without_vendor_env_is_unchanged(monkeypatch: pytest.MonkeyPa
     run_server(_Svc, _SvcImpl())
     ((server, kwargs),) = calls
     assert server.external_config is None
-    assert "upload_url_provider" not in kwargs
+    assert kwargs["upload_url_provider"] is None
+
+
+class _InjectAuth(httpx2.Auth):
+    """An auth flow that stamps a credential on every request it sees."""
+
+    def auth_flow(self, request: httpx2.Request) -> Generator[httpx2.Request, httpx2.Response]:
+        request.headers["Authorization"] = "Bearer rpc-auth-flow-secret"
+        request.headers["X-Auth-Flow"] = "1"
+        yield request
+
+
+def _leaky_client(base_url: str | None = None) -> httpx2.Client:
+    """Build an httpx2 client carrying every kind of caller credential."""
+
+    def hook(request: httpx2.Request) -> None:
+        request.headers["X-Hook"] = "rpc-hook-secret"
+
+    kwargs: dict[str, object] = {}
+    if base_url is not None:
+        kwargs["base_url"] = base_url
+    return httpx2.Client(
+        headers={"Authorization": "Bearer rpc-default-secret", "X-Custom": "rpc-custom-secret"},
+        cookies={"session": "rpc-cookie-secret"},
+        auth=_InjectAuth(),
+        event_hooks={"request": [hook]},
+        timeout=30.0,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+_CALLER_HEADERS = frozenset({"HTTP_AUTHORIZATION", "HTTP_COOKIE", "HTTP_X_CUSTOM", "HTTP_X_HOOK", "HTTP_X_AUTH_FLOW"})
+
+
+def test_client_upload_put_never_carries_caller_credentials(deployment: _Deployment) -> None:
+    """A client upload PUT carries none of the RPC client's headers, cookies, auth flow or hooks."""
+    client_cfg = client_external_config_from_env()
+    with (
+        _leaky_client(deployment.base_url) as rpc_client,
+        http_connect(_Svc, client=rpc_client, external_location=client_cfg, compression_level=None) as proxy,
+    ):
+        assert proxy.length(data="c" * (_MAX_REQUEST * 2)) == _MAX_REQUEST * 2
+    vendor = deployment.fake.vendor
+    puts = [headers for method, path, headers in vendor.requests if method == "PUT"]
+    assert len(puts) == 1
+    assert not puts[0] & _CALLER_HEADERS, sorted(puts[0] & _CALLER_HEADERS)
+
+
+def test_vendor_clients_never_send_session_credentials(deployment: _Deployment) -> None:
+    """VendorStorage / VendorBlobClient storage PUT/GET carry no session credentials.
+
+    Vendor API requests carry the vendor token (not the session's auth flow)
+    and none of the session's default headers or cookies; the session's event
+    hooks, which the caller installed on purpose, do run for them.
+    """
+    from vgi_rpc.vendor import VendorBlobClient
+
+    fake = deployment.fake
+    with _leaky_client() as session:
+        with VendorStorage(fake.url, _TOKEN, session=session) as storage:
+            url = storage.upload(b"payload" * 100, pa.schema([]))
+            pair = storage.generate_upload_url(pa.schema([]))
+        with VendorBlobClient(fake.url, _TOKEN, session=session) as blobs:
+            ref = blobs.put_bytes(b"blob" * 100)
+            assert blobs.get_bytes(ref) == b"blob" * 100
+    assert url and pair.upload_url
+    storage_requests = [h for m, p, h in fake.vendor.requests if p.startswith("/r2/")]
+    assert len(storage_requests) >= 4  # 2 PUTs + probe/GET for the blob
+    for headers in storage_requests:
+        assert not headers & _CALLER_HEADERS, sorted(headers & _CALLER_HEADERS)
+    api_requests = [h for m, p, h in fake.vendor.requests if p.startswith("/v1/")]
+    assert api_requests
+    for headers in api_requests:
+        assert "HTTP_AUTHORIZATION" in headers  # the vendor token; a wrong one would 401
+        assert not headers & (_CALLER_HEADERS - {"HTTP_AUTHORIZATION", "HTTP_X_HOOK"})

@@ -476,6 +476,10 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
       total bytes uploaded to external storage during one HTTP response.
       Default: unbounded.  Env:
       ``VGI_RPC_MAX_EXTERNALIZED_RESPONSE_BYTES``.
+    - ``--max-request-bytes N`` — HTTP-only.  Advertise and enforce a
+      request-body cap; larger requests go through vended upload URLs when
+      the server offers them.  Default: no cap.  Env:
+      ``VGI_RPC_MAX_REQUEST_BYTES``.
     - ``--max-stream-response-bytes N`` — **Deprecated**; alias for
       ``--max-response-bytes``.
 
@@ -650,6 +654,17 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         ),
     )
     parser.add_argument(
+        "--max-request-bytes",
+        type=int,
+        default=int(os.environ.get("VGI_RPC_MAX_REQUEST_BYTES", "0")) or None,
+        help=(
+            "HTTP-only. Advertise (VGI-Max-Request-Bytes) and enforce a request-body cap. "
+            "Clients send larger requests through vended upload URLs when the server "
+            "offers them (e.g. via VGI_BLOB_VENDOR_URL). Ignored off HTTP. Default: no cap. "
+            "Env: VGI_RPC_MAX_REQUEST_BYTES."
+        ),
+    )
+    parser.add_argument(
         "--max-stream-response-bytes",
         type=int,
         default=int(os.environ.get("VGI_RPC_MAX_STREAM_RESPONSE_BYTES", "0")) or None,
@@ -742,24 +757,17 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         # is the vendor's: it is also what resolves (and host-pins) the
         # pointers those uploads come back as.
         server_storage = server.external_config.storage if server.external_config is not None else None
-        if isinstance(server_storage, VendorStorage):
-            serve_http(
-                server,
-                host=args.host,
-                port=args.port,
-                max_response_bytes=args.max_response_bytes,
-                max_externalized_response_bytes=args.max_externalized_response_bytes,
-                upload_url_provider=server_storage,
-                max_upload_bytes=max_upload_bytes_from_env(),
-            )
-        else:
-            serve_http(
-                server,
-                host=args.host,
-                port=args.port,
-                max_response_bytes=args.max_response_bytes,
-                max_externalized_response_bytes=args.max_externalized_response_bytes,
-            )
+        upload_provider = server_storage if isinstance(server_storage, VendorStorage) else None
+        serve_http(
+            server,
+            host=args.host,
+            port=args.port,
+            max_response_bytes=args.max_response_bytes,
+            max_externalized_response_bytes=args.max_externalized_response_bytes,
+            max_request_bytes=args.max_request_bytes,
+            upload_url_provider=upload_provider,
+            max_upload_bytes=max_upload_bytes_from_env() if upload_provider is not None else None,
+        )
     elif args.unix is not None:
         threaded = True if args.threaded is None else args.threaded
         idle_timeout: float | None = args.idle_timeout if args.idle_timeout > 0 else None

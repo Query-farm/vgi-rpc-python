@@ -25,11 +25,12 @@ import pyarrow as pa
 from pyarrow import ipc
 
 from vgi_rpc.external import (
-    ExternalLocationConfig,
+    AnyExternalConfig,
     UploadUrl,
     make_external_location_batch,
     resolve_external_location,
 )
+from vgi_rpc.external_fetch import redact_httpx_logging
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import (
     CALL_STATE_KEY,
@@ -202,8 +203,48 @@ def _prepare_request_body(
     return _compress_with_encoding(encoding, content, level=level)
 
 
-#: Content-Type for PUTs to server-vended upload URLs (see _externalize_via_upload_url).
+#: Timeout for a PUT to a pre-signed storage URL when no RPC client timeout applies.
+DEFAULT_STORAGE_TIMEOUT = 300.0
+
+#: Content-Type for PUTs to server-vended upload URLs.  application/octet-stream,
+#: not the Arrow media type: a pre-signed URL that signs the content type
+#: (GCSStorage.generate_upload_url signs octet-stream) rejects any other value.
 _UPLOAD_CONTENT_TYPE = "application/octet-stream"
+
+
+def storage_put(
+    url: str,
+    body: bytes,
+    *,
+    headers: Mapping[str, str] | None = None,
+    timeout: httpx2.Timeout | float | None = DEFAULT_STORAGE_TIMEOUT,
+) -> httpx2.Response:
+    """PUT *body* to a pre-signed storage URL on a bare, single-use client.
+
+    Never the RPC client: a pre-signed URL is its own credential, and the RPC
+    client may carry default headers (``Authorization``, cookies, custom
+    headers), an auth flow, or event hooks that would hand the caller's RPC
+    credentials to the storage host -- where R2/S3 also refuse a second auth
+    mechanism.  The request carries only *headers* (default
+    ``Content-Type: application/octet-stream``) plus what HTTP itself needs,
+    and does not follow redirects.
+
+    Args:
+        url: The pre-signed upload URL.
+        body: The bytes to upload.
+        headers: Exact headers to send; defaults to the octet-stream
+            Content-Type.
+        timeout: Request timeout.
+
+    Returns:
+        The response (already read and closed).
+
+    """
+    redact_httpx_logging()
+    request_headers = dict(headers) if headers is not None else {"Content-Type": _UPLOAD_CONTENT_TYPE}
+    with httpx2.Client(timeout=timeout, follow_redirects=False) as bare:
+        request = httpx2.Request("PUT", url, headers=request_headers, content=body)
+        return bare.send(request, auth=None)
 
 
 def _externalize_via_upload_url(
@@ -241,10 +282,7 @@ def _externalize_via_upload_url(
     if url_validator is not None:
         url_validator(upload_url)
         url_validator(download_url)
-    # application/octet-stream, not the Arrow media type: a pre-signed URL that
-    # signs the content type (GCSStorage.generate_upload_url signs octet-stream)
-    # rejects any other value with a signature mismatch.
-    put_resp = client.put(upload_url, content=body, headers={"Content-Type": _UPLOAD_CONTENT_TYPE})
+    put_resp = storage_put(upload_url, body, timeout=client.timeout)
     if not (200 <= put_resp.status_code < 300):
         raise RpcError(
             "ExternalUploadFailed",
@@ -451,7 +489,7 @@ class HttpStreamSession:
         on_log: Callable[[Message], None] | None = None,
         *,
         call_state_bytes: bytes | None = None,
-        external_config: ExternalLocationConfig | None = None,
+        external_config: AnyExternalConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
         pending_batches: list[AnnotatedBatch] | None = None,
         finished: bool = False,
@@ -973,7 +1011,7 @@ def http_connect[P](
     prefix: str | None = None,
     on_log: Callable[[Message], None] | None = None,
     client: httpx2.Client | _SyncTestClient | None = None,
-    external_location: ExternalLocationConfig | None = None,
+    external_location: AnyExternalConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
     compression_level: int | None = 1,
@@ -994,7 +1032,8 @@ def http_connect[P](
         on_log: Optional callback for log messages from the server.
         client: Optional HTTP client — ``httpx2.Client`` for production,
             or a ``_SyncTestClient`` from ``make_sync_client()`` for testing.
-        external_location: Optional ExternalLocationConfig for
+        external_location: Optional ``ClientExternalConfig`` (or, for
+            backward compatibility, ``ServerExternalConfig``) for
             resolving and producing externalized batches.
         ipc_validation: Validation level for incoming IPC batches.
         retry: Optional retry configuration for replay-safe discovery and
@@ -1057,7 +1096,7 @@ def http_introspect(
     ipc_validation: IpcValidation = IpcValidation.FULL,
     retry: HttpRetryConfig | None = None,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
-    external_location: ExternalLocationConfig | None = None,
+    external_location: AnyExternalConfig | None = None,
     timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
 ) -> ServiceDescription:
     """Describe a server's primary protocol over HTTP.
@@ -1187,7 +1226,7 @@ def _init_http_stream_session(
     reader: ValidatedReader,
     on_log: Callable[[Message], None] | None = None,
     *,
-    external_config: ExternalLocationConfig | None = None,
+    external_config: AnyExternalConfig | None = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
     header: object | None = None,
     retry_config: HttpRetryConfig | None = None,
@@ -1305,7 +1344,7 @@ class _HttpProxy:
         url_prefix: str,
         on_log: Callable[[Message], None] | None = None,
         *,
-        external_config: ExternalLocationConfig | None = None,
+        external_config: AnyExternalConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
         retry_config: HttpRetryConfig | None = None,
         compression_level: int | None = None,

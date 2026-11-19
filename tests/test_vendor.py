@@ -91,7 +91,7 @@ class TestVendorStorage:
         api = [h for m, p, h in fake.vendor.requests if p.startswith("/v1/")]
         assert all("HTTP_AUTHORIZATION" in h for h in api)
 
-    def test_signed_put_headers_are_exactly_the_grant(self) -> None:
+    def test_signed_put_headers_are_exactly_the_grant(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The PUT to storage carries the grant's headers and no Content-Type or Authorization."""
         seen: dict[str, httpx2.Headers] = {}
 
@@ -112,7 +112,9 @@ class TestVendorStorage:
                 },
             )
 
-        with httpx2.Client(transport=httpx2.MockTransport(handler)) as session:
+        transport = httpx2.MockTransport(handler)
+        monkeypatch.setattr("vgi_rpc.vendor._new_storage_client", lambda timeout: httpx2.Client(transport=transport))
+        with httpx2.Client(transport=transport) as session:
             VendorStorage("https://vendor.example", _TOKEN, session=session).upload(
                 b"hi", _SCHEMA, content_encoding="zstd"
             )
@@ -232,20 +234,16 @@ class TestVendorStorage:
     def test_token_and_signatures_never_logged(
         self, fake: FakeVendorServer, storage: VendorStorage, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """vgi_rpc's debug logs and errors carry neither the token nor signed query strings.
-
-        (httpx2's own ``httpx2`` logger records full request URLs at INFO; that
-        is outside vgi_rpc's control and is excluded here.)
-        """
-        caplog.set_level(logging.DEBUG, logger="vgi_rpc")
+        """No log record (vgi_rpc's or httpx2's) and no error carries the token or a signed query."""
+        caplog.set_level(logging.DEBUG)
         fake.vendor.fail_next("/r2/put/", status=503, count=3)
         with pytest.raises(VendorError) as exc_info:
             storage.upload(b"secret payload", _SCHEMA)
         fake.vendor.fail_next("/v1/blobs/put", status=503)
         storage.upload(b"ok", _SCHEMA)
-        ours = [r.getMessage() for r in caplog.records if r.name.startswith("vgi_rpc")]
-        assert ours
-        text = "\n".join(ours) + str(exc_info.value)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(r.name == "httpx2" for r in caplog.records)  # httpx2 did log the requests...
+        text = "\n".join(messages) + str(exc_info.value)  # ...with their URLs redacted
         assert _TOKEN not in text
         assert "X-Amz-Signature" not in text
         assert "/r2/put/" in text  # redacted URL path is still there for diagnosis

@@ -319,7 +319,7 @@ class TestExternalInputRoutes:
             http_connect(
                 ConformanceService,  # type: ignore[type-abstract]
                 f"http://127.0.0.1:{conformance_http_with_storage_port}",
-                external_location=config,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+                external_location=config,
                 compression_level=None,
             ) as proxy,
             proxy.exchange_scale(factor=2.0) as session,

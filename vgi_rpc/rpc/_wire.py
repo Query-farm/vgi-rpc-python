@@ -18,6 +18,7 @@ from pyarrow import ipc
 
 from vgi_rpc.errors import decode_error_details
 from vgi_rpc.external import (
+    AnyExternalConfig,
     ExternalLocationConfig,
     ExternalRef,
     maybe_externalize_batch,
@@ -1047,7 +1048,7 @@ def _read_header_batch(
     source: IOBase,
     ipc_validation: IpcValidation,
     on_log: Callable[[Message], None] | None = None,
-    external_config: ExternalLocationConfig | None = None,
+    external_config: AnyExternalConfig | None = None,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Read a stream header IPC stream and return the raw batch and metadata.
 
@@ -1094,7 +1095,7 @@ def _read_stream_header(
     header_type: type[ArrowSerializableDataclass],
     ipc_validation: IpcValidation,
     on_log: Callable[[Message], None] | None = None,
-    external_config: ExternalLocationConfig | None = None,
+    external_config: AnyExternalConfig | None = None,
 ) -> ArrowSerializableDataclass:
     """Read a stream header IPC stream and deserialize it.
 
@@ -1125,7 +1126,7 @@ def _read_raw_stream_header(
     source: IOBase,
     ipc_validation: IpcValidation,
     on_log: Callable[[Message], None] | None = None,
-    external_config: ExternalLocationConfig | None = None,
+    external_config: AnyExternalConfig | None = None,
 ) -> pa.RecordBatch:
     """Read a stream header IPC stream and return the raw batch.
 
@@ -1192,7 +1193,7 @@ def _send_request(
 def _read_batch_with_log_check(
     reader: ValidatedReader,
     on_log: Callable[[Message], None] | None = None,
-    external_config: ExternalLocationConfig | None = None,
+    external_config: AnyExternalConfig | None = None,
     *,
     shm: ShmSegment | None = None,
 ) -> AnnotatedBatch:
@@ -1229,7 +1230,7 @@ def _read_unary_response(
     reader: ValidatedReader,
     info: RpcMethodInfo,
     on_log: Callable[[Message], None] | None,
-    external_config: ExternalLocationConfig | None = None,
+    external_config: AnyExternalConfig | None = None,
     *,
     shm: ShmSegment | None = None,
 ) -> object:

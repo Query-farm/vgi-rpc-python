@@ -617,7 +617,7 @@ def test_external_worker_mode_covers_response_pointer_and_client_upload_flow() -
             ClientConformanceService,
             base_url,
             prefix="/vgi",
-            external_location=external,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+            external_location=external,
         ) as proxy:
             assert proxy.large_response(size=len(expected)) == expected
             assert proxy.echo_bytes(value=expected) == expected

@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING, Literal, Self
 from urllib.parse import urlsplit
 
 from vgi_rpc.external import ClientExternalConfig, Compression, ServerExternalConfig, UploadUrl
-from vgi_rpc.external_fetch import FetchConfig, fetch_url, redact_url
+from vgi_rpc.external_fetch import FetchConfig, fetch_url, redact_httpx_logging, redact_url
 
 if TYPE_CHECKING:
     import httpx2
@@ -495,6 +495,8 @@ class _VendorApi:
         self._backoff = backoff_seconds
         self._own_session = session is None
         self._session = session
+        self._storage: httpx2.Client | None = None
+        redact_httpx_logging()
 
     # -- transport --------------------------------------------------------
 
@@ -507,10 +509,21 @@ class _VendorApi:
             self._session = httpx2.Client(timeout=self._timeout, follow_redirects=False)
         return self._session
 
+    def _storage_client(self) -> httpx2.Client:
+        # Storage hosts get their own bare client, never the caller's
+        # session: that may carry default headers, cookies, an auth flow or
+        # event hooks, all of which would reach the storage host.
+        if self._storage is None:
+            self._storage = _new_storage_client(self._timeout)
+        return self._storage
+
     def close(self) -> None:
         if self._own_session and self._session is not None:
             self._session.close()
             self._session = None
+        if self._storage is not None:
+            self._storage.close()
+            self._storage = None
 
     def _send(
         self,
@@ -520,11 +533,17 @@ class _VendorApi:
         *,
         headers: Mapping[str, str],
         content: bytes | None = None,
+        storage: bool = False,
     ) -> httpx2.Response:
-        """Send one request, retrying transport errors, 429 and 5xx with backoff."""
+        """Send one request, retrying transport errors, 429 and 5xx with backoff.
+
+        The request is built standalone and sent with ``auth=None``, so it
+        carries exactly *headers*: no client default headers, cookies or auth
+        flow.  ``storage=True`` sends it on the bare storage client.
+        """
         import httpx2
 
-        client = self._client()
+        client = self._storage_client() if storage else self._client()
         last_error = ""
         status: int | None = None
         for attempt in range(self._max_attempts):
@@ -532,7 +551,8 @@ class _VendorApi:
                 delay = min(self._backoff * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
                 time.sleep(delay * (0.5 + random.random() / 2))
             try:
-                resp = client.request(method, url, headers=dict(headers), content=content)
+                request = httpx2.Request(method, url, headers=dict(headers), content=content)
+                resp = client.send(request, auth=None, follow_redirects=False)
             except httpx2.TransportError as exc:
                 # Never str(exc): httpx messages can embed the full URL.
                 status = None
@@ -696,7 +716,7 @@ class _VendorApi:
             raise VendorError(f"Blob vendor granted Content-Length {declared} for a {len(data)}-byte object")
         if content_encoding is not None and "content-encoding" not in lower:
             headers["Content-Encoding"] = content_encoding
-        resp = self._send("PUT", grant.upload_url, "upload", headers=headers, content=data)
+        resp = self._send("PUT", grant.upload_url, "upload", headers=headers, content=data, storage=True)
         if not 200 <= resp.status_code < 300:
             code = _s3_error_code(resp.content)
             raise VendorError(
@@ -705,6 +725,13 @@ class _VendorApi:
                 resp.status_code,
                 code,
             )
+
+
+def _new_storage_client(timeout: float) -> httpx2.Client:
+    """Build the bare client used for storage-host (signed URL) requests."""
+    import httpx2
+
+    return httpx2.Client(timeout=timeout, follow_redirects=False)
 
 
 def _error_detail(resp: httpx2.Response) -> tuple[str | None, str]:
@@ -848,8 +875,10 @@ class VendorStorage(_VendorClientBase):
             purpose: Object purpose; ``"rpc"`` (default) gets a download URL
                 and the short lifecycle.
             timeout: Per-request timeout in seconds.
-            session: Optional ``httpx2.Client``.  It must not carry default
-                auth headers: the same client PUTs to storage.
+            session: Optional ``httpx2.Client`` for vendor API requests
+                (its transport only: requests carry exactly the vendor
+                headers, never its default headers, cookies or auth).
+                Storage-host requests always use a separate bare client.
             max_attempts: Attempts per request (transport errors, 429 and
                 5xx are retried with exponential backoff).
             backoff_seconds: Base backoff between attempts.
@@ -982,7 +1011,8 @@ class VendorBlobClient(_VendorClientBase):
             token: Bearer token.
             purpose: Object purpose (default ``"fs"``).
             timeout: Per-request timeout in seconds.
-            session: Optional ``httpx2.Client`` without default auth headers.
+            session: Optional ``httpx2.Client`` for vendor API requests
+                (transport only; storage requests use a separate bare client).
             max_attempts: Attempts per vendor request.
             backoff_seconds: Base backoff between attempts.
             info_ttl_seconds: How long the ``/v1/info`` host pin is cached.
