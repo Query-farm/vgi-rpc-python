@@ -202,6 +202,10 @@ def _prepare_request_body(
     return _compress_with_encoding(encoding, content, level=level)
 
 
+#: Content-Type for PUTs to server-vended upload URLs (see _externalize_via_upload_url).
+_UPLOAD_CONTENT_TYPE = "application/octet-stream"
+
+
 def _externalize_via_upload_url(
     body: bytes,
     *,
@@ -237,7 +241,10 @@ def _externalize_via_upload_url(
     if url_validator is not None:
         url_validator(upload_url)
         url_validator(download_url)
-    put_resp = client.put(upload_url, content=body, headers={"Content-Type": _ARROW_CONTENT_TYPE})
+    # application/octet-stream, not the Arrow media type: a pre-signed URL that
+    # signs the content type (GCSStorage.generate_upload_url signs octet-stream)
+    # rejects any other value with a signature mismatch.
+    put_resp = client.put(upload_url, content=body, headers={"Content-Type": _UPLOAD_CONTENT_TYPE})
     if not (200 <= put_resp.status_code < 300):
         raise RpcError(
             "ExternalUploadFailed",

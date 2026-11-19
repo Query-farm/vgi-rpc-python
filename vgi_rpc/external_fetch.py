@@ -638,6 +638,10 @@ def _content_length_from_content_range(content_range: str) -> int | None:
         return None
 
 
+#: Range-probe statuses that mean "fall back to a plain GET" rather than fail.
+_PROBE_FALLBACK_STATUSES = frozenset({403, 405, 416, 501})
+
+
 async def _range_probe(
     url: str,
     client: aiohttp.ClientSession,
@@ -668,14 +672,16 @@ async def _range_probe(
                 return None, "", content_encoding
 
             # Some signed URLs are method/header constrained and may reject
-            # the probe even though a normal GET is valid.
-            if resp.status in (403, 405, 501):
+            # the probe even though a normal GET is valid.  416: S3 and R2
+            # answer any Range on a zero-byte object with InvalidRange, while
+            # a plain GET returns its (empty) body.
+            if resp.status in _PROBE_FALLBACK_STATUSES:
                 return None, "", ""
 
             _raise_for_status_redacted(resp, url)
             return None, "", content_encoding  # pragma: no cover
     except _aiohttp.ClientResponseError as exc:
-        if exc.status in (403, 405, 501):
+        if exc.status in _PROBE_FALLBACK_STATUSES:
             return None, "", ""
         raise
 
