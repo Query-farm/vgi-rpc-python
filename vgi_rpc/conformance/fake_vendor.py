@@ -37,8 +37,27 @@ URLs support ``HEAD`` and single ``Range`` requests.
 
 Test hooks on :class:`FakeVendor`: :meth:`~FakeVendor.fail_next` (inject 5xx),
 :meth:`~FakeVendor.corrupt` (tamper with a stored object),
-:attr:`~FakeVendor.requests` (method, path, header names) and
-:meth:`~FakeVendor.stats`.
+:meth:`~FakeVendor.set_download_fault` (corrupt or lose downloads by purpose),
+:attr:`~FakeVendor.requests` (method, path, header names),
+:meth:`~FakeVendor.stats` and :meth:`~FakeVendor.test_stats`.
+
+Test routes (``--test-routes`` / ``test_routes=True``), unauthenticated, for
+test lanes in any language (e.g. read from SQL with ``read_json_auto``):
+
+* ``GET /__stats__`` returns :meth:`~FakeVendor.test_stats` as JSON.
+* ``GET /__admin__/fault?purpose=fs|rpc&action=corrupt|missing&count=N``
+  arms a download fault (see :meth:`~FakeVendor.set_download_fault`); it
+  *replaces* any fault armed for that purpose, so repeating the request is
+  harmless.
+* ``GET /__admin__/reset`` clears every fault (armed, applied and
+  :meth:`~FakeVendor.fail_next`).
+
+Only ``GET`` has side effects; ``HEAD`` answers ``200`` with the same
+headers and no effect (HTTP clients such as DuckDB's httpfs may ``HEAD``
+first). The JSON bodies are padded with spaces to a fixed
+:data:`TEST_ROUTE_BODY_BYTES` so a ``HEAD``'s ``Content-Length`` stays true
+for the following ``GET``, ranged reads work, and responses carry
+``Cache-Control: no-store``.
 
 Usage::
 
@@ -72,10 +91,31 @@ from vgi_rpc.conformance.fake_storage import (
     _ThreadingWSGIServer,
 )
 
-__all__ = ["FakeVendor", "FakeVendorServer", "serve_fake_vendor"]
+__all__ = ["STATS_KEYS", "TEST_ROUTE_BODY_BYTES", "FakeVendor", "FakeVendorServer", "serve_fake_vendor"]
 
 #: Scope fields the staging Worker accepts.
 _SCOPE_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+#: Keys of :meth:`FakeVendor.test_stats` (and ``GET /__stats__``), in order.
+STATS_KEYS = (
+    "puts",
+    "gets",
+    "deletes",
+    "delete_scopes",
+    "upload_urls",
+    "storage_puts",
+    "storage_gets",
+    "objects",
+    "bytes",
+    "bytes_uploaded",
+    "bytes_downloaded",
+)
+
+#: Every test-route JSON body is padded with spaces to exactly this many bytes.
+TEST_ROUTE_BODY_BYTES = 1024
+
+_FAULT_ACTIONS = ("corrupt", "missing")
+_PURPOSES = ("rpc", "fs")
 
 
 @dataclass
@@ -111,6 +151,8 @@ class FakeVendor:
         max_object_bytes: Largest declarable object (413 ``object_too_large``).
         quota_bytes: Per-tenant bytes charged at ``put`` (413 ``quota_exceeded``).
         base_url: Set by :func:`serve_fake_vendor` once bound.
+        test_routes: Serve the unauthenticated ``/__stats__`` and
+            ``/__admin__/*`` routes (see the module docstring).
         requests: ``(method, path, header names)`` for every request.
 
     """
@@ -122,12 +164,17 @@ class FakeVendor:
     max_object_bytes: int = 4 * 1024**3
     quota_bytes: int = 10 * 1024**3
     base_url: str = ""
+    test_routes: bool = False
     requests: list[tuple[str, str, frozenset[str]]] = field(default_factory=list)
     _objects: dict[str, _Object] = field(default_factory=dict)
     _grants: dict[str, _Grant] = field(default_factory=dict)
     _faults: list[list[object]] = field(default_factory=list)
     _hits: dict[str, int] = field(default_factory=dict)
     _used: dict[str, int] = field(default_factory=dict)
+    _armed: dict[str, tuple[str, int]] = field(default_factory=dict)
+    _faulted: dict[str, str] = field(default_factory=dict)
+    _bytes_uploaded: int = 0
+    _bytes_downloaded: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # -- test hooks -------------------------------------------------------
@@ -154,6 +201,51 @@ class FakeVendor:
         """
         with self._lock:
             self._objects[object_id].data = data
+
+    def set_download_fault(self, purpose: str, action: str, count: int) -> None:
+        """Fault the next *count* objects of *purpose* that are downloaded.
+
+        The first signed-URL ``GET`` (ranged or not) of an object with that
+        purpose, while the fault has objects left, takes one and marks the
+        object; from then on *every* ``GET`` of it is faulted, until
+        :meth:`reset_faults`. So a client that probes with a ranged ``GET``,
+        fetches in ranges or retries with a fresh URL sees one consistent
+        fault, as with an object damaged or expired at rest:
+
+        * ``corrupt`` serves the object with every byte XORed with ``0xFF``
+          (same length, different content);
+        * ``missing`` answers ``404 NoSuchKey``.
+
+        ``HEAD`` is never faulted. Arming *replaces* any fault already armed
+        for *purpose*; objects already marked stay marked.
+
+        Args:
+            purpose: ``"fs"`` or ``"rpc"``.
+            action: ``"corrupt"`` or ``"missing"``.
+            count: How many objects to fault (``0`` disarms).
+
+        Raises:
+            ValueError: On an unknown purpose or action, or a negative count.
+
+        """
+        if purpose not in _PURPOSES:
+            raise ValueError(f"purpose must be one of {_PURPOSES}, got {purpose!r}")
+        if action not in _FAULT_ACTIONS:
+            raise ValueError(f"action must be one of {_FAULT_ACTIONS}, got {action!r}")
+        if count < 0:
+            raise ValueError(f"count must be >= 0, got {count}")
+        with self._lock:
+            if count:
+                self._armed[purpose] = (action, count)
+            else:
+                self._armed.pop(purpose, None)
+
+    def reset_faults(self) -> None:
+        """Clear armed and applied download faults and :meth:`fail_next` faults."""
+        with self._lock:
+            self._armed.clear()
+            self._faulted.clear()
+            self._faults.clear()
 
     def object_data(self, object_id: str) -> bytes | None:
         """Return an object's stored bytes, or ``None`` if never uploaded or deleted.
@@ -188,6 +280,41 @@ class FakeVendor:
         """
         with self._lock:
             return {"object_count": len(self._objects), **self._hits}
+
+    def test_stats(self) -> dict[str, int]:
+        """Return the counters served at ``GET /__stats__``.
+
+        Keys (:data:`STATS_KEYS`): ``puts`` / ``gets`` / ``deletes`` /
+        ``delete_scopes`` / ``upload_urls`` (authenticated calls to
+        ``/v1/blobs/put``, ``/v1/blobs/get``, ``/v1/blobs/delete``,
+        ``/v1/blobs/delete_scope`` and ``/v1/upload_urls``, either purpose),
+        ``storage_puts`` / ``storage_gets`` (signed-URL ``PUT`` and
+        ``GET``/``HEAD`` requests with a valid signature), ``objects`` and
+        ``bytes`` (live uploaded objects and their total size) and
+        ``bytes_uploaded`` / ``bytes_downloaded`` (cumulative bytes accepted
+        by signed ``PUT`` and served by signed ``GET``). All but ``objects``
+        and ``bytes`` only grow, so tests compare before/after values.
+
+        Returns:
+            The counters.
+
+        """
+        with self._lock:
+            live = [o.data for o in self._objects.values() if o.data is not None]
+            hits = self._hits
+            return {
+                "puts": hits.get("/v1/blobs/put", 0),
+                "gets": hits.get("/v1/blobs/get", 0),
+                "deletes": hits.get("/v1/blobs/delete", 0),
+                "delete_scopes": hits.get("/v1/blobs/delete_scope", 0),
+                "upload_urls": hits.get("/v1/upload_urls", 0),
+                "storage_puts": hits.get("r2_put", 0),
+                "storage_gets": hits.get("r2_get", 0),
+                "objects": len(live),
+                "bytes": sum(len(d) for d in live),
+                "bytes_uploaded": self._bytes_uploaded,
+                "bytes_downloaded": self._bytes_downloaded,
+            }
 
     @property
     def host(self) -> str:
@@ -233,6 +360,8 @@ class FakeVendor:
             # Always drain the body first; see fake_storage.make_app.
             body = _read_body(environ)
             header_names = frozenset(k for k in environ if k.startswith("HTTP_") or k in ("CONTENT_TYPE",))
+            if self.test_routes and path.startswith(("/__stats__", "/__admin__/")):
+                return self._test_route(environ, start_response, method, path)
             with self._lock:
                 self.requests.append((method, path, header_names))
                 fault = self._take_fault(path)
@@ -245,6 +374,61 @@ class FakeVendor:
             return _error(start_response, 404, "not_found", "no such route")
 
         return application
+
+    # -- test routes ------------------------------------------------------
+
+    def _test_route(
+        self, environ: WSGIEnvironment, start_response: StartResponse, method: str, path: str
+    ) -> list[bytes]:
+        if method not in ("GET", "HEAD"):
+            return _error(start_response, 405, "bad_request", "method not allowed")
+        effect = method == "GET"
+        body: dict[str, object]
+        if path == "/__stats__":
+            body = dict(self.test_stats())
+        elif path == "/__admin__/reset":
+            if effect:
+                self.reset_faults()
+            body = {"ok": True}
+        elif path == "/__admin__/fault":
+            query = parse_qs(str(environ.get("QUERY_STRING", "")))
+            purpose = query.get("purpose", [""])[0]
+            action = query.get("action", [""])[0]
+            raw_count = query.get("count", ["1"])[0]
+            try:
+                count = int(raw_count)
+                if purpose not in _PURPOSES or action not in _FAULT_ACTIONS or count < 0:
+                    raise ValueError
+            except ValueError:
+                return _error(
+                    start_response, 400, "bad_request", "need purpose=fs|rpc, action=corrupt|missing, count>=0"
+                )
+            if effect:
+                self.set_download_fault(purpose, action, count)
+            body = {"ok": True, "purpose": purpose, "action": action, "count": count}
+        else:
+            return _error(start_response, 404, "not_found", "no such route")
+        payload = json.dumps(body).encode()
+        payload += b" " * max(0, TEST_ROUTE_BODY_BYTES - 1 - len(payload)) + b"\n"
+        return _serve_object(
+            environ, start_response, method, payload, None, content_type="application/json", no_store=True
+        )
+
+    def _download_fault(self, object_id: str, obj: _Object) -> str | None:
+        """Return the fault for a signed ``GET`` of *object_id*, marking it if one is armed."""
+        applied = self._faulted.get(object_id)
+        if applied is not None:
+            return applied
+        armed = self._armed.get(obj.purpose)
+        if armed is None or obj.data is None:
+            return None
+        action, remaining = armed
+        if remaining <= 1:
+            del self._armed[obj.purpose]
+        else:
+            self._armed[obj.purpose] = (action, remaining - 1)
+        self._faulted[object_id] = action
+        return action
 
     # -- vendor API -------------------------------------------------------
 
@@ -456,7 +640,16 @@ class FakeVendor:
         self._hit("r2_get")
         if obj is None or obj.data is None:
             return _xml(start_response, 404, "NoSuchKey")
-        return _serve_object(environ, start_response, method, obj.data, obj.stored_encoding)
+        data = obj.data
+        if method == "GET":
+            fault = self._download_fault(grant.object_id, obj)
+            if fault == "missing":
+                return _xml(start_response, 404, "NoSuchKey")
+            if fault == "corrupt":
+                data = bytes(b ^ 0xFF for b in data)
+        chunks = _serve_object(environ, start_response, method, data, obj.stored_encoding)
+        self._bytes_downloaded += sum(len(c) for c in chunks)
+        return chunks
 
     def _store_put(
         self, environ: WSGIEnvironment, start_response: StartResponse, obj: _Object, body: bytes
@@ -476,14 +669,24 @@ class FakeVendor:
                 return _xml(start_response, 403, "SignatureDoesNotMatch")
         obj.data = body
         obj.stored_encoding = str(encoding) if encoding else None
+        self._bytes_uploaded += len(body)
         start_response("200 OK", [("Content-Length", "0"), ("ETag", '"fake"')])
         return [b""]
 
 
 def _serve_object(
-    environ: WSGIEnvironment, start_response: StartResponse, method: str, data: bytes, encoding: str | None
+    environ: WSGIEnvironment,
+    start_response: StartResponse,
+    method: str,
+    data: bytes,
+    encoding: str | None,
+    *,
+    content_type: str = "application/octet-stream",
+    no_store: bool = False,
 ) -> list[bytes]:
-    headers = [("Content-Type", "application/octet-stream"), ("Accept-Ranges", "bytes")]
+    headers = [("Content-Type", content_type), ("Accept-Ranges", "bytes")]
+    if no_store:
+        headers.append(("Cache-Control", "no-store"))
     if encoding:
         headers.append(("Content-Encoding", encoding))
     range_header = str(environ.get("HTTP_RANGE", ""))
@@ -584,7 +787,12 @@ class FakeVendorServer:
 
 
 def serve_fake_vendor(
-    tokens: Mapping[str, str] | None = None, *, host: str = "127.0.0.1", port: int = 0, region: str = "auto-enam"
+    tokens: Mapping[str, str] | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    region: str = "auto-enam",
+    test_routes: bool = False,
 ) -> FakeVendorServer:
     """Start a fake vendor on a background thread.
 
@@ -593,12 +801,13 @@ def serve_fake_vendor(
         host: Bind host.
         port: Bind port (``0`` picks a free one).
         region: Region reported by ``/v1/info``.
+        test_routes: Serve ``/__stats__`` and ``/__admin__/*`` (module docstring).
 
     Returns:
         The running :class:`FakeVendorServer`.
 
     """
-    vendor = FakeVendor(tokens=dict(tokens or {"test-token": "tenant-a"}), region=region)
+    vendor = FakeVendor(tokens=dict(tokens or {"test-token": "tenant-a"}), region=region, test_routes=test_routes)
     placeholder = cast("WSGIApplication", lambda environ, start_response: [b""])
     server = make_server(host, port, placeholder, server_class=_ThreadingWSGIServer, handler_class=_SilentHandler)
     vendor.base_url = f"http://{host}:{server.server_address[1]}"
@@ -607,16 +816,36 @@ def serve_fake_vendor(
     return FakeVendorServer(vendor, server)
 
 
-def main() -> None:
-    """Run the fake vendor standalone; prints ``PORT:<n>``."""
-    parser = argparse.ArgumentParser(prog="vgi-rpc-fake-vendor")
+def main(argv: list[str] | None = None) -> None:
+    """Run the fake vendor standalone (the ``vgi-rpc-fake-vendor`` command).
+
+    Prints ``PORT:<n>`` and then ``URL:<base url>`` on stdout and serves
+    until killed. ``--token TOKEN[=TENANT]`` (repeatable; tenant defaults to
+    ``tenant-a``, token to ``test-token``), ``--test-routes`` serves
+    ``/__stats__`` and ``/__admin__/*``.
+
+    Args:
+        argv: Arguments (default ``sys.argv[1:]``).
+
+    """
+    parser = argparse.ArgumentParser(prog="vgi-rpc-fake-vendor", description="In-memory fake blob vendor for tests")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--token", action="append", default=[], help="TOKEN=TENANT (repeatable)")
-    args = parser.parse_args()
-    tokens = dict(t.split("=", 1) for t in args.token) if args.token else None
-    fake = serve_fake_vendor(tokens, host=args.host, port=args.port)
+    parser.add_argument("--token", action="append", default=[], help="TOKEN[=TENANT] (repeatable)")
+    parser.add_argument("--region", default="auto-enam", help="Region reported by /v1/info")
+    parser.add_argument(
+        "--test-routes", action="store_true", help="Serve unauthenticated GET /__stats__ and /__admin__/{fault,reset}"
+    )
+    args = parser.parse_args(argv)
+    tokens: dict[str, str] | None = None
+    if args.token:
+        tokens = {}
+        for entry in args.token:
+            token, _, tenant = entry.partition("=")
+            tokens[token] = tenant or "tenant-a"
+    fake = serve_fake_vendor(tokens, host=args.host, port=args.port, region=args.region, test_routes=args.test_routes)
     print(f"PORT:{fake.url.rsplit(':', 1)[1]}", flush=True)
+    print(f"URL:{fake.url}", flush=True)
     try:
         threading.Event().wait()
     except KeyboardInterrupt:

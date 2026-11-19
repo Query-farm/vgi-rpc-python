@@ -389,6 +389,29 @@ with serve_fake_vendor({"tok": "tenant-a"}) as fake:
     fake.vendor.fail_next("/v1/blobs/put", status=503)
 ```
 
+The same fake runs standalone for test lanes in any language. It prints
+`PORT:<n>` and then `URL:<base>`, and needs only vgi-rpc's base dependencies:
+
+```bash
+uvx --from vgi-rpc vgi-rpc-fake-vendor --test-routes --token test-token=tenant-a
+```
+
+`--test-routes` adds unauthenticated routes. Each answers `GET` with a JSON
+body padded to 1,024 bytes, and a `HEAD` has no side effects:
+
+- `GET /__stats__`: call and byte counters (`puts`, `gets`, `deletes`,
+  `delete_scopes`, `upload_urls`, `storage_puts`, `storage_gets`, `objects`,
+  `bytes`, `bytes_uploaded`, `bytes_downloaded`).
+- `GET /__admin__/fault?purpose=fs|rpc&action=corrupt|missing&count=N`: the
+  next `N` objects of that purpose that are downloaded are damaged for every
+  later `GET`. `corrupt` keeps the length and changes every byte; `missing`
+  answers 404.
+- `GET /__admin__/reset`: clears all faults.
+
+In-process, the same faults are available as
+`fake.vendor.set_download_fault(...)` and `reset_faults()`, and the counters as
+`test_stats()`.
+
 ## URL Validation
 
 By default, external location URLs are validated with `https_only_validator`, which rejects non-HTTPS URLs. This prevents pointer batches from being used to probe internal networks. You can provide a custom validator via `ExternalLocationConfig.url_validator`; for the blob vendor use the host-pinned validators described in [Host pinning](#host-pinning).

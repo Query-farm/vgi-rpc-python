@@ -125,7 +125,9 @@ class VendorError(RuntimeError):
         code: The vendor's machine-readable ``error`` code (e.g.
             ``"not_found"``, ``"not_uploaded"``, ``"quota_exceeded"``,
             ``"idempotency_conflict"``), or the storage's XML error code
-            (e.g. ``"BadDigest"``), when there was one.
+            (e.g. ``"BadDigest"``), when there was one.  Checks made by
+            :meth:`VendorBlobClient.get_bytes` itself use ``"size_mismatch"``
+            and ``"sha256_mismatch"``.
 
     """
 
@@ -1111,7 +1113,10 @@ class VendorBlobClient(_VendorClientBase):
         if location.content_encoding not in (None, "identity"):
             raise VendorError(f"Blob {ref.object_id} has unsupported content_encoding {location.content_encoding!r}")
         if location.size != ref.size:
-            raise VendorError(f"Blob {ref.object_id} size mismatch: vendor reports {location.size}, ref has {ref.size}")
+            raise VendorError(
+                f"Blob {ref.object_id} size mismatch: vendor reports {location.size}, ref has {ref.size}",
+                code="size_mismatch",
+            )
         try:
             data = fetch_url(location.download_url, self._fetch, url_validator=self._validator)
         except ValueError as exc:
@@ -1127,10 +1132,14 @@ class VendorBlobClient(_VendorClientBase):
                 status if isinstance(status, int) else None,
             ) from None
         if len(data) != ref.size:
-            raise VendorError(f"Blob {ref.object_id} size mismatch: expected {ref.size}, got {len(data)}")
+            raise VendorError(
+                f"Blob {ref.object_id} size mismatch: expected {ref.size}, got {len(data)}", code="size_mismatch"
+            )
         actual = hashlib.sha256(data).hexdigest()
         if actual != ref.sha256.lower():
-            raise VendorError(f"Blob {ref.object_id} SHA-256 mismatch: expected {ref.sha256}, got {actual}")
+            raise VendorError(
+                f"Blob {ref.object_id} SHA-256 mismatch: expected {ref.sha256}, got {actual}", code="sha256_mismatch"
+            )
         return data
 
     def delete(self, refs: Iterable[BlobRef | str]) -> int:

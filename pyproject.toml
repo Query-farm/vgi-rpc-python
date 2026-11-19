@@ -67,6 +67,7 @@ iroh = ["iroh>=1.1,<2", "httpx2[zstd]>=2.12.0"]
 qf = "vgi_rpc.qf:app"
 vgi-rpc = "vgi_rpc.cli:app"
 vgi-rpc-conformance = "vgi_rpc.conformance._cli:main"
+vgi-rpc-fake-vendor = "vgi_rpc.conformance.fake_vendor:main"
 vgi-rpc-test = "vgi_rpc.conformance._test_cli:main"
 vgi-rpc-test-hosted = "vgi_rpc.conformance.hosted_protocols:main"
 
