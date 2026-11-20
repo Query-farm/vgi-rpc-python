@@ -53,6 +53,7 @@ from vgi_rpc.http._client import (
     parse_use_id_token_as_bearer,
     parse_www_authenticate_params,
     request_upload_urls,
+    storage_put,
     upload_put_headers,
 )
 from vgi_rpc.http._common import (
@@ -248,6 +249,7 @@ __all__ = [
     "serve_http",
     "request_upload_urls",
     "parse_upload_url_support",
+    "storage_put",
     "upload_put_headers",
     "XfccElement",
     "mtls_authenticate_xfcc",
