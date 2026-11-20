@@ -163,6 +163,10 @@ module = "msgpack.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "botocore.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "waitress.*"
 ignore_missing_imports = true
 

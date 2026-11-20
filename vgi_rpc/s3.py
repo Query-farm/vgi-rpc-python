@@ -21,7 +21,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider
+from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider, sha256_b64_from_hex
 
 _logger = logging.getLogger(__name__)
 
@@ -72,11 +72,17 @@ class S3Storage:
         with pool.lock:
             if pool.client is None:
                 import boto3
+                from botocore.config import Config
 
+                # SigV4 explicitly: botocore may presign with legacy SigV2
+                # (e.g. in us-east-1), which signs neither Content-Length nor
+                # x-amz-checksum-sha256 as headers, so a sized upload URL
+                # would not bind its body.
                 pool.client = boto3.client(
                     "s3",
                     region_name=self.region_name,
                     endpoint_url=self.endpoint_url,
+                    config=Config(signature_version="s3v4"),
                 )
             return pool.client
 
@@ -136,22 +142,26 @@ class S3Storage:
         )
         return url
 
-    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
-        """Generate pre-signed PUT and GET URLs for client-side upload.
+    def generate_upload_url(self, size: int, sha256_hex: str) -> UploadUrl:
+        """Generate pre-signed PUT and GET URLs for one sized client upload.
 
-        The created S3 object is not automatically deleted.  Configure
-        S3 Lifecycle Policies on the bucket to expire objects after
-        a suitable retention period.
+        The PUT URL signs ``Content-Length`` and ``x-amz-checksum-sha256``
+        (SigV4), so S3 rejects any body that is not exactly *size* bytes
+        hashing to *sha256_hex* (``BadDigest``).  The created S3 object is
+        not automatically deleted.  Configure S3 Lifecycle Policies on the
+        bucket to expire objects after a suitable retention period.
 
         Args:
-            schema: The Arrow schema of the data to be uploaded
-                (unused but available for metadata hints).
+            size: Exact byte length the client will PUT.
+            sha256_hex: SHA-256 of those bytes, 64 lowercase hex.
 
         Returns:
             An ``UploadUrl`` with PUT and GET pre-signed URLs for the
-            same S3 object.
+            same S3 object and the ``x-amz-checksum-sha256`` header the
+            PUT must carry.
 
         """
+        checksum = sha256_b64_from_hex(sha256_hex)
         client = self._get_client()
         key = f"{self.prefix}{uuid.uuid4().hex}.arrow"
         params = {"Bucket": self.bucket, "Key": key}
@@ -159,7 +169,7 @@ class S3Storage:
 
         put_url: str = client.generate_presigned_url(
             "put_object",
-            Params=params,
+            Params={**params, "ContentLength": size, "ChecksumSHA256": checksum},
             ExpiresIn=self.presign_expiry_seconds,
         )
         get_url: str = client.generate_presigned_url(
@@ -169,12 +179,18 @@ class S3Storage:
         )
 
         _logger.debug(
-            "S3 upload URL generated: bucket=%s key=%s",
+            "S3 upload URL generated: bucket=%s key=%s size=%d",
             self.bucket,
             key,
-            extra={"bucket": self.bucket, "key": key},
+            size,
+            extra={"bucket": self.bucket, "key": key, "size_bytes": size},
         )
-        return UploadUrl(upload_url=put_url, download_url=get_url, expires_at=expires_at)
+        return UploadUrl(
+            upload_url=put_url,
+            download_url=get_url,
+            expires_at=expires_at,
+            headers={"x-amz-checksum-sha256": checksum},
+        )
 
 
 # Runtime check that S3Storage satisfies ExternalStorage and UploadUrlProvider protocols

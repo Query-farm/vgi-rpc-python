@@ -1945,40 +1945,115 @@ class TestUploadUrlEndpoint:
         assert UPLOAD_URL_METHOD == _UPLOAD_URL_METHOD == "__upload_url__"
         assert MAX_UPLOAD_URL_COUNT == _MAX_UPLOAD_URL_COUNT
         assert UPLOAD_URL_PARAMS_SCHEMA.equals(_UPLOAD_URL_PARAMS_SCHEMA)
-        assert UPLOAD_URL_PARAMS_SCHEMA.names == ["count"]
+        assert UPLOAD_URL_PARAMS_SCHEMA.names == ["uploads"]
+        entry = UPLOAD_URL_PARAMS_SCHEMA.field("uploads").type.value_type
+        assert [(f.name, f.type, f.nullable) for f in entry] == [
+            ("size", pa.int64(), False),
+            ("sha256", pa.utf8(), False),
+        ]
         assert UPLOAD_URL_RESPONSE_SCHEMA.equals(_UPLOAD_URL_SCHEMA)
-        assert UPLOAD_URL_RESPONSE_SCHEMA.names == ["upload_url", "download_url", "expires_at"]
+        assert UPLOAD_URL_RESPONSE_SCHEMA.names == ["upload_url", "download_url", "expires_at", "upload_headers"]
+        assert not any(f.nullable for f in UPLOAD_URL_RESPONSE_SCHEMA)
 
-    def test_returns_urls(self) -> None:
-        """Endpoint returns N URL rows."""
+    def test_returns_one_url_per_entry(self) -> None:
+        """Endpoint returns one row per (size, sha256) entry, in order, passing both to the provider."""
+        import hashlib
+
         storage = MockStorage()
         client = self._make_client(storage)
+        entries = [(10 + i, hashlib.sha256(bytes([i])).hexdigest()) for i in range(3)]
 
-        urls = request_upload_urls(count=3, client=client)
+        urls = request_upload_urls(uploads=entries, client=client)
         assert len(urls) == 3
-        for url in urls:
+        assert storage.upload_requests == entries
+        for url, (_size, digest) in zip(urls, entries, strict=True):
             assert isinstance(url, UploadUrl)
             assert url.upload_url.startswith("https://mock.storage/upload/")
             assert url.download_url.startswith("https://mock.storage/download/")
+            # Provider headers pass through, minus Content-Length.
+            assert url.headers == {"x-amz-checksum-sha256": f"mock-{digest[:8]}"}
         client.close()
 
-    def test_default_count_is_one(self) -> None:
-        """Omitting count returns 1 row."""
+    def test_100_entries_allowed(self) -> None:
+        """Exactly 100 entries is the maximum and succeeds."""
         storage = MockStorage()
         client = self._make_client(storage)
 
-        urls = request_upload_urls(client=client)
-        assert len(urls) == 1
-        client.close()
-
-    def test_count_capped_at_100(self) -> None:
-        """Requesting >100 is capped at 100."""
-        storage = MockStorage()
-        client = self._make_client(storage)
-
-        urls = request_upload_urls(count=200, client=client)
+        urls = request_upload_urls(uploads=[(1, "a" * 64)] * 100, client=client)
         assert len(urls) == 100
         client.close()
+
+    @pytest.mark.parametrize(
+        ("params", "schema", "match"),
+        [
+            ({"count": 1}, pa.schema([pa.field("count", pa.int64())]), "retired count shape"),
+            ({}, pa.schema([]), "retired count shape"),
+            ({"uploads": []}, None, "1-100 entries"),
+            ({"uploads": [{"size": 1, "sha256": "a" * 64}] * 101}, None, "1-100 entries"),
+            ({"uploads": [{"size": 0, "sha256": "a" * 64}]}, None, "size must be an integer >= 1"),
+            ({"uploads": [{"size": 1, "sha256": "ABC"}]}, None, "64 lowercase hex"),
+            ({"uploads": [{"size": 1001, "sha256": "a" * 64}]}, None, "exceeds VGI-Max-Upload-Bytes"),
+        ],
+        ids=["count", "no-uploads", "empty", "over-100", "size-0", "bad-hash", "over-max"],
+    )
+    def test_refusals_are_400_before_minting(
+        self, params: dict[str, object], schema: pa.Schema | None, match: str
+    ) -> None:
+        """Malformed and retired requests are refused with 400 and no URL is minted."""
+        from vgi_rpc.http import UPLOAD_URL_PARAMS_SCHEMA
+        from vgi_rpc.rpc._wire import _write_request
+
+        storage = MockStorage()
+        client = self._make_client(storage, max_upload_bytes=1000)
+        buf = BytesIO()
+        _write_request(buf, "__upload_url__", schema if schema is not None else UPLOAD_URL_PARAMS_SCHEMA, params)
+        response = client.post(
+            f"{_BASE_URL}{client.prefix}/__upload_url__/init",
+            content=buf.getvalue(),
+            headers={"Content-Type": _ARROW_CONTENT_TYPE},
+        )
+        assert response.status_code == 400
+        reader = pa.ipc.open_stream(BytesIO(response.content))
+        _batch, metadata = reader.read_next_batch_with_custom_metadata()
+        assert metadata is not None
+        assert match in (metadata.get(b"vgi_rpc.log_message") or b"").decode()
+        assert storage.upload_requests == []
+        client.close()
+
+    def test_client_validates_entries(self) -> None:
+        """The client refuses malformed entries before sending anything."""
+        client = self._make_client(MockStorage())
+        with pytest.raises(ValueError, match="1-100 entries"):
+            request_upload_urls(uploads=[], client=client)
+        with pytest.raises(ValueError, match="size must be an integer >= 1"):
+            request_upload_urls(uploads=[(0, "a" * 64)], client=client)
+        with pytest.raises(ValueError, match="64 lowercase hex"):
+            request_upload_urls(uploads=[(1, "A" * 64)], client=client)
+        client.close()
+
+    def test_client_refuses_v1_server(self) -> None:
+        """A server advertising VGI-Upload-URL-Support: true (v1) is refused, never fallen back to."""
+        from vgi_rpc.http import HttpServerCapabilities
+
+        client = self._make_client(MockStorage())
+        v1 = HttpServerCapabilities(upload_url_support=True, upload_url_version=1)
+        with pytest.raises(RpcError, match="upload protocol is too old"):
+            request_upload_urls(
+                uploads=[(1, "a" * 64)], client=client, capabilities=v1, accepted_max_response_bytes=None
+            )
+        client.close()
+
+    def test_parse_upload_url_support(self) -> None:
+        """Header values map to protocol versions: "true" is v1, digits are that version."""
+        from vgi_rpc.http import parse_upload_url_support
+
+        assert parse_upload_url_support(None) is None
+        assert parse_upload_url_support("true") == 1
+        assert parse_upload_url_support("2") == 2
+        assert parse_upload_url_support(" 2 ") == 2
+        assert parse_upload_url_support("false") is None
+        assert parse_upload_url_support("02") is None
+        assert parse_upload_url_support("v2") is None
 
     def test_oversized_control_body_is_rejected_before_allocation(self) -> None:
         """The upload control route obeys max_request_bytes before allocation."""
@@ -1991,8 +2066,8 @@ class TestUploadUrlEndpoint:
             headers={"Content-Type": _ARROW_CONTENT_TYPE},
         )
         assert response.status_code == 413
-        assert storage._counter == 0
-        assert len(request_upload_urls(count=1, client=client)) == 1
+        assert storage.upload_requests == []
+        assert len(request_upload_urls(uploads=[(1, "a" * 64)], client=client)) == 1
         client.close()
 
     def test_404_when_not_configured(self) -> None:
@@ -2000,7 +2075,7 @@ class TestUploadUrlEndpoint:
         client = self._make_client(storage=None)
 
         with pytest.raises(RpcError, match="does not support upload URLs"):
-            request_upload_urls(client=client)
+            request_upload_urls(uploads=[(1, "a" * 64)], client=client)
         client.close()
 
     def test_auth_applies(self) -> None:
@@ -2012,7 +2087,7 @@ class TestUploadUrlEndpoint:
             default_headers={"Authorization": "Bearer alice"},
         )
         # Should succeed with auth
-        urls = request_upload_urls(client=client)
+        urls = request_upload_urls(uploads=[(1, "a" * 64)], client=client)
         assert len(urls) == 1
         client.close()
 
@@ -2022,7 +2097,7 @@ class TestUploadUrlEndpoint:
         client = self._make_client(storage, authenticate=_test_authenticate)
 
         with pytest.raises(RpcError) as exc_info:
-            request_upload_urls(client=client)
+            request_upload_urls(uploads=[(1, "a" * 64)], client=client)
         assert exc_info.value.error_type == "AuthenticationError"
         client.close()
 
@@ -2033,7 +2108,7 @@ class TestUploadUrlEndpoint:
         storage = MockStorage()
         client = self._make_client(storage)
 
-        urls = request_upload_urls(client=client)
+        urls = request_upload_urls(uploads=[(1, "a" * 64)], client=client)
         assert len(urls) == 1
         assert urls[0].expires_at > datetime.now(UTC)
         client.close()
@@ -4003,7 +4078,7 @@ class TestClientTimeout:
             lambda: http_capabilities("http://x"),
             lambda: http_introspect("http://x"),
             lambda: http_oauth_metadata("http://x"),
-            lambda: request_upload_urls("http://x"),
+            lambda: request_upload_urls("http://x", uploads=[(1, "a" * 64)]),
             lambda: fetch_oauth_metadata("http://x"),
             lambda: fetch_auth_server_metadata("http://x"),
         ]

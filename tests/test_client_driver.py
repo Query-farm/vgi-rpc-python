@@ -313,9 +313,16 @@ class TestHttpStandIns:
 
     def test_upload_urls(self, driver: ClientDriver) -> None:
         """Upload URLs decode into the real dataclass, with a real timestamp."""
-        urls = driver.request_upload_urls("http://example.invalid", count=2)
+        urls = driver.request_upload_urls("http://example.invalid", uploads=[(5, "ab" * 32), (7, "cd" * 32)])
         assert [url.upload_url for url in urls] == ["http://up/0", "http://up/1"]
         assert urls[0].expires_at == datetime.fromtimestamp(1767225600, tz=UTC)
+        assert urls[1].headers == {"x-amz-checksum-sha256": "digest-cdcd"}
+
+    def test_capabilities_carry_upload_url_version(self, driver: ClientDriver) -> None:
+        """The driver's capability answer carries the parsed upload-URL protocol version."""
+        caps = driver.http_capabilities("http://example.invalid")
+        assert caps.upload_url_support is True
+        assert caps.upload_url_version == 2
 
     def test_http_connect_is_a_context_manager(self, driver: ClientDriver) -> None:
         """The stand-in has ``http_connect``'s shape, including its scope."""

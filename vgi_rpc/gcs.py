@@ -21,7 +21,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider
+from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider, is_sha256_hex
 
 _logger = logging.getLogger(__name__)
 
@@ -128,34 +128,45 @@ class GCSStorage:
         )
         return url
 
-    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
-        """Generate signed PUT and GET URLs for client-side upload.
+    def generate_upload_url(self, size: int, sha256_hex: str) -> UploadUrl:
+        """Generate signed PUT and GET URLs for one sized client upload.
 
-        The created GCS object is not automatically deleted.  Configure
-        GCS Object Lifecycle Management on the bucket to expire objects
-        after a suitable retention period.
+        GCS cannot verify a SHA-256 at storage, so the PUT URL signs the
+        length (``x-goog-content-length-range: size,size``) and the content
+        type; the server's ``vgi_rpc.location.sha256`` check on the request
+        pointer catches a wrong body.  The created GCS object is not
+        automatically deleted.  Configure GCS Object Lifecycle Management on
+        the bucket to expire objects after a suitable retention period.
 
         Args:
-            schema: The Arrow schema of the data to be uploaded
-                (unused but available for metadata hints).
+            size: Exact byte length the client will PUT.
+            sha256_hex: SHA-256 of those bytes, 64 lowercase hex (validated;
+                GCS cannot enforce it).
 
         Returns:
-            An ``UploadUrl`` with PUT and GET signed URLs for the
-            same GCS object.
+            An ``UploadUrl`` with PUT and GET signed URLs for the same GCS
+            object and the signed headers the PUT must carry.
+
+        Raises:
+            ValueError: If *sha256_hex* is not 64 lowercase hex characters.
 
         """
+        if not is_sha256_hex(sha256_hex):
+            raise ValueError("sha256 must be 64 lowercase hex characters")
         client = self._get_client()
         bucket = client.bucket(self.bucket)
         blob_name = f"{self.prefix}{uuid.uuid4().hex}.arrow"
         blob = bucket.blob(blob_name)
         expiration = timedelta(seconds=self.presign_expiry_seconds)
         expires_at = datetime.now(UTC) + expiration
+        put_headers = {"x-goog-content-length-range": f"{size},{size}"}
 
         put_url: str = blob.generate_signed_url(
             version="v4",
             expiration=expiration,
             method="PUT",
             content_type="application/octet-stream",
+            headers=put_headers,
         )
         get_url: str = blob.generate_signed_url(
             version="v4",
@@ -164,12 +175,18 @@ class GCSStorage:
         )
 
         _logger.debug(
-            "GCS upload URL generated: bucket=%s key=%s",
+            "GCS upload URL generated: bucket=%s key=%s size=%d",
             self.bucket,
             blob_name,
-            extra={"bucket": self.bucket, "key": blob_name},
+            size,
+            extra={"bucket": self.bucket, "key": blob_name, "size_bytes": size},
         )
-        return UploadUrl(upload_url=put_url, download_url=get_url, expires_at=expires_at)
+        return UploadUrl(
+            upload_url=put_url,
+            download_url=get_url,
+            expires_at=expires_at,
+            headers={"Content-Type": "application/octet-stream", **put_headers},
+        )
 
 
 # Runtime check that GCSStorage satisfies ExternalStorage and UploadUrlProvider protocols

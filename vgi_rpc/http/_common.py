@@ -82,13 +82,28 @@ _SESSION_ENDPOINT = "__session__"
 
 _MAX_UPLOAD_URL_COUNT = 100
 
+#: Upload-URL protocol version this implementation speaks, advertised as the
+#: value of ``VGI-Upload-URL-Support``.  Version 2 replaced the v1 ``count``
+#: request (advertised as ``"true"``) with one ``(size, sha256)`` entry per
+#: upload, so every vended URL is signed for exactly the bytes it will carry.
+UPLOAD_URL_PROTOCOL_VERSION = 2
+
 _UPLOAD_URL_METHOD = "__upload_url__"
-_upload_url_params_fields: list[pa.Field[Any]] = [pa.field("count", pa.int64())]
+_upload_url_entry_type = pa.struct(
+    [
+        pa.field("size", pa.int64(), nullable=False),
+        pa.field("sha256", pa.utf8(), nullable=False),
+    ]
+)
+_upload_url_params_fields: list[pa.Field[Any]] = [
+    pa.field("uploads", pa.list_(_upload_url_entry_type), nullable=False),
+]
 _UPLOAD_URL_PARAMS_SCHEMA = pa.schema(_upload_url_params_fields)
 _upload_url_fields: list[pa.Field[Any]] = [
-    pa.field("upload_url", pa.utf8()),
-    pa.field("download_url", pa.utf8()),
-    pa.field("expires_at", pa.timestamp("us", tz="UTC")),
+    pa.field("upload_url", pa.utf8(), nullable=False),
+    pa.field("download_url", pa.utf8(), nullable=False),
+    pa.field("expires_at", pa.timestamp("us", tz="UTC"), nullable=False),
+    pa.field("upload_headers", pa.map_(pa.utf8(), pa.utf8()), nullable=False),
 ]
 _UPLOAD_URL_SCHEMA = pa.schema(_upload_url_fields)
 

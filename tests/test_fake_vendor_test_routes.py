@@ -159,11 +159,40 @@ def test_fault_replaces_and_disarms(fake: FakeVendorServer, blobs: VendorBlobCli
         "purpose=fs&action=burn",
         "purpose=fs&action=corrupt&count=-1",
         "purpose=fs&action=corrupt&count=a",
+        "purpose=upload&action=missing",
+        "purpose=upload&action=corrupt&count=-1",
     ],
 )
 def test_fault_rejects_bad_parameters(fake: FakeVendorServer, query: str) -> None:
     """Unknown purpose/action or a bad count is a 400."""
     assert httpx2.get(f"{fake.url}/__admin__/fault?{query}", timeout=10.0).status_code == 400
+
+
+def test_upload_fault_corrupts_next_puts_in_transit(fake: FakeVendorServer) -> None:
+    """``purpose=upload&action=corrupt&count=N`` damages N signed PUTs; the store refuses them (BadDigest)."""
+    assert _get(fake, "/__admin__/fault?purpose=upload&action=corrupt&count=1")["ok"] is True
+    with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
+        with pytest.raises(VendorError) as exc:
+            storage.upload(b"corrupt me", _SCHEMA)
+        assert exc.value.code == "BadDigest"
+        stats = _get(fake, "/__stats__")
+        assert stats["uploads_corrupted"] == 1
+        assert stats["upload_bad_digest"] == 1 and stats["upload_refusals"] == 1
+        assert stats["objects"] == 0
+        # Spent after one PUT.
+        url = storage.upload(b"intact", _SCHEMA)
+        assert httpx2.get(url, timeout=10.0).content == b"intact"
+
+
+def test_reset_clears_upload_fault(fake: FakeVendorServer) -> None:
+    """``/__admin__/reset`` disarms an armed upload fault; HEAD never arms one."""
+    httpx2.head(fake.url + "/__admin__/fault?purpose=upload&action=corrupt&count=1", timeout=10.0)
+    _get(fake, "/__admin__/fault?purpose=upload&action=corrupt&count=3")
+    _get(fake, "/__admin__/reset")
+    with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
+        url = storage.upload(b"after reset", _SCHEMA)
+    assert httpx2.get(url, timeout=10.0).content == b"after reset"
+    assert _get(fake, "/__stats__")["uploads_corrupted"] == 0
 
 
 def test_reset_clears_fail_next(fake: FakeVendorServer, blobs: VendorBlobClient) -> None:

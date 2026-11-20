@@ -597,6 +597,7 @@ def test_external_worker_mode_covers_response_pointer_and_client_upload_flow() -
         capabilities = http_capabilities(base_url, prefix="/vgi")
         assert capabilities.externalization_enabled is True
         assert capabilities.upload_url_support is True
+        assert capabilities.upload_url_version == 2
         assert capabilities.max_request_bytes == 4096
 
         raw = httpx2.post(

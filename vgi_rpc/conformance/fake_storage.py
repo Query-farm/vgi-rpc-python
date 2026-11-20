@@ -24,6 +24,15 @@ service or implement the contract independently:
   (PUT-only), and ``download_url`` (GET/HEAD-only).  Keeping ``object_url``
   makes the fixture backward compatible while the method-bound pair catches
   production backends that accidentally vend a PUT signature for later GET.
+  A *sized* allocation (upload-URL protocol v2) adds ``"size": N`` and
+  ``"sha256_b64": "<base64 of the 32 digest bytes>"`` to the body; the
+  response then also carries ``upload_headers``
+  (``{"x-amz-checksum-sha256": <sha256_b64>}``) and its ``upload_url``
+  verifies the PUT like S3/R2: a body whose length is not ``size`` is
+  ``400 IncompleteBody``, an ``x-amz-checksum-sha256`` header missing or
+  different from the allocation is ``403 SignatureDoesNotMatch``, and a body
+  that does not hash to it is ``400 BadDigest`` (S3-style XML error bodies).
+  Nothing is stored on a refusal.
 * ``PUT /blob/{id}`` accepts the raw bytes (and an optional
   ``Content-Encoding`` request header which the service echoes back on
   ``HEAD``/``GET``).  Returns ``204``.
@@ -37,7 +46,7 @@ service or implement the contract independently:
   and assert the download route is never reached.
 * ``GET|HEAD /redirect-loop/{id}`` redirects to itself.
 * ``GET /_stats`` includes per-route request counters in addition to the
-  legacy ``object_count``.
+  legacy ``object_count``; ``upload_refusals`` counts sized PUTs refused.
 
 The service is in-memory only — every restart loses its objects, which
 is exactly what tests want.
@@ -66,6 +75,8 @@ Prints ``PORT:<n>`` to stdout (machine-readable port discovery).
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import logging
 import socketserver
@@ -92,9 +103,19 @@ class _BlobStore:
         self._lock = threading.Lock()
         self._blobs: dict[str, tuple[bytes, str | None]] = {}
         self._hits: dict[str, int] = {}
+        self._sized: dict[str, tuple[int, str]] = {}
 
-    def allocate(self) -> str:
-        return uuid.uuid4().hex
+    def allocate(self, sized: tuple[int, str] | None = None) -> str:
+        blob_id = uuid.uuid4().hex
+        if sized is not None:
+            with self._lock:
+                self._sized[blob_id] = sized
+        return blob_id
+
+    def sized(self, blob_id: str) -> tuple[int, str] | None:
+        """Return the ``(size, sha256_b64)`` a sized allocation declared, if any."""
+        with self._lock:
+            return self._sized.get(blob_id)
 
     def put(self, blob_id: str, data: bytes, content_encoding: str | None) -> None:
         with self._lock:
@@ -170,7 +191,7 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
         body = _read_body(environ)
 
         if method == "POST" and path == "/alloc":
-            return _handle_alloc(environ, start_response, store, base_url)
+            return _handle_alloc(environ, start_response, store, base_url, body)
         redirect_prefix = next(
             (prefix for prefix in ("/redirect/", "/redirect-localhost/", "/redirect-loop/") if path.startswith(prefix)),
             None,
@@ -224,20 +245,41 @@ def _handle_alloc(
     start_response: StartResponse,
     store: _BlobStore,
     base_url: str,
+    request_body: bytes = b"",
 ) -> list[bytes]:
-    blob_id = store.allocate()
+    try:
+        request = json.loads(request_body or b"{}")
+    except ValueError:
+        request = None
+    if not isinstance(request, dict):
+        return _respond(start_response, "400 Bad Request", b"alloc body must be a JSON object")
+    sized: tuple[int, str] | None = None
+    if "size" in request or "sha256_b64" in request:
+        size = request.get("size")
+        sha256_b64 = request.get("sha256_b64")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return _respond(start_response, "400 Bad Request", b"size must be a non-negative integer")
+        try:
+            digest_ok = isinstance(sha256_b64, str) and len(base64.b64decode(sha256_b64, validate=True)) == 32
+        except ValueError:
+            digest_ok = False
+        if not digest_ok or not isinstance(sha256_b64, str):
+            return _respond(start_response, "400 Bad Request", b"sha256_b64 must be a base64 SHA-256")
+        sized = (size, sha256_b64)
+    blob_id = store.allocate(sized)
+    store.hit("allocations")
     # Pre-allocate an empty entry so HEAD/GET before PUT returns 404 cleanly
     # (we only insert on PUT).
-    body = json.dumps(
-        {
-            # Retained for older conformance adapters that have not migrated
-            # to the explicit method-bound pair yet.
-            "object_url": f"{base_url}/blob/{blob_id}",
-            "upload_url": f"{base_url}/upload/{blob_id}",
-            "download_url": f"{base_url}/download/{blob_id}",
-        }
-    ).encode()
-    return _respond(start_response, "200 OK", body, content_type="application/json")
+    response: dict[str, object] = {
+        # Retained for older conformance adapters that have not migrated
+        # to the explicit method-bound pair yet.
+        "object_url": f"{base_url}/blob/{blob_id}",
+        "upload_url": f"{base_url}/upload/{blob_id}",
+        "download_url": f"{base_url}/download/{blob_id}",
+    }
+    if sized is not None:
+        response["upload_headers"] = {"x-amz-checksum-sha256": sized[1]}
+    return _respond(start_response, "200 OK", json.dumps(response).encode(), content_type="application/json")
 
 
 def _handle_put(
@@ -249,9 +291,36 @@ def _handle_put(
 ) -> list[bytes]:
     if data is _MALFORMED_LENGTH:
         return _respond(start_response, "400 Bad Request", b"invalid Content-Length")
+    sized = store.sized(blob_id)
+    if sized is not None:
+        refusal = _sized_put_refusal(environ, data, *sized)
+        if refusal is not None:
+            status, code = refusal
+            store.hit("upload_refusals")
+            store.hit(f"upload_refusals_{code}")
+            payload = f"<Error><Code>{code}</Code></Error>".encode()
+            return _respond(start_response, status, payload, content_type="application/xml")
     encoding = environ.get("HTTP_CONTENT_ENCODING")
     store.put(blob_id, data, str(encoding) if encoding else None)
     return _respond(start_response, "204 No Content", b"")
+
+
+def _sized_put_refusal(environ: WSGIEnvironment, data: bytes, size: int, sha256_b64: str) -> tuple[str, str] | None:
+    """Return ``(status, S3 error code)`` when a sized PUT must be refused, else ``None``.
+
+    Mirrors S3/R2 for a URL signed over ``Content-Length`` and
+    ``x-amz-checksum-sha256``: a short or long body is ``IncompleteBody``,
+    a checksum header that is absent or not the signed value fails the
+    signature, and a body that does not hash to the signed value is
+    ``BadDigest``.
+    """
+    if len(data) != size:
+        return "400 Bad Request", "IncompleteBody"
+    if environ.get("HTTP_X_AMZ_CHECKSUM_SHA256") != sha256_b64:
+        return "403 Forbidden", "SignatureDoesNotMatch"
+    if base64.b64encode(hashlib.sha256(data).digest()).decode() != sha256_b64:
+        return "400 Bad Request", "BadDigest"
+    return None
 
 
 #: Sentinel distinguishing "the client sent a Content-Length we cannot parse"
@@ -474,22 +543,32 @@ class FakeStorageBackend:
         put_resp.raise_for_status()
         return str(download_url)
 
-    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
-        """Allocate a fresh blob and return an ``UploadUrl`` (``UploadUrlProvider``)."""
+    def generate_upload_url(self, size: int, sha256_hex: str) -> UploadUrl:
+        """Allocate a sized blob and return an ``UploadUrl`` (``UploadUrlProvider``).
+
+        The allocation declares *size* and the digest, so the fake storage
+        refuses any other PUT body the way S3/R2 would.
+        """
         from datetime import datetime, timedelta
 
         import httpx2
 
-        from vgi_rpc.external import UploadUrl
+        from vgi_rpc.external import UploadUrl, sha256_b64_from_hex
 
-        alloc_resp = httpx2.post(f"{self._base_url}/alloc", json={}, timeout=10.0)
+        alloc_resp = httpx2.post(
+            f"{self._base_url}/alloc",
+            json={"size": size, "sha256_b64": sha256_b64_from_hex(sha256_hex)},
+            timeout=10.0,
+        )
         alloc_resp.raise_for_status()
         allocation = alloc_resp.json()
         object_url = allocation["object_url"]
+        headers = allocation.get("upload_headers") or {}
         return UploadUrl(
             upload_url=allocation.get("upload_url", object_url),
             download_url=allocation.get("download_url", object_url),
             expires_at=datetime.now(UTC) + timedelta(hours=1),
+            headers={str(k): str(v) for k, v in headers.items()},
         )
 
     def close(self) -> None:

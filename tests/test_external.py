@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -74,6 +75,7 @@ class MockStorage(ExternalStorage):
         self.data: dict[str, bytes] = {}
         self._counter = 0
         self.last_content_encoding: str | None = None
+        self.upload_requests: list[tuple[int, str]] = []
 
     def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Store data and return a mock URL."""
@@ -83,14 +85,16 @@ class MockStorage(ExternalStorage):
         self.data[url] = data
         return url
 
-    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
-        """Generate a mock upload URL pair."""
+    def generate_upload_url(self, size: int, sha256_hex: str) -> UploadUrl:
+        """Generate a mock upload URL pair signed (notionally) for one sized upload."""
         self._counter += 1
+        self.upload_requests.append((size, sha256_hex))
         expires_at = datetime.now(UTC) + timedelta(hours=1)
         return UploadUrl(
             upload_url=f"https://mock.storage/upload/{self._counter}",
             download_url=f"https://mock.storage/download/{self._counter}",
             expires_at=expires_at,
+            headers={"x-amz-checksum-sha256": f"mock-{sha256_hex[:8]}", "Content-Length": str(size)},
         )
 
 
@@ -927,6 +931,53 @@ class TestSHA256Checksum:
         assert resolved.num_rows == 1
         assert resolved.column("value")[0].as_py() == 42
 
+    def test_require_sha256_refuses_pointer_without_digest(self) -> None:
+        """Request pointers (require_sha256=True) without a digest are refused before any fetch."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
+        pointer, cm = make_external_location_batch(_SCHEMA, "https://mock.storage/never-fetched")
+        with pytest.raises(ValueError, match=r"missing vgi_rpc\.location\.sha256"):
+            resolve_external_location(pointer, cm, config, require_sha256=True)
+
+    def test_require_sha256_refuses_malformed_digest(self) -> None:
+        """A request pointer digest that is not 64 lowercase hex is refused."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
+        pointer, cm = make_external_location_batch(_SCHEMA, "https://mock.storage/x", sha256="ABCD")
+        with pytest.raises(ValueError, match="64 lowercase hex"):
+            resolve_external_location(pointer, cm, config, require_sha256=True)
+
+    def test_require_sha256_verifies_digest(self) -> None:
+        """With a digest present, require_sha256 resolves and still verifies (mismatch says 'sha256 mismatch')."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, externalize_threshold_bytes=10, max_retries=0)
+        data_batch = pa.RecordBatch.from_pydict({"value": [7]}, schema=_SCHEMA)
+        ipc_bytes = _serialize_ipc(_SCHEMA, [(data_batch, None)])
+        url = "https://mock.storage/with-sha"
+        storage.data[url] = ipc_bytes
+        good, good_cm = make_external_location_batch(_SCHEMA, url, sha256=hashlib.sha256(ipc_bytes).hexdigest())
+        bad, bad_cm = make_external_location_batch(_SCHEMA, url, sha256="0" * 64)
+        with _mock_aio(storage):
+            resolved, _ = resolve_external_location(good, good_cm, config, require_sha256=True)
+        assert resolved.column("value")[0].as_py() == 7
+        with _mock_aio(storage), pytest.raises(RuntimeError, match="sha256 mismatch"):
+            resolve_external_location(bad, bad_cm, config, require_sha256=True)
+
+    def test_sha256_helpers(self) -> None:
+        """is_sha256_hex / sha256_b64_from_hex use the wire encodings."""
+        import base64
+
+        from vgi_rpc.external import is_sha256_hex, sha256_b64_from_hex
+
+        digest = hashlib.sha256(b"x")
+        assert is_sha256_hex(digest.hexdigest())
+        assert not is_sha256_hex(digest.hexdigest().upper())
+        assert not is_sha256_hex("a" * 63)
+        assert not is_sha256_hex(None)
+        assert sha256_b64_from_hex(digest.hexdigest()) == base64.b64encode(digest.digest()).decode()
+        with pytest.raises(ValueError):
+            sha256_b64_from_hex("nothex")
+
     def test_sha256_roundtrip_with_compression(self) -> None:
         """SHA-256 checksum works correctly with zstd compression."""
         storage = MockStorage()
@@ -1458,6 +1509,23 @@ class TestS3Storage:
 
         assert url.split("?")[0].endswith(".arrow.zst")
 
+    def test_generate_upload_url_signs_size_and_checksum(self, _s3_env: tuple[Any, Any]) -> None:
+        """The PUT URL is SigV4 over content-length and x-amz-checksum-sha256; the header is returned."""
+        import base64
+        from urllib.parse import parse_qs, urlsplit
+
+        s3_storage, _ = _s3_env
+        body = b"sized client upload"
+        digest = hashlib.sha256(body)
+        pair = s3_storage.generate_upload_url(len(body), digest.hexdigest())
+        query = parse_qs(urlsplit(pair.upload_url).query)
+        assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+        assert query["X-Amz-SignedHeaders"] == ["content-length;host;x-amz-checksum-sha256"]
+        assert pair.headers == {"x-amz-checksum-sha256": base64.b64encode(digest.digest()).decode()}
+        assert "X-Amz-SignedHeaders" in pair.download_url
+        with pytest.raises(ValueError, match="64 lowercase hex"):
+            s3_storage.generate_upload_url(len(body), "nothex")
+
 
 # ===========================================================================
 # GCS tests (mock)
@@ -1499,6 +1567,27 @@ class TestGCSStorage:
         call_kwargs = mock_blob.generate_signed_url.call_args
         assert call_kwargs.kwargs["version"] == "v4"
         assert call_kwargs.kwargs["method"] == "GET"
+
+    def test_generate_upload_url_signs_length(
+        self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]
+    ) -> None:
+        """The PUT URL signs the exact length and content type, and returns them as headers."""
+        from vgi_rpc.gcs import GCSStorage
+
+        _, _, _, mock_blob = _gcs_mocks
+        mock_blob.generate_signed_url.return_value = "https://storage.googleapis.com/signed"
+        storage = GCSStorage(bucket="test-bucket")
+        pair = storage.generate_upload_url(1234, "c" * 64)
+        put_call = mock_blob.generate_signed_url.call_args_list[0].kwargs
+        assert put_call["method"] == "PUT"
+        assert put_call["content_type"] == "application/octet-stream"
+        assert put_call["headers"] == {"x-goog-content-length-range": "1234,1234"}
+        assert pair.headers == {
+            "Content-Type": "application/octet-stream",
+            "x-goog-content-length-range": "1234,1234",
+        }
+        with pytest.raises(ValueError, match="64 lowercase hex"):
+            storage.generate_upload_url(1, "C" * 64)
 
     def test_full_roundtrip(self, _gcs_mocks: tuple[MagicMock, MagicMock, MagicMock, MagicMock]) -> None:
         """Full round-trip with mocked GCS + aiointercept."""

@@ -547,6 +547,7 @@ class ClientDriver:
             max_externalized_response_bytes=_as_int(caps.get("max_externalized_response_bytes")),
             externalization_enabled=bool(caps.get("externalization_enabled")),
             upload_url_support=bool(caps.get("upload_url_support")),
+            upload_url_version=_as_int(caps.get("upload_url_version")),
             max_upload_bytes=_as_int(caps.get("max_upload_bytes")),
             supported_encodings=tuple(encodings),
             sticky_enabled=bool(caps.get("sticky_enabled")),
@@ -558,7 +559,7 @@ class ClientDriver:
         self,
         base_url: str | None = None,
         *,
-        count: int = 1,
+        uploads: Sequence[tuple[int, str]],
         prefix: str | None = None,
         client: object = None,
         **_ignored: object,
@@ -567,7 +568,7 @@ class ClientDriver:
 
         Args:
             base_url: Base URL of the server.
-            count: Number of upload URL pairs to request.
+            uploads: One ``(size, sha256_hex)`` per upload URL to request.
             prefix: Accepted for signature parity and ignored.
             client: A pre-built HTTP client to unwrap.
             **_ignored: Remaining keywords, accepted and ignored.
@@ -580,7 +581,8 @@ class ClientDriver:
         target, headers = _target_and_headers(base_url, client)
         proxy = self.connect("http", target, headers=headers)
         try:
-            raw = _as_list(proxy.admin("request_upload_urls", count=count).get("urls")) or []
+            entries = [{"size": size, "sha256": sha256_hex} for size, sha256_hex in uploads]
+            raw = _as_list(proxy.admin("request_upload_urls", uploads=entries).get("urls")) or []
         finally:
             proxy.close()
         urls: list[UploadUrl] = []
@@ -593,6 +595,7 @@ class ClientDriver:
                     upload_url=_as_str(entry.get("upload_url")) or "",
                     download_url=_as_str(entry.get("download_url")) or "",
                     expires_at=_expires_at(entry.get("expires_at")),
+                    headers={str(k): str(v) for k, v in (_as_dict(entry.get("upload_headers")) or {}).items()},
                 )
             )
         return urls

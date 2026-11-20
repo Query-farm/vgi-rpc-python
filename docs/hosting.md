@@ -40,7 +40,7 @@ app = make_wsgi_app(
 | `max_request_bytes` | Advertised request size limit | None (unlimited) |
 | `max_response_bytes` | Application HTTP body cap (every method). Combined by minimum with the hosting and client caps; overshoot is a structured error with no producer cursor | None (unlimited) |
 | `max_externalized_response_bytes` | Cap on bytes uploaded to external storage per HTTP response.  Always hard.  Pre-flighted before the upload | None (unlimited) |
-| `max_upload_bytes` | Advertised upload size limit | None (unlimited) |
+| `max_upload_bytes` | Upload size limit (advertised; larger upload-URL requests are refused) | None (unlimited) |
 | `authenticate` | Auth callback `(Request) → AuthContext` | None (anonymous) |
 | `cors_origins` | Enable CORS for browser clients | None (disabled) |
 | `upload_url_provider` | Enable pre-signed upload URL vending | None (disabled) |
@@ -201,9 +201,9 @@ app = make_wsgi_app(
 The client workflow:
 
 1. Call `http_capabilities()` — discovers `max_request_bytes` and upload URL support
-2. If payload exceeds the limit, call `request_upload_urls()` — gets pre-signed PUT/GET URL pairs
-3. Upload data directly to storage via the PUT URL
-4. Send a pointer batch (with the GET URL) to the server
+2. If payload exceeds the limit, call `request_upload_urls()` with the body's `(size, sha256)` — gets a PUT/GET URL pair signed for exactly that body
+3. Upload exactly those bytes via the PUT URL, with its `headers`
+4. Send a pointer batch (with the GET URL and `vgi_rpc.location.sha256`) to the server
 5. Server resolves the pointer transparently
 
 ## Platform Guides

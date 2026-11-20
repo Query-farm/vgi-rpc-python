@@ -68,7 +68,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Literal, Self
 from urllib.parse import urlsplit
 
-from vgi_rpc.external import ClientExternalConfig, Compression, ServerExternalConfig, UploadUrl
+from vgi_rpc.external import ClientExternalConfig, Compression, ServerExternalConfig, UploadUrl, sha256_b64_from_hex
 from vgi_rpc.external_fetch import FetchConfig, fetch_url, redact_httpx_logging, redact_url
 
 if TYPE_CHECKING:
@@ -850,7 +850,8 @@ class VendorStorage(_VendorClientBase):
     ``upload()`` (server-side externalization) asks the vendor for a sized,
     checksummed grant, PUTs the bytes with exactly the grant's required
     headers, and returns the grant's download URL.  ``generate_upload_url()``
-    (client uploads) asks ``/v1/upload_urls`` for one unsized PUT/GET pair.
+    (client uploads, upload-URL protocol v2) asks for the same kind of sized
+    grant for the client's declared size and digest.
 
     Thread-safe.  Objects are cleaned up by the vendor (registry alarm plus
     storage lifecycle rules); vgi-rpc never deletes them.
@@ -953,24 +954,38 @@ class VendorStorage(_VendorClientBase):
         _logger.debug("Vendored %d bytes as %s", len(data), redact_url(download_url))
         return download_url
 
-    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
-        """Ask the vendor for one unsized PUT/GET pair.
+    def generate_upload_url(self, size: int, sha256_hex: str) -> UploadUrl:
+        """Ask the vendor for one sized, checksummed PUT/GET pair (``purpose=rpc``).
+
+        Uses the same ``/v1/blobs/put`` grant as :meth:`upload`, so the PUT
+        URL signs ``Content-Length`` and ``x-amz-checksum-sha256`` and R2
+        rejects any other body.  The grant's ``required_headers`` become
+        the URL's headers, minus ``Content-Length`` (the client sends the
+        body's own).
 
         Args:
-            schema: Arrow schema of the data to be uploaded (unused).
+            size: Exact byte length the client will PUT.
+            sha256_hex: SHA-256 of those bytes, 64 lowercase hex.
 
         Returns:
             The vendored :class:`~vgi_rpc.external.UploadUrl`.
 
         Raises:
-            VendorError: If the vendor fails.
+            VendorError: If the vendor fails or returns no download URL.
 
         """
-        upload = self._api.upload_urls(1)[0]
+        grant = self._api.put(size=size, sha256_b64=sha256_b64_from_hex(sha256_hex), purpose="rpc")
+        if grant.download_url is None:
+            raise VendorError("Blob vendor put for purpose 'rpc' returned no download_url")
         if self._pin:
-            self._check(upload.upload_url)
-            self._check(upload.download_url)
-        return upload
+            self._check(grant.upload_url)
+            self._check(grant.download_url)
+        return UploadUrl(
+            upload_url=grant.upload_url,
+            download_url=grant.download_url,
+            expires_at=min(grant.expires_at, grant.download_expires_at or grant.expires_at),
+            headers={k: v for k, v in grant.required_headers.items() if k.lower() != "content-length"},
+        )
 
     def _check(self, url: str) -> None:
         try:

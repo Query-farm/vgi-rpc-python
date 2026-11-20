@@ -56,6 +56,7 @@ from vgi_rpc.conformance._external_pytest import (
     TestExternalInputRoutes,  # noqa: F401
     TestExternalRef,  # noqa: F401
     TestExternalStorageUrlPair,  # noqa: F401
+    TestUploadUrlV2,  # noqa: F401
 )
 from vgi_rpc.conformance._grant_pytest import (  # noqa: F401
     TestGrantPrefixRouting,
@@ -1654,6 +1655,7 @@ class TestExternalLocation:
 
         caps = http_capabilities(f"http://127.0.0.1:{conformance_http_with_storage_port}")
         assert caps.upload_url_support is True
+        assert caps.upload_url_version == 2
         assert caps.max_request_bytes is not None and caps.max_request_bytes > 0
         assert caps.max_upload_bytes is not None and caps.max_upload_bytes > 0
 
@@ -1662,7 +1664,7 @@ class TestExternalLocation:
         conformance_http_with_storage_port: int,
         conformance_fake_storage: str,
     ) -> None:
-        """``request_upload_urls(count=N)`` returns N usable PUT/GET URL pairs.
+        """``request_upload_urls(uploads=[...])`` returns one usable PUT/GET pair per entry.
 
         Asserts both the protocol shape (count, ``upload_url`` /
         ``download_url`` strings) and end-to-end usability: PUT to the
@@ -1670,26 +1672,32 @@ class TestExternalLocation:
         bytes.  Also confirms that the upload registered against the
         backing fake-storage service via its ``/_stats`` counter.
         """
+        import hashlib
+
         import httpx2
 
-        from vgi_rpc.http import request_upload_urls
+        from vgi_rpc.http import request_upload_urls, upload_put_headers
 
         before = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
-        urls = request_upload_urls(f"http://127.0.0.1:{conformance_http_with_storage_port}", count=2)
+        payload = b"client-vended upload contents"
+        other = b"a second, longer upload body"
+        urls = request_upload_urls(
+            f"http://127.0.0.1:{conformance_http_with_storage_port}",
+            uploads=[(len(p), hashlib.sha256(p).hexdigest()) for p in (payload, other)],
+        )
         assert len(urls) == 2
         for u in urls:
             assert u.upload_url and isinstance(u.upload_url, str)
             assert u.download_url and isinstance(u.download_url, str)
 
-        payload = b"client-vended upload contents"
-        put_resp = httpx2.put(urls[0].upload_url, content=payload, timeout=5.0)
-        assert put_resp.status_code == 204, f"PUT failed: {put_resp.status_code}"
+        put_resp = httpx2.put(urls[0].upload_url, content=payload, headers=upload_put_headers(urls[0]), timeout=5.0)
+        assert put_resp.status_code in (200, 204), f"PUT failed: {put_resp.status_code}"
         get_resp = httpx2.get(urls[0].download_url, timeout=5.0)
         assert get_resp.status_code == 200
         assert get_resp.content == payload
 
         after = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
-        # Each request_upload_urls(count=2) call performs >=1 alloc per URL.
+        # One stored object: the first URL's upload.
         assert after >= before + 1
 
     def test_externalization_uses_fake_storage(
@@ -1725,8 +1733,10 @@ class TestExternalLocation:
 
         1. POST the inline body, get back ``413 Payload Too Large``.
         2. Discover capabilities (``upload_url_support`` is True).
-        3. Call ``__upload_url__/init``, PUT the bytes to the vended URL.
-        4. Re-POST a pointer batch carrying ``vgi_rpc.location``.
+        3. Call ``__upload_url__/init`` with the body's (size, sha256),
+           PUT exactly those bytes with the vended headers.
+        4. Re-POST a pointer batch carrying ``vgi_rpc.location`` and
+           ``vgi_rpc.location.sha256``.
         5. Server resolves the pointer in ``_read_request`` (stage 1)
            and dispatches with the reconstructed parameters.
 

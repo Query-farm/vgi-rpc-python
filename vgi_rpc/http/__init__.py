@@ -49,9 +49,11 @@ from vgi_rpc.http._client import (
     parse_device_code_client_id,
     parse_device_code_client_secret,
     parse_resource_metadata_url,
+    parse_upload_url_support,
     parse_use_id_token_as_bearer,
     parse_www_authenticate_params,
     request_upload_urls,
+    upload_put_headers,
 )
 from vgi_rpc.http._common import (
     _ARROW_CONTENT_TYPE,
@@ -63,6 +65,7 @@ from vgi_rpc.http._common import (
     MAX_UPLOAD_BYTES_HEADER,
     RPC_ERROR_HEADER,
     UPLOAD_URL_HEADER,
+    UPLOAD_URL_PROTOCOL_VERSION,
     _RpcHttpError,
     decode_content_encoding,
 )
@@ -202,6 +205,7 @@ __all__ = [
     "OAuthResourceMetadataResponse",
     "OAuthServerMetadata",
     "UPLOAD_URL_HEADER",
+    "UPLOAD_URL_PROTOCOL_VERSION",
     "decode_content_encoding",
     "UPLOAD_URL_METHOD",
     "UPLOAD_URL_PARAMS_SCHEMA",
@@ -243,6 +247,8 @@ __all__ = [
     "make_wsgi_app",
     "serve_http",
     "request_upload_urls",
+    "parse_upload_url_support",
+    "upload_put_headers",
     "XfccElement",
     "mtls_authenticate_xfcc",
     "tailscale_localapi_provider",

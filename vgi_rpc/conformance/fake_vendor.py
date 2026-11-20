@@ -15,9 +15,11 @@ Mirrors the staging Worker (``blobs.staging.queryfarm.cloud``): errors are
   same ``idempotency_key`` with the same bytes returns the same object; with
   other bytes, 409 ``idempotency_conflict``.  Over ``max_object_bytes`` or the
   tenant quota: 413 ``object_too_large`` / ``quota_exceeded``.
-  The PUT URL enforces the declared ``Content-Length`` and
-  ``x-amz-checksum-sha256`` header *and* that the body really hashes to it
-  (R2 answers ``400 BadDigest``), plus ``Content-Encoding`` when declared.
+  The PUT URL enforces the declared size and ``x-amz-checksum-sha256`` like
+  R2: a body of any other length is ``400 IncompleteBody``, a checksum header
+  absent or different from the signed value (or a ``Content-Encoding`` other
+  than the declared one) is ``403 SignatureDoesNotMatch``, and a body that
+  does not hash to the signed value is ``400 BadDigest``.
   ``download_url`` is returned only for purpose ``rpc``.
 * ``POST /v1/blobs/get`` ``{object_id}`` returns
   ``{object_id, download_url, size, sha256_b64, content_encoding, expires_at}``
@@ -49,6 +51,11 @@ test lanes in any language (e.g. read from SQL with ``read_json_auto``):
   arms a download fault (see :meth:`~FakeVendor.set_download_fault`); it
   *replaces* any fault armed for that purpose, so repeating the request is
   harmless.
+* ``GET /__admin__/fault?purpose=upload&action=corrupt&count=N`` corrupts the
+  next *N* signed ``PUT`` bodies in transit (see
+  :meth:`~FakeVendor.set_upload_fault`), so the store's checksum check
+  refuses them with ``400 BadDigest``; it also replaces any armed upload
+  fault.
 * ``GET /__admin__/reset`` clears every fault (armed, applied and
   :meth:`~FakeVendor.fail_next`).
 
@@ -109,6 +116,11 @@ STATS_KEYS = (
     "bytes",
     "bytes_uploaded",
     "bytes_downloaded",
+    "upload_refusals",
+    "upload_bad_digest",
+    "upload_incomplete_body",
+    "upload_signature_mismatch",
+    "uploads_corrupted",
 )
 
 #: Every test-route JSON body is padded with spaces to exactly this many bytes.
@@ -116,6 +128,8 @@ TEST_ROUTE_BODY_BYTES = 1024
 
 _FAULT_ACTIONS = ("corrupt", "missing")
 _PURPOSES = ("rpc", "fs")
+#: Pseudo-purpose of ``/__admin__/fault`` that targets signed PUTs, not downloads.
+_UPLOAD_FAULT_PURPOSE = "upload"
 
 
 @dataclass
@@ -173,6 +187,7 @@ class FakeVendor:
     _used: dict[str, int] = field(default_factory=dict)
     _armed: dict[str, tuple[str, int]] = field(default_factory=dict)
     _faulted: dict[str, str] = field(default_factory=dict)
+    _upload_corruptions: int = 0
     _bytes_uploaded: int = 0
     _bytes_downloaded: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -240,12 +255,37 @@ class FakeVendor:
             else:
                 self._armed.pop(purpose, None)
 
+    def set_upload_fault(self, action: str, count: int) -> None:
+        """Corrupt the next *count* signed ``PUT`` bodies in transit.
+
+        Every byte of the body is XORed with ``0xFF`` before the store
+        verifies it, as if damaged on the wire, so a sized (checksummed) PUT
+        is refused with ``400 BadDigest`` and nothing is stored.  An
+        unsized PUT (``/v1/upload_urls``) would store the damaged bytes.
+        Arming *replaces* any armed upload fault.
+
+        Args:
+            action: ``"corrupt"`` (the only upload action).
+            count: How many PUTs to corrupt (``0`` disarms).
+
+        Raises:
+            ValueError: On another action or a negative count.
+
+        """
+        if action != "corrupt":
+            raise ValueError(f"upload faults support only action 'corrupt', got {action!r}")
+        if count < 0:
+            raise ValueError(f"count must be >= 0, got {count}")
+        with self._lock:
+            self._upload_corruptions = count
+
     def reset_faults(self) -> None:
-        """Clear armed and applied download faults and :meth:`fail_next` faults."""
+        """Clear armed and applied download and upload faults and :meth:`fail_next` faults."""
         with self._lock:
             self._armed.clear()
             self._faulted.clear()
             self._faults.clear()
+            self._upload_corruptions = 0
 
     def object_data(self, object_id: str) -> bytes | None:
         """Return an object's stored bytes, or ``None`` if never uploaded or deleted.
@@ -292,8 +332,12 @@ class FakeVendor:
         ``GET``/``HEAD`` requests with a valid signature), ``objects`` and
         ``bytes`` (live uploaded objects and their total size) and
         ``bytes_uploaded`` / ``bytes_downloaded`` (cumulative bytes accepted
-        by signed ``PUT`` and served by signed ``GET``). All but ``objects``
-        and ``bytes`` only grow, so tests compare before/after values.
+        by signed ``PUT`` and served by signed ``GET``), ``upload_refusals``
+        (signed ``PUT`` bodies the store refused, the sum of
+        ``upload_bad_digest``, ``upload_incomplete_body`` and
+        ``upload_signature_mismatch``) and ``uploads_corrupted`` (PUT bodies
+        damaged by an upload fault). All but ``objects`` and ``bytes`` only
+        grow, so tests compare before/after values.
 
         Returns:
             The counters.
@@ -314,6 +358,13 @@ class FakeVendor:
                 "bytes": sum(len(d) for d in live),
                 "bytes_uploaded": self._bytes_uploaded,
                 "bytes_downloaded": self._bytes_downloaded,
+                "upload_refusals": sum(
+                    hits.get(k, 0) for k in ("upload_bad_digest", "upload_incomplete_body", "upload_signature_mismatch")
+                ),
+                "upload_bad_digest": hits.get("upload_bad_digest", 0),
+                "upload_incomplete_body": hits.get("upload_incomplete_body", 0),
+                "upload_signature_mismatch": hits.get("upload_signature_mismatch", 0),
+                "uploads_corrupted": hits.get("uploads_corrupted", 0),
             }
 
     @property
@@ -397,14 +448,25 @@ class FakeVendor:
             raw_count = query.get("count", ["1"])[0]
             try:
                 count = int(raw_count)
-                if purpose not in _PURPOSES or action not in _FAULT_ACTIONS or count < 0:
+                if count < 0:
+                    raise ValueError
+                if purpose == _UPLOAD_FAULT_PURPOSE:
+                    if action != "corrupt":
+                        raise ValueError
+                elif purpose not in _PURPOSES or action not in _FAULT_ACTIONS:
                     raise ValueError
             except ValueError:
                 return _error(
-                    start_response, 400, "bad_request", "need purpose=fs|rpc, action=corrupt|missing, count>=0"
+                    start_response,
+                    400,
+                    "bad_request",
+                    "need purpose=fs|rpc with action=corrupt|missing, or purpose=upload with action=corrupt; count>=0",
                 )
             if effect:
-                self.set_download_fault(purpose, action, count)
+                if purpose == _UPLOAD_FAULT_PURPOSE:
+                    self.set_upload_fault(action, count)
+                else:
+                    self.set_download_fault(purpose, action, count)
             body = {"ok": True, "purpose": purpose, "action": action, "count": count}
         else:
             return _error(start_response, 404, "not_found", "no such route")
@@ -656,17 +718,26 @@ class FakeVendor:
     ) -> list[bytes]:
         if body is _MALFORMED_LENGTH:
             return _xml(start_response, 400, "InvalidArgument")
+        if self._upload_corruptions > 0:
+            # Damaged in transit: the store sees other bytes than were sent.
+            self._upload_corruptions -= 1
+            self._hit("uploads_corrupted")
+            body = bytes(b ^ 0xFF for b in body)
         encoding = environ.get("HTTP_CONTENT_ENCODING")
         if obj.size is not None:
-            # Sized grant: the signed headers must be present and true.
-            if str(environ.get("CONTENT_LENGTH", "")) != str(obj.size) or len(body) != obj.size:
-                return _xml(start_response, 403, "SignatureDoesNotMatch")
-            if environ.get("HTTP_X_AMZ_CHECKSUM_SHA256") != obj.sha256_b64:
+            # Sized grant: verify like R2 (length, then signed checksum
+            # header, then the body's real digest).
+            if len(body) != obj.size:
+                self._hit("upload_incomplete_body")
+                return _xml(start_response, 400, "IncompleteBody")
+            if environ.get("HTTP_X_AMZ_CHECKSUM_SHA256") != obj.sha256_b64 or (
+                obj.content_encoding and encoding != obj.content_encoding
+            ):
+                self._hit("upload_signature_mismatch")
                 return _xml(start_response, 403, "SignatureDoesNotMatch")
             if base64.b64encode(hashlib.sha256(body).digest()).decode() != obj.sha256_b64:
+                self._hit("upload_bad_digest")
                 return _xml(start_response, 400, "BadDigest")
-            if obj.content_encoding and encoding != obj.content_encoding:
-                return _xml(start_response, 403, "SignatureDoesNotMatch")
         obj.data = body
         obj.stored_encoding = str(encoding) if encoding else None
         self._bytes_uploaded += len(body)

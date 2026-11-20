@@ -20,6 +20,7 @@ import pytest
 
 from tests._paths import fixture_path
 from vgi_rpc.http import (
+    HttpServerCapabilities,
     _SyncTestClient,
     _SyncTestResponse,
     http_capabilities,
@@ -793,8 +794,11 @@ class TestRequestUploadUrlsWithRetry:
         with pytest.raises(RpcError, match="NotSupported"):
             request_upload_urls(
                 client=wrapper,  # type: ignore[arg-type]
+                uploads=[(1, "a" * 64)],
                 retry=HttpRetryConfig(max_retries=3, backoff_base=0.001),
                 accepted_max_response_bytes=None,
+                # Claim v2 support so the request reaches the (missing) route.
+                capabilities=HttpServerCapabilities(upload_url_support=True, upload_url_version=2),
             )
         # Verify retry happened: 1 failure + 1 success (which returns 404)
         assert wrapper.call_count == 2

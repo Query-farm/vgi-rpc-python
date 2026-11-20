@@ -1863,6 +1863,7 @@ class RpcServer:
                             custom_metadata,
                             self._external_config,
                             ipc_validation=self._ipc_validation,
+                            require_sha256=True,
                         )
 
                         # Resolve SHM pointer on input batch

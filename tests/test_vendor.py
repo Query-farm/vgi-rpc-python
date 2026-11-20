@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import re
@@ -154,15 +155,48 @@ class TestVendorStorage:
         url = storage.upload(zstandard.compress(raw), _SCHEMA, content_encoding="zstd")
         assert _fetch(url, storage.url_validator) == raw
 
-    def test_generate_upload_url(self, storage: VendorStorage) -> None:
-        """generate_upload_url() vends an unsized PUT/GET pair that round-trips."""
-        pair = storage.generate_upload_url(_SCHEMA)
+    def test_generate_upload_url(self, fake: FakeVendorServer, storage: VendorStorage) -> None:
+        """generate_upload_url() vends a sized, checksummed purpose=rpc grant that round-trips."""
+        body = b"client bytes"
+        digest = hashlib.sha256(body).hexdigest()
+        pair = storage.generate_upload_url(len(body), digest)
         assert pair.expires_at > datetime.now(UTC)
-        resp = httpx2.put(
-            pair.upload_url, content=b"client bytes", headers={"Content-Type": "application/octet-stream"}
-        )
+        assert pair.headers == {"x-amz-checksum-sha256": base64.b64encode(hashlib.sha256(body).digest()).decode()}
+        assert fake.vendor.test_stats()["puts"] == 1 and fake.vendor.test_stats()["upload_urls"] == 0
+        resp = httpx2.put(pair.upload_url, content=body, headers=dict(pair.headers))
         assert resp.status_code == 200
-        assert _fetch(pair.download_url, storage.url_validator) == b"client bytes"
+        assert _fetch(pair.download_url, storage.url_validator) == body
+
+    @pytest.mark.parametrize(
+        ("wrong", "status", "code", "counter"),
+        [
+            (b"client bytez", 400, "BadDigest", "upload_bad_digest"),
+            (b"client byte", 400, "IncompleteBody", "upload_incomplete_body"),
+            (b"client bytes!", 400, "IncompleteBody", "upload_incomplete_body"),
+        ],
+    )
+    def test_generated_upload_url_refuses_other_bytes(
+        self, fake: FakeVendorServer, storage: VendorStorage, wrong: bytes, status: int, code: str, counter: str
+    ) -> None:
+        """The vended PUT accepts only the declared body, like R2."""
+        body = b"client bytes"
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        resp = httpx2.put(pair.upload_url, content=wrong, headers=dict(pair.headers))
+        assert resp.status_code == status
+        assert code.encode() in resp.content
+        stats = fake.vendor.test_stats()
+        assert stats[counter] == 1 and stats["upload_refusals"] == 1
+        assert stats["objects"] == 0
+
+    def test_generated_upload_url_requires_checksum_header(
+        self, fake: FakeVendorServer, storage: VendorStorage
+    ) -> None:
+        """Omitting the signed x-amz-checksum-sha256 header fails the signature."""
+        body = b"client bytes"
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        resp = httpx2.put(pair.upload_url, content=body)
+        assert resp.status_code == 403
+        assert fake.vendor.test_stats()["upload_signature_mismatch"] == 1
 
     def test_retries_5xx_on_put_and_upload(self, fake: FakeVendorServer, storage: VendorStorage) -> None:
         """A transient 503 from the vendor and from storage is retried."""
@@ -197,14 +231,21 @@ class TestVendorStorage:
             return httpx2.Response(
                 200,
                 json={
-                    "urls": [{"upload_url": "https://h/u", "download_url": "https://h/d", "expires_at": 1_900_000_000}]
+                    "object_id": "0" * 32,
+                    "upload_url": "https://h/u",
+                    "upload_method": "PUT",
+                    "required_headers": {"content-length": "5", "x-amz-checksum-sha256": "c2hh"},
+                    "download_url": "https://h/d",
+                    "expires_at": 1_900_000_000,
                 },
             )
 
         with httpx2.Client(transport=httpx2.MockTransport(handler)) as session:
             s = VendorStorage("https://vendor.example", _TOKEN, session=session, backoff_seconds=0.0, pin_hosts=False)
-            pair = s.generate_upload_url(_SCHEMA)
+            pair = s.generate_upload_url(5, "a" * 64)
         assert pair.upload_url == "https://h/u"
+        assert pair.headers == {"x-amz-checksum-sha256": "c2hh"}
+        assert calls[-1].endswith("/v1/blobs/put")
         assert len(calls) == 2
 
     def test_rejects_vended_url_off_pinned_hosts(self) -> None:
@@ -216,20 +257,19 @@ class TestVendorStorage:
             return httpx2.Response(
                 200,
                 json={
-                    "urls": [
-                        {
-                            "upload_url": "https://evil.example/u",
-                            "download_url": "https://r2.example/d",
-                            "expires_at": "2099-01-01T00:00:00Z",
-                        }
-                    ]
+                    "object_id": "0" * 32,
+                    "upload_url": "https://evil.example/u",
+                    "upload_method": "PUT",
+                    "required_headers": {},
+                    "download_url": "https://r2.example/d",
+                    "expires_at": "2099-01-01T00:00:00Z",
                 },
             )
 
         with httpx2.Client(transport=httpx2.MockTransport(handler)) as session:
             s = VendorStorage("https://vendor.example", _TOKEN, session=session)
             with pytest.raises(VendorError, match="pinned"):
-                s.generate_upload_url(_SCHEMA)
+                s.generate_upload_url(1, "a" * 64)
 
     def test_token_and_signatures_never_logged(
         self, fake: FakeVendorServer, storage: VendorStorage, caplog: pytest.LogCaptureFixture
@@ -337,7 +377,10 @@ class TestVendorBlobClient:
         bad = httpx2.put(grant["upload_url"], content=b"abc", headers=grant["required_headers"])
         assert bad.status_code == 400  # BadDigest: body does not hash to the signed checksum
         wrong_len = httpx2.put(grant["upload_url"], content=b"abcd", headers={"x-amz-checksum-sha256": "A" * 43 + "="})
-        assert wrong_len.status_code == 403
+        assert wrong_len.status_code == 400  # IncompleteBody: length is not the signed size
+        assert b"IncompleteBody" in wrong_len.content
+        no_header = httpx2.put(grant["upload_url"], content=b"abc")
+        assert no_header.status_code == 403  # the signed checksum header is missing
 
     def test_missing_object_is_clean_error(self, blobs: VendorBlobClient) -> None:
         """An unknown object id surfaces as a 404 VendorError."""

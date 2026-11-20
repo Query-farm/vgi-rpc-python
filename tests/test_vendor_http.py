@@ -6,8 +6,9 @@
 A real waitress server runs ``external_config_from_env()`` against the
 in-process fake vendor.  Large results are externalized through the vendor's
 sized grants and resolved by the Python client; a client request over
-``max_request_bytes`` goes through the vendor's ``/v1/upload_urls`` and comes
-back to the server as a host-pinned pointer.  This is the focused equivalent
+``max_request_bytes`` goes through a sized vendor grant (upload-URL protocol
+v2, ``/v1/blobs/put``) and comes back to the server as a host-pinned pointer
+carrying its SHA-256.  This is the focused equivalent
 of the conformance external suites, which are wired to the fake-storage
 service's own ``/alloc`` API and cannot take a pluggable backend.
 """
@@ -149,17 +150,39 @@ def test_large_stream_output_is_externalized(deployment: _Deployment) -> None:
     assert deployment.fake.vendor.stats()["/v1/blobs/put"] == 1
 
 
-def test_large_client_request_goes_through_vendor_upload_urls(deployment: _Deployment) -> None:
-    """A request over max_request_bytes is PUT to a vendor upload URL and resolved by the server."""
+def test_large_client_request_goes_through_sized_vendor_grant(deployment: _Deployment) -> None:
+    """A request over max_request_bytes is PUT to a sized, checksummed vendor URL and resolved by the server."""
     client_cfg = client_external_config_from_env()
     payload = "q" * (_MAX_REQUEST * 2)
     with http_connect(_Svc, deployment.base_url, external_location=client_cfg, compression_level=None) as proxy:
         assert proxy.length(data=payload) == len(payload)
     vendor = deployment.fake.vendor
-    assert vendor.stats()["/v1/upload_urls"] == 1
+    stats = vendor.test_stats()
+    assert stats["puts"] == 1 and stats["upload_urls"] == 0  # the unsized path is no longer used
+    assert stats["upload_refusals"] == 0
     puts = [headers for method, path, headers in vendor.requests if method == "PUT"]
     assert len(puts) == 1
     assert "HTTP_AUTHORIZATION" not in puts[0]
+    assert "HTTP_X_AMZ_CHECKSUM_SHA256" in puts[0]
+
+
+def test_corrupted_client_upload_is_refused_by_storage(deployment: _Deployment) -> None:
+    """The upload fault damages the PUT in transit; the store refuses it (BadDigest) and the call fails."""
+    vendor = deployment.fake.vendor
+    vendor.set_upload_fault("corrupt", 1)
+    client_cfg = client_external_config_from_env()
+    payload = "k" * (_MAX_REQUEST * 2)
+    with (
+        http_connect(_Svc, deployment.base_url, external_location=client_cfg, compression_level=None) as proxy,
+        pytest.raises(RpcError, match="BadDigest"),
+    ):
+        proxy.length(data=payload)
+    stats = vendor.test_stats()
+    assert stats["uploads_corrupted"] == 1
+    assert stats["upload_bad_digest"] == 1 and stats["upload_refusals"] == 1
+    # The fault is spent: the next call goes through.
+    with http_connect(_Svc, deployment.base_url, external_location=client_cfg, compression_level=None) as proxy:
+        assert proxy.length(data=payload) == len(payload)
 
 
 def test_client_upload_put_is_octet_stream(deployment: _Deployment, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,7 +218,8 @@ def test_server_rejects_client_pointer_to_foreign_host(deployment: _Deployment) 
     _write_request(buf, "length", info.params_schema, {"data": "x"}, protocol="_Svc")
     batch, md = ipc.open_stream(BytesIO(buf.getvalue())).read_next_batch_with_custom_metadata()
     port = deployment.fake.url.rsplit(":", 1)[1]
-    pointer, loc = make_external_location_batch(batch.schema, f"http://localhost:{port}/r2/get/nope")
+    # A well-formed digest, so the refusal is the host pin and not the missing sha256.
+    pointer, loc = make_external_location_batch(batch.schema, f"http://localhost:{port}/r2/get/nope", sha256="e" * 64)
     out = BytesIO()
     with new_ipc_stream(out, batch.schema) as writer:
         writer.write_batch(pointer, custom_metadata=merge_metadata(md, loc))
@@ -214,6 +238,7 @@ def test_capabilities_advertise_vendor_uploads(deployment: _Deployment) -> None:
 
     caps = http_capabilities(deployment.base_url)
     assert caps.upload_url_support
+    assert caps.upload_url_version == 2
     assert caps.max_upload_bytes == 16 * 1024 * 1024
     assert caps.max_request_bytes == _MAX_REQUEST
 
@@ -330,7 +355,7 @@ def test_vendor_clients_never_send_session_credentials(deployment: _Deployment) 
     with _leaky_client() as session:
         with VendorStorage(fake.url, _TOKEN, session=session) as storage:
             url = storage.upload(b"payload" * 100, pa.schema([]))
-            pair = storage.generate_upload_url(pa.schema([]))
+            pair = storage.generate_upload_url(10, "a" * 64)
         with VendorBlobClient(fake.url, _TOKEN, session=session) as blobs:
             ref = blobs.put_bytes(b"blob" * 100)
             assert blobs.get_bytes(ref) == b"blob" * 100

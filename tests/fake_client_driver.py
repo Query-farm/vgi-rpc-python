@@ -253,6 +253,7 @@ class FakeDriver:
                 "sticky_default_ttl": 300,
                 "sticky_echo_headers": ["Backend"],
                 "upload_url_support": True,
+                "upload_url_version": 2,
                 "max_request_bytes": 1048576,
                 "max_response_bytes": None,
                 "max_externalized_response_bytes": None,
@@ -263,12 +264,17 @@ class FakeDriver:
         }
 
     def _op_request_upload_urls(self, request: dict[str, Any]) -> dict[str, Any]:
-        count = int(request.get("count", 1))
+        uploads = request.get("uploads") or []
         return {
             "ok": True,
             "urls": [
-                {"upload_url": f"http://up/{i}", "download_url": f"http://down/{i}", "expires_at": 1767225600}
-                for i in range(count)
+                {
+                    "upload_url": f"http://up/{i}",
+                    "download_url": f"http://down/{i}",
+                    "expires_at": 1767225600,
+                    "upload_headers": {"x-amz-checksum-sha256": f"digest-{entry['sha256'][:4]}"},
+                }
+                for i, entry in enumerate(uploads)
             ],
         }
 

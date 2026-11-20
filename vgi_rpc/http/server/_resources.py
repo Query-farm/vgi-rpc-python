@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from http import HTTPStatus
 from io import BytesIO
 from typing import TYPE_CHECKING, Literal
@@ -15,6 +16,7 @@ import falcon
 import pyarrow as pa
 
 from vgi_rpc.errors import error_code_of
+from vgi_rpc.external import is_sha256_hex
 from vgi_rpc.rpc import (
     MethodType,
     RpcError,
@@ -36,6 +38,9 @@ from .._common import (
     _MAX_UPLOAD_URL_COUNT,
     _UPLOAD_URL_METHOD,
     _UPLOAD_URL_SCHEMA,
+    MAX_UPLOAD_BYTES_HEADER,
+    UPLOAD_URL_HEADER,
+    UPLOAD_URL_PROTOCOL_VERSION,
     _RpcHttpError,
 )
 from ._responses import (
@@ -359,6 +364,61 @@ class _ExchangeResource:
             _current_response_budget.reset(budget_token)
 
 
+def _parse_upload_entries(kwargs: dict[str, object], *, max_upload_bytes: int | None) -> list[tuple[int, str]]:
+    """Validate an ``__upload_url__`` v2 request and return its ``(size, sha256)`` entries.
+
+    Args:
+        kwargs: The decoded request parameters.
+        max_upload_bytes: The advertised ``VGI-Max-Upload-Bytes``, or ``None``.
+
+    Returns:
+        One ``(size, sha256_hex)`` per requested upload, in request order.
+
+    Raises:
+        ValueError: On the retired v1 ``count`` shape, a missing ``uploads``
+            parameter, 0 or more than 100 entries, a ``size`` below 1 or
+            above *max_upload_bytes*, or a ``sha256`` that is not 64
+            lowercase hex characters.  The server answers 400 with this
+            message before any URL is minted.
+
+    """
+    if "count" in kwargs or "uploads" not in kwargs:
+        raise ValueError(
+            f"{_UPLOAD_URL_METHOD} request uses the retired count shape: this server requires "
+            f"{UPLOAD_URL_HEADER}: {UPLOAD_URL_PROTOCOL_VERSION} and an 'uploads' parameter "
+            "(list<struct<size: int64, sha256: utf8>>, one entry per upload)"
+        )
+    raw = kwargs["uploads"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= _MAX_UPLOAD_URL_COUNT:
+        got = len(raw) if isinstance(raw, list) else "null"
+        raise ValueError(f"{_UPLOAD_URL_METHOD} 'uploads' must have 1-{_MAX_UPLOAD_URL_COUNT} entries, got {got}")
+    entries: list[tuple[int, str]] = []
+    for i, item in enumerate(raw):
+        size = item.get("size") if isinstance(item, dict) else None
+        sha256_hex = item.get("sha256") if isinstance(item, dict) else None
+        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+            raise ValueError(f"{_UPLOAD_URL_METHOD} uploads[{i}].size must be an integer >= 1, got {size!r}")
+        if not is_sha256_hex(sha256_hex):
+            raise ValueError(f"{_UPLOAD_URL_METHOD} uploads[{i}].sha256 must be 64 lowercase hex characters")
+        assert isinstance(sha256_hex, str)
+        if max_upload_bytes is not None and size > max_upload_bytes:
+            raise ValueError(
+                f"{_UPLOAD_URL_METHOD} uploads[{i}].size {size} exceeds {MAX_UPLOAD_BYTES_HEADER} ({max_upload_bytes})"
+            )
+        entries.append((size, sha256_hex))
+    return entries
+
+
+def _upload_headers(headers: Mapping[str, str]) -> list[tuple[str, str]]:
+    """Return a provider's PUT headers as map entries, minus ``Content-Length``.
+
+    The client sends exactly the declared size with a plain
+    ``Content-Length`` of its own, so a provider that lists one (the
+    vendor's ``required_headers`` does) must not hand the client a second.
+    """
+    return [(k, v) for k, v in headers.items() if k.lower() != "content-length"]
+
+
 class _UploadUrlResource:
     """Falcon resource for upload URL generation: ``POST {prefix}/__upload_url__/init``."""
 
@@ -391,10 +451,10 @@ class _UploadUrlResource:
                 # error with a type and a message, not as Falcon's default page.
                 raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
-            count = kwargs.get("count", 1)
-            if not isinstance(count, int):
-                count = 1
-            count = max(1, min(count, _MAX_UPLOAD_URL_COUNT))
+            try:
+                uploads = _parse_upload_entries(kwargs, max_upload_bytes=self._app._max_upload_bytes)
+            except ValueError as exc:
+                raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
         except _RpcHttpError as e:
             _set_error_response(
                 resp,
@@ -423,12 +483,13 @@ class _UploadUrlResource:
             with new_ipc_stream(resp_buf, _UPLOAD_URL_SCHEMA) as writer:
                 sink.flush_contents(writer, _UPLOAD_URL_SCHEMA)
                 try:
-                    urls = [provider.generate_upload_url(pa.schema([])) for _ in range(count)]
+                    urls = [provider.generate_upload_url(size, sha256_hex) for size, sha256_hex in uploads]
                     result_batch = pa.RecordBatch.from_pydict(
                         {
                             "upload_url": [u.upload_url for u in urls],
                             "download_url": [u.download_url for u in urls],
                             "expires_at": [u.expires_at for u in urls],
+                            "upload_headers": [_upload_headers(u.headers) for u in urls],
                         },
                         schema=_UPLOAD_URL_SCHEMA,
                     )

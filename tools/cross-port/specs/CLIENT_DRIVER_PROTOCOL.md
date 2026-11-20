@@ -409,19 +409,30 @@ driver that defers connection setup until the first RPC will fail them.
 {"ok": true, "caps": {
   "sticky_enabled": true, "sticky_default_ttl": 300,
   "sticky_echo_headers": ["Backend"], "upload_url_support": true,
+  "upload_url_version": 2,
   "max_request_bytes": 1048576, "max_response_bytes": 8388608,
   "max_externalized_response_bytes": null, "externalization_enabled": true,
   "max_upload_bytes": 16777216, "supported_encodings": ["zstd", "gzip"]}}
 ```
 
-Byte caps and the TTL are integers or `null`. `supported_encodings` uses the
+`upload_url_support` is whether `VGI-Upload-URL-Support` is present at all;
+`upload_url_version` is its parsed value (`"true"` is `1`, `"2"` is `2`,
+absent or unparseable is `null`). Byte caps and the TTL are integers or `null`. `supported_encodings` uses the
 lowercase wire tokens (`zstd`, `gzip`, `identity`) — not your enum's spelling.
 
-**`request_upload_urls`** — `{"op": "request_upload_urls", "count": 1}`:
+**`request_upload_urls`** — upload-URL protocol v2, one entry per upload:
+`{"op": "request_upload_urls", "uploads": [{"size": 1234, "sha256": "<64 lowercase hex>"}]}`.
+The driver sends the entries as given, even malformed ones, and reports a
+server refusal as an error response:
 
 ```json
-{"ok": true, "urls": [{"upload_url": "...", "download_url": "...", "expires_at": 1767225600}]}
+{"ok": true, "urls": [{"upload_url": "...", "download_url": "...", "expires_at": 1767225600,
+  "upload_headers": {"x-amz-checksum-sha256": "..."}}]}
 ```
+
+`upload_headers` is the response row's `upload_headers` map, verbatim (`{}`
+when empty). The driver's client must refuse a server whose
+`VGI-Upload-URL-Support` is not `2`.
 
 `expires_at` should be integer Unix seconds; an ISO-8601 string is also
 accepted, and `null` is tolerated. No test asserts on its value.

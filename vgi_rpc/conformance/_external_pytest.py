@@ -104,6 +104,39 @@ def _upload_body(
     return download_url, hashlib.sha256(body).hexdigest()
 
 
+def _upload_entry(payload: bytes) -> tuple[int, str]:
+    """Return the ``(size, sha256_hex)`` upload-URL v2 entry for *payload*."""
+    return len(payload), hashlib.sha256(payload).hexdigest()
+
+
+def _upload_url_request(params: dict[str, object], schema: pa.Schema) -> bytes:
+    """Serialize a raw ``__upload_url__`` request, even a malformed one."""
+    buf = BytesIO()
+    _write_request(buf, "__upload_url__", schema, params)
+    return buf.getvalue()
+
+
+def _v2_upload_url_request(entries: list[dict[str, object]]) -> bytes:
+    """Serialize a v2 ``__upload_url__`` request without client-side validation."""
+    from vgi_rpc.http import UPLOAD_URL_PARAMS_SCHEMA
+
+    return _upload_url_request({"uploads": entries}, UPLOAD_URL_PARAMS_SCHEMA)
+
+
+def _assert_upload_url_refused(response: httpx2.Response, match: str) -> None:
+    """Require a 400 whose Arrow body is an RPC error matching *match*."""
+    assert response.status_code == 400, f"{response.status_code}: {response.content[:300]!r}"
+    reader = ipc.open_stream(BytesIO(response.content))
+    with pytest.raises(RpcError, match=match):
+        while True:
+            try:
+                batch, metadata = reader.read_next_batch_with_custom_metadata()
+            except StopIteration:
+                break
+            _dispatch_log_or_error(batch, metadata)
+        raise AssertionError("400 response carried no RPC error batch")
+
+
 def _storage_stats(storage_url: str) -> dict[str, int]:
     """Read fake-storage counters."""
     import httpx2
@@ -341,7 +374,11 @@ class TestExternalFetchFailures:
 
         base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
         original = _request_body("echo_int", value=7)
-        pointer = _pointer_body(original, f"{conformance_fake_storage}/download/conformance-missing")
+        pointer = _pointer_body(
+            original,
+            f"{conformance_fake_storage}/download/conformance-missing",
+            sha256=hashlib.sha256(original).hexdigest(),
+        )
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
             _assert_rpc_error_response(_post(client, "/ConformanceService/echo_int", pointer))
             assert _result_value(_post(client, "/ConformanceService/echo_int", original)) == 7
@@ -367,6 +404,7 @@ class TestExternalFetchFailures:
             pointer = _pointer_body(
                 inline_exchange,
                 f"{conformance_fake_storage}/download/conformance-missing-exchange",
+                sha256=hashlib.sha256(inline_exchange).hexdigest(),
             )
             _assert_rpc_error_response(_post(client, "/ConformanceService/exchange_scale/exchange", pointer))
             assert (
@@ -386,7 +424,7 @@ class TestExternalFetchFailures:
         download_url, _checksum = _upload_body(conformance_fake_storage, original)
         pointer = _pointer_body(original, download_url, sha256="0" * 64)
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
-            _assert_rpc_error_response(_post(client, "/ConformanceService/echo_int", pointer), match="checksum")
+            _assert_rpc_error_response(_post(client, "/ConformanceService/echo_int", pointer), match="sha256 mismatch")
             assert _result_value(_post(client, "/ConformanceService/echo_int", original)) == 11
 
 
@@ -500,7 +538,7 @@ class TestExternalFetchSecurity:
             f"{conformance_fake_storage}/download/conformance-missing-signed"
             f"?X-Amz-Credential=credential&X-Amz-Signature={secret}"
         )
-        pointer = _pointer_body(original, location)
+        pointer = _pointer_body(original, location, sha256=hashlib.sha256(original).hexdigest())
         base_url = f"http://127.0.0.1:{conformance_http_external_security_port}"
         with httpx2.Client(base_url=base_url, timeout=5.0) as client:
             response = _post(client, "/ConformanceService/echo_int", pointer)
@@ -537,7 +575,7 @@ class TestExternalStorageUrlPair:
             assert after == before, "an oversized control request must not allocate storage"
             # The rejected body must be framed cleanly enough to reuse the
             # same persistent HTTP connection for the next request.
-            assert len(request_upload_urls(count=1, client=client)) == 1
+            assert len(request_upload_urls(uploads=[_upload_entry(b"after the refusal")], client=client)) == 1
 
     def test_chunked_upload_url_control_route_honors_request_cap(
         self,
@@ -571,7 +609,7 @@ class TestExternalStorageUrlPair:
             assert response.status_code == 413
             after = httpx2.get(f"{conformance_fake_storage}/_stats", timeout=5.0).json()["object_count"]
             assert after == before, "an oversized chunked request must not allocate storage"
-            assert len(request_upload_urls(count=1, client=client)) == 1
+            assert len(request_upload_urls(uploads=[_upload_entry(b"after the refusal")], client=client)) == 1
 
     def test_upload_and_download_urls_are_method_bound(
         self,
@@ -580,18 +618,198 @@ class TestExternalStorageUrlPair:
         """Wrong-method use fails while PUT followed by GET round-trips."""
         import httpx2
 
-        from vgi_rpc.http import request_upload_urls
+        from vgi_rpc.http import request_upload_urls, upload_put_headers
 
-        urls = request_upload_urls(f"http://127.0.0.1:{conformance_http_with_storage_port}", count=1)
+        payload = b"method-bound external storage conformance"
+        urls = request_upload_urls(
+            f"http://127.0.0.1:{conformance_http_with_storage_port}", uploads=[_upload_entry(payload)]
+        )
         assert len(urls) == 1
         pair = urls[0]
         assert httpx2.get(pair.upload_url, timeout=5.0).status_code == 403
         assert httpx2.put(pair.download_url, content=b"wrong method", timeout=5.0).status_code == 403
-        payload = b"method-bound external storage conformance"
-        assert httpx2.put(pair.upload_url, content=payload, timeout=5.0).status_code == 204
+        put = httpx2.put(pair.upload_url, content=payload, headers=upload_put_headers(pair), timeout=5.0)
+        assert put.status_code in (200, 204), put.status_code
         response = httpx2.get(pair.download_url, timeout=5.0)
         assert response.status_code == 200
         assert response.content == payload
+
+
+class TestUploadUrlV2:
+    """Upload-URL protocol v2: sized, checksummed client uploads (vgi protocol 3.4).
+
+    ``__upload_url__/init`` takes ``uploads: list<struct<size, sha256>>``
+    and vends one URL per entry signed for exactly that body; the old
+    ``count`` request is refused; request pointers must carry
+    ``vgi_rpc.location.sha256``.  Runs against
+    ``conformance_http_with_storage_port`` (a server whose upload provider
+    is the shared fake storage, which verifies sized PUTs like S3/R2).
+    """
+
+    def test_capability_header_is_2(self, conformance_http_with_storage_port: int) -> None:
+        """``VGI-Upload-URL-Support`` is exactly ``2`` on the discovery response."""
+        import httpx2
+
+        response = httpx2.get(f"http://127.0.0.1:{conformance_http_with_storage_port}/health", timeout=5.0)
+        assert response.headers.get("VGI-Upload-URL-Support") == "2"
+
+    def test_round_trip_two_uploads(self, conformance_http_with_storage_port: int) -> None:
+        """Each entry gets its own sized URL; PUT with the vended headers, then GET the same bytes."""
+        import httpx2
+
+        from vgi_rpc.http import request_upload_urls, upload_put_headers
+
+        payloads = [b"first sized upload", os.urandom(3000)]
+        urls = request_upload_urls(
+            f"http://127.0.0.1:{conformance_http_with_storage_port}",
+            uploads=[_upload_entry(p) for p in payloads],
+        )
+        assert len(urls) == 2
+        assert urls[0].upload_url != urls[1].upload_url
+        for url, payload in zip(urls, payloads, strict=True):
+            assert all(k.lower() != "content-length" for k in url.headers)
+            put = httpx2.put(url.upload_url, content=payload, headers=upload_put_headers(url), timeout=5.0)
+            assert put.status_code in (200, 204), put.status_code
+            got = httpx2.get(url.download_url, timeout=5.0)
+            assert got.status_code == 200
+            assert got.content == payload
+
+    def test_response_schema(self, conformance_http_with_storage_port: int) -> None:
+        """The response batch has the four v2 columns with their Arrow types."""
+        import httpx2
+
+        body = _v2_upload_url_request([{"size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}])
+        with httpx2.Client(base_url=f"http://127.0.0.1:{conformance_http_with_storage_port}", timeout=5.0) as client:
+            batches = _response_batches(_post(client, "/__upload_url__/init", body))
+        data = [b for b, _ in batches if b.num_rows > 0]
+        assert len(data) == 1 and data[0].num_rows == 1
+        schema = data[0].schema
+        assert schema.field("upload_url").type == pa.utf8()
+        assert schema.field("download_url").type == pa.utf8()
+        assert schema.field("expires_at").type == pa.timestamp("us", tz="UTC")
+        headers_type = schema.field("upload_headers").type
+        assert pa.types.is_map(headers_type)
+        assert headers_type.key_type == pa.utf8() and headers_type.item_type == pa.utf8()
+
+    def test_retired_count_shape_is_refused(
+        self, conformance_http_with_storage_port: int, conformance_fake_storage: str
+    ) -> None:
+        """A v1 ``count`` request (or one with no ``uploads``) is a 400 naming the v2 requirement."""
+        import httpx2
+
+        before = _storage_stats(conformance_fake_storage).get("allocations", 0)
+        bodies = [
+            _upload_url_request({"count": 1}, pa.schema([pa.field("count", pa.int64())])),
+            _upload_url_request({}, pa.schema([])),
+        ]
+        with httpx2.Client(base_url=f"http://127.0.0.1:{conformance_http_with_storage_port}", timeout=5.0) as client:
+            for body in bodies:
+                response = _post(client, "/__upload_url__/init", body)
+                _assert_upload_url_refused(response, "retired count shape")
+                assert b"VGI-Upload-URL-Support: 2" in response.content
+        assert _storage_stats(conformance_fake_storage).get("allocations", 0) == before
+
+    @pytest.mark.parametrize(
+        ("entries", "match"),
+        [
+            ([], "1-100 entries"),
+            ([{"size": 1, "sha256": "a" * 64}] * 101, "1-100 entries"),
+            ([{"size": 0, "sha256": "a" * 64}], r"size must be an integer >= 1"),
+            ([{"size": -5, "sha256": "a" * 64}], r"size must be an integer >= 1"),
+            ([{"size": 1, "sha256": "A" * 64}], "64 lowercase hex"),
+            ([{"size": 1, "sha256": "a" * 63}], "64 lowercase hex"),
+            ([{"size": 1, "sha256": "a" * 64}, {"size": 1, "sha256": "zz"}], r"uploads\[1\]\.sha256"),
+        ],
+        ids=["empty", "over-100", "size-0", "size-negative", "uppercase-hex", "short-hex", "second-entry-bad"],
+    )
+    def test_malformed_entries_are_refused(
+        self,
+        conformance_http_with_storage_port: int,
+        conformance_fake_storage: str,
+        entries: list[dict[str, object]],
+        match: str,
+    ) -> None:
+        """Bad entry counts, sizes and digests are a 400 before any URL is minted."""
+        import httpx2
+
+        before = _storage_stats(conformance_fake_storage).get("allocations", 0)
+        with httpx2.Client(base_url=f"http://127.0.0.1:{conformance_http_with_storage_port}", timeout=5.0) as client:
+            response = _post(client, "/__upload_url__/init", _v2_upload_url_request(entries))
+            # 101 entries (~7.7 KB) can exceed a small max_request_bytes; a 413
+            # is then an equally valid refusal before anything is minted.
+            if not (len(entries) > 100 and response.status_code == 413):
+                _assert_upload_url_refused(response, match)
+        assert _storage_stats(conformance_fake_storage).get("allocations", 0) == before
+
+    def test_size_over_max_upload_bytes_is_refused(self, conformance_http_with_storage_port: int) -> None:
+        """An entry larger than ``VGI-Max-Upload-Bytes`` is a 400."""
+        import httpx2
+
+        from vgi_rpc.http import http_capabilities
+
+        base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
+        max_upload = http_capabilities(base_url).max_upload_bytes
+        if max_upload is None:
+            pytest.skip("server advertises no VGI-Max-Upload-Bytes")
+        body = _v2_upload_url_request([{"size": max_upload + 1, "sha256": "b" * 64}])
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            _assert_upload_url_refused(_post(client, "/__upload_url__/init", body), "exceeds VGI-Max-Upload-Bytes")
+
+    def test_storage_refuses_wrong_bytes(
+        self, conformance_http_with_storage_port: int, conformance_fake_storage: str
+    ) -> None:
+        """A vended URL accepts only the declared body: other bytes or another length are refused."""
+        import httpx2
+
+        from vgi_rpc.http import request_upload_urls, upload_put_headers
+
+        payload = b"the declared body, exactly"
+        (url,) = request_upload_urls(
+            f"http://127.0.0.1:{conformance_http_with_storage_port}", uploads=[_upload_entry(payload)]
+        )
+        headers = upload_put_headers(url)
+        same_length = bytes(b ^ 0x01 for b in payload)
+        for wrong in (same_length, payload[:-1], payload + b"!"):
+            put = httpx2.put(url.upload_url, content=wrong, headers=headers, timeout=5.0)
+            assert 400 <= put.status_code < 500, f"storage accepted a wrong body: HTTP {put.status_code}"
+        assert httpx2.get(url.download_url, timeout=5.0).status_code == 404, "a refused PUT stored bytes"
+        assert _storage_stats(conformance_fake_storage).get("upload_refusals", 0) >= 3
+
+    def test_request_pointer_without_sha256_is_refused(
+        self, conformance_http_with_storage_port: int, conformance_fake_storage: str
+    ) -> None:
+        """A request pointer lacking ``vgi_rpc.location.sha256`` fails without being fetched."""
+        import httpx2
+
+        base_url = f"http://127.0.0.1:{conformance_http_with_storage_port}"
+        original = _request_body("echo_int", value=41)
+        download_url, _checksum = _upload_body(conformance_fake_storage, original)
+        before = _storage_stats(conformance_fake_storage).get("download_requests", 0)
+        with httpx2.Client(base_url=base_url, timeout=5.0) as client:
+            _assert_rpc_error_response(
+                _post(client, "/ConformanceService/echo_int", _pointer_body(original, download_url)),
+                match="missing vgi_rpc.location.sha256",
+            )
+            assert _result_value(_post(client, "/ConformanceService/echo_int", original)) == 41
+        assert _storage_stats(conformance_fake_storage).get("download_requests", 0) == before
+
+    def test_client_upload_carries_sha256(self, conformance_http_with_storage_port: int) -> None:
+        """The client's auto-externalized request round-trips (its pointer carries the digest)."""
+        from vgi_rpc.external import ExternalLocationConfig
+        from vgi_rpc.http import http_connect
+
+        big = os.urandom(20_000).hex()
+        config = ExternalLocationConfig(url_validator=None)
+        try:
+            with http_connect(
+                ConformanceService,  # type: ignore[type-abstract]
+                f"http://127.0.0.1:{conformance_http_with_storage_port}",
+                external_location=config,
+                compression_level=None,
+            ) as proxy:
+                assert proxy.echo_large_string(value=big) == big
+        finally:
+            config.fetch_config.close()
 
 
 __all__ = [
@@ -599,6 +817,7 @@ __all__ = [
     "TestExternalFetchSecurity",
     "TestExternalInputRoutes",
     "TestExternalStorageUrlPair",
+    "TestUploadUrlV2",
 ]
 
 

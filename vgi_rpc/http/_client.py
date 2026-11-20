@@ -13,7 +13,7 @@ import contextlib
 import json
 import logging
 import struct
-from collections.abc import Callable, Generator, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO
@@ -27,6 +27,7 @@ from pyarrow import ipc
 from vgi_rpc.external import (
     AnyExternalConfig,
     UploadUrl,
+    is_sha256_hex,
     make_external_location_batch,
     resolve_external_location,
 )
@@ -60,6 +61,7 @@ from vgi_rpc.utils import ArrowSerializableDataclass, IpcValidation, ValidatedRe
 
 from ._common import (
     _ARROW_CONTENT_TYPE,
+    _MAX_UPLOAD_URL_COUNT,
     _SESSION_ENDPOINT,
     _UPLOAD_URL_METHOD,
     _UPLOAD_URL_PARAMS_SCHEMA,
@@ -79,6 +81,7 @@ from ._common import (
     STICKY_ENABLED_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
+    UPLOAD_URL_PROTOCOL_VERSION,
     Encoding,
     available_encodings,
     parse_encoding_list,
@@ -247,6 +250,41 @@ def storage_put(
         return bare.send(request, auth=None)
 
 
+def _require_upload_url_v2(capabilities: HttpServerCapabilities) -> None:
+    """Refuse to upload to a server that does not speak upload-URL protocol v2.
+
+    Args:
+        capabilities: The server's discovered capabilities.
+
+    Raises:
+        RpcError: ``RequestTooLarge`` when the server vends no upload URLs,
+            ``ProtocolError`` when it advertises another protocol version
+            (``"true"`` is v1, the retired ``count`` shape).
+
+    """
+    version = capabilities.upload_url_version
+    if not capabilities.upload_url_support or version is None:
+        raise RpcError(
+            "RequestTooLarge",
+            "Request exceeds max_request_bytes and the server does not advertise upload_url_support",
+            "",
+        )
+    if version < UPLOAD_URL_PROTOCOL_VERSION:
+        raise RpcError(
+            "ProtocolError",
+            f"Server upload protocol is too old: it advertises {UPLOAD_URL_HEADER} v{version} "
+            f"and this client needs {UPLOAD_URL_PROTOCOL_VERSION}",
+            "",
+        )
+    if version > UPLOAD_URL_PROTOCOL_VERSION:
+        raise RpcError(
+            "ProtocolError",
+            f"Server upload protocol is newer than this client: it advertises {UPLOAD_URL_HEADER}: {version} "
+            f"and this client speaks {UPLOAD_URL_PROTOCOL_VERSION}",
+            "",
+        )
+
+
 def _externalize_via_upload_url(
     body: bytes,
     *,
@@ -258,48 +296,87 @@ def _externalize_via_upload_url(
 ) -> bytes:
     """Upload *body* to a server-vended URL and return a pointer-batch body.
 
-    Caller must have already verified ``capabilities.upload_url_support``;
-    this helper does no capability check.  Used from both the unary/init
-    path on ``_HttpProxy`` and the exchange path on ``HttpStreamSession``.
+    Requires a server advertising ``VGI-Upload-URL-Support: 2``; a v1
+    (``"true"``) server is refused, never fallen back to.  Hashes *body*,
+    requests one URL signed for its size and digest, PUTs exactly those
+    bytes with every vended header, and returns a pointer request whose
+    ``vgi_rpc.location.sha256`` is the same digest.  Used from both the
+    unary/init path on ``_HttpProxy`` and the exchange path on
+    ``HttpStreamSession``.
     """
-    if not capabilities.upload_url_support:
-        raise RpcError(
-            "RequestTooLarge",
-            "Request exceeds max_request_bytes and the server does not advertise upload_url_support",
-            "",
-        )
+    import hashlib
+
+    _require_upload_url_v2(capabilities)
     if not isinstance(client, httpx2.Client):
         raise RpcError(
             "ExternalUploadFailed",
             "Auto-externalization requires an httpx2.Client (the in-process test shim doesn't support PUT)",
             "",
         )
-    urls = request_upload_urls(client=client, prefix=url_prefix, count=1, retry=retry_config)
-    if not urls:
-        raise RpcError("ProtocolError", "Server returned no upload URLs", "")
-    upload_url = urls[0].upload_url
-    download_url = urls[0].download_url
+    sha256_hex = hashlib.sha256(body).hexdigest()
+    urls = request_upload_urls(
+        client=client,
+        prefix=url_prefix,
+        uploads=[(len(body), sha256_hex)],
+        retry=retry_config,
+        capabilities=capabilities,
+    )
+    if len(urls) != 1:
+        raise RpcError("ProtocolError", f"Server returned {len(urls)} upload URLs for 1 upload", "")
+    vended = urls[0]
     if url_validator is not None:
-        url_validator(upload_url)
-        url_validator(download_url)
-    put_resp = storage_put(upload_url, body, timeout=client.timeout)
+        url_validator(vended.upload_url)
+        url_validator(vended.download_url)
+    put_resp = storage_put(vended.upload_url, body, headers=upload_put_headers(vended), timeout=client.timeout)
     if not (200 <= put_resp.status_code < 300):
+        code = _storage_error_code(put_resp.content)
         raise RpcError(
             "ExternalUploadFailed",
-            f"PUT to upload URL failed: HTTP {put_resp.status_code}",
+            f"PUT to upload URL failed: HTTP {put_resp.status_code}{f' {code}' if code else ''}",
             "",
         )
-    return _build_pointer_request_body(body, download_url)
+    return _build_pointer_request_body(body, vended.download_url, sha256_hex)
 
 
-def _build_pointer_request_body(original_body: bytes, location_url: str) -> bytes:
+def upload_put_headers(url: UploadUrl) -> dict[str, str]:
+    """Headers for the PUT of one upload-URL v2 upload.
+
+    Every ``upload_headers`` entry verbatim, plus
+    ``Content-Type: application/octet-stream`` when the server listed no
+    content type.  ``Content-Length`` is never taken from the server: the
+    HTTP client sets it from the body, which must be exactly the declared
+    size (no chunked transfer encoding).
+
+    Args:
+        url: The vended upload URL.
+
+    Returns:
+        The headers to send.
+
+    """
+    headers = {k: v for k, v in url.headers.items() if k.lower() != "content-length"}
+    if not any(k.lower() == "content-type" for k in headers):
+        headers["Content-Type"] = _UPLOAD_CONTENT_TYPE
+    return headers
+
+
+def _storage_error_code(body: bytes) -> str | None:
+    """Pull the S3-style ``<Code>`` out of a storage error body, if there is one."""
+    import re
+
+    match = re.search(rb"<Code>([A-Za-z0-9]{1,64})</Code>", body[:4096])
+    return match.group(1).decode() if match else None
+
+
+def _build_pointer_request_body(original_body: bytes, location_url: str, sha256_hex: str) -> bytes:
     """Convert an inline IPC request body into an externalized pointer body.
 
     Reads the original request batch (assumed to be a single IPC stream
     with one batch carrying ``vgi_rpc.method`` / ``vgi_rpc.request_version``
     in custom_metadata), then writes a new IPC stream containing a
     zero-row pointer batch with the same schema and merged metadata
-    (original dispatch keys + ``vgi_rpc.location``).
+    (original dispatch keys + ``vgi_rpc.location`` +
+    ``vgi_rpc.location.sha256``, which servers require on request pointers).
 
     The receiving server's ``_read_request`` honours the outer batch's
     dispatch metadata for routing, then resolves the pointer to fetch
@@ -307,7 +384,7 @@ def _build_pointer_request_body(original_body: bytes, location_url: str) -> byte
     """
     reader = ipc.open_stream(BytesIO(original_body))
     batch, custom_metadata = reader.read_next_batch_with_custom_metadata()
-    pointer_batch, loc_md = make_external_location_batch(batch.schema, location_url)
+    pointer_batch, loc_md = make_external_location_batch(batch.schema, location_url, sha256=sha256_hex)
     merged = merge_metadata(custom_metadata, loc_md)
     buf = BytesIO()
     with new_ipc_stream(buf, batch.schema) as writer:
@@ -2084,7 +2161,12 @@ class HttpServerCapabilities:
             rescue an oversize response; conformance tests for the
             externalised strict-fail path should skip.
         upload_url_support: Whether the server exposes
-            ``__upload_url__/init`` for client-vended pointer-batch uploads.
+            ``__upload_url__/init`` for client-vended pointer-batch uploads
+            (any protocol version; see *upload_url_version*).
+        upload_url_version: Upload-URL protocol version from
+            ``VGI-Upload-URL-Support``: ``1`` for the retired ``"true"``
+            (``count``) shape, ``2`` for the sized ``(size, sha256)`` shape
+            this client speaks, ``None`` when not advertised.
         max_upload_bytes: Maximum upload size the server advertises for
             client-vended URLs, or ``None`` if not advertised.
         supported_encodings: Content-encoding codecs the server can
@@ -2120,6 +2202,7 @@ class HttpServerCapabilities:
     max_externalized_response_bytes: int | None = None
     externalization_enabled: bool = False
     upload_url_support: bool = False
+    upload_url_version: int | None = None
     max_upload_bytes: int | None = None
     supported_encodings: tuple[Encoding, ...] = (Encoding.ZSTD,)
     cache_expires_at: float | None = None
@@ -2223,7 +2306,8 @@ def http_capabilities(
         ext_enabled = ext_enabled_raw == "true" if ext_enabled_raw is not None else False
 
         upload_raw = headers.get(UPLOAD_URL_HEADER) or headers.get(UPLOAD_URL_HEADER.lower())
-        upload_support = upload_raw == "true" if upload_raw is not None else False
+        upload_version = parse_upload_url_support(upload_raw)
+        upload_support = upload_version is not None
 
         max_upload: int | None = None
         upload_bytes_raw = headers.get(MAX_UPLOAD_BYTES_HEADER) or headers.get(MAX_UPLOAD_BYTES_HEADER.lower())
@@ -2287,6 +2371,7 @@ def http_capabilities(
             max_externalized_response_bytes=max_ext_resp,
             externalization_enabled=ext_enabled,
             upload_url_support=upload_support,
+            upload_url_version=upload_version,
             max_upload_bytes=max_upload,
             supported_encodings=supported_encodings,
             cache_expires_at=cache_expires_at,
@@ -2300,25 +2385,52 @@ def http_capabilities(
             client.close()
 
 
+def parse_upload_url_support(value: str | None) -> int | None:
+    """Parse a ``VGI-Upload-URL-Support`` value into an upload-URL protocol version.
+
+    Args:
+        value: The header value, or ``None`` when absent.
+
+    Returns:
+        ``1`` for the retired ``"true"``, the integer for a positive decimal
+        version (``"2"``), ``None`` when absent or unrecognised.
+
+    """
+    if value is None:
+        return None
+    token = value.strip()
+    if token.lower() == "true":
+        return 1
+    if token.isascii() and token.isdigit() and not token.startswith("0"):
+        return int(token)
+    return None
+
+
 def request_upload_urls(
     base_url: str | None = None,
     *,
-    count: int = 1,
+    uploads: Sequence[tuple[int, str]],
     prefix: str | None = None,
     client: httpx2.Client | _SyncTestClient | None = None,
     retry: HttpRetryConfig | None = None,
     accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
     timeout: float | httpx2.Timeout | None = DEFAULT_HTTP_TIMEOUT,
+    capabilities: HttpServerCapabilities | None = None,
 ) -> list[UploadUrl]:
     """Request pre-signed upload URLs from the server's ``__upload_url__`` endpoint.
 
-    The server must have been configured with an ``upload_url_provider``
-    in ``make_wsgi_app()``.
+    Speaks upload-URL protocol v2: one ``(size, sha256)`` entry per upload,
+    and each returned URL is signed for exactly that body.  PUT the bytes
+    with :func:`upload_put_headers` and name the download URL in a pointer
+    carrying ``vgi_rpc.location.sha256``.  A server advertising anything
+    but ``VGI-Upload-URL-Support: 2`` is refused before the request.
 
     Args:
         base_url: Base URL of the server (e.g. ``http://localhost:8000``).
             Required when *client* is ``None``.
-        count: Number of upload URLs to request (default 1, max 100).
+        uploads: One ``(size, sha256_hex)`` per upload (1-100 entries):
+            the exact byte length the PUT will carry (``>= 1``) and the
+            SHA-256 of those bytes as 64 lowercase hex characters.
         prefix: URL prefix matching the server's prefix.  ``None``
             auto-detects from ``_SyncTestClient``.
         client: Optional HTTP client (``httpx2.Client`` or ``_SyncTestClient``).
@@ -2329,16 +2441,29 @@ def request_upload_urls(
             acquisition, an ``httpx2.Timeout`` for separate limits, or ``None``
             for no limit.  Used only when this function builds the client; a
             provided *client* keeps its own timeout.
+        capabilities: Already-discovered server capabilities; probed when
+            ``None``.
 
     Returns:
-        A list of ``UploadUrl`` objects with pre-signed PUT and GET URLs.
+        One ``UploadUrl`` per entry, in request order, each carrying the
+        headers its PUT must send.
 
     Raises:
-        RpcError: If the server does not support upload URLs (404) or
-            returns an error.
-        ValueError: If *base_url* is ``None`` and *client* is ``None``.
+        RpcError: If the server does not support upload URLs (404),
+            advertises a protocol other than v2, or returns an error.
+        ValueError: If *base_url* is ``None`` and *client* is ``None``, or an
+            entry is malformed.
 
     """
+    entries = list(uploads)
+    if not 1 <= len(entries) <= _MAX_UPLOAD_URL_COUNT:
+        raise ValueError(f"uploads must have 1-{_MAX_UPLOAD_URL_COUNT} entries, got {len(entries)}")
+    for size, sha256_hex in entries:
+        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+            raise ValueError(f"upload size must be an integer >= 1, got {size!r}")
+        if not is_sha256_hex(sha256_hex):
+            raise ValueError("upload sha256 must be 64 lowercase hex characters")
+
     own_client = client is None
     if client is None:
         if base_url is None:
@@ -2349,15 +2474,26 @@ def request_upload_urls(
 
     try:
         accepted_max_response_bytes = _validate_accepted_max_response_bytes(accepted_max_response_bytes)
-        _require_response_budget_support(
+        caps = _require_response_budget_support(
             client=client,
             prefix=prefix,
             retry=retry,
             accepted_max_response_bytes=accepted_max_response_bytes,
+            capabilities=capabilities,
         )
+        if caps is None:
+            caps = http_capabilities(client=client, prefix=prefix, retry=retry)
+        if caps.upload_url_version is None:
+            raise RpcError("NotSupported", "Server does not support upload URLs", "")
+        _require_upload_url_v2(caps)
         # Build request IPC with standard wire protocol metadata
         req_buf = BytesIO()
-        _write_request(req_buf, _UPLOAD_URL_METHOD, _UPLOAD_URL_PARAMS_SCHEMA, {"count": count})
+        _write_request(
+            req_buf,
+            _UPLOAD_URL_METHOD,
+            _UPLOAD_URL_PARAMS_SCHEMA,
+            {"uploads": [{"size": size, "sha256": sha256_hex} for size, sha256_hex in entries]},
+        )
 
         headers = {"Content-Type": _ARROW_CONTENT_TYPE}
         if accepted_max_response_bytes is not None:
@@ -2389,15 +2525,30 @@ def request_upload_urls(
                 if _dispatch_log_or_error(batch, custom_metadata):
                     continue
 
+                header_column = batch.column("upload_headers") if "upload_headers" in batch.schema.names else None
                 for i in range(batch.num_rows):
                     upload_url = batch.column("upload_url")[i].as_py()
                     download_url = batch.column("download_url")[i].as_py()
                     expires_at = batch.column("expires_at")[i].as_py()
-                    urls.append(UploadUrl(upload_url=upload_url, download_url=download_url, expires_at=expires_at))
+                    raw_headers = header_column[i].as_py() if header_column is not None else None
+                    urls.append(
+                        UploadUrl(
+                            upload_url=upload_url,
+                            download_url=download_url,
+                            expires_at=expires_at,
+                            headers=dict(raw_headers or []),
+                        )
+                    )
         except RpcError:
             _drain_stream(reader)
             raise
         _drain_stream(reader)
+        if len(urls) != len(entries):
+            raise RpcError(
+                "ProtocolError",
+                f"Server returned {len(urls)} upload URLs for {len(entries)} requested uploads",
+                "",
+            )
         return urls
     finally:
         if own_client:

@@ -40,6 +40,7 @@ from .._common import (
     STICKY_ENABLED_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     UPLOAD_URL_HEADER,
+    UPLOAD_URL_PROTOCOL_VERSION,
     Encoding,
     available_encodings,
 )
@@ -228,12 +229,13 @@ def make_wsgi_app(
             omit the header.  Only effective when ``cors_origins`` is set.
         upload_url_provider: Optional provider for generating pre-signed
             upload URLs.  When set, the ``__upload_url__/init`` endpoint
-            is enabled and ``VGI-Upload-URL-Support: true`` is advertised
-            on every response.
+            is enabled and ``VGI-Upload-URL-Support: 2`` (upload-URL
+            protocol v2: one ``(size, sha256)`` entry per URL) is
+            advertised on every response.
         max_upload_bytes: When set (and ``upload_url_provider`` is set),
-            advertised via the ``VGI-Max-Upload-Bytes`` header.  Informs
-            clients of the maximum size they may upload to vended URLs.
-            Advertisement only — no server-side enforcement.
+            advertised via the ``VGI-Max-Upload-Bytes`` header.  The
+            ``__upload_url__/init`` endpoint refuses (400) any entry whose
+            ``size`` exceeds it before minting a URL.
         otel_config: Optional ``OtelConfig`` for OpenTelemetry instrumentation.
             When provided, ``instrument_server()`` is called and
             ``_OtelFalconMiddleware`` is prepended for W3C trace propagation.
@@ -587,7 +589,7 @@ def make_wsgi_app(
     )
     cors_expose.append(EXTERNALIZATION_ENABLED_HEADER)
     if upload_url_provider is not None:
-        capability_headers[UPLOAD_URL_HEADER] = "true"
+        capability_headers[UPLOAD_URL_HEADER] = str(UPLOAD_URL_PROTOCOL_VERSION)
         cors_expose.append(UPLOAD_URL_HEADER)
         if max_upload_bytes is not None:
             capability_headers[MAX_UPLOAD_BYTES_HEADER] = str(max_upload_bytes)

@@ -564,7 +564,8 @@ def _read_request(
     # Dispatch metadata (method name, request version, traceparent) is
     # always taken from the outer batch above.
     if external_config is not None:
-        batch, _ = resolve_external_location(batch, custom_metadata, external_config)
+        # A request pointer must carry its digest (upload-URL protocol v2).
+        batch, _ = resolve_external_location(batch, custom_metadata, external_config, require_sha256=True)
     # Resolve a shared-memory pointer request batch back to its real columns.
     # A client (e.g. the C++ extension) may route the single-row request batch
     # through the shm side channel above a size threshold, so the inline batch

@@ -209,7 +209,8 @@ python -m vgi_rpc.conformance.client_worker \
 ```
 
 Capabilities advertise externalization, a 4096-byte direct-request limit,
-the synthetic upload-URL endpoint, and a 16 MiB upload limit.
+the synthetic upload-URL endpoint (`VGI-Upload-URL-Support: 2`), and a 16 MiB
+upload limit.
 
 For responses, `large_response(size=32768)` returns a zero-row pointer batch
 with `vgi_rpc.location` and `vgi_rpc.location.sha256`. The client must fetch
@@ -220,9 +221,14 @@ not an empty application result.
 For requests, call `echo_bytes` with the same 32 KiB value. After discovering
 that the serialized request exceeds `VGI-Max-Request-Bytes`, the client must:
 
-1. request a method-bound pair from `POST /vgi/__upload_url__/init`;
-2. PUT the complete original Arrow IPC request to `upload_url`;
-3. send a zero-row pointer batch naming `download_url` to `echo_bytes`;
+1. request a method-bound pair from `POST /vgi/__upload_url__/init` with one
+   `uploads` entry: the request's byte length and SHA-256 (upload-URL
+   protocol v2, see [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#upload-url-generation));
+2. PUT exactly those bytes to `upload_url` with every `upload_headers` entry
+   (the fixture store refuses any other length or digest);
+3. send a zero-row pointer batch naming `download_url` and carrying
+   `vgi_rpc.location.sha256` to `echo_bytes` (the server refuses a request
+   pointer without it);
 4. resolve the externalized response and obtain the original bytes.
 
 Do not reuse the PUT URL as the pointer GET URL. The fixture deliberately

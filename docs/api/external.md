@@ -39,15 +39,15 @@ This works for both unary results and streaming outputs. For streaming, all batc
 
 For the reverse direction — when a client needs to send large data to the server — the framework provides **upload URLs**. This is particularly important for HTTP transport where request body size limits are common.
 
-1. The client calls `request_upload_urls()` to get one or more pre-signed URL pairs from the server
-2. Each [`UploadUrl`](#vgi_rpc.external.UploadUrl) contains an `upload_url` (for PUT) and a `download_url` (for GET) — these may be the same or different depending on the storage backend
-3. The client serializes the large batch to Arrow IPC and uploads it directly to the `upload_url` via HTTP PUT, bypassing the RPC server entirely
-4. The client sends the RPC request with a pointer batch referencing the `download_url`
-5. The server resolves the pointer batch transparently, fetching the data from storage
+1. The client serializes the request to Arrow IPC, hashes it, and calls `request_upload_urls()` with one `(size, sha256)` entry per body
+2. Each [`UploadUrl`](#vgi_rpc.external.UploadUrl) contains an `upload_url` (for PUT) signed for exactly that size and digest, a `download_url` (for GET), and the `headers` the PUT must carry
+3. The client PUTs exactly those bytes to the `upload_url` with those headers, bypassing the RPC server entirely; storage refuses any other body where the backend can verify it (S3, R2, the blob vendor)
+4. The client sends the RPC request with a pointer batch referencing the `download_url` and carrying `vgi_rpc.location.sha256`
+5. The server verifies the digest while resolving the pointer, and refuses a request pointer without one
 
 This pattern lets clients send arbitrarily large payloads even when the HTTP server enforces strict request size limits — the large data goes directly to cloud storage, and only a small pointer crosses the RPC boundary.
 
-The upload URL endpoint is enabled by passing `upload_url_provider` to [`make_wsgi_app()`](http.md). The server advertises this capability via the `VGI-Upload-URL-Support: true` response header, and clients can discover it with `http_capabilities()`.
+The upload URL endpoint is enabled by passing `upload_url_provider` to [`make_wsgi_app()`](http.md). The server advertises this capability via the `VGI-Upload-URL-Support: 2` response header (upload-URL protocol v2; the retired `true` was the unsized `count` protocol, which a v2 client refuses), and clients can discover it with `http_capabilities()` (`upload_url_version == 2`). The HTTP client does all of this automatically when a request exceeds the server's `max_request_bytes`.
 
 ## Server Configuration
 
@@ -87,28 +87,34 @@ from vgi_rpc import make_wsgi_app
 app = make_wsgi_app(
     server,
     upload_url_provider=storage,       # enables __upload_url__ endpoint
-    max_upload_bytes=100 * 1024 * 1024,  # advertise 100 MiB max upload
+    max_upload_bytes=100 * 1024 * 1024,  # refuse (400) uploads over 100 MiB
 )
 ```
 
 ## Client Upload URLs
 
 ```python
-from vgi_rpc import UploadUrl, request_upload_urls
+import hashlib
 
-# Get pre-signed upload URLs from the server
+import httpx2
+
+from vgi_rpc import UploadUrl, request_upload_urls
+from vgi_rpc.http import upload_put_headers
+
+ipc_data = serialize_large_batch(my_batch)
+digest = hashlib.sha256(ipc_data).hexdigest()
+
+# One pre-signed URL pair, signed for exactly these bytes
 urls: list[UploadUrl] = request_upload_urls(
     base_url="http://localhost:8080",
-    count=1,
+    uploads=[(len(ipc_data), digest)],
 )
 
-# Upload large data directly to storage (bypasses RPC server)
-import httpx2
-ipc_data = serialize_large_batch(my_batch)
-httpx2.put(urls[0].upload_url, content=ipc_data)
+# Upload directly to storage (bypasses the RPC server), with the vended headers
+httpx2.put(urls[0].upload_url, content=ipc_data, headers=upload_put_headers(urls[0]))
 
-# Send RPC request with pointer to uploaded data
-# The server resolves the pointer transparently
+# Send the RPC request with a pointer naming urls[0].download_url and
+# carrying vgi_rpc.location.sha256 = digest; the server verifies it
 ```
 
 Clients can discover whether the server supports upload URLs:
@@ -117,8 +123,8 @@ Clients can discover whether the server supports upload URLs:
 from vgi_rpc import http_capabilities
 
 caps = http_capabilities("http://localhost:8080")
-if caps.upload_url_support:
-    urls = request_upload_urls("http://localhost:8080", count=5)
+if caps.upload_url_version == 2:
+    urls = request_upload_urls("http://localhost:8080", uploads=[(len(body), digest)])
 ```
 
 ## Compression

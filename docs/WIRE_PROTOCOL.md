@@ -112,7 +112,7 @@ table below.
 | Key (bytes) | Value | Description |
 |-------------|-------|-------------|
 | `vgi_rpc.location` | UTF-8 URL | URL to fetch the externalized batch data. |
-| `vgi_rpc.location.sha256` | UTF-8 hex string | SHA-256 of the uploaded payload **before** compression. Optional; when present the reader MUST verify it after fetching. |
+| `vgi_rpc.location.sha256` | UTF-8 hex string | SHA-256 of the uploaded payload **before** compression, 64 lowercase hex characters. **Required on request pointers** (client → server; since upload-URL protocol v2). Optional on result pointers; when present the reader MUST verify it after fetching. |
 
 A pointer batch on the wire carries **only** the two keys above. It MUST NOT
 carry either provenance key below: those are stamped by the reader, and a
@@ -976,8 +976,8 @@ from every client. There is no Arrow IPC body on any of them.
 | `VGI-Max-Externalized-Response-Bytes` | Integer | when configured | Cap on total bytes uploaded to external storage during one response. Always *hard*. |
 | `VGI-Externalization-Enabled` | `"true"` / `"false"` | always | Whether a storage backend is wired up, i.e. whether the client should expect pointer batches at all. |
 | `VGI-Supported-Encodings` | Comma-separated codec tokens | always | Content codings this server will *produce*. See [Content-encoding negotiation](#content-encoding-negotiation). |
-| `VGI-Upload-URL-Support` | `"true"` | when enabled | The upload-URL endpoint is available. |
-| `VGI-Max-Upload-Bytes` | Integer | when enabled + configured | Maximum upload size for externalized batches. |
+| `VGI-Upload-URL-Support` | `"2"` | when enabled | The upload-URL endpoint is available and speaks upload-URL protocol **v2** (sized, checksummed uploads; see [Upload URL generation](#upload-url-generation)). The retired value `"true"` meant v1 (the `count` request); a v2 client MUST refuse such a server. |
+| `VGI-Max-Upload-Bytes` | Integer | when enabled + configured | Largest `size` the upload-URL endpoint vends a URL for; larger entries are refused with `400`. |
 | `VGI-Proxy-Proof-Required` | `"true"` | when required | This worker rejects requests lacking a valid proxy proof. |
 | `VGI-Sticky-Enabled` | `"true"` | when enabled | Sticky sessions are available. |
 | `VGI-Sticky-Default-TTL` | Integer seconds | when sticky enabled | TTL applied when a method opens a session without specifying one. |
@@ -1004,25 +1004,122 @@ a client that honours it should refresh on expiry.
 
 ### Upload URL generation
 
-When the server has an `upload_url_provider` configured, the
-`POST {prefix}/__upload_url__/init` endpoint generates pre-signed
-upload/download URL pairs for client-side externalization.
+When the server has an upload-URL provider configured, the
+`POST {prefix}/__upload_url__/init` endpoint vends pre-signed
+upload/download URL pairs so a client can send a request too large for
+`VGI-Max-Request-Bytes` through object storage. This section is **upload-URL
+protocol v2**, advertised as `VGI-Upload-URL-Support: 2` and shipped with vgi
+application protocol 3.4. Every vended PUT URL is signed for exactly one body
+of a declared size and SHA-256, so storage itself refuses any other bytes
+wherever the backend can verify them.
 
-**Request**: Standard unary request with `vgi_rpc.method` = `"__upload_url__"`.
+v2 is a clean break from v1 (`VGI-Upload-URL-Support: true`, a `count`
+parameter, unsized URLs). There is no negotiation and no fallback in either
+direction.
 
-| Parameter | Arrow type | Default | Description |
-|-----------|-----------|---------|-------------|
-| `count` | `int64` | 1 | Number of URL pairs to generate (1–100). |
+**Request**: standard unary request (one row) with `vgi_rpc.method` =
+`"__upload_url__"` and one parameter:
 
-**Response schema**:
+| Parameter | Arrow type | Description |
+|-----------|-----------|-------------|
+| `uploads` | `list<item: struct<size: int64 not null, sha256: utf8 not null>>`, field not null | One entry per upload, 1–100 entries. |
+
+* `size` — exact byte length of the body the client will PUT; MUST be `>= 1`.
+* `sha256` — SHA-256 of exactly those bytes as 64 lowercase hex characters
+  (the encoding of `vgi_rpc.location.sha256`).
+
+Servers read the entries by field name; the list item field name and
+the struct fields' nullability are not checked, but a null `size` or
+`sha256` is refused like any other invalid value.
+
+**Refusals**: before minting any URL, the server answers `400` with an RPC
+error batch (the usual error body; `error_type` is `ValueError` in the
+reference) when:
+
+| Condition | Error message contains |
+|-----------|------------------------|
+| The request has a `count` parameter, or no `uploads` parameter (the v1 shape) | `retired count shape` and `VGI-Upload-URL-Support: 2` |
+| `uploads` has 0 or more than 100 entries (or is null) | `1-100 entries` |
+| an entry's `size` is null or `< 1` | `uploads[i].size must be an integer >= 1` |
+| an entry's `sha256` is null or not 64 lowercase hex characters | `uploads[i].sha256 must be 64 lowercase hex characters` |
+| an entry's `size` exceeds `VGI-Max-Upload-Bytes` (when configured) | `exceeds VGI-Max-Upload-Bytes` |
+
+Reference message texts (`i` is the 0-based entry index):
+
+```
+__upload_url__ request uses the retired count shape: this server requires VGI-Upload-URL-Support: 2 and an 'uploads' parameter (list<struct<size: int64, sha256: utf8>>, one entry per upload)
+__upload_url__ 'uploads' must have 1-100 entries, got N
+__upload_url__ uploads[i].size must be an integer >= 1, got X
+__upload_url__ uploads[i].sha256 must be 64 lowercase hex characters
+__upload_url__ uploads[i].size N exceeds VGI-Max-Upload-Bytes (M)
+```
+
+A request body over `VGI-Max-Request-Bytes` is still `413` before any of the
+above. A provider failure while minting is a `500` with an RPC error batch.
+
+**Response schema** — one row per request entry, in request order:
 
 | Column | Arrow type | Nullable | Description |
 |--------|-----------|----------|-------------|
-| `upload_url` | `utf8` | No | Pre-signed URL for uploading batch data. |
-| `download_url` | `utf8` | No | Pre-signed URL the server uses to fetch the uploaded data. |
-| `expires_at` | `timestamp("us", tz="UTC")` | No | Expiration time of the pre-signed URLs. |
+| `upload_url` | `utf8` | No | Pre-signed PUT URL, signed for that entry's size (and SHA-256 where the backend can verify it). |
+| `download_url` | `utf8` | No | Pre-signed GET URL the server will fetch the object from. |
+| `expires_at` | `timestamp("us", tz="UTC")` | No | Expiry of the pair (the earlier of the two URLs' expiries). |
+| `upload_headers` | `map<utf8, utf8>` | No (may be empty) | Headers the client MUST send on the PUT, verbatim. |
 
-The response has one row per requested URL pair.
+The reference declares all four fields non-nullable and uses Arrow's default
+map layout (`entries: struct<key: utf8 not null, value: utf8>`).
+`upload_headers` never contains `Content-Length` (a provider that lists one
+has it removed by the server).
+
+What each backend signs and returns in `upload_headers`:
+
+| Backend | Signed | `upload_headers` |
+|---------|--------|------------------|
+| S3 (SigV4) / R2 | `content-length`, `host`, `x-amz-checksum-sha256` | `{"x-amz-checksum-sha256": <base64 of the 32 digest bytes>}` |
+| Blob vendor (`POST /v1/blobs/put`, `purpose: "rpc"`) | the vendor's sized grant: `content-length`, `x-amz-checksum-sha256` (+ `content-encoding` if declared) | the grant's `required_headers` minus `content-length`: `{"x-amz-checksum-sha256": <b64>}` |
+| GCS (V4) | `content-type`, `x-goog-content-length-range: N,N` | `{"Content-Type": "application/octet-stream", "x-goog-content-length-range": "N,N"}` |
+| Conformance fake storage (`/alloc` with `size` + `sha256_b64`) | verified like S3 | `{"x-amz-checksum-sha256": <b64>}` |
+
+GCS cannot verify a SHA-256 at storage; the server's digest check on the
+request pointer (below) catches a wrong body there.
+
+**Client obligations**:
+
+1. Upload only to a server advertising `VGI-Upload-URL-Support: 2`. A server
+   advertising `true` (v1) MUST be refused with an error containing
+   `upload protocol is too old` (reference:
+   `Server upload protocol is too old: it advertises VGI-Upload-URL-Support v1 and this client needs 2`).
+   Never fall back to `count`.
+2. Hash the body, request one URL per body with its `(size, sha256)`, and PUT
+   exactly those bytes with a plain `Content-Length` (no chunked transfer
+   encoding) and every `upload_headers` entry. When `upload_headers` has no
+   `Content-Type`, the reference client sends
+   `Content-Type: application/octet-stream`. The PUT goes on a bare HTTP
+   client that carries none of the RPC client's credentials.
+3. POST the pointer request with `vgi_rpc.location = download_url` **and**
+   `vgi_rpc.location.sha256 = <the same hex digest>`.
+
+The uploaded bytes are the uncompressed Arrow IPC request stream, so the
+entry's `sha256` and the pointer's `vgi_rpc.location.sha256` are the same
+value. (A client that ever stored a `Content-Encoding`-compressed body would
+sign the stored bytes in the entry and put the decompressed digest on the
+pointer; the reference client does not compress uploads.)
+
+**Server obligations when resolving a request pointer** (any transport — HTTP
+unary, stream init and exchange, and the byte-stream transports):
+
+* `vgi_rpc.location.sha256` is required. A request pointer without it (or with
+  a value that is not 64 lowercase hex characters) is refused **before** the
+  URL is fetched, with an error containing `missing vgi_rpc.location.sha256`
+  (reference: `Request pointer is missing vgi_rpc.location.sha256 (required on request pointers since vgi-rpc upload-URL protocol v2): <redacted url>`).
+* The fetched (decompressed) bytes are verified against it before decoding; a
+  mismatch fails with an error containing `sha256 mismatch` (reference:
+  `ExternalLocation sha256 mismatch (SHA-256 checksum mismatch) for <redacted url>: expected <hex>, got <hex>`).
+* Result pointers keep the optional reading described in [Integrity](#integrity).
+
+On HTTP both refusals surface like any other request-resolution failure: an RPC
+error batch (the reference answers `200` + `X-VGI-RPC-Error: true`), never a
+dispatch with fabricated input.
 
 ### Request headers
 
@@ -1628,8 +1725,11 @@ Readers resolve it like any other pointer.
 
 ### Integrity
 
-`vgi_rpc.location.sha256` is optional on the wire — a pointer batch without it
-is valid, which keeps readers compatible with writers that predate the key.
+`vgi_rpc.location.sha256` is optional on **result** pointers — a result pointer
+without it is valid, which keeps readers compatible with writers that predate
+the key. It is **required on request pointers** (client → server) since
+upload-URL protocol v2: a server refuses a request pointer without it before
+fetching (see [Upload URL generation](#upload-url-generation)).
 When the key **is** present, a reader MUST verify the digest against the fetched
 payload (decompressed, if a coding was applied) and MUST fail the resolution
 on mismatch rather than handing the batch to application code.

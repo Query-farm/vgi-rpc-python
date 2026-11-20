@@ -777,6 +777,7 @@ def _run_http_exchange_turn(
             custom_metadata,
             app._server.external_config,
             ipc_validation=app._server.ipc_validation,
+            require_sha256=True,
         )
     except Exception as exc:
         outcome.status = "error"

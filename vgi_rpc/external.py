@@ -68,7 +68,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -116,7 +116,9 @@ __all__ = [
     "UploadUrl",
     "UploadUrlProvider",
     "https_only_validator",
+    "is_sha256_hex",
     "publish_external",
+    "sha256_b64_from_hex",
 ]
 
 
@@ -226,28 +228,78 @@ class ExternalStorage(Protocol):
 # ---------------------------------------------------------------------------
 
 
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def is_sha256_hex(value: object) -> bool:
+    """Return whether *value* is a SHA-256 digest as 64 lowercase hex characters.
+
+    This is the encoding of ``vgi_rpc.location.sha256`` and of the
+    ``sha256`` field of an ``__upload_url__`` request entry.
+
+    Args:
+        value: The candidate digest.
+
+    Returns:
+        ``True`` iff *value* is a 64-character lowercase hex string.
+
+    """
+    return isinstance(value, str) and len(value) == 64 and all(c in _HEX_DIGITS for c in value)
+
+
+def sha256_b64_from_hex(sha256_hex: str) -> str:
+    """Convert a hex SHA-256 digest to standard base64 of its 32 raw bytes.
+
+    That is the encoding of the ``x-amz-checksum-sha256`` header S3 and R2
+    verify an upload against.
+
+    Args:
+        sha256_hex: 64 lowercase hex characters.
+
+    Returns:
+        The base64 digest (44 characters, padded).
+
+    Raises:
+        ValueError: If *sha256_hex* is not 64 lowercase hex characters.
+
+    """
+    import base64
+
+    if not is_sha256_hex(sha256_hex):
+        raise ValueError("sha256 must be 64 lowercase hex characters")
+    return base64.b64encode(bytes.fromhex(sha256_hex)).decode("ascii")
+
+
 @dataclass(frozen=True)
 class UploadUrl:
-    """Pre-signed URL pair for client-side data upload.
+    """Pre-signed URL pair for one client-side upload of known size and digest.
 
     S3/GCS pre-signed URLs are signed per HTTP method, so a PUT URL
     cannot be used for GET — hence two URLs for the same storage object.
+    Since upload-URL protocol v2 the PUT URL is signed for the exact size
+    (and, where the backend can verify one, the SHA-256) of the body, and
+    *headers* lists what the client must send with it.
 
     Attributes:
         upload_url: Pre-signed PUT URL for uploading data.
         download_url: Pre-signed GET URL for downloading the uploaded data.
         expires_at: Expiration time for the pre-signed URLs (UTC).
+        headers: Headers the client MUST send on the PUT, verbatim (for
+            example ``x-amz-checksum-sha256``).  Never ``Content-Length``:
+            the client sends exactly the declared size with a plain
+            ``Content-Length``, which the signature covers.  May be empty.
 
     """
 
     upload_url: str
     download_url: str
     expires_at: datetime
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable
 class UploadUrlProvider(Protocol):
-    """Generates pre-signed upload URL pairs.
+    """Generates pre-signed upload URL pairs, each for one sized upload.
 
     Implementations must be thread-safe — ``generate_upload_url()``
     may be called concurrently from different server threads.
@@ -260,20 +312,22 @@ class UploadUrlProvider(Protocol):
        to automatically expire and delete stale objects.
     """
 
-    def generate_upload_url(self, schema: pa.Schema) -> UploadUrl:
-        """Generate a pre-signed upload/download URL pair.
+    def generate_upload_url(self, size: int, sha256_hex: str) -> UploadUrl:
+        """Generate a pre-signed upload/download URL pair for one upload.
 
-        The caller receives time-limited PUT and GET URLs for a new
-        storage object.  **The uploaded object is not automatically
-        deleted** — server operators are responsible for configuring
-        object cleanup via storage lifecycle rules or TTLs.
+        The PUT URL must be signed for exactly *size* bytes and, where the
+        backend can verify it at storage, for *sha256_hex*, so storage
+        itself refuses any other body.  **The uploaded object is not
+        automatically deleted** — server operators are responsible for
+        configuring object cleanup via storage lifecycle rules or TTLs.
 
         Args:
-            schema: The Arrow schema of the data to be uploaded.
-                Backends may use this for content-type or metadata hints.
+            size: Exact byte length the client will PUT (``>= 1``).
+            sha256_hex: SHA-256 of exactly those bytes, 64 lowercase hex.
 
         Returns:
-            An ``UploadUrl`` with PUT and GET URLs for the same object.
+            An ``UploadUrl`` with PUT and GET URLs for the same object and
+            the headers the PUT must carry.
 
         """
         ...
@@ -490,6 +544,8 @@ def resolve_external_location(
     config: AnyExternalConfig | None,
     on_log: _OnLog = None,
     ipc_validation: IpcValidation = IpcValidation.FULL,
+    *,
+    require_sha256: bool = False,
 ) -> tuple[pa.RecordBatch, pa.KeyValueMetadata | None]:
     """Resolve an ExternalLocation pointer batch, or return it unchanged.
 
@@ -512,6 +568,10 @@ def resolve_external_location(
             fetched stream.  If ``None``, log batches are silently
             discarded.
         ipc_validation: Validation level for batches in the fetched stream.
+        require_sha256: Refuse a pointer that carries no
+            ``vgi_rpc.location.sha256``.  Servers set this when resolving
+            *request* pointers (vgi protocol 3.4 / upload-URL v2), where the
+            digest is mandatory; result pointers keep the optional reading.
 
     Returns:
         ``(batch, custom_metadata)`` unchanged if not a pointer,
@@ -523,8 +583,9 @@ def resolve_external_location(
             multiple data batches, or the fetch exceeds
             ``config.fetch_config.max_fetch_bytes``.
         ValueError: If the URL fails validation (e.g. non-HTTPS when using
-            ``https_only_validator``) or the fetched data has a schema
-            mismatch.
+            ``https_only_validator``), the fetched data has a schema
+            mismatch, or *require_sha256* is set and the pointer has no
+            valid ``vgi_rpc.location.sha256``.
 
     """
     if config is None or not is_external_location_batch(batch, custom_metadata):
@@ -536,6 +597,24 @@ def resolve_external_location(
     url_bytes = custom_metadata.get(LOCATION_KEY)
     assert url_bytes is not None
     url = url_bytes.decode()
+
+    # Extract the expected SHA-256 before any network work, so a request
+    # pointer that must carry one is refused without touching storage.
+    expected_sha256: str | None = None
+    sha256_bytes = custom_metadata.get(LOCATION_SHA256_KEY)
+    if sha256_bytes is not None:
+        expected_sha256 = sha256_bytes.decode("utf-8", errors="replace")
+    if require_sha256:
+        if expected_sha256 is None:
+            raise ValueError(
+                "Request pointer is missing vgi_rpc.location.sha256 "
+                "(required on request pointers since vgi-rpc upload-URL protocol v2): "
+                f"{redact_url(url)}"
+            )
+        if not is_sha256_hex(expected_sha256):
+            raise ValueError(
+                f"Request pointer vgi_rpc.location.sha256 is not 64 lowercase hex characters: {redact_url(url)}"
+            )
 
     import aiohttp
     from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
@@ -553,12 +632,6 @@ def resolve_external_location(
 
     t0 = time.monotonic()
     try:
-        # Extract expected SHA-256 from pointer metadata (optional — backward compatible)
-        expected_sha256: str | None = None
-        sha256_bytes = custom_metadata.get(LOCATION_SHA256_KEY)
-        if sha256_bytes is not None:
-            expected_sha256 = sha256_bytes.decode()
-
         retryer = Retrying(
             stop=stop_after_attempt(max_retries + 1),
             wait=wait_fixed(config.retry_delay_seconds),
@@ -614,7 +687,8 @@ def _fetch_and_resolve(
         actual_sha256 = hashlib.sha256(data).hexdigest()
         if actual_sha256 != expected_sha256:
             raise RuntimeError(
-                f"SHA-256 checksum mismatch for {redact_url(url)}: expected {expected_sha256}, got {actual_sha256}"
+                f"ExternalLocation sha256 mismatch (SHA-256 checksum mismatch) for {redact_url(url)}: "
+                f"expected {expected_sha256}, got {actual_sha256}"
             )
 
     reader = ValidatedReader(ipc.open_stream(BytesIO(data)), ipc_validation)
