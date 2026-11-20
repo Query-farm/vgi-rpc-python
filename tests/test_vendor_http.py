@@ -160,6 +160,9 @@ def test_large_client_request_goes_through_sized_vendor_grant(deployment: _Deplo
     stats = vendor.test_stats()
     assert stats["puts"] == 1 and stats["upload_urls"] == 0  # the unsized path is no longer used
     assert stats["upload_refusals"] == 0
+    # The server marked the grant as a client upload (origin=client_upload).
+    assert stats["puts_upload"] == 1 and stats["puts_rpc"] == 0
+    assert stats["client_uploads"] == 1 and stats["client_upload_bytes"] == stats["bytes_uploaded"]
     puts = [headers for method, path, headers in vendor.requests if method == "PUT"]
     assert len(puts) == 1
     assert "HTTP_AUTHORIZATION" not in puts[0]
@@ -180,6 +183,7 @@ def test_corrupted_client_upload_is_refused_by_storage(deployment: _Deployment) 
     stats = vendor.test_stats()
     assert stats["uploads_corrupted"] == 1
     assert stats["upload_bad_digest"] == 1 and stats["upload_refusals"] == 1
+    assert stats["client_upload_refusals"] == 1 and stats["client_uploads"] == 0
     # The fault is spent: the next call goes through.
     with http_connect(_Svc, deployment.base_url, external_location=client_cfg, compression_level=None) as proxy:
         assert proxy.length(data=payload) == len(payload)

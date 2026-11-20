@@ -138,7 +138,12 @@ published wire spec is `docs/WIRE_PROTOCOL.md` § *Upload URL generation*.
     configured purpose), because only rpc grants carry a `download_url`. The
     vendor Worker already returns `upload_url`, `required_headers`
     (`content-length`, `x-amz-checksum-sha256`) and `download_url` for rpc, so
-    **no vendor change was needed**. Note that the vendor accepts `size: 0`;
+    **no vendor change was needed**. The grant request also carries the
+    advisory `origin: "client_upload"`: the vendor Worker ignores unknown
+    fields, and the fake vendor uses it to count client uploads apart from
+    the server's own writes and to aim the upload fault at them. **Every SDK's
+    vendor `generate_upload_url` must send it**, or the shared
+    `external_storage` tests (`puts_upload`, `client_uploads`) fail. Note that the vendor accepts `size: 0`;
     vgi-rpc servers refuse it earlier. `/v1/upload_urls` (unsized) is no
     longer called; `_VendorApi.upload_urls` is kept as a raw API mirror.
 
@@ -149,13 +154,20 @@ published wire spec is `docs/WIRE_PROTOCOL.md` § *Upload URL generation*.
     SignatureDoesNotMatch`; body digest ≠ signed → `400 BadDigest`. Nothing is
     stored on a refusal.
     `GET /__admin__/fault?purpose=upload&action=corrupt&count=N` corrupts (XOR
-    0xFF) the next N signed PUTs of **any** purpose, before verification. That
-    includes server-side externalization PUTs, because both go through
-    `/v1/blobs/put`. In a SQL test the request upload happens first, so `count=1`
-    hits it. `action` must be `corrupt`; `/__admin__/reset` disarms it.
+    0xFF) the next N signed PUTs of **client uploads** before verification:
+    objects granted with `origin: "client_upload"` (and unsized
+    `/v1/upload_urls` objects). Server writes (results, function storage) are
+    never corrupted, so tests may return large results while it is armed.
+    `action` must be `corrupt`; `/__admin__/reset` disarms it.
     `/__stats__` (`STATS_KEYS`) gains, appended in this order:
     `upload_refusals` (sum of the next three), `upload_bad_digest`,
-    `upload_incomplete_body`, `upload_signature_mismatch`, `uploads_corrupted`.
+    `upload_incomplete_body`, `upload_signature_mismatch`, `uploads_corrupted`;
+    then by purpose: `puts_rpc`, `puts_fs`, `puts_upload` (grants issued:
+    server rpc writes, function storage, client-upload grants; disjoint), and
+    `client_uploads`, `client_upload_bytes`, `client_upload_refusals` (signed
+    PUTs to client-upload objects accepted, their bytes, refused).
+    The standalone fake logs each stop signal (SIGTERM/SIGINT/SIGHUP) with the
+    sender's pid and command line (Linux) and its final counters to stderr.
 15. **Fake storage** (conformance `/alloc`): a sized allocation is
     `{"size": N, "sha256_b64": "<b64>"}`. The response adds
     `upload_headers: {"x-amz-checksum-sha256": <b64>}`, and PUTs to that blob

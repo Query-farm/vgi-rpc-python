@@ -1076,7 +1076,7 @@ What each backend signs and returns in `upload_headers`:
 | Backend | Signed | `upload_headers` |
 |---------|--------|------------------|
 | S3 (SigV4) / R2 | `content-length`, `host`, `x-amz-checksum-sha256` | `{"x-amz-checksum-sha256": <base64 of the 32 digest bytes>}` |
-| Blob vendor (`POST /v1/blobs/put`, `purpose: "rpc"`) | the vendor's sized grant: `content-length`, `x-amz-checksum-sha256` (+ `content-encoding` if declared) | the grant's `required_headers` minus `content-length`: `{"x-amz-checksum-sha256": <b64>}` |
+| Blob vendor (`POST /v1/blobs/put`, `purpose: "rpc"`, advisory `origin: "client_upload"`) | the vendor's sized grant: `content-length`, `x-amz-checksum-sha256` (+ `content-encoding` if declared) | the grant's `required_headers` minus `content-length`: `{"x-amz-checksum-sha256": <b64>}` |
 | GCS (V4) | `content-type`, `x-goog-content-length-range: N,N` | `{"Content-Type": "application/octet-stream", "x-goog-content-length-range": "N,N"}` |
 | Conformance fake storage (`/alloc` with `size` + `sha256_b64`) | verified like S3 | `{"x-amz-checksum-sha256": <b64>}` |
 

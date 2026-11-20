@@ -10,7 +10,7 @@ Mirrors the staging Worker (``blobs.staging.queryfarm.cloud``): errors are
 ``{error, message, ...}``, times ISO-8601 UTC, object ids 32 lowercase hex.
 
 * ``POST /v1/blobs/put`` ``{size, sha256_b64, purpose, scope?, content_encoding?,
-  idempotency_key?}`` returns ``{object_id, region, upload_url, upload_method,
+  idempotency_key?, origin?}`` returns ``{object_id, region, upload_url, upload_method,
   required_headers, expires_at, download_url?, download_expires_at?}``.  The
   same ``idempotency_key`` with the same bytes returns the same object; with
   other bytes, 409 ``idempotency_conflict``.  Over ``max_object_bytes`` or the
@@ -21,6 +21,10 @@ Mirrors the staging Worker (``blobs.staging.queryfarm.cloud``): errors are
   than the declared one) is ``403 SignatureDoesNotMatch``, and a body that
   does not hash to the signed value is ``400 BadDigest``.
   ``download_url`` is returned only for purpose ``rpc``.
+  ``origin: "client_upload"`` marks a grant a server mints for a *client*
+  to upload a request (``UploadUrlProvider.generate_upload_url``); the real
+  vendor ignores the field, the fake counts and faults those grants apart
+  from the server's own writes. Any other value, or none, is a server write.
 * ``POST /v1/blobs/get`` ``{object_id}`` returns
   ``{object_id, download_url, size, sha256_b64, content_encoding, expires_at}``
   for the calling tenant's objects; never uploaded is 404 ``not_uploaded``,
@@ -52,10 +56,10 @@ test lanes in any language (e.g. read from SQL with ``read_json_auto``):
   *replaces* any fault armed for that purpose, so repeating the request is
   harmless.
 * ``GET /__admin__/fault?purpose=upload&action=corrupt&count=N`` corrupts the
-  next *N* signed ``PUT`` bodies in transit (see
+  next *N* signed ``PUT`` bodies of client uploads in transit (see
   :meth:`~FakeVendor.set_upload_fault`), so the store's checksum check
-  refuses them with ``400 BadDigest``; it also replaces any armed upload
-  fault.
+  refuses them with ``400 BadDigest``; server writes (results, function
+  storage) are never touched. It also replaces any armed upload fault.
 * ``GET /__admin__/reset`` clears every fault (armed, applied and
   :meth:`~FakeVendor.fail_next`).
 
@@ -78,9 +82,13 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
+import signal
+import sys
 import threading
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -98,7 +106,14 @@ from vgi_rpc.conformance.fake_storage import (
     _ThreadingWSGIServer,
 )
 
-__all__ = ["STATS_KEYS", "TEST_ROUTE_BODY_BYTES", "FakeVendor", "FakeVendorServer", "serve_fake_vendor"]
+__all__ = [
+    "CLIENT_UPLOAD_ORIGIN",
+    "STATS_KEYS",
+    "TEST_ROUTE_BODY_BYTES",
+    "FakeVendor",
+    "FakeVendorServer",
+    "serve_fake_vendor",
+]
 
 #: Scope fields the staging Worker accepts.
 _SCOPE_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
@@ -121,6 +136,12 @@ STATS_KEYS = (
     "upload_incomplete_body",
     "upload_signature_mismatch",
     "uploads_corrupted",
+    "puts_rpc",
+    "puts_fs",
+    "puts_upload",
+    "client_uploads",
+    "client_upload_bytes",
+    "client_upload_refusals",
 )
 
 #: Every test-route JSON body is padded with spaces to exactly this many bytes.
@@ -130,6 +151,8 @@ _FAULT_ACTIONS = ("corrupt", "missing")
 _PURPOSES = ("rpc", "fs")
 #: Pseudo-purpose of ``/__admin__/fault`` that targets signed PUTs, not downloads.
 _UPLOAD_FAULT_PURPOSE = "upload"
+#: ``origin`` of a ``/v1/blobs/put`` grant minted for a client upload.
+CLIENT_UPLOAD_ORIGIN = "client_upload"
 
 
 @dataclass
@@ -143,6 +166,7 @@ class _Object:
     data: bytes | None = None
     stored_encoding: str | None = None
     idempotency_key: str | None = None
+    client_upload: bool = False
 
 
 @dataclass
@@ -256,17 +280,21 @@ class FakeVendor:
                 self._armed.pop(purpose, None)
 
     def set_upload_fault(self, action: str, count: int) -> None:
-        """Corrupt the next *count* signed ``PUT`` bodies in transit.
+        """Corrupt the next *count* client-upload ``PUT`` bodies in transit.
 
-        Every byte of the body is XORed with ``0xFF`` before the store
-        verifies it, as if damaged on the wire, so a sized (checksummed) PUT
-        is refused with ``400 BadDigest`` and nothing is stored.  An
-        unsized PUT (``/v1/upload_urls``) would store the damaged bytes.
-        Arming *replaces* any armed upload fault.
+        Only PUTs to client-upload objects count: grants from
+        ``/v1/blobs/put`` with ``origin: "client_upload"`` and the unsized
+        ``/v1/upload_urls`` (only ever handed to clients).  The server's own
+        writes (results, function storage) are never corrupted, so a test
+        may run large-result queries while the fault is armed.  Every byte
+        of the body is XORed with ``0xFF`` before the store verifies it, as
+        if damaged on the wire, so a sized (checksummed) PUT is refused with
+        ``400 BadDigest`` and nothing is stored.  An unsized PUT would store
+        the damaged bytes.  Arming *replaces* any armed upload fault.
 
         Args:
             action: ``"corrupt"`` (the only upload action).
-            count: How many PUTs to corrupt (``0`` disarms).
+            count: How many client-upload PUTs to corrupt (``0`` disarms).
 
         Raises:
             ValueError: On another action or a negative count.
@@ -336,8 +364,20 @@ class FakeVendor:
         (signed ``PUT`` bodies the store refused, the sum of
         ``upload_bad_digest``, ``upload_incomplete_body`` and
         ``upload_signature_mismatch``) and ``uploads_corrupted`` (PUT bodies
-        damaged by an upload fault). All but ``objects`` and ``bytes`` only
-        grow, so tests compare before/after values.
+        damaged by an upload fault, which only client uploads take).
+
+        By purpose, for ``/v1/blobs/put`` grants issued (``200``; ``puts``
+        also counts refused calls): ``puts_rpc`` (purpose ``rpc``, server
+        writes such as externalized results), ``puts_fs`` (purpose ``fs``,
+        function storage) and ``puts_upload`` (``origin: "client_upload"``,
+        minted for a client to upload a request; not in the other two).
+        Signed ``PUT`` requests to client-upload objects (those grants and
+        the unsized ``/v1/upload_urls``): ``client_uploads`` /
+        ``client_upload_bytes`` (accepted, and their bytes) and
+        ``client_upload_refusals`` (refused by the store).
+
+        All but ``objects`` and ``bytes`` only grow, so tests compare
+        before/after values.
 
         Returns:
             The counters.
@@ -365,6 +405,12 @@ class FakeVendor:
                 "upload_incomplete_body": hits.get("upload_incomplete_body", 0),
                 "upload_signature_mismatch": hits.get("upload_signature_mismatch", 0),
                 "uploads_corrupted": hits.get("uploads_corrupted", 0),
+                "puts_rpc": hits.get("puts_rpc", 0),
+                "puts_fs": hits.get("puts_fs", 0),
+                "puts_upload": hits.get("puts_upload", 0),
+                "client_uploads": hits.get("client_uploads", 0),
+                "client_upload_bytes": hits.get("client_upload_bytes", 0),
+                "client_upload_refusals": hits.get("client_upload_refusals", 0),
             }
 
     @property
@@ -374,8 +420,8 @@ class FakeVendor:
 
     # -- internals --------------------------------------------------------
 
-    def _hit(self, name: str) -> None:
-        self._hits[name] = self._hits.get(name, 0) + 1
+    def _hit(self, name: str, n: int = 1) -> None:
+        self._hits[name] = self._hits.get(name, 0) + n
 
     def _take_fault(self, path: str) -> int | None:
         for fault in self._faults:
@@ -558,7 +604,7 @@ class FakeVendor:
             urls = []
             for _ in range(count):
                 object_id = secrets.token_hex(16)
-                self._objects[object_id] = _Object(tenant, "rpc", None, None, None, None)
+                self._objects[object_id] = _Object(tenant, "rpc", None, None, None, None, client_upload=True)
                 put_url, expires = self._sign(object_id, "PUT")
                 get_url, get_expires = self._sign(object_id, "GET", self.rpc_download_ttl)
                 urls.append(
@@ -603,6 +649,9 @@ class FakeVendor:
         encoding = req.get("content_encoding")
         scope = req.get("scope")
         key = req.get("idempotency_key")
+        # Advisory, like the real vendor (which ignores it): anything but the
+        # client-upload marker is a server write.
+        client_upload = req.get("origin") == CLIENT_UPLOAD_ORIGIN
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             return _error(start_response, 400, "bad_request", "size must be a non-negative integer")
         try:
@@ -645,6 +694,7 @@ class FakeVendor:
             object_id, obj = existing
             if (obj.size, obj.sha256_b64, obj.purpose, obj.content_encoding) != (size, sha, purpose, encoding):
                 return _error(start_response, 409, "idempotency_conflict", "idempotency_key reused for other bytes")
+            obj.client_upload = obj.client_upload or client_upload
         else:
             if self._used.get(tenant, 0) + size > self.quota_bytes:
                 return _error(start_response, 413, "quota_exceeded", "tenant quota exhausted")
@@ -658,7 +708,9 @@ class FakeVendor:
                 encoding,
                 scope_key,
                 idempotency_key=key if isinstance(key, str) else None,
+                client_upload=client_upload,
             )
+        self._hit("puts_upload" if client_upload else f"puts_{purpose}")
         upload_url, expires = self._sign(object_id, "PUT")
         required = {"content-length": str(size), "x-amz-checksum-sha256": sha}
         if encoding:
@@ -716,9 +768,18 @@ class FakeVendor:
     def _store_put(
         self, environ: WSGIEnvironment, start_response: StartResponse, obj: _Object, body: bytes
     ) -> list[bytes]:
+        result = self._store_put_checked(environ, start_response, obj, body)
+        if obj.client_upload:
+            # Only an accepted PUT answers an empty body; refusals carry S3 XML.
+            self._hit("client_uploads" if result == [b""] else "client_upload_refusals")
+        return result
+
+    def _store_put_checked(
+        self, environ: WSGIEnvironment, start_response: StartResponse, obj: _Object, body: bytes
+    ) -> list[bytes]:
         if body is _MALFORMED_LENGTH:
             return _xml(start_response, 400, "InvalidArgument")
-        if self._upload_corruptions > 0:
+        if obj.client_upload and self._upload_corruptions > 0:
             # Damaged in transit: the store sees other bytes than were sent.
             self._upload_corruptions -= 1
             self._hit("uploads_corrupted")
@@ -741,6 +802,8 @@ class FakeVendor:
         obj.data = body
         obj.stored_encoding = str(encoding) if encoding else None
         self._bytes_uploaded += len(body)
+        if obj.client_upload:
+            self._hit("client_upload_bytes", len(body))
         start_response("200 OK", [("Content-Length", "0"), ("ETag", '"fake"')])
         return [b""]
 
@@ -891,9 +954,12 @@ def main(argv: list[str] | None = None) -> None:
     """Run the fake vendor standalone (the ``vgi-rpc-fake-vendor`` command).
 
     Prints ``PORT:<n>`` and then ``URL:<base url>`` on stdout and serves
-    until killed. ``--token TOKEN[=TENANT]`` (repeatable; tenant defaults to
-    ``tenant-a``, token to ``test-token``), ``--test-routes`` serves
-    ``/__stats__`` and ``/__admin__/*``.
+    until killed. On ``SIGTERM``, ``SIGINT`` or ``SIGHUP`` it logs to stderr
+    which signal arrived and (on Linux) the sending pid and its command
+    line, then its final counters, so a lane can tell why its vendor died.
+    ``--token TOKEN[=TENANT]`` (repeatable; tenant defaults to ``tenant-a``,
+    token to ``test-token``), ``--test-routes`` serves ``/__stats__`` and
+    ``/__admin__/*``.
 
     Args:
         argv: Arguments (default ``sys.argv[1:]``).
@@ -914,15 +980,56 @@ def main(argv: list[str] | None = None) -> None:
         for entry in args.token:
             token, _, tenant = entry.partition("=")
             tokens[token] = tenant or "tenant-a"
+    # Block the stop signals before any thread starts (threads inherit the
+    # mask), so they stay pending for the main thread to take with
+    # sigwaitinfo and log who sent them.
+    can_wait = hasattr(signal, "pthread_sigmask") and hasattr(signal, "sigwait")
+    if can_wait:
+        signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     fake = serve_fake_vendor(tokens, host=args.host, port=args.port, region=args.region, test_routes=args.test_routes)
+    started = time.monotonic()
     print(f"PORT:{fake.url.rsplit(':', 1)[1]}", flush=True)
     print(f"URL:{fake.url}", flush=True)
+    _log(f"pid {os.getpid()} serving {fake.url}")
     try:
-        threading.Event().wait()
+        if can_wait:
+            _log(f"received {_wait_stop_signal()}; shutting down after {time.monotonic() - started:.1f}s")
+        else:
+            threading.Event().wait()
     except KeyboardInterrupt:
-        pass
+        _log(f"received KeyboardInterrupt; shutting down after {time.monotonic() - started:.1f}s")
     finally:
+        _log(f"final counters {json.dumps(fake.vendor.test_stats(), separators=(',', ':'))}")
         fake.close()
+
+
+#: Signals that stop the standalone fake vendor (each is logged with its sender).
+_STOP_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT} | ({signal.SIGHUP} if hasattr(signal, "SIGHUP") else set()))
+
+
+def _log(message: str) -> None:
+    """Write a timestamped diagnostic line to stderr (test lanes keep it in a log file)."""
+    stamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    print(f"vgi-rpc-fake-vendor: {stamp} {message}", file=sys.stderr, flush=True)
+
+
+def _wait_stop_signal() -> str:
+    """Block until a stop signal arrives; describe it and, where the OS says, its sender."""
+    if sys.platform != "linux":  # no sigwaitinfo (macOS): the signal, not its sender
+        return f"{signal.Signals(signal.sigwait(_STOP_SIGNALS)).name} (sender unknown on {sys.platform})"
+    info = signal.sigwaitinfo(_STOP_SIGNALS)
+    return f"{signal.Signals(info.si_signo).name} from pid {info.si_pid}{_describe_pid(info.si_pid)}"
+
+
+def _describe_pid(pid: int) -> str:
+    """Return `` (command line)`` for *pid* from ``/proc``, or `` (exited)`` once it is gone."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read(400)
+    except OSError:
+        return " (exited)"
+    cmdline = raw.replace(b"\0", b" ").decode(errors="replace").strip()
+    return f" ({cmdline[:300]})" if cmdline else " (exited)"
 
 
 if __name__ == "__main__":

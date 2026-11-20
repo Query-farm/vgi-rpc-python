@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 __all__ = [
+    "CLIENT_UPLOAD_ORIGIN",
     "ENV_COMPRESSION",
     "ENV_MAX_UPLOAD_BYTES",
     "ENV_THRESHOLD",
@@ -105,6 +106,11 @@ ENV_TOKEN_FALLBACK = "VGI_CF_DO_TOKEN"
 ENV_THRESHOLD = "VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES"
 ENV_COMPRESSION = "VGI_RPC_EXTERNAL_COMPRESSION"
 ENV_MAX_UPLOAD_BYTES = "VGI_RPC_MAX_UPLOAD_BYTES"
+
+#: Advisory ``origin`` on a ``/v1/blobs/put`` grant minted for a client to
+#: upload a request (:meth:`VendorStorage.generate_upload_url`).  The vendor
+#: ignores it; test fakes count and fault client uploads by it.
+CLIENT_UPLOAD_ORIGIN = "client_upload"
 
 _DEFAULT_THRESHOLD = 1_048_576
 _DEFAULT_TIMEOUT = 30.0
@@ -620,8 +626,11 @@ class _VendorApi:
         scope: BlobScope | None = None,
         content_encoding: str | None = None,
         idempotency_key: str | None = None,
+        origin: str | None = None,
     ) -> PutGrant:
         body: dict[str, object] = {"size": size, "sha256_b64": sha256_b64, "purpose": purpose}
+        if origin is not None:
+            body["origin"] = origin
         if scope is not None:
             body["scope"] = {"shard": scope.shard, "execution_id": scope.execution_id}
         if content_encoding is not None:
@@ -959,7 +968,10 @@ class VendorStorage(_VendorClientBase):
 
         Uses the same ``/v1/blobs/put`` grant as :meth:`upload`, so the PUT
         URL signs ``Content-Length`` and ``x-amz-checksum-sha256`` and R2
-        rejects any other body.  The grant's ``required_headers`` become
+        rejects any other body.  The request carries the advisory
+        ``origin: "client_upload"`` (:data:`CLIENT_UPLOAD_ORIGIN`): the vendor
+        ignores it, test fakes use it to tell client uploads from the
+        server's own writes.  The grant's ``required_headers`` become
         the URL's headers, minus ``Content-Length`` (the client sends the
         body's own).
 
@@ -974,7 +986,9 @@ class VendorStorage(_VendorClientBase):
             VendorError: If the vendor fails or returns no download URL.
 
         """
-        grant = self._api.put(size=size, sha256_b64=sha256_b64_from_hex(sha256_hex), purpose="rpc")
+        grant = self._api.put(
+            size=size, sha256_b64=sha256_b64_from_hex(sha256_hex), purpose="rpc", origin=CLIENT_UPLOAD_ORIGIN
+        )
         if grant.download_url is None:
             raise VendorError("Blob vendor put for purpose 'rpc' returned no download_url")
         if self._pin:

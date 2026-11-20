@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import signal
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -15,11 +18,14 @@ import pyarrow as pa
 import pytest
 
 from vgi_rpc.conformance.fake_vendor import (
+    CLIENT_UPLOAD_ORIGIN,
     STATS_KEYS,
     TEST_ROUTE_BODY_BYTES,
     FakeVendorServer,
     serve_fake_vendor,
 )
+from vgi_rpc.http import storage_put
+from vgi_rpc.vendor import CLIENT_UPLOAD_ORIGIN as VENDOR_CLIENT_UPLOAD_ORIGIN
 from vgi_rpc.vendor import VendorBlobClient, VendorError, VendorStorage
 
 pytest.importorskip("aiohttp", reason="blob downloads need vgi-rpc[external]")
@@ -168,20 +174,77 @@ def test_fault_rejects_bad_parameters(fake: FakeVendorServer, query: str) -> Non
     assert httpx2.get(f"{fake.url}/__admin__/fault?{query}", timeout=10.0).status_code == 400
 
 
-def test_upload_fault_corrupts_next_puts_in_transit(fake: FakeVendorServer) -> None:
-    """``purpose=upload&action=corrupt&count=N`` damages N signed PUTs; the store refuses them (BadDigest)."""
+def test_upload_fault_corrupts_next_client_uploads_in_transit(fake: FakeVendorServer) -> None:
+    """``purpose=upload&action=corrupt&count=N`` damages N client-upload PUTs; the store refuses them (BadDigest)."""
     assert _get(fake, "/__admin__/fault?purpose=upload&action=corrupt&count=1")["ok"] is True
+    body = b"corrupt me"
     with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
-        with pytest.raises(VendorError) as exc:
-            storage.upload(b"corrupt me", _SCHEMA)
-        assert exc.value.code == "BadDigest"
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        resp = storage_put(pair.upload_url, body, headers=dict(pair.headers))
+        assert resp.status_code == 400 and b"BadDigest" in resp.content
         stats = _get(fake, "/__stats__")
-        assert stats["uploads_corrupted"] == 1
+        assert stats["uploads_corrupted"] == 1 and stats["client_upload_refusals"] == 1
         assert stats["upload_bad_digest"] == 1 and stats["upload_refusals"] == 1
-        assert stats["objects"] == 0
+        assert stats["objects"] == 0 and stats["client_uploads"] == 0
         # Spent after one PUT.
-        url = storage.upload(b"intact", _SCHEMA)
-        assert httpx2.get(url, timeout=10.0).content == b"intact"
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        assert storage_put(pair.upload_url, body, headers=dict(pair.headers)).status_code == 200
+        assert httpx2.get(pair.download_url, timeout=10.0).content == body
+    stats = _get(fake, "/__stats__")
+    assert stats["client_uploads"] == 1 and stats["client_upload_bytes"] == len(body)
+
+
+def test_upload_fault_spares_server_writes(fake: FakeVendorServer, blobs: VendorBlobClient) -> None:
+    """Server writes (rpc results, fs storage) never take the upload fault, even while it is armed."""
+    _get(fake, "/__admin__/fault?purpose=upload&action=corrupt&count=5")
+    with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
+        url = storage.upload(b"result bytes", _SCHEMA)
+    assert httpx2.get(url, timeout=10.0).content == b"result bytes"
+    ref = blobs.put_bytes(b"stored value")
+    assert blobs.get_bytes(ref) == b"stored value"
+    stats = _get(fake, "/__stats__")
+    assert stats["uploads_corrupted"] == 0 and stats["upload_refusals"] == 0
+    assert stats["client_uploads"] == 0
+    # Still armed for the next client upload: unsized /v1/upload_urls PUTs count as client uploads.
+    resp = httpx2.post(
+        fake.url + "/v1/upload_urls", json={"count": 1}, headers={"Authorization": f"Bearer {_TOKEN}"}, timeout=10.0
+    )
+    put_url = resp.json()["urls"][0]["upload_url"]
+    assert storage_put(put_url, b"abc").status_code == 200
+    stats = _get(fake, "/__stats__")
+    assert stats["uploads_corrupted"] == 1 and stats["client_uploads"] == 1
+
+
+def test_puts_by_purpose(fake: FakeVendorServer, blobs: VendorBlobClient) -> None:
+    """``puts_rpc`` / ``puts_fs`` / ``puts_upload`` split issued grants; client-upload PUTs are counted apart."""
+    body = b"client request"
+    with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
+        storage.upload(b"r" * 100, _SCHEMA)
+        storage.upload(b"s" * 100, _SCHEMA)
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        assert storage_put(pair.upload_url, body, headers=dict(pair.headers)).status_code == 200
+        wrong = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        assert storage_put(wrong.upload_url, b"x" * len(body), headers=dict(wrong.headers)).status_code == 400
+    blobs.put_bytes(b"f" * 10)
+    # A refused grant request counts in puts only.
+    bad = httpx2.post(
+        fake.url + "/v1/blobs/put",
+        json={"size": 1, "sha256_b64": "nope", "purpose": "rpc"},
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        timeout=10.0,
+    )
+    assert bad.status_code == 400
+    stats = _get(fake, "/__stats__")
+    assert stats["puts"] == 6
+    assert (stats["puts_rpc"], stats["puts_fs"], stats["puts_upload"]) == (2, 1, 2)
+    assert stats["client_uploads"] == 1 and stats["client_upload_bytes"] == len(body)
+    assert stats["client_upload_refusals"] == 1 and stats["upload_refusals"] == 1
+    assert stats["storage_puts"] == 5 and stats["bytes_uploaded"] == 200 + len(body) + 10
+
+
+def test_origin_matches_vendor_client() -> None:
+    """The fake and the vendor client agree on the client-upload marker."""
+    assert CLIENT_UPLOAD_ORIGIN == VENDOR_CLIENT_UPLOAD_ORIGIN == "client_upload"
 
 
 def test_reset_clears_upload_fault(fake: FakeVendorServer) -> None:
@@ -189,9 +252,11 @@ def test_reset_clears_upload_fault(fake: FakeVendorServer) -> None:
     httpx2.head(fake.url + "/__admin__/fault?purpose=upload&action=corrupt&count=1", timeout=10.0)
     _get(fake, "/__admin__/fault?purpose=upload&action=corrupt&count=3")
     _get(fake, "/__admin__/reset")
+    body = b"after reset"
     with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
-        url = storage.upload(b"after reset", _SCHEMA)
-    assert httpx2.get(url, timeout=10.0).content == b"after reset"
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+    assert storage_put(pair.upload_url, body, headers=dict(pair.headers)).status_code == 200
+    assert httpx2.get(pair.download_url, timeout=10.0).content == body
     assert _get(fake, "/__stats__")["uploads_corrupted"] == 0
 
 
@@ -233,3 +298,30 @@ def test_cli_prints_port_and_url() -> None:
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_cli_logs_stop_signal_and_sender() -> None:
+    """On SIGTERM the CLI logs the signal (and on Linux the sender pid) and its final counters to stderr."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "from vgi_rpc.conformance.fake_vendor import main; main()", "--test-routes"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().startswith("PORT:")
+        assert proc.stdout.readline().startswith("URL:")
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 0
+    assert f"pid {proc.pid} serving http://127.0.0.1:" in err
+    if sys.platform == "linux":
+        assert f"received SIGTERM from pid {os.getpid()} (" in err
+    else:
+        assert "received SIGTERM" in err
+    assert 'final counters {"puts":0,' in err

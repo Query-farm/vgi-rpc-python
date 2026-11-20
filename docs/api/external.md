@@ -407,12 +407,27 @@ body padded to 1,024 bytes, and a `HEAD` has no side effects:
 
 - `GET /__stats__`: call and byte counters (`puts`, `gets`, `deletes`,
   `delete_scopes`, `upload_urls`, `storage_puts`, `storage_gets`, `objects`,
-  `bytes`, `bytes_uploaded`, `bytes_downloaded`).
+  `bytes`, `bytes_uploaded`, `bytes_downloaded`), signed-PUT refusals
+  (`upload_refusals`, `upload_bad_digest`, `upload_incomplete_body`,
+  `upload_signature_mismatch`, `uploads_corrupted`), and counters by purpose:
+  `puts_rpc`, `puts_fs` and `puts_upload` split the `/v1/blobs/put` grants
+  issued into server rpc writes (results), function storage, and grants
+  minted for a client upload; `client_uploads`, `client_upload_bytes` and
+  `client_upload_refusals` count the signed PUTs to client-upload objects.
+  A server marks a client-upload grant with the advisory
+  `origin: "client_upload"` field, which `VendorStorage.generate_upload_url`
+  sends and the real vendor ignores.
 - `GET /__admin__/fault?purpose=fs|rpc&action=corrupt|missing&count=N`: the
   next `N` objects of that purpose that are downloaded are damaged for every
   later `GET`. `corrupt` keeps the length and changes every byte; `missing`
   answers 404.
+- `GET /__admin__/fault?purpose=upload&action=corrupt&count=N`: the next `N`
+  signed PUTs of client uploads are damaged in transit, so the store refuses
+  them with `400 BadDigest`. Server writes are never touched.
 - `GET /__admin__/reset`: clears all faults.
+
+The standalone fake logs to stderr which stop signal it received, the sending
+pid and its command line (Linux), and its final counters.
 
 In-process, the same faults are available as
 `fake.vendor.set_download_fault(...)` and `reset_faults()`, and the counters as
