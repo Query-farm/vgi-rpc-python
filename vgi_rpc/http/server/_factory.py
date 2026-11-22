@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 import falcon
 
 from vgi_rpc.external import UploadUrlProvider
+from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
 from vgi_rpc.rpc import AuthContext, PeerAuthenticationPolicy, PeerIdentityProvider, RpcServer
 
 from .._common import (
@@ -81,6 +82,49 @@ from ._sticky import (
 )
 
 _logger = logging.getLogger("vgi_rpc.http")
+
+
+def _resolve_max_upload_bytes(
+    server: RpcServer, upload_url_provider: UploadUrlProvider | None, max_upload_bytes: int | None
+) -> int | None:
+    """Return the ``VGI-Max-Upload-Bytes`` to advertise, enforcing the fetch cap.
+
+    An upload comes back to the server as a pointer that it fetches under its
+    external config's ``max_fetch_bytes``.  Advertising more than that would
+    let a client upload a request the server then refuses, after the whole
+    upload, so the advertised size defaults to the fetch cap and may not
+    exceed it.
+
+    Args:
+        server: The server whose external config fetches inbound pointers.
+        upload_url_provider: The upload-URL provider, or ``None``.
+        max_upload_bytes: The caller's requested upload cap, or ``None``.
+
+    Returns:
+        The size to advertise; *max_upload_bytes* unchanged when no
+        provider is set (nothing is advertised then).
+
+    Raises:
+        ValueError: If *max_upload_bytes* is not a positive integer or
+            exceeds the fetch cap.
+
+    """
+    if upload_url_provider is None:
+        return max_upload_bytes
+    external = server.external_config
+    fetch_cap = external.fetch_config.max_fetch_bytes if external is not None else DEFAULT_MAX_FETCH_BYTES
+    if max_upload_bytes is None:
+        return fetch_cap
+    if type(max_upload_bytes) is not int or max_upload_bytes < 1:
+        raise ValueError(f"max_upload_bytes must be a positive integer, got {max_upload_bytes!r}")
+    if max_upload_bytes > fetch_cap:
+        raise ValueError(
+            f"max_upload_bytes ({max_upload_bytes}) exceeds the server's inbound fetch cap "
+            f"(external_location.fetch_config.max_fetch_bytes = {fetch_cap}): clients would upload "
+            "requests the server then refuses to fetch. Raise max_fetch_bytes (VGI_RPC_MAX_FETCH_BYTES "
+            "for vgi_rpc.vendor.external_config_from_env) or lower max_upload_bytes."
+        )
+    return max_upload_bytes
 
 
 def make_wsgi_app(
@@ -232,10 +276,16 @@ def make_wsgi_app(
             is enabled and ``VGI-Upload-URL-Support: 2`` (upload-URL
             protocol v2: one ``(size, sha256)`` entry per URL) is
             advertised on every response.
-        max_upload_bytes: When set (and ``upload_url_provider`` is set),
-            advertised via the ``VGI-Max-Upload-Bytes`` header.  The
-            ``__upload_url__/init`` endpoint refuses (400) any entry whose
-            ``size`` exceeds it before minting a URL.
+        max_upload_bytes: Largest upload ``__upload_url__/init`` vends a
+            URL for, advertised as ``VGI-Max-Upload-Bytes`` whenever
+            ``upload_url_provider`` is set.  The endpoint refuses (400) any
+            entry whose ``size`` exceeds it before minting a URL.  It may not
+            exceed the server's inbound fetch cap
+            (``server.external_config.fetch_config.max_fetch_bytes``, or the
+            256 MiB default without an external config): an upload the
+            server would then refuse to fetch fails only after the client
+            has sent it all, so a larger value raises ``ValueError``.
+            ``None`` (the default) advertises the fetch cap itself.
         otel_config: Optional ``OtelConfig`` for OpenTelemetry instrumentation.
             When provided, ``instrument_server()`` is called and
             ``_OtelFalconMiddleware`` is prepended for W3C trace propagation.
@@ -400,6 +450,8 @@ def make_wsgi_app(
     for name, value in response_byte_limits.items():
         if value is not None and (type(value) is not int or not 65536 <= value <= (1 << 53) - 1):
             raise ValueError(f"{name} must be an integer from 65536 through {(1 << 53) - 1}")
+
+    max_upload_bytes = _resolve_max_upload_bytes(server, upload_url_provider, max_upload_bytes)
 
     effective_max_request_bytes = (
         min(value for value in (max_request_bytes, hosting_max_request_bytes) if value is not None)
@@ -591,6 +643,8 @@ def make_wsgi_app(
     if upload_url_provider is not None:
         capability_headers[UPLOAD_URL_HEADER] = str(UPLOAD_URL_PROTOCOL_VERSION)
         cors_expose.append(UPLOAD_URL_HEADER)
+        # Always set when a provider is: _resolve_max_upload_bytes fills in
+        # the fetch cap.
         if max_upload_bytes is not None:
             capability_headers[MAX_UPLOAD_BYTES_HEADER] = str(max_upload_bytes)
             cors_expose.append(MAX_UPLOAD_BYTES_HEADER)

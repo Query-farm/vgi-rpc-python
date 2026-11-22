@@ -36,6 +36,7 @@ from vgi_rpc.external import (
     make_external_location_batch,
     resolve_external_location,
 )
+from vgi_rpc.external_fetch import FetchConfig
 from vgi_rpc.http import (
     _ARROW_CONTENT_TYPE,
     DEFAULT_HTTP_TIMEOUT,
@@ -1887,6 +1888,45 @@ class TestHttpCapabilities:
         caps = http_capabilities(client=client)
         assert caps.max_upload_bytes == 50_000_000
         client.close()
+
+    def test_max_upload_bytes_defaults_to_fetch_cap(self) -> None:
+        """A server vending upload URLs always advertises a cap: unset means its inbound fetch cap."""
+        storage = MockStorage()
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl()),
+            token_key=b"test",
+            upload_url_provider=storage,
+        )
+        assert http_capabilities(client=client).max_upload_bytes == 256 * 1024 * 1024
+        client.close()
+        config = ExternalLocationConfig(storage=storage, fetch_config=FetchConfig(max_fetch_bytes=1 << 30))
+        client = make_sync_client(
+            RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), external_location=config),
+            token_key=b"test",
+            upload_url_provider=storage,
+        )
+        assert http_capabilities(client=client).max_upload_bytes == 1 << 30
+        client.close()
+        config.fetch_config.close()
+
+    def test_max_upload_bytes_above_fetch_cap_is_refused(self) -> None:
+        """Advertising more than the server will fetch is a startup error, not a post-upload failure."""
+        storage = MockStorage()
+        config = ExternalLocationConfig(storage=storage, fetch_config=FetchConfig(max_fetch_bytes=1000))
+        server = RpcServer(RpcFixtureService, RpcFixtureServiceImpl(), external_location=config)
+        with pytest.raises(ValueError, match=r"max_upload_bytes \(1001\) exceeds the server's inbound fetch cap"):
+            make_wsgi_app(server, token_key=b"t" * 32, upload_url_provider=storage, max_upload_bytes=1001)
+        # Equal is fine; so is a cap without a provider (nothing is advertised then).
+        make_wsgi_app(server, token_key=b"t" * 32, upload_url_provider=storage, max_upload_bytes=1000)
+        make_wsgi_app(server, token_key=b"t" * 32, max_upload_bytes=1 << 40)
+        # Without an external config the default fetch cap applies.
+        bare = RpcServer(RpcFixtureService, RpcFixtureServiceImpl())
+        with pytest.raises(ValueError, match="inbound fetch cap"):
+            make_wsgi_app(bare, token_key=b"t" * 32, upload_url_provider=storage, max_upload_bytes=(256 << 20) + 1)
+        for bad in (0, -5):
+            with pytest.raises(ValueError, match="positive integer"):
+                make_wsgi_app(bare, token_key=b"t" * 32, upload_url_provider=storage, max_upload_bytes=bad)
+        config.fetch_config.close()
 
     def test_upload_url_support_false_by_default(self) -> None:
         """http_capabilities() returns upload_url_support=False when not configured."""

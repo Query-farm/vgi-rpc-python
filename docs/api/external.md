@@ -91,6 +91,12 @@ app = make_wsgi_app(
 )
 ```
 
+`max_upload_bytes` defaults to the server's inbound fetch cap
+(`ServerExternalConfig.fetch_config.max_fetch_bytes`, 256 MiB by default) and
+may not exceed it — an upload the server would refuse to fetch would fail only
+after the client sent it. To accept larger uploads, raise `max_fetch_bytes` on
+the server's external config as well.
+
 ## Client Upload URLs
 
 ```python
@@ -335,8 +341,16 @@ with VendorBlobClient.from_env() as blobs:
 | `VGI_BLOB_VENDOR_TOKEN` | Bearer token; falls back to `VGI_CF_DO_TOKEN`. |
 | `VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES` | Result size above which the server externalizes (default 1 MiB). |
 | `VGI_RPC_EXTERNAL_COMPRESSION` | `none` (default), `zstd` or `gzip`, optionally `:<level>`. |
-| `VGI_RPC_MAX_UPLOAD_BYTES` | Upload size advertised to clients (`VGI-Max-Upload-Bytes`). |
+| `VGI_RPC_MAX_UPLOAD_BYTES` | Largest client upload, advertised as `VGI-Max-Upload-Bytes`. Unset: the inbound fetch cap below, so a server that vends upload URLs always advertises a limit. |
+| `VGI_RPC_MAX_FETCH_BYTES` | Largest request the server fetches from an inbound pointer (`max_fetch_bytes`). Default 256 MiB, raised to `VGI_RPC_MAX_UPLOAD_BYTES` when that is larger; setting both with the upload cap above the fetch cap is a startup error. |
 | `VGI_RPC_MAX_REQUEST_BYTES` | Request-body cap for `run_server --http` (`--max-request-bytes`); clients send larger requests through vendor upload URLs. Without a cap, clients never upload. |
+
+A server never advertises an upload size it would then refuse to fetch:
+`make_wsgi_app` / `serve_http` default `max_upload_bytes` to the server's
+inbound fetch cap (`external_location.fetch_config.max_fetch_bytes`) and raise
+`ValueError` for a larger value. A client over the limit is refused at
+`__upload_url__/init`, before it uploads anything. Fetched requests are held
+in memory, so size the worker for the cap you set.
 
 ### Host pinning
 
@@ -502,3 +516,5 @@ Requires `pip install vgi-rpc[http,external]`.
 ::: vgi_rpc.vendor.client_external_config_from_env
 
 ::: vgi_rpc.vendor.max_upload_bytes_from_env
+
+::: vgi_rpc.vendor.max_fetch_bytes_from_env

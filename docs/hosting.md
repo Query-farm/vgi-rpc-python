@@ -40,7 +40,7 @@ app = make_wsgi_app(
 | `max_request_bytes` | Advertised request size limit | None (unlimited) |
 | `max_response_bytes` | Application HTTP body cap (every method). Combined by minimum with the hosting and client caps; overshoot is a structured error with no producer cursor | None (unlimited) |
 | `max_externalized_response_bytes` | Cap on bytes uploaded to external storage per HTTP response.  Always hard.  Pre-flighted before the upload | None (unlimited) |
-| `max_upload_bytes` | Upload size limit (advertised; larger upload-URL requests are refused) | None (unlimited) |
+| `max_upload_bytes` | Upload size limit (advertised; larger upload-URL requests are refused). May not exceed the server's inbound fetch cap (`fetch_config.max_fetch_bytes`) | The fetch cap (256 MiB by default) when `upload_url_provider` is set |
 | `authenticate` | Auth callback `(Request) → AuthContext` | None (anonymous) |
 | `cors_origins` | Enable CORS for browser clients | None (disabled) |
 | `upload_url_provider` | Enable pre-signed upload URL vending | None (disabled) |
@@ -190,13 +190,26 @@ vgi-rpc does **not** manage object cleanup — uploaded objects persist until yo
 For large **inputs** (client → server), enable upload URL vending so clients can upload directly to storage:
 
 ```python
+server = RpcServer(
+    MyProtocol, MyServiceImpl(),
+    external_location=ExternalLocationConfig(
+        storage=storage,
+        fetch_config=FetchConfig(max_fetch_bytes=500_000_000),  # fetch uploads up to 500 MB
+    ),
+)
 app = make_wsgi_app(
     server,
     token_key=token_key,
     upload_url_provider=storage,      # S3Storage/GCSStorage implement this
-    max_upload_bytes=500_000_000,     # 500 MB
+    max_upload_bytes=500_000_000,     # 500 MB; must not exceed max_fetch_bytes
 )
 ```
+
+The upload comes back to the server as a pointer it fetches under
+`max_fetch_bytes` (256 MiB by default), so `make_wsgi_app` refuses a
+`max_upload_bytes` above it and, when `max_upload_bytes` is omitted, advertises
+the fetch cap. With the blob vendor, `VGI_RPC_MAX_UPLOAD_BYTES` raises the
+fetch cap to match (or set `VGI_RPC_MAX_FETCH_BYTES`).
 
 The client workflow:
 

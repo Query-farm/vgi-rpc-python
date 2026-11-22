@@ -167,8 +167,9 @@ def serve_http(
             ``max_request_bytes`` through object storage.  See
             :func:`make_wsgi_app`.
         max_upload_bytes: Largest upload the ``__upload_url__`` endpoint
-            vends a URL for, advertised as ``VGI-Max-Upload-Bytes``.  See
-            :func:`make_wsgi_app`.
+            vends a URL for, advertised as ``VGI-Max-Upload-Bytes``.
+            ``None`` advertises the server's inbound fetch cap; a value
+            above that cap raises ``ValueError``.  See :func:`make_wsgi_app`.
 
     """
     if max_stream_response_bytes is not None:

@@ -41,7 +41,22 @@ Environment variables
     ``none`` (default), ``zstd``, ``gzip``, optionally with a level, e.g.
     ``zstd:3``.
 ``VGI_RPC_MAX_UPLOAD_BYTES``
-    Optional size advertised to clients for vendor upload URLs.
+    Largest client upload the server vends a URL for, advertised as
+    ``VGI-Max-Upload-Bytes``.  Unset means "the inbound fetch cap" (below), so
+    a server that vends upload URLs always advertises a limit and a client is
+    refused at ``__upload_url__/init`` rather than after uploading.
+``VGI_RPC_MAX_FETCH_BYTES``
+    Largest request the server will fetch from an inbound pointer (the
+    ``max_fetch_bytes`` of the server's fetch config).  Defaults to 256 MiB,
+    raised to ``VGI_RPC_MAX_UPLOAD_BYTES`` when that is set higher.  Setting
+    both with ``VGI_RPC_MAX_UPLOAD_BYTES`` above ``VGI_RPC_MAX_FETCH_BYTES``
+    is a startup error.
+
+The rule behind the last two: a server never advertises an upload size it
+would then refuse to fetch.  Raising the upload size is how an operator says
+"accept requests this large", so it carries the fetch cap with it; only an
+explicit, contradictory pair of values is rejected.  Fetched requests are held
+in memory, so size the worker for the larger of the two.
 
 Every vendor request carries ``Authorization: Bearer <token>``.  The token and
 signed URLs are never logged: diagnostics go through
@@ -69,7 +84,13 @@ from typing import TYPE_CHECKING, Literal, Self
 from urllib.parse import urlsplit
 
 from vgi_rpc.external import ClientExternalConfig, Compression, ServerExternalConfig, UploadUrl, sha256_b64_from_hex
-from vgi_rpc.external_fetch import FetchConfig, fetch_url, redact_httpx_logging, redact_url
+from vgi_rpc.external_fetch import (
+    DEFAULT_MAX_FETCH_BYTES,
+    FetchConfig,
+    fetch_url,
+    redact_httpx_logging,
+    redact_url,
+)
 
 if TYPE_CHECKING:
     import httpx2
@@ -78,6 +99,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CLIENT_UPLOAD_ORIGIN",
     "ENV_COMPRESSION",
+    "ENV_MAX_FETCH_BYTES",
     "ENV_MAX_UPLOAD_BYTES",
     "ENV_THRESHOLD",
     "ENV_TOKEN",
@@ -93,6 +115,7 @@ __all__ = [
     "VendorStorage",
     "client_external_config_from_env",
     "external_config_from_env",
+    "max_fetch_bytes_from_env",
     "max_upload_bytes_from_env",
     "pinned_hosts_validator",
     "vendor_url_validator",
@@ -106,6 +129,7 @@ ENV_TOKEN_FALLBACK = "VGI_CF_DO_TOKEN"
 ENV_THRESHOLD = "VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES"
 ENV_COMPRESSION = "VGI_RPC_EXTERNAL_COMPRESSION"
 ENV_MAX_UPLOAD_BYTES = "VGI_RPC_MAX_UPLOAD_BYTES"
+ENV_MAX_FETCH_BYTES = "VGI_RPC_MAX_FETCH_BYTES"
 
 #: Advisory ``origin`` on a ``/v1/blobs/put`` grant minted for a client to
 #: upload a request (:meth:`VendorStorage.generate_upload_url`).  The vendor
@@ -1277,10 +1301,13 @@ def external_config_from_env(env: Mapping[str, str] | None = None) -> ServerExte
 
     Uses :class:`VendorStorage` for uploads, pins inbound pointer URLs to the
     vendor's hosts, and reads ``VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES``
-    (default 1 MiB) and ``VGI_RPC_EXTERNAL_COMPRESSION`` (default none).
+    (default 1 MiB) and ``VGI_RPC_EXTERNAL_COMPRESSION`` (default none).  The
+    inbound fetch cap comes from :func:`max_fetch_bytes_from_env`.
 
-    Pass ``config.storage`` as ``upload_url_provider`` to ``serve_http`` /
-    ``make_wsgi_app`` to also vend client upload URLs.
+    Pass ``config.storage`` as ``upload_url_provider`` and
+    :func:`max_upload_bytes_from_env` as ``max_upload_bytes`` to
+    ``serve_http`` / ``make_wsgi_app`` to also vend client upload URLs; the
+    advertised size then never exceeds this config's fetch cap.
 
     Args:
         env: Environment mapping (defaults to ``os.environ``).
@@ -1296,13 +1323,18 @@ def external_config_from_env(env: Mapping[str, str] | None = None) -> ServerExte
     environ = _resolve_env(env)
     if not environ.get(ENV_URL, "").strip():
         return None
-    storage = VendorStorage.from_env(env=environ)
+    # Parse everything before VendorStorage opens a session, so a bad value
+    # fails startup without leaking it.
     threshold = _parse_positive_int(environ, ENV_THRESHOLD, _DEFAULT_THRESHOLD)
     assert threshold is not None
+    compression = _parse_compression(environ.get(ENV_COMPRESSION, ""))
+    max_fetch = max_fetch_bytes_from_env(environ)
+    storage = VendorStorage.from_env(env=environ)
     return ServerExternalConfig(
         storage=storage,
         externalize_threshold_bytes=threshold,
-        compression=_parse_compression(environ.get(ENV_COMPRESSION, "")),
+        compression=compression,
+        fetch_config=FetchConfig(max_fetch_bytes=max_fetch),
         url_validator=storage.url_validator,
     )
 
@@ -1334,6 +1366,9 @@ def client_external_config_from_env(env: Mapping[str, str] | None = None) -> Cli
 def max_upload_bytes_from_env(env: Mapping[str, str] | None = None) -> int | None:
     """Read ``VGI_RPC_MAX_UPLOAD_BYTES`` (advertised client-upload size).
 
+    ``None`` (unset) is meant to be passed straight to ``make_wsgi_app`` /
+    ``serve_http``, which then advertise the server's inbound fetch cap.
+
     Args:
         env: Environment mapping (defaults to ``os.environ``).
 
@@ -1342,3 +1377,37 @@ def max_upload_bytes_from_env(env: Mapping[str, str] | None = None) -> int | Non
 
     """
     return _parse_positive_int(_resolve_env(env), ENV_MAX_UPLOAD_BYTES, None)
+
+
+def max_fetch_bytes_from_env(env: Mapping[str, str] | None = None) -> int:
+    """Inbound fetch cap from ``VGI_RPC_MAX_FETCH_BYTES`` / ``VGI_RPC_MAX_UPLOAD_BYTES``.
+
+    The largest request a server fetches from an inbound pointer.  It is
+    ``VGI_RPC_MAX_FETCH_BYTES`` when set; otherwise 256 MiB, raised to
+    ``VGI_RPC_MAX_UPLOAD_BYTES`` when that is larger, so advertising an upload
+    size is enough to accept uploads of that size.
+
+    Args:
+        env: Environment mapping (defaults to ``os.environ``).
+
+    Returns:
+        The cap in bytes.
+
+    Raises:
+        ValueError: If a variable will not parse, or both are set and
+            ``VGI_RPC_MAX_UPLOAD_BYTES`` exceeds ``VGI_RPC_MAX_FETCH_BYTES``
+            (the server would advertise uploads it then refuses to fetch).
+
+    """
+    environ = _resolve_env(env)
+    max_fetch = _parse_positive_int(environ, ENV_MAX_FETCH_BYTES, None)
+    max_upload = _parse_positive_int(environ, ENV_MAX_UPLOAD_BYTES, None)
+    if max_fetch is None:
+        return max(DEFAULT_MAX_FETCH_BYTES, max_upload or 0)
+    if max_upload is not None and max_upload > max_fetch:
+        raise ValueError(
+            f"{ENV_MAX_UPLOAD_BYTES} ({max_upload}) exceeds {ENV_MAX_FETCH_BYTES} ({max_fetch}): "
+            "the server would advertise uploads it then refuses to fetch; raise "
+            f"{ENV_MAX_FETCH_BYTES} or unset it (it then follows {ENV_MAX_UPLOAD_BYTES})"
+        )
+    return max_fetch

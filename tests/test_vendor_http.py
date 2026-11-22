@@ -21,17 +21,23 @@ import threading
 import time
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
+import falcon.testing
 import httpx2
 import pyarrow as pa
 import pytest
 
 from vgi_rpc.conformance.fake_vendor import FakeVendorServer, serve_fake_vendor
-from vgi_rpc.http import http_connect, make_wsgi_app
+from vgi_rpc.http import http_capabilities, http_connect, make_wsgi_app
 from vgi_rpc.metadata import LOCATION_SOURCE_KEY
 from vgi_rpc.rpc import CallContext, OutputCollector, RpcError, RpcServer, Stream, StreamState
-from vgi_rpc.vendor import VendorStorage, client_external_config_from_env, external_config_from_env
+from vgi_rpc.vendor import (
+    VendorStorage,
+    client_external_config_from_env,
+    external_config_from_env,
+    max_upload_bytes_from_env,
+)
 
 _TOKEN = "e2e-token"
 _THRESHOLD = 4096
@@ -59,6 +65,8 @@ class _Svc(Protocol):
 
     def length(self, data: str) -> int: ...
 
+    def blob_size(self, data: bytes) -> int: ...
+
     def big_stream(self, size: int) -> Stream[StreamState]: ...
 
 
@@ -67,6 +75,9 @@ class _SvcImpl:
         return "v" * n
 
     def length(self, data: str) -> int:
+        return len(data)
+
+    def blob_size(self, data: bytes) -> int:
         return len(data)
 
     def big_stream(self, size: int) -> Stream[_BigState]:
@@ -82,6 +93,18 @@ class _Deployment:
 @pytest.fixture
 def deployment(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Deployment]:
     """Run a waitress server configured purely from the vendor environment."""
+    with _vendor_deployment(monkeypatch, max_upload_bytes=16 * 1024 * 1024) as dep:
+        yield dep
+
+
+@contextlib.contextmanager
+def _vendor_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    max_upload_bytes: int | None,
+    env: dict[str, str] | None = None,
+) -> Iterator[_Deployment]:
+    """Serve ``_Svc`` from ``external_config_from_env()`` against a fake vendor."""
     import waitress
 
     with serve_fake_vendor({_TOKEN: "tenant-e2e"}) as fake:
@@ -90,6 +113,8 @@ def deployment(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Deployment]:
         monkeypatch.setenv("VGI_CF_DO_TOKEN", _TOKEN)
         monkeypatch.setenv("VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES", str(_THRESHOLD))
         monkeypatch.setenv("VGI_RPC_EXTERNAL_COMPRESSION", "zstd")
+        for name, value in (env or {}).items():
+            monkeypatch.setenv(name, value)
         config = external_config_from_env()
         assert config is not None and isinstance(config.storage, VendorStorage)
         app = make_wsgi_app(
@@ -97,7 +122,7 @@ def deployment(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Deployment]:
             token_key=b"vendor-e2e",
             max_request_bytes=_MAX_REQUEST,
             upload_url_provider=config.storage,
-            max_upload_bytes=16 * 1024 * 1024,
+            max_upload_bytes=max_upload_bytes,
         )
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
@@ -124,6 +149,7 @@ def deployment(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Deployment]:
         finally:
             server.close()
             config.storage.close()
+            config.fetch_config.close()
 
 
 def test_large_unary_result_is_externalized_and_resolved(deployment: _Deployment) -> None:
@@ -238,8 +264,6 @@ def test_server_rejects_client_pointer_to_foreign_host(deployment: _Deployment) 
 
 def test_capabilities_advertise_vendor_uploads(deployment: _Deployment) -> None:
     """The env-configured server advertises externalization and upload URLs."""
-    from vgi_rpc.http import http_capabilities
-
     caps = http_capabilities(deployment.base_url)
     assert caps.upload_url_support
     assert caps.upload_url_version == 2
@@ -281,6 +305,112 @@ def test_run_server_http_applies_vendor_env(monkeypatch: pytest.MonkeyPatch) -> 
     assert kwargs["max_upload_bytes"] == 1234
     assert kwargs["max_request_bytes"] == 65536
     server.external_config.storage.close()
+
+
+def test_run_server_http_upload_cap_raises_fetch_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VGI_RPC_MAX_UPLOAD_BYTES of 1 GiB (the staging config) also lets the server fetch 1 GiB."""
+    from vgi_rpc.rpc import run_server
+
+    calls: list[tuple[RpcServer, dict[str, object]]] = []
+
+    def fake_serve_http(server: RpcServer, **kwargs: object) -> None:
+        calls.append((server, kwargs))
+
+    monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)
+    monkeypatch.setattr("sys.argv", ["worker", "--http"])
+    monkeypatch.setenv("VGI_BLOB_VENDOR_URL", "https://blobs.example")
+    monkeypatch.setenv("VGI_BLOB_VENDOR_TOKEN", "t")
+    monkeypatch.setenv("VGI_RPC_MAX_UPLOAD_BYTES", str(1 << 30))
+    run_server(_Svc, _SvcImpl())
+    ((server, kwargs),) = calls
+    assert server.external_config is not None
+    assert server.external_config.fetch_config.max_fetch_bytes == 1 << 30
+    assert kwargs["max_upload_bytes"] == 1 << 30
+    # And the app it would build advertises exactly that.
+    app = make_wsgi_app(
+        server,
+        token_key=b"k" * 32,
+        upload_url_provider=cast("VendorStorage", kwargs["upload_url_provider"]),
+        max_upload_bytes=cast("int | None", kwargs["max_upload_bytes"]),
+    )
+    assert falcon.testing.TestClient(app).simulate_get("/health").headers["VGI-Max-Upload-Bytes"] == str(1 << 30)
+    assert isinstance(server.external_config.storage, VendorStorage)
+    server.external_config.storage.close()
+
+
+def test_run_server_http_unset_upload_cap_advertises_fetch_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no VGI_RPC_MAX_UPLOAD_BYTES, the advertised upload cap is the fetch cap, never absent."""
+    from vgi_rpc.rpc import run_server
+
+    calls: list[tuple[RpcServer, dict[str, object]]] = []
+
+    def fake_serve_http(server: RpcServer, **kwargs: object) -> None:
+        calls.append((server, kwargs))
+
+    monkeypatch.setattr("vgi_rpc.http.serve_http", fake_serve_http)
+    monkeypatch.setattr("sys.argv", ["worker", "--http"])
+    monkeypatch.setenv("VGI_BLOB_VENDOR_URL", "https://blobs.example")
+    monkeypatch.setenv("VGI_BLOB_VENDOR_TOKEN", "t")
+    monkeypatch.delenv("VGI_RPC_MAX_UPLOAD_BYTES", raising=False)
+    monkeypatch.setenv("VGI_RPC_MAX_FETCH_BYTES", str(512 << 20))
+    run_server(_Svc, _SvcImpl())
+    ((server, kwargs),) = calls
+    app = make_wsgi_app(
+        server,
+        token_key=b"k" * 32,
+        upload_url_provider=cast("VendorStorage", kwargs["upload_url_provider"]),
+        max_upload_bytes=cast("int | None", kwargs["max_upload_bytes"]),
+    )
+    assert falcon.testing.TestClient(app).simulate_get("/health").headers["VGI-Max-Upload-Bytes"] == str(512 << 20)
+    assert server.external_config is not None and isinstance(server.external_config.storage, VendorStorage)
+    server.external_config.storage.close()
+
+
+def test_run_server_http_contradictory_caps_fail_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VGI_RPC_MAX_UPLOAD_BYTES above an explicit VGI_RPC_MAX_FETCH_BYTES refuses to start."""
+    from vgi_rpc.rpc import run_server
+
+    monkeypatch.setattr("vgi_rpc.http.serve_http", lambda *a, **k: pytest.fail("must not serve"))
+    monkeypatch.setattr("sys.argv", ["worker", "--http"])
+    monkeypatch.setenv("VGI_BLOB_VENDOR_URL", "https://blobs.example")
+    monkeypatch.setenv("VGI_BLOB_VENDOR_TOKEN", "t")
+    monkeypatch.setenv("VGI_RPC_MAX_UPLOAD_BYTES", str(1 << 30))
+    monkeypatch.setenv("VGI_RPC_MAX_FETCH_BYTES", str(256 << 20))
+    with pytest.raises(ValueError, match="exceeds VGI_RPC_MAX_FETCH_BYTES"):
+        run_server(_Svc, _SvcImpl())
+
+
+def test_upload_over_fetch_cap_is_refused_before_uploading(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With caps from the env, a too-large request is refused at __upload_url__/init: nothing is PUT."""
+    with _vendor_deployment(monkeypatch, max_upload_bytes=None, env={"VGI_RPC_MAX_FETCH_BYTES": str(1 << 20)}) as dep:
+        assert http_capabilities(dep.base_url).max_upload_bytes == 1 << 20
+        client_cfg = client_external_config_from_env()
+        with (
+            http_connect(_Svc, dep.base_url, external_location=client_cfg, compression_level=None) as proxy,
+            pytest.raises(RpcError, match="VGI-Max-Upload-Bytes"),
+        ):
+            proxy.blob_size(data=b"z" * (2 << 20))
+        stats = dep.fake.vendor.test_stats()
+        assert stats["puts"] == 0 and stats["client_uploads"] == 0
+
+
+def test_upload_above_256_mib_is_accepted_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The staging regression: VGI_RPC_MAX_UPLOAD_BYTES above 256 MiB, a ~300 MB request round-trips.
+
+    Before the fix the server advertised the upload cap but fetched under the
+    256 MiB default, refusing the pointer after the whole upload
+    (``Content-Length ... exceeds max_fetch_bytes (268435456)``).
+    """
+    size = 300_000_000
+    monkeypatch.setenv("VGI_RPC_MAX_UPLOAD_BYTES", str(320 << 20))
+    with _vendor_deployment(monkeypatch, max_upload_bytes=max_upload_bytes_from_env()) as dep:
+        assert http_capabilities(dep.base_url).max_upload_bytes == 320 << 20
+        client_cfg = client_external_config_from_env()
+        with http_connect(_Svc, dep.base_url, external_location=client_cfg, compression_level=None) as proxy:
+            assert proxy.blob_size(data=b"x" * size) == size
+        stats = dep.fake.vendor.test_stats()
+        assert stats["client_uploads"] == 1
+        assert stats["client_upload_bytes"] > 256 << 20
 
 
 def test_run_server_without_vendor_env_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:

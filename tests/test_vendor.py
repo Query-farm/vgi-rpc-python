@@ -27,6 +27,7 @@ from vgi_rpc.vendor import (
     VendorStorage,
     client_external_config_from_env,
     external_config_from_env,
+    max_fetch_bytes_from_env,
     max_upload_bytes_from_env,
     pinned_hosts_validator,
     vendor_url_validator,
@@ -624,6 +625,39 @@ class TestEnvConfig:
         for bad in ({"VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES": "0"}, {"VGI_RPC_EXTERNAL_COMPRESSION": "lz4"}):
             with pytest.raises(ValueError):
                 external_config_from_env({**base, **bad})
+
+    def test_max_fetch_bytes_default_and_knob(self) -> None:
+        """Unset: 256 MiB.  VGI_RPC_MAX_FETCH_BYTES sets the inbound fetch cap on the config."""
+        base = {"VGI_BLOB_VENDOR_URL": "https://v.example", "VGI_BLOB_VENDOR_TOKEN": "t"}
+        assert max_fetch_bytes_from_env({}) == 256 * 1024 * 1024
+        cfg = external_config_from_env(base)
+        assert cfg is not None and cfg.fetch_config.max_fetch_bytes == 256 * 1024 * 1024
+        cfg = external_config_from_env({**base, "VGI_RPC_MAX_FETCH_BYTES": str(1 << 30)})
+        assert cfg is not None and cfg.fetch_config.max_fetch_bytes == 1 << 30
+        # A fetch cap below the default is honoured too (no upload cap set).
+        assert max_fetch_bytes_from_env({"VGI_RPC_MAX_FETCH_BYTES": "1000"}) == 1000
+        for bad in ("0", "-1", "lots"):
+            with pytest.raises(ValueError, match="VGI_RPC_MAX_FETCH_BYTES"):
+                external_config_from_env({**base, "VGI_RPC_MAX_FETCH_BYTES": bad})
+
+    def test_upload_cap_raises_fetch_cap(self) -> None:
+        """VGI_RPC_MAX_UPLOAD_BYTES above 256 MiB carries the fetch cap with it (the staging 300 MB bug)."""
+        base = {"VGI_BLOB_VENDOR_URL": "https://v.example", "VGI_BLOB_VENDOR_TOKEN": "t"}
+        cfg = external_config_from_env({**base, "VGI_RPC_MAX_UPLOAD_BYTES": str(1 << 30)})
+        assert cfg is not None and cfg.fetch_config.max_fetch_bytes == 1 << 30
+        # A smaller upload cap leaves the default fetch cap alone.
+        assert max_fetch_bytes_from_env({"VGI_RPC_MAX_UPLOAD_BYTES": "1000"}) == 256 * 1024 * 1024
+        # Equal explicit values are fine.
+        assert max_fetch_bytes_from_env({"VGI_RPC_MAX_UPLOAD_BYTES": "5000", "VGI_RPC_MAX_FETCH_BYTES": "5000"}) == 5000
+
+    def test_upload_cap_above_explicit_fetch_cap_is_startup_error(self) -> None:
+        """An explicit contradiction fails startup instead of failing every large upload after it is sent."""
+        base = {"VGI_BLOB_VENDOR_URL": "https://v.example", "VGI_BLOB_VENDOR_TOKEN": "t"}
+        env = {**base, "VGI_RPC_MAX_UPLOAD_BYTES": "2000", "VGI_RPC_MAX_FETCH_BYTES": "1000"}
+        with pytest.raises(ValueError, match=r"VGI_RPC_MAX_UPLOAD_BYTES \(2000\) exceeds VGI_RPC_MAX_FETCH_BYTES"):
+            external_config_from_env(env)
+        with pytest.raises(ValueError, match="exceeds"):
+            max_fetch_bytes_from_env(env)
 
     def test_from_env_constructors(self, fake: FakeVendorServer) -> None:
         """from_env builds working clients; the dedicated token wins over the fallback."""

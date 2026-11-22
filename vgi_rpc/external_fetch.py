@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     import aiohttp
 
 __all__ = [
+    "DEFAULT_MAX_FETCH_BYTES",
     "FetchConfig",
     "fetch_url",
     "redact_httpx_logging",
@@ -54,6 +55,11 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+#: Default :attr:`FetchConfig.max_fetch_bytes` (256 MiB).  On a server this is
+#: also the default inbound request cap for upload-URL pointers, and so the
+#: default ``VGI-Max-Upload-Bytes`` it advertises.
+DEFAULT_MAX_FETCH_BYTES = 256 * 1024 * 1024
 
 
 def redact_url(url: str) -> str:
@@ -156,7 +162,12 @@ class FetchConfig:
         chunk_size_bytes: Size of each Range request chunk.
         max_parallel_requests: Semaphore limit on concurrent requests.
         timeout_seconds: Overall deadline for the fetch.
-        max_fetch_bytes: Hard cap on encoded/on-wire download size.
+        max_fetch_bytes: Hard cap on encoded/on-wire download size
+            (default :data:`DEFAULT_MAX_FETCH_BYTES`, 256 MiB).  In a
+            :class:`~vgi_rpc.external.ServerExternalConfig` it is the largest
+            client request the server will fetch from a pointer, so
+            ``make_wsgi_app`` never advertises a larger
+            ``VGI-Max-Upload-Bytes``.
         max_decompressed_bytes: Hard cap after content decoding. ``None``
             preserves the historical effective limit of
             ``16 * max_fetch_bytes``.
@@ -177,7 +188,7 @@ class FetchConfig:
     chunk_size_bytes: int = 8 * 1024 * 1024
     max_parallel_requests: int = 8
     timeout_seconds: float = 60.0
-    max_fetch_bytes: int = 256 * 1024 * 1024
+    max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES
     max_decompressed_bytes: int | None = None
     max_redirects: int = 5
     speculative_retry_multiplier: float = 2.0

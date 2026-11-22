@@ -493,7 +493,7 @@ def main() -> None:
         upload_url_provider=backend,
         compression_level=compression_level,
         max_request_bytes=max_request_bytes,
-        max_upload_bytes=64 * 1024 * 1024,
+        max_upload_bytes=min(64 * 1024 * 1024, fetch_config.max_fetch_bytes),
         enable_sticky=enable_sticky,
         sticky_echo_headers=sticky_echo_headers,
         cors_origins=args.cors_origin,

@@ -756,6 +756,8 @@ def run_server(protocol_or_server: type | RpcServer, implementation: object | No
         # Vend client upload URLs only when this server's own external config
         # is the vendor's: it is also what resolves (and host-pins) the
         # pointers those uploads come back as.
+        # VGI_RPC_MAX_UPLOAD_BYTES unset advertises the external config's
+        # fetch cap (make_wsgi_app enforces advertised <= fetch cap).
         server_storage = server.external_config.storage if server.external_config is not None else None
         upload_provider = server_storage if isinstance(server_storage, VendorStorage) else None
         serve_http(

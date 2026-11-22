@@ -520,7 +520,7 @@ with http_connect(MyService, "http://localhost:8080") as proxy:
 | `cors_origins` | `None` | Allowed CORS origins — `"*"` for all, a string, or list of strings |
 | `cors_max_age` | `7200` | `Access-Control-Max-Age` (seconds) on preflight responses; only effective with `cors_origins` |
 | `upload_url_provider` | `None` | `UploadUrlProvider` for generating pre-signed upload URLs (enables `__upload_url__/init` endpoint) |
-| `max_upload_bytes` | `None` | Advertise max upload size via `VGI-Max-Upload-Bytes` header (requires `upload_url_provider`) |
+| `max_upload_bytes` | `None` | Max upload size advertised via `VGI-Max-Upload-Bytes` (requires `upload_url_provider`). `None` advertises the server's inbound fetch cap (`fetch_config.max_fetch_bytes`, 256 MiB default); a larger value raises `ValueError` |
 | `otel_config` | `None` | `OtelConfig` for OpenTelemetry instrumentation (requires `[otel]`) |
 | `sentry_config` | `None` | `SentryConfig` for Sentry error reporting (requires `[sentry]`) |
 | `token_ttl` | `3600` | Maximum age (seconds) for stream state tokens |
@@ -579,6 +579,10 @@ app = make_wsgi_app(
     max_upload_bytes=100_000_000,  # optional: advertise 100 MB limit
 )
 ```
+
+`max_upload_bytes` may not exceed the server's inbound fetch cap
+(`external_location.fetch_config.max_fetch_bytes`, 256 MiB by default); when
+omitted, the fetch cap itself is advertised.
 
 Clients discover support via `http_capabilities()` and request URLs with `request_upload_urls()`:
 
