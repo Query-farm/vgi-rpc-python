@@ -553,6 +553,15 @@ defined, and the code is required whenever the kind is set. Well-known values:
 | `introspection_refused` | `PERMISSION_DENIED` | | See [Section 16](#16-identity-vgi_rpcidentityv1). |
 | `grant_refused` | `PERMISSION_DENIED` | | See [Section 16](#16-identity-vgi_rpcidentityv1). |
 | `token_unresolved` | `NOT_FOUND` | | See [Section 16](#16-identity-vgi_rpcidentityv1). |
+| `invalid_state_ref` | `INVALID_ARGUMENT` | | A `StateRef` failed to resolve (HTTP 400). See [StateRef](#stateref-stream-state-by-reference). |
+| `state_ref_missing` | `NOT_FOUND` | | A stored `StateRef`'s object is gone; restart the query. |
+| `state_ref_too_large` | `RESOURCE_EXHAUSTED` | | A stored `StateRef` object exceeds `max_fetch_bytes`. |
+| `state_ref_misuse` | `FAILED_PRECONDITION` | | `state_ref()` outside a stream's init request. |
+| `cursor_too_large` | `RESOURCE_EXHAUSTED` | | A cursor over the turn budget under the error rule. |
+| `storage_unavailable` | `UNAVAILABLE` | | A transient object-storage failure on `get`. |
+| `invalid_arguments_ref` | `INVALID_ARGUMENT` | | An argument reference did not open for the caller or does not match its claim. See [Upload URL generation](#upload-url-generation). |
+| `arguments_ref_integrity` | `DATA_LOSS` | | The fetched argument object's length or SHA-256 differs from the sealed values. |
+| `arguments_ref_missing` | `NOT_FOUND` | | The argument object is gone (lifecycle, never uploaded). |
 
 **Normative client behaviour on `protocol_not_supported`:** a client SHOULD
 call `vgi_rpc.Reflection.v1/list_protocols` to learn what the server does host,
@@ -1066,8 +1075,42 @@ above. A provider failure while minting is a `500` with an RPC error batch.
 | `expires_at` | `timestamp("us", tz="UTC")` | No | Expiry of the pair (the earlier of the two URLs' expiries). |
 | `upload_headers` | `map<utf8, utf8>` | No (may be empty) | Headers the client MUST send on the PUT, verbatim. |
 
-The reference declares all four fields non-nullable and uses Arrow's default
-map layout (`entries: struct<key: utf8 not null, value: utf8>`).
+| `object_id` | `utf8` | No | Protocol 3.4: the storage id of the object this entry's PUT creates (S3/GCS key, vendor `object_id`, fake-storage blob id). |
+| `ref` | `binary` | No | Protocol 3.4: a sealed argument reference for that object (below). |
+
+The reference declares all six fields non-nullable and uses Arrow's default
+map layout (`entries: struct<key: utf8 not null, value: utf8>`). Clients read
+the columns by name; a client that does not use argument references ignores
+`object_id` and `ref`, and servers MUST NOT require clients to read them.
+
+**Argument reference** (`ref`), sealed from the entry's *claimed* size and
+digest without seeing the bytes (storage enforces them on the PUT where it
+can; the resolver verifies them on the GET):
+
+```
+ref = 0x01 || nonce24 || AEAD(0x01 || size u64le || sha256[32] || id_len u16le || object_id, ARGREF_AAD)
+ARGREF_AAD = b"vgi_rpc.argref.v1\x00" || BASE_AAD(auth, "\x00server")
+```
+
+It carries no expiry: a prepared statement may re-send it until storage
+lifecycle deletes the object or a replica's object-cache entry ages out (one
+day). On an unauthenticated server it is therefore a bearer capability for
+about one to two days. `ARGREF_AAD` is computed from the `AuthContext` of the
+`__upload_url__/init` request and again from the request presenting the ref,
+so a server MUST authenticate `__upload_url__/init` exactly as it
+authenticates its protocol methods (same authenticators, same peer-evidence
+binding, same anonymous fallback). Every upload-URL provider MUST supply the
+`object_id`.
+
+**Resolving an argument reference** (a framework primitive; the vgi layer
+calls it for `BindRequest.arguments_location`): open `ref` with
+`ARGREF_AAD`; check the version and that the sealed size and SHA-256 equal the
+values sent alongside it; then the object cache by `object_id` → `get(object_id)`
+→ verify length and SHA-256 → return. Failures carry the kinds
+`invalid_arguments_ref` (`INVALID_ARGUMENT`: does not open, wrong
+principal, mismatched claim, malformed claim, no storage),
+`arguments_ref_integrity` (`DATA_LOSS`: fetched bytes differ) and
+`arguments_ref_missing` (`NOT_FOUND`: object gone).
 `upload_headers` never contains `Content-Length` (a provider that lists one
 has it removed by the server).
 
@@ -1385,7 +1428,7 @@ independent reasons. After base64-decoding, both share this envelope:
 
 ```
 Offset      Size     Field
-0           1        version: uint8 (cursor token: 5; call token: 1)
+0           1        version: uint8 (cursor token: 5; call token: 3)
 1           24       nonce: random per-token (XChaCha20-Poly1305 NPUB)
 25          ...      ciphertext: AEAD(sealed_payload, AAD) — includes the
                      16-byte Poly1305 tag at the end
@@ -1397,10 +1440,23 @@ Offset      Size     Field
 
 ```
 Offset      Size     Field
-0           1        codec: uint8 — self-describing codec tag
-                     (reference: 0x00 raw, 0x01 zstd)
+0           1        codec: uint8 — self-describing codec tag (table below)
 1           ...      the framed plaintext below, compressed per `codec`
 ```
+
+Since protocol 3.4 the tag values are fixed for every port (the *standard
+token codec*, also used for `StateRef` payloads below):
+
+| `codec` | Body | Notes |
+|---|---|---|
+| `0x00` | raw framed plaintext | MUST be used when compression does not make it smaller |
+| `0x01` | zstd frame | the default; reference level 3 |
+| `0x02` | raw DEFLATE (RFC 1951) | for runtimes without zstd |
+| other | — | reserved; MUST be rejected |
+
+A reader MUST accept every codec its own writer can emit and MUST reject
+tags it does not implement. The reference writes `0x00`/`0x01` and reads all
+three.
 
 The order matters and is the point of the exercise: **compress, then
 encrypt**. Once a token is sealed it is ciphertext, so the HTTP body codec
@@ -1430,10 +1486,10 @@ The requirements on a server are:
   decompress, as the same uniform `400 Bad Request` as every other token
   failure — both mean a token this server did not mint.
 
-The **codec is the port's choice**: zstd where the runtime has it, deflate or
-gzip where it does not. Tag values are per-port, since a token never
-round-trips across ports. The reference uses zstd level 3 for both token
-kinds — the same speed as level 1 at these payload sizes and slightly
+The **codec is the port's choice** among the table's entries: zstd where the
+runtime has it, DEFLATE where it does not. A token never round-trips across
+ports; the fixed values only make ports reviewable against one table. The
+reference uses zstd level 3 for both token kinds — the same speed as level 1 at these payload sizes and slightly
 smaller, where the levels that compress materially better (9, 19) cost 8× and
 84× the CPU for a few hundred bytes.
 
@@ -1446,7 +1502,8 @@ that a corrupt or unknown-codec payload surfaces as a 400.
 Cursor token plaintext (encrypted, never on the wire) — v5 carries only the
 advancing state plus the call id binding it to its call token. Everything
 the pre-split v4 token also carried (both schemas, the stream id) moved into
-the call token:
+the call token. A state field of type `StateRef` serializes inside
+`state_bytes` as its encoded bytes ([StateRef](#stateref-stream-state-by-reference)):
 
 ```
 Offset      Size     Field
@@ -1456,7 +1513,9 @@ Offset      Size     Field
 28          N        state_bytes: serialized StreamState
 ```
 
-Call token plaintext — v1, minted once at `/init`:
+Call token plaintext — v3, minted once at `/init`. Since v3 the two frozen
+schemas sit behind one `StateRef`, so a very wide table's schemas are stored
+once instead of riding every request:
 
 ```
 Offset      Size     Field
@@ -1467,13 +1526,18 @@ Offset      Size     Field
                      method declares none)
 ...         4        type_len: uint32 LE
 ...         M        call_state_type: UTF-8 class name, or empty
-...         4        schema_len: uint32 LE
-...         P        schema_bytes: serialized output pa.Schema
-...         4        input_schema_len: uint32 LE
-...         Q        input_schema_bytes: serialized input pa.Schema
+...         4        schemas_len: uint32 LE
+...         P        schemas_ref: StateRef bytes whose value is
+                     uint32 LE len || output_schema_bytes ||
+                     uint32 LE len || input_schema_bytes
 ...         4        stream_id_len: uint32 LE
 ...         R        stream_id_bytes: UTF-8 chain-correlation id
+...         8        response_limit_bytes: uint64 LE (0 = unbounded)
 ```
+
+`schemas_ref` follows the inline-or-stored rule below with its inline limit
+computed with `call_token_bytes = 0`; readers resolve it like any `StateRef`
+(stored form: one GET per process per stream, then the object cache).
 
 `call_state_type` is carried because a stream method may return a *union* of
 state classes whose members declare different call-state types. A reader MUST
@@ -1483,13 +1547,22 @@ unrecognised one — never look up a class by a client-supplied name.
 The AEAD AAD (authenticated, not encrypted) is:
 
 ```
-cursor token:  b"vgi_rpc.state.v4\x00" || identity_tail
-call token:    b"vgi_rpc.call.v1\x00"  || identity_tail
+cursor token:  prefix_state || identity_tail || b"\x00" || protocol
+call token:    prefix_call  || identity_tail || b"\x00" || protocol
+
+prefix_state := b"vgi_rpc.state.v7\x00" if a peer-evidence binding digest is present
+                else b"vgi_rpc.state.v6\x00"
+prefix_call  := b"vgi_rpc.call.v4\x00"  if a peer-evidence binding digest is present
+                else b"vgi_rpc.call.v3\x00"
+identity_tail := b"\x00anonymous"                                  (unauthenticated)
+               | b"\x01" || domain || b"\x00" || principal          (authenticated)
+                 then, if binding present: || b"\x00" || binding
 ```
 
-where `identity_tail` is `b"\x01" || domain || b"\x00" || principal` for
-authenticated requests and the literal `b"\x00anonymous"` otherwise. The
-prefixes differ deliberately, so a call token and a cursor token are not
+`protocol` is the wire name of the protocol that owns the stream (or
+`"\x00server"` for server-scoped tokens). The cursor-token AAD is also
+`BASE_AAD`, from which the `StateRef` and argument-reference scopes below are
+derived. The prefixes differ deliberately, so a call token and a cursor token are not
 interchangeable even for the same principal: presenting one where the other
 is expected fails the tag check rather than decoding into a payload the
 reader would misinterpret.
@@ -1512,14 +1585,15 @@ share the master `token_key`.
   Used by the server to enforce a configurable TTL (`token_ttl`). When
   `token_ttl > 0`, tokens older than `token_ttl` seconds are rejected
   with HTTP 400 ("State token expired"). Set `token_ttl` to `0` to
-  disable expiry checking. The default TTL is 3600 seconds (1 hour).
-- **`state_bytes`**: The stream state dataclass serialized as a complete
-  Arrow IPC stream (schema + 1-row batch + EOS).
-- **`schema_bytes`**: The output Arrow schema serialized via
-  `pa.Schema.serialize()`.
-- **`input_schema_bytes`**: The input Arrow schema serialized via
-  `pa.Schema.serialize()`. For producer streams, this is the serialized
-  empty schema.
+  disable expiry checking. The default TTL is 21600 seconds (6 hours, the
+  maximum stream duration) since protocol 3.4; it applies to cursor tokens,
+  call tokens and stored `StateRef` tags, each from its own `created_at`.
+- **`state_bytes`**: The stream state dataclass, in the reference either a
+  compact msgpack record (first byte `0x01`) or a complete Arrow IPC stream
+  (first byte `0xFF`); a union-typed method prefixes `0x00 || uint16 LE tag`.
+- **`schemas_ref`**: The `StateRef` of both serialized schemas
+  (`pa.Schema.serialize()`; for producer streams the input is the serialized
+  empty schema).
 
 **Verification order**: The version byte is checked first (cheap
 rejection), then the AEAD `decrypt` is attempted. Any authenticity
@@ -1527,6 +1601,133 @@ failure (bad key, bad AAD, tampered nonce or ciphertext) surfaces as a
 uniform HTTP 400 "State token signature verification failed". TTL
 enforcement only runs after authenticity is established — the timestamp
 is inside the ciphertext, so it cannot be tampered with independently.
+
+### StateRef: stream state by reference
+
+Protocol 3.4. Full contract: `tools/cross-port/specs/STATE_REF_V1.md`.
+
+Every HTTP continuation echoes the stream's state. A `StateRef` is how a
+server marks part of that state as immutable for the life of the stream:
+small values ride inline (compressed) inside the cursor token, large ones are
+stored once in object storage and only a ~130-byte sealed tag rides each turn.
+The client never parses one; it echoes the opaque tokens as always. On pipe,
+stdio, Unix and TCP the value simply stays in process memory.
+
+API (Python; other ports idiomatic): `ctx.state_ref(value)` — bytes or a
+serializable record — returns a `StateRef` to store in a state field;
+`ctx.resolve(ref)` (or `ctx.resolve(ref, RecordType)`) returns it on any
+turn, any transport, any replica.
+
+**`state_ref()` is only valid while handling a stream's init request.** The
+reference allows it only on the context passed to the stream method itself
+(HTTP `/init`, stream construction on the byte-stream transports); on a
+continuation (`process`, `on_cancel`, including the first producer turn folded
+into `/init`) and on unary calls it raises `state_ref_misuse`
+(`FAILED_PRECONDITION`, message
+`state_ref() may only be called while handling a stream's init request (<protocol>.<method>)`).
+Within one init, byte-equal or identical values return one ref and store at
+most one object. A ref belongs to its stream (its tag binds the `call_id`);
+state transitions copy it and never call `state_ref()` again.
+
+**Encoding.** The first byte is the form, doubling as the format version:
+
+```
+StateRef (inline)  = 0x01 || codec || body            (codec: standard token codec)
+StateRef (stored)  = 0x02 || 0x01 || nonce24 || AEAD(tag_plaintext, STATEREF_TAG_AAD)
+tag_plaintext      = 0x01 || created_at u64le || size u64le || sha256[32]
+                     || id_len u16le || object_id                (id_len 1..1024)
+stored object      = 0x01 || nonce24 || AEAD(codec || body, STATEREF_OBJECT_AAD)
+```
+
+`size` and `sha256` in the tag describe the stored object bytes, pinning each
+tag to exactly one object (every ref of a stream shares one object AAD).
+
+**Sealing scopes**, all under the server's one `token_key`, with `BASE_AAD` the
+cursor-token AAD above:
+
+```
+STATEREF_TAG_AAD    = b"vgi_rpc.stateref.v1\x00"        || BASE_AAD(auth, protocol) || call_id
+STATEREF_OBJECT_AAD = b"vgi_rpc.stateref.object.v1\x00" || BASE_AAD(auth, protocol) || call_id
+ARGREF_AAD          = b"vgi_rpc.argref.v1\x00"          || BASE_AAD(auth, "\x00server")
+```
+
+A stored tag cannot be opened as a cursor, a call token, an argument
+reference, another stream's tag, or under another principal or protocol.
+Every replica that shares the token key can open it; **deployments with more
+than one replica MUST set a shared `token_key`.**
+
+**Form, decided at first token serialization** (the init response, after the
+call token is minted), then cached on the ref so every later serialization
+re-emits the same bytes (no re-compression, no re-seal, no second upload):
+
+```
+stored  iff  transport is HTTP (incl. Iroh)
+         and storage is configured (implements put_object/get)
+         and len(codec || body) > state_ref_inline_bytes
+inline  otherwise
+```
+
+A stored object larger than the server's `max_fetch_bytes` fails the init
+with `state_ref_too_large`.
+
+**Resolve.** Inline: decompress (bounded at `max(64 MiB, max_fetch_bytes)`).
+Stored, all before any network I/O except the fetch: open the tag; check its
+version and layout; if `token_ttl > 0` and the tag is older than `token_ttl`,
+refuse (`StateRef expired`); refuse `size > max_fetch_bytes`; look up the
+object cache by `object_id`, on a miss single-flight `get(object_id)`; verify
+length and SHA-256; open the object; decompress.
+
+| Kind | Code | When | HTTP |
+|---|---|---|---|
+| `invalid_state_ref` | `INVALID_ARGUMENT` | unknown form, tag unseal/scope failure, bad layout, expired tag, size/digest mismatch, object unseal failure | 400 |
+| `state_ref_missing` | `NOT_FOUND` | storage reports the object gone; message `stream state object is gone (StateRef object expired or deleted); restart the query` | 200 + `X-VGI-RPC-Error` |
+| `state_ref_too_large` | `RESOURCE_EXHAUSTED` | stored object over `max_fetch_bytes` (store or resolve) | 200 + `X-VGI-RPC-Error` |
+| `state_ref_misuse` | `FAILED_PRECONDITION` | `state_ref()` outside the init request | 200 + `X-VGI-RPC-Error` |
+| `cursor_too_large` | `RESOURCE_EXHAUSTED` | the cursor rule's hard error (below) | 200 + `X-VGI-RPC-Error` |
+| `storage_unavailable` | `UNAVAILABLE` | a transient storage failure (5xx, timeout) on `get` | 200 + `X-VGI-RPC-Error` |
+
+Messages never contain URLs, tokens, object contents or digests.
+
+**Turn budget and the cursor rule.** With `max_request_bytes` the advertised
+`VGI-Max-Request-Bytes` (unset or `<= 0` means unbounded) and
+`call_token_bytes` the sealed length of the stream's call token:
+
+```
+turn_budget            = floor((max_request_bytes - 4096) / 1.34) - call_token_bytes
+state_ref_inline_bytes = min(VGI_RPC_STATE_REF_INLINE_BYTES (default 16384), floor(turn_budget / 4)), >= 0
+```
+
+On every turn the sealed cursor is compared with `turn_budget`. Under the
+**warn** rule an over-budget cursor logs `cursor_large` (the reference also
+sends the client a `WARN` log whose message starts `cursor_large:`) and the
+stream continues; under the **error** rule it is `cursor_too_large`, raised
+while minting, only when a request cap is set:
+`cursor_too_large: stream state for <protocol>.<method> is <N> bytes, over this server's turn budget of <B> bytes (VGI-Max-Request-Bytes <M>). Wrap data that does not change across turns in ctx.state_ref().`
+A framework switches to the error rule once its own unchanging state is
+behind a `StateRef`. A `max_request_bytes` below 16384 is accepted with a
+startup warning
+(`max_request_bytes (N) is below 16384: the cursor rule is disabled and stream continuations may not fit`)
+and disables the rule for the server's lifetime.
+
+**Storage contract.** Storage gains `put_object(data) -> object_id` (one
+`rpc`-purpose object, written with its size and SHA-256 so storage verifies
+the body; the blob vendor's grant carries the advisory `origin: "state_ref"`)
+and `get(object_id) -> bytes` (download minted server-side, host-pinned,
+capped at `max_fetch_bytes`; a distinguishable *missing* error for 404 /
+vendor `not_found`). Objects carry no TTL and are never deleted by the server:
+operators MUST set a bucket lifecycle rule of at least one day on the `rpc`
+prefix.
+
+**Object cache** (required framework behaviour, not wire): one per server
+process, keyed by `object_id` (never a digest), single-flight, byte-bounded
+LRU (`VGI_RPC_OBJECT_CACHE_BYTES`, default `min(1 GiB, 40% of the cgroup or
+physical memory)`), entries older than one day treated as misses, and memos
+hold the `object_id`, never the value. Shared by stored `StateRef`s and
+argument references.
+
+The single-replica SDKs (C#, C, C++; their HTTP streams live in process memory
+in 3.4) keep every `StateRef` in memory and inline; the cursor rule, tag
+expiry and `schemas_ref` do not apply to them.
 
 ### Authentication (HTTP)
 

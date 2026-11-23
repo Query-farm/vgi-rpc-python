@@ -145,7 +145,7 @@ published wire spec is `docs/WIRE_PROTOCOL.md` § *Upload URL generation*.
     vendor `generate_upload_url` must send it**, or the shared
     `external_storage` tests (`puts_upload`, `client_uploads`) fail. Note that the vendor accepts `size: 0`;
     vgi-rpc servers refuse it earlier. `/v1/upload_urls` (unsized) is no
-    longer called; `_VendorApi.upload_urls` is kept as a raw API mirror.
+    longer called; protocol 3.4 removed `_VendorApi.upload_urls` and the fake vendor's route (`STATE_REF_V1.md` §13).
 
 ### Test fakes
 14. **Fake vendor** (`vgi-rpc-fake-vendor`), sized PUT verification order:

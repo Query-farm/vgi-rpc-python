@@ -1,7 +1,9 @@
 # StateRef, turn budgets and the object store: contract (vgi-rpc, protocol 3.4)
 
-Status: **Phase 0 spec, normative for all eight vgi-rpc SDKs** (Python, Go,
-TypeScript, Rust, Java, C#, C, C++). Not yet implemented anywhere.
+Status: **normative for all eight vgi-rpc SDKs** (Python, Go, TypeScript,
+Rust, Java, C#, C, C++). Implemented in the Python reference on
+`protocol-3.4` (Phase 2a); decisions it settled are at the end of this
+document. The other seven follow in Phase 4.
 Decided by Rusty (the maintainer), 2026-11-22, as part of the "large values in
 VGI protocol 3.4" plan (v5). The Python reference implements it first
 (Phase 2); the other seven follow (Phase 4). `docs/WIRE_PROTOCOL.md` is
@@ -713,3 +715,130 @@ stored object      = 0x01 || nonce24 || AEAD(codec || body, STATEREF_OBJECT_AAD)
 argument ref       = 0x01 || nonce24 || AEAD(0x01 || size u64le || sha256[32] || id_len u16le || object_id, ARGREF_AAD)
 sealed token body  = codec || framed plaintext          (codec: 0x00 raw, 0x01 zstd, 0x02 deflate)
 ```
+
+---
+
+## Decisions made in the Python reference (vgi-rpc-python `protocol-3.4`, Phase 2a)
+
+The contract above is unchanged; these settle what it left open. The
+published wire summary is `docs/WIRE_PROTOCOL.md` § *StateRef: stream state
+by reference* (plus the grant columns under *Upload URL generation*).
+
+### API
+1. **Where `state_ref()` is allowed.** Only on the context handed to the
+   stream method itself. Every other context — `process`/`exchange`/`produce`,
+   `on_cancel`, unary calls — raises `state_ref_misuse`. That includes the
+   first producer turn, which HTTP folds into the `/init` request: refusing it
+   keeps transport parity (on pipe the first `process()` is a continuation),
+   so worker code that works on one transport works on all.
+2. **Python surface** (stable for vgi-python):
+   `CallContext.state_ref(value) -> StateRef`;
+   `CallContext.resolve(ref) -> bytes`, `CallContext.resolve(ref, RecordType) -> RecordType`;
+   `CallContext.resolve_argument_ref(ref, *, size, sha256) -> bytes`;
+   a state field annotated `StateRef` (`vgi_rpc.state_ref.StateRef`, Arrow
+   `binary`; the compact cursor codec carries it too). A ref still in memory
+   returns the original record instance from a typed resolve.
+3. **Memo** (§2.2) is per init context, keyed by object identity and by the
+   serialized bytes; it returns the same `StateRef` instance, whose encoded
+   bytes are cached, so it stores once.
+4. **Serialization outside a token mint** (a caller serializing a state for
+   its own reasons) renders an un-encoded ref inline and does **not** cache
+   it, so the next token mint still decides the form.
+
+### Storage
+5. **`ObjectStore` is a separate runtime-checkable protocol** (`put_object`,
+   `get`) next to `ExternalStorage`, not new members of it, so a third-party
+   `ExternalStorage` keeps type-checking. "Storage is configured" (§5.2) means
+   the server's storage implements `ObjectStore`; one that does not keeps every
+   ref inline and cannot resolve argument references
+   (`invalid_arguments_ref`). Every in-tree backend implements both.
+6. `get(object_id, *, max_bytes=None)` takes the cap as a keyword (the server
+   passes `max_fetch_bytes`). Missing is `vgi_rpc.external.ObjectMissingError`.
+   Any other `get` failure surfaces as kind **`storage_unavailable`**, code
+   `UNAVAILABLE` (§6 names the code but no kind).
+7. **`UploadUrl` gains `object_id: str = ""` and `ref: bytes = b""`.**
+   Providers set `object_id`; the server refuses a grant whose provider returned
+   none (RPC error batch). The client fills both from the response columns
+   when present.
+8. **Fake storage object API**: every `/alloc` response carries `object_id`;
+   an allocation with `"purpose": "object"` is a `put_object` (counted
+   `object_puts`); `GET /objects/{id}` is `get` (`object_gets`, 404 when
+   absent); `DELETE /objects/{id}` is a test route standing in for lifecycle
+   (`object_deletes`). `/_stats` always reports `allocations`, `object_puts`,
+   `object_gets`, `object_deletes`, `upload_refusals`.
+9. **Fake vendor**: `puts_state_ref` counts grants with `origin: "state_ref"`
+   and they are *also* counted in `puts_rpc` (they are server rpc writes).
+   `VendorStorage.get` treats vendor `not_found` and `not_uploaded` (and a
+   storage 404) as missing.
+
+### Errors
+10. **Argument-reference kinds live in vgi-rpc** with the vgi spec's names:
+    `invalid_arguments_ref` (`INVALID_ARGUMENT`), `arguments_ref_integrity`
+    (`DATA_LOSS`), `arguments_ref_missing` (`NOT_FOUND`), with generic
+    messages. vgi re-raises `arguments_ref_missing` with its prepared-statement
+    message.
+11. `invalid_state_ref` raised while a method or state runs is answered
+    HTTP 400 (with the RPC error batch), like a token failure; every other
+    kind here is `200 + X-VGI-RPC-Error: true`.
+
+### Turn budget
+12. **The cursor rule is a server option**, `make_wsgi_app(cursor_rule="warn" | "error")`
+    (also `serve_http`, `make_sync_client`), default `"warn"`. vgi-python
+    passes `"error"` once its `init: StateRef` port lands. Under `"warn"` the
+    server also sends the client a `WARN` log whose message starts
+    `cursor_large:` (kind `cursor_large` in its extras) — that is what makes
+    the warning observable to the shared suite.
+13. `state_ref_inline_bytes` is `make_wsgi_app(state_ref_inline_bytes=...)`,
+    else `VGI_RPC_STATE_REF_INLINE_BYTES`, else 16384; non-positive is a
+    startup `ValueError`. `call_token_bytes` is the base64-decoded length of
+    the call token (cached per stream; recomputed on a cold replica).
+14. Over-budget producer turns: the cursor is now minted **before** the
+    turn's data is flushed, so a `cursor_too_large` refusal never follows data
+    the client already consumed.
+
+### Object cache
+15. One process-wide cache, `vgi_rpc.object_cache.default_object_cache()`,
+    bound read once from `VGI_RPC_OBJECT_CACHE_BYTES` (`0` retains nothing; a
+    negative or non-integer value is a `ValueError`). Default: `min(1 GiB, 40%`
+    of cgroup v2 `memory.max` / v1 `memory.limit_in_bytes`, else physical
+    memory`)`. `ObjectCache.age_entries(seconds)` is a test hook (exposed to
+    the shared suite as the conformance method `object_cache_age`).
+
+### Codec
+16. Readers accept `0x00`, `0x01` and `0x02`; the writer emits `0x00`/`0x01`.
+    zstd decompression now checks a frame's declared content size against the
+    bound first: python-zstandard's `max_output_size` only bounds frames that
+    do not declare one. This tightens the 64 MiB token bound too.
+
+### Shared conformance (§15)
+17. New `ConformanceService` methods every port implements:
+    `state_ref_exchange(size, compressible, seed, misuse, cursor_padding)`
+    (exchange; input `{override: binary}`, output
+    `{size, sha256, form, ref}`; payload from `state_ref_payload`),
+    `object_cache_stats()`, `object_cache_age(seconds)`,
+    `resolve_argument_ref(ref, size, sha256) -> sha256 hex`. Method count
+    90 → 94; describe golden and protocol-hash vector regenerated.
+18. Runner fixtures (`vgi_rpc/conformance/_state_ref_pytest.py` docstring):
+    `conformance_state_ref_replicas` (two workers, shared key + fake storage,
+    no request cap, cursor rule error, object-cache bound 98304, principal
+    required via `X-Conformance-Principal`), `conformance_state_ref_short_ttl_port`
+    (`token_ttl` 2), `conformance_cursor_budget_ports` (warn / error at 32768,
+    floor at 9000), and optional `conformance_state_ref_capabilities`
+    (`frozenset()` for C#, C, C++). The Python worker's flags:
+    `--cursor-rule`, `--token-ttl`, `--object-cache-bytes`,
+    `--require-principal`, and `--max-request-bytes 0` for "no cap".
+19. **Capability gating.** Tests 1 (stored half), 2, 3, 5, 10 **and 4** skip
+    for the single-replica SDKs with `SINGLE_REPLICA_SKIP_REASON`: their refs
+    are never encoded, so the codec bytes test 4 inspects do not exist.
+20. **Tests 6, 7, 8 and 14 go through argument references**, not stored
+    `StateRef`s, so the in-memory SDKs (which implement argument references
+    and the object cache but never store a ref) run them too.
+21. **Test 8** reads resident bytes from the worker's own cache stats; a memo
+    pinning values outside the cache is not observable across languages.
+22. **Test 10** cannot tell tag expiry from call-token expiry over the wire:
+    both are minted at `/init` under the same `token_ttl`, and the call-state
+    cache entry expires with it. The shared test asserts the expired turn is a
+    400 with no fetch; the tag's own expiry check is covered language-locally.
+23. **Test 13** covers the principal-header authenticator. Peer-evidence
+    binding is covered by a language-local test that the argument-reference
+    AAD includes the binding digest (refs do not cross bindings).

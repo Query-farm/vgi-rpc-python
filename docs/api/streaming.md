@@ -108,6 +108,55 @@ This all happens transparently — you write the same `StreamState` subclass reg
 !!! note "Design your state for serialization"
     Since HTTP transport serializes and deserializes state every exchange, keep state fields to serializable types (see table above). File handles, sockets, database connections, and other non-serializable resources should not be stored in state fields — use `CallContext` or external storage instead.
 
+## Immutable state by reference: `StateRef`
+
+On HTTP every continuation echoes the stream's state back to the server, so a
+large value in the state costs its size on every request — and can exceed the
+server's `VGI-Max-Request-Bytes`. Data that does not change for the life of
+the stream belongs in a `StateRef`:
+
+```python
+from dataclasses import dataclass
+
+from vgi_rpc import CallContext, ExchangeState, OutputCollector, AnnotatedBatch, Stream
+from vgi_rpc.state_ref import StateRef
+
+
+@dataclass
+class LookupState(ExchangeState):
+    table: StateRef          # serialized as a few bytes, whatever the value's size
+    seen: int = 0            # ordinary per-turn state
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        table = ctx.resolve(self.table)          # bytes (or ctx.resolve(self.table, MyRecord))
+        self.seen += input.batch.num_rows
+        ...
+
+
+class LookupImpl:
+    def lookup(self, table: bytes, ctx: CallContext) -> Stream[LookupState]:
+        # Only here, while handling the stream's init request.
+        return Stream(output_schema=OUT, input_schema=IN, state=LookupState(table=ctx.state_ref(table)))
+```
+
+- `ctx.state_ref(value)` takes `bytes` or an `ArrowSerializableDataclass`. Call
+  it only in the stream method itself; on a continuation it raises
+  `state_ref_misuse`. State transitions copy the ref.
+- On HTTP a small value is carried inline, compressed; a value over
+  `VGI_RPC_STATE_REF_INLINE_BYTES` (16 KiB, or a quarter of the turn budget)
+  is stored once in the server's object storage and only a ~130-byte sealed
+  tag rides each turn. Any replica sharing the `token_key` can resolve it.
+- On pipe, stdio, Unix and TCP the value simply stays in memory. Worker code
+  never branches on transport or storage.
+- The server compares each sealed cursor with its turn budget,
+  `floor((max_request_bytes - 4096) / 1.34) - call_token_bytes`. With
+  `make_wsgi_app(cursor_rule="warn")` (the default) an over-budget cursor logs
+  `cursor_large`; with `cursor_rule="error"` the turn fails with
+  `cursor_too_large`, naming `ctx.state_ref()` as the fix.
+
+The wire format, sealing scopes and errors are in the
+[Wire Protocol](../WIRE_PROTOCOL.md#stateref-stream-state-by-reference).
+
 ## Producer vs Exchange
 
 ### Producer streams
@@ -330,3 +379,11 @@ with serve_pipe(DataService, DataServiceImpl()) as proxy:
 ### AnnotatedBatch
 
 ::: vgi_rpc.rpc.AnnotatedBatch
+
+### StateRef
+
+::: vgi_rpc.state_ref.StateRef
+
+::: vgi_rpc.state_ref.StateRefRuntime
+
+::: vgi_rpc.state_ref.turn_budget

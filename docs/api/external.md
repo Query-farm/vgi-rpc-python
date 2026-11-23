@@ -123,6 +123,18 @@ httpx2.put(urls[0].upload_url, content=ipc_data, headers=upload_put_headers(urls
 # carrying vgi_rpc.location.sha256 = digest; the server verifies it
 ```
 
+Since protocol 3.4 each `UploadUrl` returned to a client also carries the
+grant's `object_id` and `ref`: a sealed **argument reference** for that
+object, bound to the requesting principal. A caller that sends the reference
+instead of the data (the VGI `BindRequest.arguments_location`) lets the server
+resolve it with `ctx.resolve_argument_ref(ref, size=..., sha256=...)`: open it
+under the caller's principal, check the sealed size and digest equal the ones
+sent alongside, fetch through the per-process object cache, verify, return the
+bytes. Failures carry the kinds `invalid_arguments_ref`,
+`arguments_ref_integrity` and `arguments_ref_missing`. `__upload_url__/init`
+is authenticated exactly like the protocol's methods, so the principal that
+was granted is the one that can use the reference.
+
 Clients can discover whether the server supports upload URLs:
 
 ```python
@@ -258,9 +270,39 @@ The caller owns the ref and the object's lifecycle:
 - A pre-signed URL expires; re-sign or rebuild the ref before it does.
 - Only return a ref to callers who are all entitled to the same content.
 
+## Object API (protocol 3.4)
+
+Every backend here also implements `ObjectStore`, the two storage methods
+that stored `StateRef` values and argument references need:
+
+- `put_object(data) -> object_id` stores one object, written with its size and
+  SHA-256 so storage verifies the body (vendor sized grant with the advisory
+  `origin: "state_ref"`; S3 `PutObject` with `ChecksumSHA256`; GCS length-exact).
+- `get(object_id, *, max_bytes=None) -> bytes` mints the download server-side
+  from the id, pins it to the backend's hosts, caps it at `max_bytes`, and
+  raises `ObjectMissingError` for an absent object (any other failure is
+  transient). Callers verify size and digest.
+
+`object_id` is the S3/GCS key, the vendor's `object_id`, or the fake storage's
+blob id. A storage that implements only `ExternalStorage` keeps working for
+externalization; `StateRef`s then stay inline and argument references cannot
+be resolved.
+
+Resolved objects go through one **object cache** per process
+(`vgi_rpc.object_cache.default_object_cache()`): keyed by `object_id`,
+single-flight, byte-bounded (`VGI_RPC_OBJECT_CACHE_BYTES`, default
+`min(1 GiB, 40% of memory)`), and an entry fetched more than a day ago is a
+miss.
+
 ## Object Lifecycle
 
 Uploaded objects persist indefinitely — vgi-rpc does not delete them. Configure storage-level cleanup policies to auto-expire old data.
+
+Objects written through the object API (stored `StateRef`s) and argument
+uploads carry no TTL either. **Set a lifecycle rule of at least one day** on
+the prefix: a stream may live six hours, and a prepared statement's argument
+reference is honoured until the object is deleted (or a replica's cache entry
+ages past a day).
 
 **S3 lifecycle rule:**
 
@@ -420,7 +462,9 @@ uvx --from vgi-rpc vgi-rpc-fake-vendor --test-routes --token test-token=tenant-a
 body padded to 1,024 bytes, and a `HEAD` has no side effects:
 
 - `GET /__stats__`: call and byte counters (`puts`, `gets`, `deletes`,
-  `delete_scopes`, `upload_urls`, `storage_puts`, `storage_gets`, `objects`,
+  `delete_scopes`, `upload_urls` (always 0: the vendor's unsized
+  `/v1/upload_urls` route is gone, and `vgi-rpc` no longer has a client for it),
+  `storage_puts`, `storage_gets`, `objects`,
   `bytes`, `bytes_uploaded`, `bytes_downloaded`), signed-PUT refusals
   (`upload_refusals`, `upload_bad_digest`, `upload_incomplete_body`,
   `upload_signature_mismatch`, `uploads_corrupted`), and counters by purpose:
@@ -430,7 +474,10 @@ body padded to 1,024 bytes, and a `HEAD` has no side effects:
   `client_upload_refusals` count the signed PUTs to client-upload objects.
   A server marks a client-upload grant with the advisory
   `origin: "client_upload"` field, which `VendorStorage.generate_upload_url`
-  sends and the real vendor ignores.
+  sends and the real vendor ignores. Protocol 3.4 appends `puts_state_ref`
+  (grants with `origin: "state_ref"`, a subset of `puts_rpc`),
+  `gets_state_ref` and `gets_upload` (`/v1/blobs/get` calls on objects granted
+  with origin `state_ref` and `client_upload`).
 - `GET /__admin__/fault?purpose=fs|rpc&action=corrupt|missing&count=N`: the
   next `N` objects of that purpose that are downloaded are damaged for every
   later `GET`. `corrupt` keeps the length and changes every byte; `missing`
@@ -476,6 +523,24 @@ Client uploads to a vended URL are sent with `Content-Type: application/octet-st
 ::: vgi_rpc.external.UploadUrlProvider
 
 ::: vgi_rpc.external.UploadUrl
+
+::: vgi_rpc.external.ObjectStore
+
+::: vgi_rpc.external.ObjectMissingError
+
+### Object cache
+
+::: vgi_rpc.object_cache.ObjectCache
+
+::: vgi_rpc.object_cache.default_object_cache
+
+### Argument references
+
+::: vgi_rpc.state_ref.mint_argument_ref
+
+::: vgi_rpc.state_ref.open_argument_ref
+
+::: vgi_rpc.state_ref.resolve_argument_ref
 
 ### Validation
 
