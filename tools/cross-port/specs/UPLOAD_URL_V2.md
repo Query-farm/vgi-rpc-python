@@ -190,3 +190,12 @@ published wire spec is `docs/WIRE_PROTOCOL.md` § *Upload URL generation*.
 `parse_upload_url_support()`; in `vgi_rpc.external`: `is_sha256_hex()`,
 `sha256_b64_from_hex()` and `resolve_external_location(..., require_sha256=)`.
 `upload_url_support` now means the header is present at any version.
+
+---
+
+## Protocol 3.4 addendum: grant columns
+
+The `__upload_url__/init` response gains two columns, `object_id` (utf8) and
+`ref` (binary, a sealed argument reference), appended after
+`upload_headers`, and `UploadUrlProvider.generate_upload_url` returns the
+`object_id`. Specified in [`STATE_REF_V1.md`](STATE_REF_V1.md) §10.2.
