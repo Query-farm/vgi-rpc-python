@@ -102,6 +102,11 @@ SINGLE_REPLICA_SKIP_REASON = (
     "(STATE_REF_V1.md §5.4)"
 )
 
+#: These groups start their workers inside the test body (``getfixturevalue``)
+#: and test 10 waits out a 2 s ``token_ttl``, so the suite's 5 s per-test
+#: budget is too tight on a loaded runner.
+_SPAWNS_IN_BODY = pytest.mark.timeout(30)
+
 _PRINCIPAL_HEADER = "X-Conformance-Principal"
 _SERVICE = "ConformanceService"
 _ARROW = "application/vnd.apache.arrow.stream"
@@ -368,6 +373,7 @@ def _resolve_arg(
 # ---------------------------------------------------------------------------
 
 
+@_SPAWNS_IN_BODY
 class TestStateRef:
     """``StateRef``: round trips, cross-replica, scope refusals, codec, misuse, expiry."""
 
@@ -524,6 +530,7 @@ def _cursor_warnings(reply: _Reply) -> list[Message]:
     return [m for m in reply.logs if m.level == Level.WARN and m.message.startswith("cursor_large")]
 
 
+@_SPAWNS_IN_BODY
 class TestCursorBudget:
     """The turn budget's cursor rule and its 16 KiB floor."""
 
@@ -572,6 +579,7 @@ class TestCursorBudget:
 # ---------------------------------------------------------------------------
 
 
+@_SPAWNS_IN_BODY
 class TestObjectCache:
     """The per-process object cache: single-flight, byte bound, no pinning, one-day age."""
 
@@ -649,6 +657,7 @@ class TestObjectCache:
 # ---------------------------------------------------------------------------
 
 
+@_SPAWNS_IN_BODY
 class TestArgumentRefs:
     """``__upload_url__/init`` grant columns and argument-reference resolution."""
 

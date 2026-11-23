@@ -160,6 +160,14 @@ _REQUESTABLE_REASONS = (
 
 pytestmark = pytest.mark.timeout(5)
 
+#: For classes whose tests start a worker process inside the test body (a
+#: ``request.getfixturevalue`` or a factory call), which the 5 s budget above
+#: also charges.  A spawn is ~0.5 s on an idle box but has measured 9.5 s on a
+#: loaded CI runner under coverage, and these groups have timed out that way
+#: since before protocol 3.4 (TestProxyProof, TestSticky).  The budget still
+#: catches a hung call; it no longer catches a slow fork.
+SPAWNS_IN_BODY_TIMEOUT = pytest.mark.timeout(30)
+
 
 def _uses_http(request: pytest.FixtureRequest) -> bool:
     """Check whether the transport variant uses the HTTP client."""
@@ -2057,6 +2065,7 @@ class TestUnauthorized:
         )
 
 
+@SPAWNS_IN_BODY_TIMEOUT
 class TestProxyProof:
     """Proxy-proof contract — see ``docs/proxy-proof-spec.md``.
 
@@ -3346,6 +3355,7 @@ class TestErrorHeader:
 _REQUEST_ID_HEADER = "X-Request-ID"
 
 
+@SPAWNS_IN_BODY_TIMEOUT
 class TestRequestId:
     """``X-Request-ID`` must be emitted, and must match the access log.
 
