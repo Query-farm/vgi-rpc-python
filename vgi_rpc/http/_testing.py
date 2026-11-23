@@ -18,6 +18,7 @@ import falcon.testing
 
 from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, PeerAuthenticationPolicy, PeerIdentityProvider, RpcServer
+from vgi_rpc.state_ref import DEFAULT_TOKEN_TTL_SECONDS, CursorRule
 
 from .server import make_wsgi_app
 
@@ -145,7 +146,7 @@ def make_sync_client(
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
     sentry_config: object | None = None,
-    token_ttl: int = 3600,
+    token_ttl: int = DEFAULT_TOKEN_TTL_SECONDS,
     compression_level: int | None = 1,
     enable_not_found_page: bool = True,
     enable_landing_page: bool = True,
@@ -157,6 +158,8 @@ def make_sync_client(
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
     call_state_cache_entries: int = 4096,
+    state_ref_inline_bytes: int | None = None,
+    cursor_rule: CursorRule = "warn",
 ) -> _SyncTestClient:
     """Create a synchronous test client for an RpcServer.
 
@@ -201,6 +204,8 @@ def make_sync_client(
         sticky_echo_headers: See ``make_wsgi_app``.
         call_state_cache_entries: See ``make_wsgi_app``.  Pass ``0`` to force
             every stream continuation down the call-token miss path.
+        state_ref_inline_bytes: See ``make_wsgi_app``.
+        cursor_rule: See ``make_wsgi_app``.
 
     Returns:
         A sync client that can be passed to ``http_connect(client=...)``.
@@ -241,5 +246,7 @@ def make_sync_client(
         sticky_default_ttl=sticky_default_ttl,
         sticky_echo_headers=sticky_echo_headers,
         call_state_cache_entries=call_state_cache_entries,
+        state_ref_inline_bytes=state_ref_inline_bytes,
+        cursor_rule=cursor_rule,
     )
     return _SyncTestClient(app, default_headers=default_headers, prefix=prefix)

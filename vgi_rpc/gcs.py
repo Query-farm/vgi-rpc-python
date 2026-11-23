@@ -21,7 +21,15 @@ from typing import Any
 
 import pyarrow as pa
 
-from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider, is_sha256_hex
+from vgi_rpc.external import (
+    ExternalStorage,
+    ObjectMissingError,
+    ObjectStore,
+    UploadUrl,
+    UploadUrlProvider,
+    is_sha256_hex,
+)
+from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
 
 _logger = logging.getLogger(__name__)
 
@@ -186,7 +194,54 @@ class GCSStorage:
             download_url=get_url,
             expires_at=expires_at,
             headers={"Content-Type": "application/octet-stream", **put_headers},
+            object_id=blob_name,
         )
+
+    def put_object(self, data: bytes) -> str:
+        """Store *data* under a fresh name and return the name (``ObjectStore``).
+
+        GCS cannot verify a SHA-256 at storage; the upload is length-exact and
+        callers verify the digest on read.  Objects carry no TTL: set Object
+        Lifecycle Management of at least one day on ``prefix``.
+
+        Args:
+            data: The bytes to store.
+
+        Returns:
+            The blob name (the ``object_id``).
+
+        """
+        client = self._get_client()
+        blob_name = f"{self.prefix}{uuid.uuid4().hex}.bin"
+        blob = client.bucket(self.bucket).blob(blob_name)
+        blob.upload_from_string(data, content_type="application/octet-stream", if_generation_match=0)
+        return blob_name
+
+    def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
+        """Fetch the object *object_id* (a blob name) names (``ObjectStore``).
+
+        Args:
+            object_id: The blob name.
+            max_bytes: Largest object accepted; ``None`` means 256 MiB.
+
+        Returns:
+            The object bytes.
+
+        Raises:
+            ObjectMissingError: GCS reports the blob absent.
+            ValueError: The object is larger than *max_bytes*.
+
+        """
+        limit = max_bytes if max_bytes is not None else DEFAULT_MAX_FETCH_BYTES
+        blob = self._get_client().bucket(self.bucket).get_blob(object_id)
+        if blob is None:
+            raise ObjectMissingError("GCS object is gone")
+        if blob.size is not None and blob.size > limit:
+            raise ValueError(f"GCS object is {blob.size} bytes, over max_fetch_bytes ({limit})")
+        data: bytes = blob.download_as_bytes(raw_download=True)
+        if len(data) > limit:
+            raise ValueError(f"GCS object exceeds max_fetch_bytes ({limit})")
+        return data
 
 
 # Runtime check that GCSStorage satisfies ExternalStorage and UploadUrlProvider protocols
@@ -194,6 +249,7 @@ def _check_protocol() -> None:
     """Verify GCSStorage satisfies ExternalStorage and UploadUrlProvider at import time."""
     _inst = GCSStorage(bucket="test")
     _storage: ExternalStorage = _inst
+    _objects: ObjectStore = _inst
     _provider: UploadUrlProvider = _inst
 
 

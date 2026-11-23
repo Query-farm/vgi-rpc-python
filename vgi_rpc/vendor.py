@@ -83,7 +83,14 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Literal, Self
 from urllib.parse import urlsplit
 
-from vgi_rpc.external import ClientExternalConfig, Compression, ServerExternalConfig, UploadUrl, sha256_b64_from_hex
+from vgi_rpc.external import (
+    ClientExternalConfig,
+    Compression,
+    ObjectMissingError,
+    ServerExternalConfig,
+    UploadUrl,
+    sha256_b64_from_hex,
+)
 from vgi_rpc.external_fetch import (
     DEFAULT_MAX_FETCH_BYTES,
     FetchConfig,
@@ -105,6 +112,7 @@ __all__ = [
     "ENV_TOKEN",
     "ENV_TOKEN_FALLBACK",
     "ENV_URL",
+    "STATE_REF_ORIGIN",
     "BlobLocation",
     "BlobRef",
     "BlobScope",
@@ -135,6 +143,11 @@ ENV_MAX_FETCH_BYTES = "VGI_RPC_MAX_FETCH_BYTES"
 #: upload a request (:meth:`VendorStorage.generate_upload_url`).  The vendor
 #: ignores it; test fakes count and fault client uploads by it.
 CLIENT_UPLOAD_ORIGIN = "client_upload"
+
+#: Advisory ``origin`` on a ``/v1/blobs/put`` grant for a stored ``StateRef``
+#: object (:meth:`VendorStorage.put_object`).  The vendor ignores it; the fake
+#: vendor counts those grants (``puts_state_ref``) and their reads.
+STATE_REF_ORIGIN = "state_ref"
 
 _DEFAULT_THRESHOLD = 1_048_576
 _DEFAULT_TIMEOUT = 30.0
@@ -274,7 +287,8 @@ class VendorInfo:
         jurisdiction: The R2 jurisdiction (``"eu"``, ``"us"``), or ``None``.
         url_prefixes: URL prefixes this tenant's objects live under.
         limits: Numeric limits (``max_object_bytes``, ``quota_bytes``,
-            ``used_bytes``, ``max_upload_urls``, ``max_delete_ids``).
+            ``used_bytes``, ``max_delete_ids``; older vendors also sent
+            ``max_upload_urls``, which nothing reads any more).
         ttl_seconds: URL lifetimes (``put``, ``rpc_download``, ``get``).
 
     """
@@ -494,9 +508,7 @@ class _VendorApi:
     GET_PATH = "/v1/blobs/get"
     DELETE_PATH = "/v1/blobs/delete"
     DELETE_SCOPE_PATH = "/v1/blobs/delete_scope"
-    UPLOAD_URLS_PATH = "/v1/upload_urls"
     INFO_PATH = "/v1/info"
-    MAX_UPLOAD_URLS = 100
     MAX_DELETE_IDS = 1000
 
     def __init__(
@@ -704,27 +716,6 @@ class _VendorApi:
         deleted = resp.get("deleted", 0)
         return deleted if isinstance(deleted, int) else 0
 
-    def upload_urls(self, count: int) -> list[UploadUrl]:
-        if not 1 <= count <= self.MAX_UPLOAD_URLS:
-            raise ValueError(f"count must be between 1 and {self.MAX_UPLOAD_URLS}")
-        resp = self._post_json(self.UPLOAD_URLS_PATH, "upload_urls", {"count": count})
-        urls = _field(resp, "urls", "upload_urls")
-        if not isinstance(urls, list) or not urls:
-            raise VendorError("Blob vendor upload_urls response has malformed 'urls'")
-        out: list[UploadUrl] = []
-        for item in urls:
-            if not isinstance(item, dict):
-                raise VendorError("Blob vendor upload_urls response has a malformed entry")
-            entry = {str(k): v for k, v in item.items()}
-            out.append(
-                UploadUrl(
-                    upload_url=_str_field(entry, "upload_url", "upload_urls"),
-                    download_url=_str_field(entry, "download_url", "upload_urls"),
-                    expires_at=_parse_expires(_field(entry, "expires_at", "upload_urls")),
-                )
-            )
-        return out
-
     def info(self) -> VendorInfo:
         resp = self._call("GET", self.INFO_PATH, "info", None)
         region = resp.get("region", "")
@@ -760,6 +751,73 @@ class _VendorApi:
                 resp.status_code,
                 code,
             )
+
+
+def _download_capped(api: _VendorApi, url: str, max_bytes: int) -> bytes:
+    """GET a signed download URL on the bare storage client, refusing more than *max_bytes*.
+
+    Transport errors, 429 and 5xx are retried like every vendor request; a
+    404 is :class:`~vgi_rpc.external.ObjectMissingError`.  Raw bytes are
+    read (no transfer decoding), so a stored ``Content-Encoding`` can never
+    inflate past the cap.
+
+    Args:
+        api: The vendor API (its storage client, retry policy).
+        url: The signed download URL.
+        max_bytes: Largest body accepted.
+
+    Returns:
+        The body bytes.
+
+    Raises:
+        ObjectMissingError: Storage answered 404.
+        VendorError: Any other failure, or a body over *max_bytes*.
+
+    """
+    import httpx2
+
+    client = api._storage_client()
+    last_error = ""
+    status: int | None = None
+    for attempt in range(api._max_attempts):
+        if attempt:
+            delay = min(api._backoff * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
+            time.sleep(delay * (0.5 + random.random() / 2))
+        try:
+            resp = client.send(httpx2.Request("GET", url), auth=None, follow_redirects=False, stream=True)
+        except httpx2.TransportError as exc:
+            status, last_error = None, type(exc).__name__
+            continue
+        try:
+            if resp.status_code == 404:
+                raise ObjectMissingError(f"object is gone: {redact_url(url)}")
+            if resp.status_code == 429 or resp.status_code >= 500:
+                status, last_error = resp.status_code, f"HTTP {resp.status_code}"
+                continue
+            if not 200 <= resp.status_code < 300:
+                raise VendorError(
+                    f"Signed download failed: HTTP {resp.status_code}: {redact_url(url)}", resp.status_code
+                )
+            declared = resp.headers.get("content-length")
+            if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+                raise VendorError(f"Signed download is {declared} bytes, over max_fetch_bytes ({max_bytes})")
+            chunks: list[bytes] = []
+            total = 0
+            try:
+                for chunk in resp.iter_raw():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise VendorError(f"Signed download exceeds max_fetch_bytes ({max_bytes})")
+                    chunks.append(chunk)
+            except httpx2.TransportError as exc:
+                status, last_error = None, type(exc).__name__
+                continue
+            return b"".join(chunks)
+        finally:
+            resp.close()
+    raise VendorError(
+        f"Signed download failed after {api._max_attempts} attempts ({last_error}): {redact_url(url)}", status
+    )
 
 
 def _new_storage_client(timeout: float) -> httpx2.Client:
@@ -1023,7 +1081,67 @@ class VendorStorage(_VendorClientBase):
             download_url=grant.download_url,
             expires_at=min(grant.expires_at, grant.download_expires_at or grant.expires_at),
             headers={k: v for k, v in grant.required_headers.items() if k.lower() != "content-length"},
+            object_id=grant.object_id,
         )
+
+    def put_object(self, data: bytes) -> str:
+        """Store *data* as one ``rpc`` object and return its ``object_id`` (``ObjectStore``).
+
+        A sized, checksummed grant (``/v1/blobs/put``, ``purpose: "rpc"``,
+        advisory ``origin: "state_ref"`` -- :data:`STATE_REF_ORIGIN`) and a PUT
+        with exactly its required headers, so R2 verifies the body.  Objects
+        carry no TTL; the bucket lifecycle removes them.
+
+        Args:
+            data: The bytes to store (a sealed ``StateRef`` object).
+
+        Returns:
+            The vendor's ``object_id``.
+
+        Raises:
+            VendorError: If the vendor or the signed upload fails.
+
+        """
+        grant = self._api.put(size=len(data), sha256_b64=_b64_sha256(data), purpose="rpc", origin=STATE_REF_ORIGIN)
+        if self._pin:
+            self._check(grant.upload_url)
+        self._api.put_object(grant, data)
+        return grant.object_id
+
+    def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
+        """Fetch an object by id (``ObjectStore``).
+
+        Mints the download server-side (``/v1/blobs/get``), pins it to the
+        vendor's download hosts, and caps it at *max_bytes*.  The caller
+        verifies size and digest.
+
+        Args:
+            object_id: A vendor ``object_id``.
+            max_bytes: Largest object accepted; ``None`` means 256 MiB.
+
+        Returns:
+            The object bytes.
+
+        Raises:
+            ObjectMissingError: The vendor reports ``not_found`` /
+                ``not_uploaded``, or storage answers 404.
+            VendorError: Any other vendor or download failure.
+
+        """
+        limit = max_bytes if max_bytes is not None else DEFAULT_MAX_FETCH_BYTES
+        try:
+            location = self._api.get(object_id)
+        except VendorError as exc:
+            if exc.code in ("not_found", "not_uploaded") or exc.status == 404:
+                raise ObjectMissingError(f"blob vendor object is gone ({exc.code or exc.status})") from None
+            raise
+        if location.size > limit:
+            raise VendorError(f"Blob vendor object is {location.size} bytes, over max_fetch_bytes ({limit})")
+        if location.content_encoding not in (None, "identity"):
+            raise VendorError(f"Blob vendor object has unsupported content_encoding {location.content_encoding!r}")
+        if self._pin:
+            self._check(location.download_url)
+        return _download_capped(self._api, location.download_url, limit)
 
     def _check(self, url: str) -> None:
         try:

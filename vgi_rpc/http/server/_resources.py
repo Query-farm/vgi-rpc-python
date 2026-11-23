@@ -31,6 +31,7 @@ from vgi_rpc.rpc import (
 )
 from vgi_rpc.rpc._common import CookieSpec, ProtocolError, _current_body_precompressed, _current_response_cookies
 from vgi_rpc.rpc._types import PROTOCOL_NAME_RE
+from vgi_rpc.state_ref import mint_argument_ref
 from vgi_rpc.utils import new_ipc_stream
 
 from .._common import (
@@ -484,12 +485,30 @@ class _UploadUrlResource:
                 sink.flush_contents(writer, _UPLOAD_URL_SCHEMA)
                 try:
                     urls = [provider.generate_upload_url(size, sha256_hex) for size, sha256_hex in uploads]
+                    # One sealed argument reference per entry, minted from the
+                    # *claimed* (size, sha256) under the same AuthContext this
+                    # request was authenticated with -- the one a later call
+                    # presenting the ref is authenticated with too.
+                    refs: list[bytes] = []
+                    for (size, sha256_hex), url in zip(uploads, urls, strict=True):
+                        if not url.object_id:
+                            raise RuntimeError(
+                                f"{type(provider).__name__}.generate_upload_url returned no object_id "
+                                "(required since vgi-rpc protocol 3.4)"
+                            )
+                        refs.append(
+                            mint_argument_ref(
+                                self._app._token_key, auth, size=size, sha256=sha256_hex, object_id=url.object_id
+                            )
+                        )
                     result_batch = pa.RecordBatch.from_pydict(
                         {
                             "upload_url": [u.upload_url for u in urls],
                             "download_url": [u.download_url for u in urls],
                             "expires_at": [u.expires_at for u in urls],
                             "upload_headers": [_upload_headers(u.headers) for u in urls],
+                            "object_id": [u.object_id for u in urls],
+                            "ref": refs,
                         },
                         schema=_UPLOAD_URL_SCHEMA,
                     )

@@ -24,15 +24,18 @@ Mirrors the staging Worker (``blobs.staging.queryfarm.cloud``): errors are
   ``origin: "client_upload"`` marks a grant a server mints for a *client*
   to upload a request (``UploadUrlProvider.generate_upload_url``); the real
   vendor ignores the field, the fake counts and faults those grants apart
-  from the server's own writes. Any other value, or none, is a server write.
+  from the server's own writes. ``origin: "state_ref"`` marks a server write
+  of a stored ``StateRef`` object (``ObjectStore.put_object``), counted as
+  ``puts_state_ref`` (and, being purpose ``rpc``, in ``puts_rpc``). Any other
+  value, or none, is a plain server write.
 * ``POST /v1/blobs/get`` ``{object_id}`` returns
   ``{object_id, download_url, size, sha256_b64, content_encoding, expires_at}``
   for the calling tenant's objects; never uploaded is 404 ``not_uploaded``,
   anyone else's (or an unknown id) 404 ``not_found``.
 * ``POST /v1/blobs/delete`` ``{object_ids}`` and
   ``POST /v1/blobs/delete_scope`` ``{shard, execution_id}`` return ``{deleted}``.
-* ``POST /v1/upload_urls`` ``{count <= 100}`` returns unsized
-  ``{region, urls: [{object_id, upload_url, download_url, expires_at, download_expires_at}]}``.
+* ``POST /v1/upload_urls`` is gone (protocol 3.4): the vendor dropped its
+  unsized upload path, so the route answers 404 like any unknown path.
 * ``GET /v1/info`` returns ``{tenant, region, jurisdiction, upload_hosts,
   download_hosts, url_prefixes, limits, ttl_seconds}``.
 
@@ -142,6 +145,9 @@ STATS_KEYS = (
     "client_uploads",
     "client_upload_bytes",
     "client_upload_refusals",
+    "puts_state_ref",
+    "gets_state_ref",
+    "gets_upload",
 )
 
 #: Every test-route JSON body is padded with spaces to exactly this many bytes.
@@ -153,6 +159,8 @@ _PURPOSES = ("rpc", "fs")
 _UPLOAD_FAULT_PURPOSE = "upload"
 #: ``origin`` of a ``/v1/blobs/put`` grant minted for a client upload.
 CLIENT_UPLOAD_ORIGIN = "client_upload"
+#: ``origin`` of a ``/v1/blobs/put`` grant for a stored ``StateRef`` object.
+STATE_REF_ORIGIN = "state_ref"
 
 
 @dataclass
@@ -167,6 +175,7 @@ class _Object:
     stored_encoding: str | None = None
     idempotency_key: str | None = None
     client_upload: bool = False
+    state_ref: bool = False
 
 
 @dataclass
@@ -376,6 +385,13 @@ class FakeVendor:
         ``client_upload_bytes`` (accepted, and their bytes) and
         ``client_upload_refusals`` (refused by the store).
 
+        Protocol 3.4 (``STATE_REF_V1.md`` §10.3): ``puts_state_ref`` (grants
+        with ``origin: "state_ref"``, a subset of ``puts_rpc``),
+        ``gets_state_ref`` and ``gets_upload`` (``/v1/blobs/get`` calls on
+        objects granted with ``origin`` ``state_ref`` and ``client_upload``).
+        ``upload_urls`` stays in the keys and is always ``0``: the unsized
+        ``/v1/upload_urls`` route no longer exists.
+
         All but ``objects`` and ``bytes`` only grow, so tests compare
         before/after values.
 
@@ -391,7 +407,7 @@ class FakeVendor:
                 "gets": hits.get("/v1/blobs/get", 0),
                 "deletes": hits.get("/v1/blobs/delete", 0),
                 "delete_scopes": hits.get("/v1/blobs/delete_scope", 0),
-                "upload_urls": hits.get("/v1/upload_urls", 0),
+                "upload_urls": 0,
                 "storage_puts": hits.get("r2_put", 0),
                 "storage_gets": hits.get("r2_get", 0),
                 "objects": len(live),
@@ -411,6 +427,9 @@ class FakeVendor:
                 "client_uploads": hits.get("client_uploads", 0),
                 "client_upload_bytes": hits.get("client_upload_bytes", 0),
                 "client_upload_refusals": hits.get("client_upload_refusals", 0),
+                "puts_state_ref": hits.get("puts_state_ref", 0),
+                "gets_state_ref": hits.get("gets_state_ref", 0),
+                "gets_upload": hits.get("gets_upload", 0),
             }
 
     @property
@@ -565,6 +584,10 @@ class FakeVendor:
             obj = self._objects.get(object_id)
             if obj is None or obj.tenant != tenant or obj.size is None:
                 return _error(start_response, 404, "not_found", "no such object")
+            if obj.state_ref:
+                self._hit("gets_state_ref")
+            elif obj.client_upload:
+                self._hit("gets_upload")
             if obj.data is None:
                 return _error(start_response, 404, "not_uploaded", "object was never uploaded")
             url, expires = self._sign(object_id, "GET")
@@ -597,26 +620,6 @@ class FakeVendor:
             for key in doomed:
                 del self._objects[key]
             return _json(start_response, 200, {"deleted": len(doomed)})
-        if path == "/v1/upload_urls":
-            count = req.get("count", 1)
-            if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 100:
-                return _error(start_response, 400, "bad_request", "count must be 1..100")
-            urls = []
-            for _ in range(count):
-                object_id = secrets.token_hex(16)
-                self._objects[object_id] = _Object(tenant, "rpc", None, None, None, None, client_upload=True)
-                put_url, expires = self._sign(object_id, "PUT")
-                get_url, get_expires = self._sign(object_id, "GET", self.rpc_download_ttl)
-                urls.append(
-                    {
-                        "object_id": object_id,
-                        "upload_url": put_url,
-                        "download_url": get_url,
-                        "expires_at": expires,
-                        "download_expires_at": get_expires,
-                    }
-                )
-            return _json(start_response, 200, {"region": self.region, "urls": urls})
         return _error(start_response, 404, "not_found", "no such route")
 
     def _info(self, tenant: str) -> dict[str, object]:
@@ -632,7 +635,6 @@ class FakeVendor:
                 "max_object_bytes": self.max_object_bytes,
                 "quota_bytes": self.quota_bytes,
                 "used_bytes": self._used.get(tenant, 0),
-                "max_upload_urls": 100,
                 "max_delete_ids": 1000,
             },
             "ttl_seconds": {
@@ -652,6 +654,7 @@ class FakeVendor:
         # Advisory, like the real vendor (which ignores it): anything but the
         # client-upload marker is a server write.
         client_upload = req.get("origin") == CLIENT_UPLOAD_ORIGIN
+        state_ref = req.get("origin") == STATE_REF_ORIGIN
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             return _error(start_response, 400, "bad_request", "size must be a non-negative integer")
         try:
@@ -709,8 +712,11 @@ class FakeVendor:
                 scope_key,
                 idempotency_key=key if isinstance(key, str) else None,
                 client_upload=client_upload,
+                state_ref=state_ref,
             )
         self._hit("puts_upload" if client_upload else f"puts_{purpose}")
+        if state_ref:
+            self._hit("puts_state_ref")
         upload_url, expires = self._sign(object_id, "PUT")
         required = {"content-length": str(size), "x-amz-checksum-sha256": sha}
         if encoding:

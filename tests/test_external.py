@@ -95,6 +95,7 @@ class MockStorage(ExternalStorage):
             download_url=f"https://mock.storage/download/{self._counter}",
             expires_at=expires_at,
             headers={"x-amz-checksum-sha256": f"mock-{sha256_hex[:8]}", "Content-Length": str(size)},
+            object_id=f"mock-object-{self._counter}",
         )
 
 
@@ -1508,6 +1509,28 @@ class TestS3Storage:
         url = s3_storage.upload(ipc_bytes, _SCHEMA, content_encoding="zstd")
 
         assert url.split("?")[0].endswith(".arrow.zst")
+
+    def test_object_api_round_trip(self, _s3_env: tuple[Any, Any]) -> None:
+        """``put_object`` stores under the prefix with a checksum; ``get`` reads it back and maps 404 to missing."""
+        from vgi_rpc.external import ObjectMissingError, ObjectStore
+
+        s3_storage, client = _s3_env
+        assert isinstance(s3_storage, ObjectStore)
+        object_id = s3_storage.put_object(b"sealed state object")
+        assert object_id.startswith("vgi-rpc/")
+        head = client.head_object(Bucket="test-bucket", Key=object_id, ChecksumMode="ENABLED")
+        assert head["ContentLength"] == len(b"sealed state object")
+        assert s3_storage.get(object_id) == b"sealed state object"
+        with pytest.raises(ValueError, match="max_fetch_bytes"):
+            s3_storage.get(object_id, max_bytes=4)
+        with pytest.raises(ObjectMissingError):
+            s3_storage.get("vgi-rpc/absent.bin")
+
+    def test_generate_upload_url_returns_the_key_as_object_id(self, _s3_env: tuple[Any, Any]) -> None:
+        """The grant's ``object_id`` is the S3 key the PUT creates."""
+        s3_storage, _ = _s3_env
+        pair = s3_storage.generate_upload_url(3, hashlib.sha256(b"abc").hexdigest())
+        assert pair.object_id.startswith("vgi-rpc/") and pair.object_id in pair.upload_url
 
     def test_generate_upload_url_signs_size_and_checksum(self, _s3_env: tuple[Any, Any]) -> None:
         """The PUT URL is SigV4 over content-length and x-amz-checksum-sha256; the header is returned."""

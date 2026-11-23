@@ -764,8 +764,7 @@ class TestStateTokenStateEncoding:
         call = _seal_call_token(
             call_state_bytes=b"\x00\xff\xfe",
             call_state_type="Whatever",
-            schema_bytes=b"\x80\x81",
-            input_schema_bytes=b"\x90\x91",
+            schemas_ref=b"\x01\x00\x80\x81\x90\x91",
             call_id=b"\x01" * 16,
             stream_id="abc",
             token_key=b"\x03" * 32,
@@ -799,8 +798,7 @@ class TestStateTokenStateEncoding:
         call = _seal_call_token(
             b"test-call-state",
             "MyCallState",
-            b"test-schema-data",
-            b"test-input-schema",
+            b"test-schemas-ref",
             call_id,
             "sid-1",
             key,
@@ -811,8 +809,7 @@ class TestStateTokenStateEncoding:
         assert _open_call_token(call, key, _compute_call_aad(None, protocol="TestProto")) == (
             b"test-call-state",
             "MyCallState",
-            b"test-schema-data",
-            b"test-input-schema",
+            b"test-schemas-ref",
             call_id,
             "sid-1",
             None,
@@ -838,7 +835,7 @@ class TestStateTokenStateEncoding:
         call_id = b"\x0b" * 16
         cursor = _seal_cursor_token(b"s", call_id, key, _compute_aad(None, protocol="TestProto"), 1000)
         call = _seal_call_token(
-            b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(None, protocol="TestProto"), 1000
+            b"c", "T", b"sch", call_id, "sid", key, _compute_call_aad(None, protocol="TestProto"), 1000
         )
 
         with pytest.raises(Exception, match="verification failed"):
@@ -923,9 +920,9 @@ class TestStateTokenStateEncoding:
         # The call token is bound the same way — this is what stops a
         # cross-principal cache probe from ever reaching a lookup.
         call = _seal_call_token(
-            b"c", "T", b"sch", b"in", call_id, "sid", key, _compute_call_aad(alice, protocol="TestProto"), 1000
+            b"c", "T", b"sch", call_id, "sid", key, _compute_call_aad(alice, protocol="TestProto"), 1000
         )
-        assert _open_call_token(call, key, _compute_call_aad(alice, protocol="TestProto"))[4] == call_id
+        assert _open_call_token(call, key, _compute_call_aad(alice, protocol="TestProto"))[3] == call_id
         with pytest.raises(Exception, match="verification failed"):
             _open_call_token(call, key, _compute_call_aad(bob, protocol="TestProto"))
 
@@ -1060,8 +1057,7 @@ class TestTokenPayloadCompression:
         token = _seal_call_token(
             call_state_bytes=call_state,
             call_state_type="BigCallState",
-            schema_bytes=b"schema" * 100,
-            input_schema_bytes=b"input-schema" * 100,
+            schemas_ref=b"\x01\x00" + b"schema" * 100,
             call_id=b"\x0c" * 16,
             stream_id="sid-compress",
             token_key=b"\x0d" * 32,
@@ -1992,7 +1988,14 @@ class TestUploadUrlEndpoint:
             ("sha256", pa.utf8(), False),
         ]
         assert UPLOAD_URL_RESPONSE_SCHEMA.equals(_UPLOAD_URL_SCHEMA)
-        assert UPLOAD_URL_RESPONSE_SCHEMA.names == ["upload_url", "download_url", "expires_at", "upload_headers"]
+        assert UPLOAD_URL_RESPONSE_SCHEMA.names == [
+            "upload_url",
+            "download_url",
+            "expires_at",
+            "upload_headers",
+            "object_id",
+            "ref",
+        ]
         assert not any(f.nullable for f in UPLOAD_URL_RESPONSE_SCHEMA)
 
     def test_returns_one_url_per_entry(self) -> None:

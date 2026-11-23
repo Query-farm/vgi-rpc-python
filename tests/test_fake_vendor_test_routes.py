@@ -205,14 +205,38 @@ def test_upload_fault_spares_server_writes(fake: FakeVendorServer, blobs: Vendor
     stats = _get(fake, "/__stats__")
     assert stats["uploads_corrupted"] == 0 and stats["upload_refusals"] == 0
     assert stats["client_uploads"] == 0
-    # Still armed for the next client upload: unsized /v1/upload_urls PUTs count as client uploads.
+    # Still armed for the next client upload: a client-upload grant's PUT is corrupted and refused.
+    body = b"abc"
+    with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+    assert storage_put(pair.upload_url, body, headers=dict(pair.headers)).status_code == 400
+    stats = _get(fake, "/__stats__")
+    assert stats["uploads_corrupted"] == 1 and stats["client_upload_refusals"] == 1
+
+
+def test_unsized_upload_urls_route_is_gone(fake: FakeVendorServer) -> None:
+    """``/v1/upload_urls`` answers 404 like any unknown path; ``upload_urls`` stays 0 (STATE_REF_V1.md §13)."""
     resp = httpx2.post(
         fake.url + "/v1/upload_urls", json={"count": 1}, headers={"Authorization": f"Bearer {_TOKEN}"}, timeout=10.0
     )
-    put_url = resp.json()["urls"][0]["upload_url"]
-    assert storage_put(put_url, b"abc").status_code == 200
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "not_found"
+    assert _get(fake, "/__stats__")["upload_urls"] == 0
+
+
+def test_state_ref_counters(fake: FakeVendorServer) -> None:
+    """``puts_state_ref`` / ``gets_state_ref`` / ``gets_upload`` count object-API writes and reads by origin."""
+    body = b"client argument"
+    with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
+        object_id = storage.put_object(b"sealed state" * 10)
+        assert storage.get(object_id) == b"sealed state" * 10
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        assert storage_put(pair.upload_url, body, headers=dict(pair.headers)).status_code == 200
+        assert storage.get(pair.object_id) == body
     stats = _get(fake, "/__stats__")
-    assert stats["uploads_corrupted"] == 1 and stats["client_uploads"] == 1
+    assert (stats["puts_state_ref"], stats["gets_state_ref"], stats["gets_upload"]) == (1, 1, 1)
+    assert stats["puts_rpc"] == 1 and stats["puts_upload"] == 1
+    assert list(stats)[-3:] == ["puts_state_ref", "gets_state_ref", "gets_upload"]
 
 
 def test_puts_by_purpose(fake: FakeVendorServer, blobs: VendorBlobClient) -> None:

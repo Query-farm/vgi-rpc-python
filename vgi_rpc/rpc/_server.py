@@ -1733,6 +1733,16 @@ class RpcServer:
     ) -> None:
         _current_stream_id.set(uuid.uuid4().hex)
         sink, auth, transport_md = self._prepare_method_call(info, kwargs)
+        init_ctx = kwargs.get("ctx")
+        if isinstance(init_ctx, CallContext):
+            # Stream construction is the init request on this transport: the
+            # one context on which ``state_ref()`` is allowed.  Values stay in
+            # memory (the state never leaves the process), so no runtime.
+            from vgi_rpc.state_ref import StateRefScope
+
+            init_ctx._state_refs = StateRefScope(
+                auth=auth, protocol=info.protocol_name or self.protocol_name, method=info.name, init=True
+            )
         # The protocol that owns the *resolved* method, not a server-wide
         # default. Access records are the one place a wrong protocol label
         # produces plausible-looking output rather than an error, so it has

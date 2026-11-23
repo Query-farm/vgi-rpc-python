@@ -51,9 +51,9 @@ from http import HTTPStatus
 from typing import get_args, get_origin, get_type_hints
 
 import pyarrow as pa
-import zstandard
 
-from vgi_rpc import crypto
+from vgi_rpc import _token_codec, crypto
+from vgi_rpc import state_ref as _state_ref
 from vgi_rpc.rpc import AuthContext, MethodType, RpcServer, Stream, StreamState
 from vgi_rpc.utils import (
     COMPACT_MARKER,
@@ -70,62 +70,26 @@ from .._common import _RpcHttpError
 # payload framing that lives inside the ciphertext.
 _HEADER_LEN = 4  # uint32 LE prefix for each plaintext segment
 _CURSOR_TOKEN_VERSION = 5  # v5: cursor-only token, call state moved to its own token
-_CALL_TOKEN_VERSION = 2  # v2 seals the init response hard limit
+_CALL_TOKEN_VERSION = 3  # v3: both schemas behind one StateRef (schemas_ref)
 _TIMESTAMP_LEN = 8  # uint64 LE, seconds since epoch (inside ciphertext)
 _CALL_ID_LEN = 16  # random per-stream id, minted at /init, echoed by the cursor
 _MIN_CURSOR_PLAINTEXT_LEN = _TIMESTAMP_LEN + _CALL_ID_LEN + _HEADER_LEN
 
-# Token payloads are compressed *before* sealing. It has to be that way round:
-# once sealed, a token is ciphertext, so the HTTP body codec can no longer find
-# any redundancy in it — measured, zstd over a sealed token recovers only the
-# slack base64 added (to ~76-80%), never the state's own structure. Compressing
-# inside the seal reaches the actual redundancy: a 7,800-byte call state packs
-# to 1,872, turning a 10,820-byte token into 2,552.
-#
-# Level 3 for both token kinds. Measured against level 1 it is the same speed
-# on these payload sizes and slightly smaller; the levels that compress
-# materially better (9, 19) cost 8x and 84x the CPU for a few hundred bytes.
-_TOKEN_ZSTD_LEVEL = 3
+# Token payloads are compressed *before* sealing, with the standard codec of
+# ``STATE_REF_V1.md`` §7 (``vgi_rpc._token_codec``): once sealed, a token is
+# ciphertext, so the HTTP body codec can no longer find any redundancy in it --
+# measured, zstd over a sealed token recovers only the slack base64 added.
+# Compressing inside the seal reaches the actual redundancy: a 7,800-byte call
+# state packs to 1,872, turning a 10,820-byte token into 2,552.
 
-#: Per-thread zstd codecs for token payloads.
-#:
-#: The level is fixed at import, so a compressor is reusable — and building
-#: one per call is not free next to the compression itself: measured 1.04us
-#: to construct-and-compress a token payload against 0.67us reusing the
-#: instance, on a path that runs once per stream turn.
-#:
-#: Per *thread* rather than one shared instance because python-zstandard does
-#: not promise that two threads may call into one codec object at the same
-#: time, and this runs on a WSGI thread pool. A thread-local costs one dict
-#: lookup and removes the question.
-_codecs = threading.local()
+#: Decompression bound for token plaintexts (64 MiB).  The plaintext is
+#: authenticated before it is decompressed, so this is defence against a
+#: framework bug rather than an attacker.
+_MAX_TOKEN_PLAINTEXT_BYTES = _token_codec.MAX_TOKEN_PLAINTEXT_BYTES
 
-
-def _compressor() -> zstandard.ZstdCompressor:
-    """Return this thread's token compressor, building it on first use."""
-    codec = getattr(_codecs, "compressor", None)
-    if codec is None:
-        codec = zstandard.ZstdCompressor(level=_TOKEN_ZSTD_LEVEL)
-        _codecs.compressor = codec
-    return codec
-
-
-def _decompressor() -> zstandard.ZstdDecompressor:
-    """Return this thread's token decompressor, building it on first use."""
-    codec = getattr(_codecs, "decompressor", None)
-    if codec is None:
-        codec = zstandard.ZstdDecompressor()
-        _codecs.decompressor = codec
-    return codec
-
-
-# Guard against a decompression bomb. The plaintext is authenticated before we
-# ever decompress it, so this is defence against a framework bug rather than an
-# attacker — but an unbounded decompress in a request path is not worth having.
-_MAX_TOKEN_PLAINTEXT_BYTES = 64 << 20
-
-_CODEC_RAW = b"\x00"
-_CODEC_ZSTD = b"\x01"
+_CODEC_RAW = bytes((_token_codec.CODEC_RAW,))
+_CODEC_ZSTD = bytes((_token_codec.CODEC_ZSTD,))
+_CODEC_DEFLATE = bytes((_token_codec.CODEC_DEFLATE,))
 
 
 def _pack_plaintext(plaintext: bytes) -> bytes:
@@ -141,10 +105,7 @@ def _pack_plaintext(plaintext: bytes) -> bytes:
         A one-byte codec tag followed by the (possibly compressed) payload.
 
     """
-    packed = _compressor().compress(plaintext)
-    if len(packed) < len(plaintext):
-        return _CODEC_ZSTD + packed
-    return _CODEC_RAW + plaintext
+    return _token_codec.pack(plaintext)
 
 
 def _unpack_plaintext(data: bytes) -> bytes:
@@ -162,17 +123,9 @@ def _unpack_plaintext(data: bytes) -> bytes:
             the same uniform 400 as every other token failure.
 
     """
-    if not data:
-        raise _RpcHttpError(RuntimeError("Malformed token payload"), status_code=HTTPStatus.BAD_REQUEST)
-    tag, body = data[:1], data[1:]
-    if tag == _CODEC_RAW:
-        return body
-    if tag != _CODEC_ZSTD:
-        raise _RpcHttpError(RuntimeError("Malformed token payload"), status_code=HTTPStatus.BAD_REQUEST)
-
     try:
-        return _decompressor().decompress(body, max_output_size=_MAX_TOKEN_PLAINTEXT_BYTES)
-    except zstandard.ZstdError as exc:
+        return _token_codec.unpack(data, _MAX_TOKEN_PLAINTEXT_BYTES)
+    except _token_codec.TokenCodecError as exc:
         raise _RpcHttpError(
             RuntimeError("Malformed token payload"),
             status_code=HTTPStatus.BAD_REQUEST,
@@ -184,7 +137,7 @@ def _unpack_plaintext(data: bytes) -> bytes:
 #: leading NUL so it cannot collide with a protocol name, which must start
 #: ``[A-Za-z_]``.  Passing it is deliberate: every AAD call site has to name
 #: its scope, so a new one cannot silently inherit an unbound token.
-SERVER_SCOPE = "\x00server"
+SERVER_SCOPE = _state_ref.SERVER_SCOPE
 
 
 def _compute_call_aad(auth: AuthContext | None, *, protocol: str) -> bytes:
@@ -264,20 +217,7 @@ def _compute_aad(auth: AuthContext | None, *, protocol: str) -> bytes:
         Associated-data bytes for the AEAD seal/open call.
 
     """
-    binding = auth.claims.get("peer_evidence_binding") if auth is not None else None
-    prefix = b"vgi_rpc.state.v7\x00" if isinstance(binding, str) and binding else b"vgi_rpc.state.v6\x00"
-    scope = b"\x00" + protocol.encode()
-    if auth is None or not auth.authenticated:
-        aad = prefix + b"\x00anonymous"
-        if isinstance(binding, str) and binding:
-            aad += b"\x00" + binding.encode()
-        return aad + scope
-    domain = (auth.domain or "").encode()
-    principal = (auth.principal or "").encode()
-    aad = prefix + b"\x01" + domain + b"\x00" + principal
-    if isinstance(binding, str) and binding:
-        aad += b"\x00" + binding.encode()
-    return aad + scope
+    return _state_ref.base_aad(auth, protocol)
 
 
 # ---------------------------------------------------------------------------
@@ -285,11 +225,40 @@ def _compute_aad(auth: AuthContext | None, *, protocol: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+def _pack_schemas(output_schema_bytes: bytes, input_schema_bytes: bytes) -> bytes:
+    """Return the ``schemas_ref`` value: ``u32 len || output || u32 len || input``."""
+    return (
+        struct.pack("<I", len(output_schema_bytes))
+        + output_schema_bytes
+        + struct.pack("<I", len(input_schema_bytes))
+        + input_schema_bytes
+    )
+
+
+def _unpack_schemas(value: bytes) -> tuple[bytes, bytes]:
+    """Reverse :func:`_pack_schemas`.
+
+    Args:
+        value: The resolved ``schemas_ref`` value.
+
+    Returns:
+        ``(output_schema_bytes, input_schema_bytes)``.
+
+    Raises:
+        _RpcHttpError: On a malformed value (HTTP 400).
+
+    """
+    output_bytes, pos = _read_segment(value, 0, "Malformed call token schemas")
+    input_bytes, end = _read_segment(value, pos, "Malformed call token schemas")
+    if end != len(value):
+        raise _RpcHttpError(RuntimeError("Malformed call token schemas"), status_code=HTTPStatus.BAD_REQUEST)
+    return output_bytes, input_bytes
+
+
 def _seal_call_token(
     call_state_bytes: bytes,
     call_state_type: str,
-    schema_bytes: bytes,
-    input_schema_bytes: bytes,
+    schemas_ref: bytes,
     call_id: bytes,
     stream_id: str,
     token_key: bytes,
@@ -297,7 +266,7 @@ def _seal_call_token(
     created_at: int,
     response_limit_bytes: int | None = None,
 ) -> bytes:
-    """Seal the immutable half of a stream's state into a call token.
+    """Seal the immutable half of a stream's state into a call token (v3).
 
     Plaintext (encrypted before transport)::
 
@@ -305,24 +274,26 @@ def _seal_call_token(
         [16 bytes : call_id     (random, minted at /init)]
         [ 4 bytes : call_len    (uint32 LE)] [call_state_bytes]
         [ 4 bytes : type_len    (uint32 LE)] [call_state_type (UTF-8)]
-        [ 4 bytes : schema_len  (uint32 LE)] [schema_bytes]
-        [ 4 bytes : input_len   (uint32 LE)] [input_schema_bytes]
+        [ 4 bytes : schemas_len (uint32 LE)] [schemas_ref: StateRef bytes]
         [ 4 bytes : sid_len     (uint32 LE)] [stream_id_bytes (UTF-8)]
         [ 8 bytes : response_limit_bytes (uint64 LE; 0 means unbounded)]
 
+    ``schemas_ref`` is a :class:`~vgi_rpc.state_ref.StateRef` whose value is
+    ``u32 len || output_schema || u32 len || input_schema``, so a very wide
+    table's schemas are stored once instead of riding every request
+    (``STATE_REF_V1.md`` §8).
+
     The type name is carried because a stream method may return a *union*
-    of state classes whose members declare different call-state types (VGI's
-    ``init`` does exactly this: table/scalar states carry a call state,
-    finalize states do not).  The reader resolves the name against the set
-    the method declares — it never looks up a class by client-supplied name.
+    of state classes whose members declare different call-state types.  The
+    reader resolves the name against the set the method declares — it never
+    looks up a class by client-supplied name.
 
     Args:
         call_state_bytes: Serialized call state; empty when the stream
             declares none (the schemas alone still justify the token).
         call_state_type: Class name of the call state, or ``""`` when there
             is none.
-        schema_bytes: Serialized output ``pa.Schema``.
-        input_schema_bytes: Serialized input ``pa.Schema``.
+        schemas_ref: Encoded ``StateRef`` of both serialized schemas.
         call_id: The stream's random 16-byte call id.
         stream_id: Chain-correlation id (hex UUID).
         token_key: 32-byte master AEAD key.
@@ -343,10 +314,8 @@ def _seal_call_token(
         + call_state_bytes
         + struct.pack("<I", len(type_bytes))
         + type_bytes
-        + struct.pack("<I", len(schema_bytes))
-        + schema_bytes
-        + struct.pack("<I", len(input_schema_bytes))
-        + input_schema_bytes
+        + struct.pack("<I", len(schemas_ref))
+        + schemas_ref
         + struct.pack("<I", len(stream_id_bytes))
         + stream_id_bytes
         + struct.pack("<Q", response_limit_bytes or 0)
@@ -360,7 +329,7 @@ def _open_call_token(
     token_key: bytes,
     aad: bytes,
     token_ttl: int = 0,
-) -> tuple[bytes, str, bytes, bytes, bytes, str, int | None]:
+) -> tuple[bytes, str, bytes, bytes, str, int | None]:
     """Open and verify a call token.
 
     Args:
@@ -370,8 +339,8 @@ def _open_call_token(
         token_ttl: Maximum token age in seconds; ``0`` disables expiry.
 
     Returns:
-        ``(call_state_bytes, call_state_type, schema_bytes, input_schema_bytes,
-        call_id, stream_id, response_limit_bytes)``
+        ``(call_state_bytes, call_state_type, schemas_ref, call_id,
+        stream_id, response_limit_bytes)``
 
     Raises:
         _RpcHttpError: On malformed, tampered, expired, or cross-principal
@@ -396,15 +365,14 @@ def _open_call_token(
         ) from exc
     plaintext = _unpack_plaintext(sealed_plaintext)
 
-    if len(plaintext) < _TIMESTAMP_LEN + _CALL_ID_LEN + _HEADER_LEN * 5 + 8:
+    if len(plaintext) < _TIMESTAMP_LEN + _CALL_ID_LEN + _HEADER_LEN * 4 + 8:
         raise _RpcHttpError(RuntimeError("Malformed call token"), status_code=HTTPStatus.BAD_REQUEST)
 
     call_id = plaintext[_TIMESTAMP_LEN : _TIMESTAMP_LEN + _CALL_ID_LEN]
     pos = _TIMESTAMP_LEN + _CALL_ID_LEN
     call_state_bytes, pos = _read_segment(plaintext, pos, "Malformed call token")
     type_bytes, pos = _read_segment(plaintext, pos, "Malformed call token")
-    schema_bytes, pos = _read_segment(plaintext, pos, "Malformed call token")
-    input_schema_bytes, pos = _read_segment(plaintext, pos, "Malformed call token")
+    schemas_ref, pos = _read_segment(plaintext, pos, "Malformed call token")
     stream_id_bytes, payload_end = _read_segment(plaintext, pos, "Malformed call token")
 
     if payload_end + 8 != len(plaintext):
@@ -420,8 +388,7 @@ def _open_call_token(
     return (
         call_state_bytes,
         type_bytes.decode(),
-        schema_bytes,
-        input_schema_bytes,
+        schemas_ref,
         call_id,
         stream_id_bytes.decode(),
         response_limit_bytes,
@@ -449,7 +416,14 @@ class _ResolvedCall:
     :meth:`StreamState.bind_call_state` documents.
     """
 
-    __slots__ = ("call_state", "input_schema", "output_schema", "response_limit_bytes", "stream_id")
+    __slots__ = (
+        "call_state",
+        "call_token_bytes",
+        "input_schema",
+        "output_schema",
+        "response_limit_bytes",
+        "stream_id",
+    )
 
     def __init__(
         self,
@@ -458,12 +432,16 @@ class _ResolvedCall:
         input_schema: pa.Schema,
         stream_id: str,
         response_limit_bytes: int | None = None,
+        call_token_bytes: int = 0,
     ) -> None:
         self.call_state = call_state
         self.output_schema = output_schema
         self.input_schema = input_schema
         self.stream_id = stream_id
         self.response_limit_bytes = response_limit_bytes
+        # Sealed (base64-decoded) length of the stream's call token: it rides
+        # every continuation, so the turn budget subtracts it.
+        self.call_token_bytes = call_token_bytes
 
 
 class _CallStateCache:
@@ -484,7 +462,7 @@ class _CallStateCache:
 
     __slots__ = ("_entries", "_lock", "_max_entries", "_ttl")
 
-    def __init__(self, max_entries: int = 4096, ttl: float = 3600.0) -> None:
+    def __init__(self, max_entries: int = 4096, ttl: float = float(_state_ref.DEFAULT_TOKEN_TTL_SECONDS)) -> None:
         self._entries: OrderedDict[tuple[bytes, str], tuple[float, _ResolvedCall]] = OrderedDict()
         self._lock = threading.Lock()
         self._max_entries = max_entries
@@ -535,9 +513,15 @@ def _mint_call_token(
     response_limit_bytes: int | None = None,
     *,
     protocol: str,
+    method: str = "",
+    state_refs: _state_ref.StateRefRuntime | None = None,
     now: int | None = None,
 ) -> tuple[bytes, bytes, bytes]:
     """Serialize and seal a stream's call token.  Called once, by ``/init``.
+
+    Both schemas go behind a ``StateRef`` (``schemas_ref``) sized with
+    ``call_token_bytes = 0``: inline in the common case, stored once when a
+    very wide table would otherwise blow the turn budget.
 
     Args:
         call_state: The stream's call state, or ``None``.
@@ -549,6 +533,9 @@ def _mint_call_token(
         response_limit_bytes: Effective hard response limit sealed at init.
         protocol: Wire name of the protocol that owns this stream, bound into
             the AAD so a continuation cannot cross protocols.
+        method: Method name, for ``StateRef`` telemetry.
+        state_refs: The server's ``StateRef`` runtime; ``None`` keeps
+            ``schemas_ref`` inline (no storage).
         now: Override for the baked-in timestamp; default ``time.time()``.
 
     Returns:
@@ -559,11 +546,23 @@ def _mint_call_token(
     """
     call_id = os.urandom(_CALL_ID_LEN)
     call_state_bytes = b"" if call_state is None else call_state.serialize_to_bytes()
+    schemas = _pack_schemas(output_schema.serialize().to_pybytes(), input_schema.serialize().to_pybytes())
+    if state_refs is None:
+        schemas_ref = b"\x01" + _token_codec.pack(schemas)
+    else:
+        schemas_ref = _state_ref.encode_value(
+            state_refs,
+            schemas,
+            auth=auth,
+            protocol=protocol,
+            method=method,
+            call_id=call_id,
+            call_token_bytes=0,
+        )
     token = _seal_call_token(
         call_state_bytes,
         "" if call_state is None else type(call_state).__name__,
-        output_schema.serialize().to_pybytes(),
-        input_schema.serialize().to_pybytes(),
+        schemas_ref,
         call_id,
         stream_id,
         token_key,
@@ -572,6 +571,12 @@ def _mint_call_token(
         response_limit_bytes,
     )
     return token, call_id, call_state_bytes
+
+
+def _sealed_len(token: bytes) -> int:
+    """Return the sealed (base64-decoded) length of a token without decoding it."""
+    stripped = token.rstrip(b"=")
+    return (len(stripped) * 3) // 4
 
 
 # Type alias: a single concrete class or an ordered tuple for unions.
@@ -683,13 +688,22 @@ def _mint_cursor_token(
     auth: AuthContext | None,
     *,
     protocol: str,
+    method: str = "",
+    state_refs: _state_ref.StateRefRuntime | None = None,
+    call_token_bytes: int = 0,
     now: int | None = None,
-) -> tuple[bytes, bytes]:
+) -> tuple[bytes, bytes, str | None]:
     """Serialize the cursor state and seal it into a continuation token.
 
     This is the whole per-turn token cost under the split: one small
     serialize and one small seal.  Both schemas and the call state stay
     where ``/init`` put them.
+
+    Serialization runs under the stream's ``StateRef`` encoder, so a ref
+    created on this init turn has its form decided (and is stored, when it
+    is stored) here, once; refs read back from a token re-emit their bytes.
+    The sealed cursor is then checked against the turn budget
+    (``STATE_REF_V1.md`` §9).
 
     Args:
         state: The current ``StreamState`` instance (cursor only).
@@ -700,15 +714,34 @@ def _mint_cursor_token(
         auth: Authenticated identity for AAD binding.
         protocol: Wire name of the protocol that owns this stream, bound into
             the AAD so a continuation cannot cross protocols.
+        method: Method name, for the cursor rule's message and telemetry.
+        state_refs: The server's ``StateRef`` runtime, or ``None`` (refs then
+            render inline and no cursor rule applies).
+        call_token_bytes: Sealed length of this stream's call token.
         now: Override for the baked-in timestamp; default ``time.time()``.
 
     Returns:
-        ``(token, state_bytes)`` — the sealed token for the
-        ``vgi_rpc.stream_state#b64`` metadata key, and the raw plaintext
-        state bytes for the access log's ``response_state`` field.
+        ``(token, state_bytes, warning)`` — the sealed token for the
+        ``vgi_rpc.stream_state#b64`` metadata key, the raw plaintext state
+        bytes (the access log records their size), and the ``cursor_large``
+        warning text when the cursor is over budget under the ``warn`` rule.
+
+    Raises:
+        CursorTooLargeError: Over budget under the ``error`` rule.
 
     """
-    state_bytes = _serialize_state_bytes(state, state_info)
+    if state_refs is None:
+        state_bytes = _serialize_state_bytes(state, state_info)
+    else:
+        with _state_ref.encoding_for_stream(
+            state_refs,
+            auth=auth,
+            protocol=protocol,
+            method=method,
+            call_id=call_id,
+            call_token_bytes=call_token_bytes,
+        ):
+            state_bytes = _serialize_state_bytes(state, state_info)
     token = _seal_cursor_token(
         state_bytes,
         call_id,
@@ -716,7 +749,15 @@ def _mint_cursor_token(
         _compute_aad(auth, protocol=protocol),
         int(time.time()) if now is None else now,
     )
-    return token, state_bytes
+    warning: str | None = None
+    if state_refs is not None:
+        warning = state_refs.check_cursor(
+            cursor_bytes=_sealed_len(token),
+            call_token_bytes=call_token_bytes,
+            protocol=protocol,
+            method=method,
+        )
+    return token, state_bytes, warning
 
 
 def _serialize_state_bytes(state: StreamState, state_info: _StateInfo) -> bytes:

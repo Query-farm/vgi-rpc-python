@@ -18,6 +18,7 @@ import falcon
 
 from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.rpc import AuthContext, RpcServer
+from vgi_rpc.state_ref import DEFAULT_TOKEN_TTL_SECONDS, CursorRule
 
 from ._factory import make_wsgi_app
 from ._sticky import drain_handle
@@ -75,6 +76,9 @@ def serve_http(
     install_signal_handlers: bool = True,
     threads: int | None = None,
     call_state_cache_entries: int = 4096,
+    state_ref_inline_bytes: int | None = None,
+    cursor_rule: CursorRule = "warn",
+    token_ttl: int = DEFAULT_TOKEN_TTL_SECONDS,
     cors_origins: str | Iterable[str] | None = None,
     cors_max_age: int | None = 7200,
     cors_resource_policy: str | None = "cross-origin",
@@ -155,6 +159,9 @@ def serve_http(
             waitress's own default of 4 is too low here.
         call_state_cache_entries: Size of the per-process call-state cache;
             ``0`` disables it.  See :func:`make_wsgi_app`.
+        state_ref_inline_bytes: See :func:`make_wsgi_app`.
+        cursor_rule: See :func:`make_wsgi_app`.
+        token_ttl: See :func:`make_wsgi_app` (default 21600 s).
         cors_origins: Allowed CORS origins; ``None`` (the default) serves no
             CORS headers at all.  See :func:`make_wsgi_app`.
         cors_max_age: Preflight cache lifetime in seconds.  Only meaningful
@@ -209,6 +216,9 @@ def serve_http(
         sticky_default_ttl=sticky_default_ttl,
         sticky_echo_headers=sticky_echo_headers,
         call_state_cache_entries=call_state_cache_entries,
+        state_ref_inline_bytes=state_ref_inline_bytes,
+        cursor_rule=cursor_rule,
+        token_ttl=token_ttl,
         cors_origins=cors_origins,
         cors_max_age=cors_max_age,
         cors_resource_policy=cors_resource_policy,

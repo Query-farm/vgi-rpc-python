@@ -23,10 +23,17 @@ import falcon
 import pyarrow as pa
 
 from vgi_rpc.external import UploadUrlProvider
+from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
 from vgi_rpc.http.server._resources import _RESERVED_PROTOCOL
 from vgi_rpc.rpc import MethodNotImplementedError, RpcMethodInfo, RpcServer
 from vgi_rpc.rpc._common import ProtocolNotSpecifiedError, ProtocolNotSupportedError
 from vgi_rpc.rpc._types import validate_protocol_name
+from vgi_rpc.state_ref import (
+    DEFAULT_STATE_REF_INLINE_BYTES,
+    DEFAULT_TOKEN_TTL_SECONDS,
+    CursorRule,
+    StateRefRuntime,
+)
 
 from .._common import _RpcHttpError
 from ._responses import _check_content_type
@@ -81,6 +88,7 @@ class _HttpRpcApp:
         "_max_upload_bytes",
         "_preferred_response_bytes",
         "_server",
+        "_state_refs",
         "_state_types",
         "_token_key",
         "_token_ttl",
@@ -95,10 +103,12 @@ class _HttpRpcApp:
         max_request_bytes: int | None = None,
         upload_url_provider: UploadUrlProvider | None = None,
         max_upload_bytes: int | None = None,
-        token_ttl: int = 3600,
+        token_ttl: int = DEFAULT_TOKEN_TTL_SECONDS,
         max_externalized_response_bytes: int | None = None,
         preferred_response_bytes: int | None = None,
         call_state_cache_entries: int = 4096,
+        state_ref_inline_bytes: int = DEFAULT_STATE_REF_INLINE_BYTES,
+        cursor_rule: CursorRule = "warn",
     ) -> None:
         self._server = server
         self._token_key = token_key
@@ -118,7 +128,22 @@ class _HttpRpcApp:
         # the call token is made testable rather than load-dependent.
         self._call_state_cache = _CallStateCache(
             max_entries=call_state_cache_entries,
-            ttl=float(token_ttl) if token_ttl > 0 else 3600.0,
+            ttl=float(token_ttl) if token_ttl > 0 else float(DEFAULT_TOKEN_TTL_SECONDS),
+        )
+        # StateRef machinery (STATE_REF_V1.md): the same key as the tokens, the
+        # server's storage (read per use), its fetch cap, and the advertised
+        # request cap that the turn budget derives from.
+        external = server.external_config
+        self._state_refs = StateRefRuntime(
+            token_key=token_key,
+            token_ttl=token_ttl,
+            storage=lambda: server.external_config.storage if server.external_config is not None else None,
+            max_fetch_bytes=(
+                external.fetch_config.max_fetch_bytes if external is not None else DEFAULT_MAX_FETCH_BYTES
+            ),
+            max_request_bytes=max_request_bytes,
+            inline_bytes_cap=state_ref_inline_bytes,
+            cursor_rule=cursor_rule,
         )
 
     @property

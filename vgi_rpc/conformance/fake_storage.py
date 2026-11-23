@@ -45,8 +45,18 @@ service or implement the contract independently:
   ``localhost``.  Security tests configure a validator that rejects that hop
   and assert the download route is never reached.
 * ``GET|HEAD /redirect-loop/{id}`` redirects to itself.
+* Every ``/alloc`` response carries ``object_id`` (the blob id), the id the
+  object API and protocol-3.4 grants name it by.  An allocation whose body
+  says ``"purpose": "object"`` is an object-API write (``put_object``) and
+  counts toward ``object_puts``.
+* ``GET /objects/{id}`` returns the stored bytes (``404`` when absent) and
+  counts ``object_gets``: the object API's ``get(object_id)``.
+* ``DELETE /objects/{id}`` deletes a blob (``204``, ``404`` when absent):
+  a test route standing in for the bucket lifecycle.
 * ``GET /_stats`` includes per-route request counters in addition to the
-  legacy ``object_count``; ``upload_refusals`` counts sized PUTs refused.
+  legacy ``object_count``; ``upload_refusals`` counts sized PUTs refused, and
+  ``allocations``, ``object_puts``, ``object_gets`` and ``object_deletes``
+  are always present (``0`` until used).
 
 The service is in-memory only — every restart loses its objects, which
 is exactly what tests want.
@@ -125,6 +135,11 @@ class _BlobStore:
         with self._lock:
             return self._blobs.get(blob_id)
 
+    def delete(self, blob_id: str) -> bool:
+        """Delete a blob; return whether it existed."""
+        with self._lock:
+            return self._blobs.pop(blob_id, None) is not None
+
     def hit(self, name: str) -> None:
         """Increment one observable route counter."""
         with self._lock:
@@ -132,7 +147,13 @@ class _BlobStore:
 
     def stats(self) -> dict[str, int]:
         with self._lock:
-            return {"object_count": len(self._blobs), **self._hits}
+            always = dict.fromkeys(_ALWAYS_REPORTED, 0)
+            return {"object_count": len(self._blobs), **always, **self._hits}
+
+
+#: Counters ``/_stats`` reports even before their first hit, so a test can read
+#: a before-value without special-casing absence.
+_ALWAYS_REPORTED = ("allocations", "object_puts", "object_gets", "object_deletes", "upload_refusals")
 
 
 def _parse_range(header: str, total: int) -> tuple[int, int] | None:
@@ -230,6 +251,22 @@ def make_app(base_url: str, store: _BlobStore | None = None) -> WSGIApplication:
             if method == "GET":
                 return _handle_get(environ, start_response, store, blob_id)
             return _respond(start_response, "405 Method Not Allowed", b"")
+        if path.startswith("/objects/"):
+            blob_id = path[len("/objects/") :]
+            if not blob_id or "/" in blob_id:
+                return _respond(start_response, "404 Not Found", b"unknown blob")
+            if method == "GET":
+                store.hit("object_gets")
+                entry = store.get(blob_id)
+                if entry is None:
+                    return _respond(start_response, "404 Not Found", b"no such object")
+                return _respond(start_response, "200 OK", entry[0], content_type="application/octet-stream")
+            if method == "DELETE":
+                store.hit("object_deletes")
+                if not store.delete(blob_id):
+                    return _respond(start_response, "404 Not Found", b"no such object")
+                return _respond(start_response, "204 No Content", b"")
+            return _respond(start_response, "405 Method Not Allowed", b"")
         if method == "GET" and path == "/_stats":
             body = json.dumps(store.stats()).encode()
             return _respond(start_response, "200 OK", body, content_type="application/json")
@@ -268,6 +305,8 @@ def _handle_alloc(
         sized = (size, sha256_b64)
     blob_id = store.allocate(sized)
     store.hit("allocations")
+    if request.get("purpose") == "object":
+        store.hit("object_puts")
     # Pre-allocate an empty entry so HEAD/GET before PUT returns 404 cleanly
     # (we only insert on PUT).
     response: dict[str, object] = {
@@ -276,6 +315,7 @@ def _handle_alloc(
         "object_url": f"{base_url}/blob/{blob_id}",
         "upload_url": f"{base_url}/upload/{blob_id}",
         "download_url": f"{base_url}/download/{blob_id}",
+        "object_id": blob_id,
     }
     if sized is not None:
         response["upload_headers"] = {"x-amz-checksum-sha256": sized[1]}
@@ -569,7 +609,65 @@ class FakeStorageBackend:
             download_url=allocation.get("download_url", object_url),
             expires_at=datetime.now(UTC) + timedelta(hours=1),
             headers={str(k): str(v) for k, v in headers.items()},
+            object_id=str(allocation["object_id"]),
         )
+
+    def put_object(self, data: bytes) -> str:
+        """Store *data* through a sized object allocation and return its id (``ObjectStore``).
+
+        ``POST /alloc`` with ``purpose: "object"`` (counted as ``object_puts``)
+        plus the size and digest, then a verified PUT -- the same shape as a
+        vendor sized grant.
+        """
+        import httpx2
+
+        sha256_b64 = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+        alloc_resp = httpx2.post(
+            f"{self._base_url}/alloc",
+            json={"size": len(data), "sha256_b64": sha256_b64, "purpose": "object"},
+            timeout=10.0,
+        )
+        alloc_resp.raise_for_status()
+        allocation = alloc_resp.json()
+        headers = {"Content-Type": "application/octet-stream", **(allocation.get("upload_headers") or {})}
+        put_resp = httpx2.put(allocation["upload_url"], content=data, headers=headers, timeout=10.0)
+        put_resp.raise_for_status()
+        return str(allocation["object_id"])
+
+    def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
+        """Fetch an object by id via ``GET /objects/{id}`` (``ObjectStore``; counted as ``object_gets``).
+
+        Args:
+            object_id: The blob id.
+            max_bytes: Largest object accepted, or ``None``.
+
+        Returns:
+            The object bytes.
+
+        Raises:
+            ObjectMissingError: The fake storage answers 404.
+            ValueError: The object is larger than *max_bytes*.
+
+        """
+        import httpx2
+
+        from vgi_rpc.external import ObjectMissingError
+
+        resp = httpx2.get(f"{self._base_url}/objects/{object_id}", timeout=10.0)
+        if resp.status_code == 404:
+            raise ObjectMissingError("fake storage object is gone")
+        resp.raise_for_status()
+        data = resp.content
+        if max_bytes is not None and len(data) > max_bytes:
+            raise ValueError(f"object is {len(data)} bytes, over max_fetch_bytes ({max_bytes})")
+        return data
+
+    def delete_object(self, object_id: str) -> bool:
+        """Delete an object (``DELETE /objects/{id}``); return whether it existed.  Test helper."""
+        import httpx2
+
+        resp = httpx2.delete(f"{self._base_url}/objects/{object_id}", timeout=10.0)
+        return resp.status_code == 204
 
     def close(self) -> None:
         """Retain the adapter cleanup protocol; requests own their clients."""

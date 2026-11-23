@@ -104,6 +104,12 @@ _upload_url_fields: list[pa.Field[Any]] = [
     pa.field("download_url", pa.utf8(), nullable=False),
     pa.field("expires_at", pa.timestamp("us", tz="UTC"), nullable=False),
     pa.field("upload_headers", pa.map_(pa.utf8(), pa.utf8()), nullable=False),
+    # Protocol 3.4 (STATE_REF_V1.md §10.2): the storage id of the object the PUT
+    # creates, and a sealed argument reference for it (vgi_rpc.argref.v1, bound
+    # to the requesting principal).  Clients read the columns by name and may
+    # ignore these two.
+    pa.field("object_id", pa.utf8(), nullable=False),
+    pa.field("ref", pa.binary(), nullable=False),
 ]
 _UPLOAD_URL_SCHEMA = pa.schema(_upload_url_fields)
 

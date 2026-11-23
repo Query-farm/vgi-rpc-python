@@ -410,9 +410,9 @@ class TestStreamIsolation:
 
         key = b"\x33" * 32
         call_id = b"\x44" * 16
-        token = _seal_call_token(b"c", "T", b"sch", b"in", call_id, "sid", key, self._aads("demo.Alpha.v1")[1], 1000)
+        token = _seal_call_token(b"c", "T", b"sch", call_id, "sid", key, self._aads("demo.Alpha.v1")[1], 1000)
 
-        assert _open_call_token(token, key, self._aads("demo.Alpha.v1")[1])[4] == call_id
+        assert _open_call_token(token, key, self._aads("demo.Alpha.v1")[1])[3] == call_id
         with pytest.raises(Exception, match="verification failed"):
             _open_call_token(token, key, self._aads("demo.Beta.v1")[1])
 

@@ -113,6 +113,8 @@ __all__ = [
     "ExternalRef",
     "ExternalStorage",
     "FetchConfig",
+    "ObjectMissingError",
+    "ObjectStore",
     "UploadUrl",
     "UploadUrlProvider",
     "https_only_validator",
@@ -224,6 +226,83 @@ class ExternalStorage(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Object API: put_object / get (STATE_REF_V1.md §10.1)
+# ---------------------------------------------------------------------------
+
+
+class ObjectMissingError(LookupError):
+    """Storage reports the object absent (HTTP 404, vendor ``not_found``).
+
+    Distinguishable from a transient failure on purpose: a missing object is
+    final (``state_ref_missing`` / ``arguments_ref_missing``), a 5xx or a
+    timeout is ``UNAVAILABLE`` and may succeed on retry.  Messages never
+    contain signed URLs.
+    """
+
+
+@runtime_checkable
+class ObjectStore(Protocol):
+    """Storage that can hold opaque objects by id.
+
+    The protocol-3.4 additions to :class:`ExternalStorage`
+    (``STATE_REF_V1.md`` §10.1).  Every storage backend in this package --
+    :class:`~vgi_rpc.vendor.VendorStorage`, :class:`~vgi_rpc.s3.S3Storage`,
+    :class:`~vgi_rpc.gcs.GCSStorage` and the conformance
+    :class:`~vgi_rpc.conformance.fake_storage.FakeStorageBackend` --
+    implements both protocols.  A storage that implements only
+    :class:`ExternalStorage` keeps working for externalization; it simply
+    stores no :class:`~vgi_rpc.state_ref.StateRef` (they stay inline) and
+    cannot resolve argument references.
+
+    Objects carry no TTL and are never deleted by the server.  Operators
+    must set a bucket lifecycle rule of at least one day on the ``rpc``
+    prefix.
+
+    Implementations must be thread-safe.
+    """
+
+    def put_object(self, data: bytes) -> str:
+        """Store *data* as one ``rpc``-purpose object and return its id.
+
+        The write must carry the size and SHA-256 of *data* so storage
+        verifies the body (a vendor sized grant, an S3 ``PutObject`` with
+        ``ChecksumSHA256``).
+
+        Args:
+            data: The bytes to store.
+
+        Returns:
+            The backend's object id (an S3/GCS key, the vendor's
+            ``object_id``), at most 1024 bytes of UTF-8.
+
+        """
+        ...
+
+    def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
+        """Fetch the object *object_id* names.
+
+        The download is minted server-side from the id, pinned to the same
+        hosts as other storage fetches, and capped at *max_bytes*.  Callers
+        verify size and SHA-256 themselves.
+
+        Args:
+            object_id: An id returned by :meth:`put_object` or by
+                :meth:`UploadUrlProvider.generate_upload_url`.
+            max_bytes: Refuse objects larger than this (the server's
+                ``max_fetch_bytes``); ``None`` uses the backend's default.
+
+        Returns:
+            The object bytes.
+
+        Raises:
+            ObjectMissingError: The object does not exist (never uploaded,
+                deleted, or expired by lifecycle).
+
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
 # UploadUrl + UploadUrlProvider
 # ---------------------------------------------------------------------------
 
@@ -288,6 +367,13 @@ class UploadUrl:
             example ``x-amz-checksum-sha256``).  Never ``Content-Length``:
             the client sends exactly the declared size with a plain
             ``Content-Length``, which the signature covers.  May be empty.
+        object_id: The storage id of the object the PUT creates (S3/GCS
+            key, vendor ``object_id``, fake-storage blob id).  Every
+            provider must supply it (protocol 3.4); the server seals it into
+            the grant's argument reference.
+        ref: The sealed argument reference the server returned for this
+            upload (the ``__upload_url__/init`` ``ref`` column).  Set only on
+            the client side, from the response; providers leave it empty.
 
     """
 
@@ -295,6 +381,8 @@ class UploadUrl:
     download_url: str
     expires_at: datetime
     headers: Mapping[str, str] = field(default_factory=dict)
+    object_id: str = ""
+    ref: bytes = b""
 
 
 @runtime_checkable
@@ -326,8 +414,8 @@ class UploadUrlProvider(Protocol):
             sha256_hex: SHA-256 of exactly those bytes, 64 lowercase hex.
 
         Returns:
-            An ``UploadUrl`` with PUT and GET URLs for the same object and
-            the headers the PUT must carry.
+            An ``UploadUrl`` with PUT and GET URLs for the same object, the
+            headers the PUT must carry, and the object's ``object_id``.
 
         """
         ...

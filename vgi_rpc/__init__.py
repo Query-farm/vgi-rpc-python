@@ -100,6 +100,7 @@ from vgi_rpc.rpc import (
     serve_pipe,
     serve_stdio,
 )
+from vgi_rpc.state_ref import StateRef
 from vgi_rpc.utils import (
     ArrowSerializableDataclass,
     ArrowType,
@@ -292,6 +293,7 @@ __all__ = [
     # Auth & Context
     "AuthContext",
     "CallContext",
+    "StateRef",
     "IdentityAssurance",
     "PeerAuthenticationPolicy",
     "PeerEvidenceSet",

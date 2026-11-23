@@ -21,7 +21,7 @@ from pyarrow import ipc
 
 from vgi_rpc.errors import error_code_of
 from vgi_rpc.external import predict_externalize_bytes_for_collector, resolve_external_location
-from vgi_rpc.log import Message
+from vgi_rpc.log import Level, Message
 from vgi_rpc.metadata import CALL_STATE_KEY, CANCEL_KEY, STATE_KEY, strip_keys
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
@@ -63,6 +63,8 @@ from vgi_rpc.rpc._common import (
     _record_input,
     _record_output,
 )
+from vgi_rpc.state_ref import InvalidStateRefError, StateRefError, StateRefScope
+from vgi_rpc.state_ref import resolve_encoded as _resolve_state_ref_bytes
 from vgi_rpc.utils import ArrowSerializableDataclass, ValidatedReader, empty_batch, new_ipc_stream
 
 from .._common import _RpcHttpError
@@ -82,7 +84,9 @@ from ._state_token import (
     _open_cursor_token,
     _resolve_state_cls,
     _ResolvedCall,
+    _sealed_len,
     _StateInfo,
+    _unpack_schemas,
 )
 
 if TYPE_CHECKING:
@@ -98,6 +102,21 @@ with the GIL released (see :func:`_run_http_producer_turn`); every other
 path builds a ``BytesIO``. Falcon only needs ``read()``/``seek()`` from
 ``resp.stream``, which both provide.
 """
+
+
+def _method_error_status(exc: BaseException) -> HTTPStatus:
+    """HTTP status for an exception a method (or its state) raised.
+
+    ``invalid_state_ref`` is answered 400 like every other token failure
+    (``STATE_REF_V1.md`` §6); everything else is the ordinary
+    ``200 + X-VGI-RPC-Error`` (signalled internally as 500).
+    """
+    return HTTPStatus.BAD_REQUEST if isinstance(exc, InvalidStateRefError) else HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+def _cursor_warning_message(warning: str) -> Message:
+    """Build the client-directed WARN log carrying a ``cursor_large`` warning."""
+    return Message(Level.WARN, warning, kind="cursor_large")
 
 
 @dataclass
@@ -285,6 +304,15 @@ def _run_stream_init_sync(
                 implementation=app._server.implementation_for(info),
                 response_limit_bytes=_current_response_budget.get().response_limit_bytes,
                 preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
+                # The stream method's own context is the init request: the one
+                # place state_ref() is allowed (STATE_REF_V1.md §2.1).
+                state_refs=StateRefScope(
+                    runtime=app._state_refs,
+                    auth=auth,
+                    protocol=info.protocol_name,
+                    method=method_name,
+                    init=True,
+                ),
             )
 
         # The chain-correlation id for all HTTP turns of this stream.  Carried
@@ -324,7 +352,10 @@ def _run_stream_init_sync(
                     stream_id,
                     _current_response_budget.get().response_limit_bytes,
                     protocol=info.protocol_name,
+                    method=method_name,
+                    state_refs=app._state_refs,
                 )
+                call_token_bytes = _sealed_len(call_token)
                 # Warm the cache with the objects we already hold, so this stream's
                 # first continuation does not have to open the token it was just
                 # handed.
@@ -337,6 +368,7 @@ def _run_stream_init_sync(
                         result.input_schema,
                         stream_id,
                         _current_response_budget.get().response_limit_bytes,
+                        call_token_bytes,
                     ),
                     time.time(),
                 )
@@ -350,7 +382,7 @@ def _run_stream_init_sync(
                 outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
                 outcome.error_code = error_code_of(exc).value
                 outcome.error_message = _truncate_error_message(exc)
-                outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+                outcome.http_status = _method_error_status(exc)
                 raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
 
             if result.input_schema == _EMPTY_SCHEMA:
@@ -493,15 +525,20 @@ def _run_http_exchange_init(
         state = result.state
         output_schema = result.output_schema
 
-        token, state_bytes = _mint_cursor_token(
+        token, state_bytes, cursor_warning = _mint_cursor_token(
             state,
             state_info,
             call_id,
             app._token_key,
             auth,
             protocol=info.protocol_name,
+            method=method_name,
+            state_refs=app._state_refs,
+            call_token_bytes=_sealed_len(call_token),
         )
         outcome.response_state_bytes = state_bytes
+        if cursor_warning is not None:
+            sink(_cursor_warning_message(cursor_warning))
 
         # Response: header (if declared) + zero-row batch carrying the tokens.
         resp_buf = BytesIO()
@@ -524,7 +561,7 @@ def _run_http_exchange_init(
         outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
         outcome.error_code = error_code_of(exc).value
         outcome.error_message = _truncate_error_message(exc)
-        outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        outcome.http_status = _method_error_status(exc)
         raise _RpcHttpError(exc, status_code=outcome.http_status) from exc
 
     resp_buf.seek(0)
@@ -642,6 +679,13 @@ def _run_stream_exchange_sync(
                     implementation=app._server.implementation_for(info),
                     response_limit_bytes=_current_response_budget.get().response_limit_bytes,
                     preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
+                    state_refs=StateRefScope(
+                        runtime=app._state_refs,
+                        auth=auth,
+                        protocol=info.protocol_name,
+                        method=method_name,
+                        call_id=call_id,
+                    ),
                 )
                 try:
                     state_obj.on_cancel(cancel_ctx)
@@ -674,6 +718,7 @@ def _run_stream_exchange_sync(
                     info=info,
                     stream_id=stream_id,
                     call_id=call_id,
+                    call_token_bytes=resolved_call.call_token_bytes,
                     auth=auth,
                     transport_metadata=transport_metadata,
                     outcome=outcome,
@@ -718,6 +763,7 @@ def _run_stream_exchange_sync(
                 custom_metadata=custom_metadata,
                 info=info,
                 call_id=call_id,
+                call_token_bytes=resolved_call.call_token_bytes,
                 auth=auth,
                 transport_metadata=transport_metadata,
                 outcome=outcome,
@@ -740,6 +786,7 @@ def _run_http_exchange_turn(
     auth: AuthContext,
     transport_metadata: Mapping[str, Any],
     outcome: _DispatchOutcome,
+    call_token_bytes: int = 0,
 ) -> BytesIO:
     """Run one HTTP exchange turn — lockstep input → output → refreshed cursor token.
 
@@ -820,6 +867,13 @@ def _run_http_exchange_turn(
             implementation=app._server.implementation_for(info),
             response_limit_bytes=_current_response_budget.get().response_limit_bytes,
             preferred_response_bytes=_current_response_budget.get().preferred_response_bytes,
+            state_refs=StateRefScope(
+                runtime=app._state_refs,
+                auth=auth,
+                protocol=info.protocol_name,
+                method=method_name,
+                call_id=call_id,
+            ),
         )
         state.process(ab_in, out, process_ctx)
         if not out.finished:
@@ -827,15 +881,20 @@ def _run_http_exchange_turn(
 
         # Refresh the cursor token.  The call token is not re-issued: nothing
         # it carries can have changed, and the client still holds it.
-        updated_token, updated_state_bytes = _mint_cursor_token(
+        updated_token, updated_state_bytes, cursor_warning = _mint_cursor_token(
             state,
             state_info,
             call_id,
             app._token_key,
             auth,
             protocol=info.protocol_name,
+            method=method_name,
+            state_refs=app._state_refs,
+            call_token_bytes=call_token_bytes,
         )
         outcome.response_state_bytes = updated_state_bytes
+        if cursor_warning is not None:
+            out.emit_client_log_message(_cursor_warning_message(cursor_warning))
         out.merge_data_metadata(pa.KeyValueMetadata({STATE_KEY: updated_token}))
 
         # Pre-flight the external cap BEFORE flushing — refuse a violating
@@ -894,7 +953,7 @@ def _run_http_exchange_turn(
         outcome.error_type = _log_method_error(protocol_name, method_name, server_id, exc)
         outcome.error_code = error_code_of(exc).value
         outcome.error_message = _truncate_error_message(exc)
-        outcome.http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        outcome.http_status = _method_error_status(exc)
         raise _RpcHttpError(exc, status_code=outcome.http_status, schema=output_schema) from exc
 
 
@@ -946,6 +1005,7 @@ def _run_http_producer_turn(
     owns_response_body: bool = False,
     call_token: bytes | None = None,
     call_state_bytes: bytes | None = None,
+    call_token_bytes: int | None = None,
 ) -> pa.BufferReader:
     """Run one HTTP turn of a producer stream.
 
@@ -1022,6 +1082,8 @@ def _run_http_producer_turn(
         call_state_bytes: The plaintext call state, passed alongside
             ``call_token`` so the init turn's access-log record shows the
             state that was issued.  ``None`` on continuation turns.
+        call_token_bytes: Sealed length of the stream's call token, for the
+            turn budget; derived from ``call_token`` when that is passed.
 
     Returns:
         The IPC response body as a native ``pa.BufferReader``, positioned at the
@@ -1105,6 +1167,13 @@ def _run_http_producer_turn(
             implementation=app._server.implementation_for(info),
             response_limit_bytes=response_budget.response_limit_bytes,
             preferred_response_bytes=response_budget.preferred_response_bytes,
+            state_refs=StateRefScope(
+                runtime=app._state_refs,
+                auth=auth,
+                protocol=info.protocol_name,
+                method=method_name,
+                call_id=call_id,
+            ),
         )
         # One HTTP request is one logical tick and therefore exactly one state
         # transition.  ``max_response_bytes`` limits that turn's response; it
@@ -1156,7 +1225,12 @@ def _run_http_producer_turn(
                 _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
                 _write_error_batch(writer, schema, overshoot, server_id=server_id, include_traceback=app._tracebacks)
             else:
-                _flush_collector(writer, out, app._server.external_config)
+                # Mint the cursor BEFORE flushing: minting decides (and may
+                # store) this stream's StateRefs and applies the cursor rule,
+                # and a cursor_too_large refusal must not follow data the
+                # client would otherwise have consumed.
+                token: bytes | None = None
+                state_bytes = b""
                 if not out.finished:
                     # Serialize the cursor after exactly one transition. The
                     # client must submit another request to advance again.
@@ -1166,9 +1240,23 @@ def _run_http_producer_turn(
                             RuntimeError(f"Cannot resolve state type for {info.protocol_name}/{info.name}"),
                             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
-                    token, state_bytes = _mint_cursor_token(
-                        state, state_info, call_id, app._token_key, auth, protocol=info.protocol_name
+                    if call_token_bytes is None:
+                        call_token_bytes = _sealed_len(call_token) if call_token is not None else 0
+                    token, state_bytes, cursor_warning = _mint_cursor_token(
+                        state,
+                        state_info,
+                        call_id,
+                        app._token_key,
+                        auth,
+                        protocol=info.protocol_name,
+                        method=method_name,
+                        state_refs=app._state_refs,
+                        call_token_bytes=call_token_bytes,
                     )
+                    if cursor_warning is not None:
+                        out.emit_client_log_message(_cursor_warning_message(cursor_warning))
+                _flush_collector(writer, out, app._server.external_config)
+                if token is not None:
                     outcome.response_state_bytes = state_bytes
                     token_md: dict[bytes, bytes] = {STATE_KEY: token}
                     if call_token is not None:
@@ -1188,7 +1276,8 @@ def _run_http_producer_turn(
             outcome.error_message = _truncate_error_message(exc)
             # Signal the resource layer to surface this as 200 +
             # ``X-VGI-RPC-Error: true``, the documented shape for a method that
-            # reached the server and raised. Without it the response is an
+            # reached the server and raised (``invalid_state_ref`` is a 400,
+            # like every other token failure). Without it the response is an
             # unflagged 200 and a client cannot tell it from a successful
             # stream short of parsing the body — which is exactly what the
             # header exists to avoid, and what every other error path in this
@@ -1199,7 +1288,7 @@ def _run_http_producer_turn(
             # streams (header + data) and the error rides in the second, so a
             # client that only reads the first stream sees a valid header and
             # no error at all.
-            _current_response_status.set(HTTPStatus.INTERNAL_SERVER_ERROR)
+            _current_response_status.set(_method_error_status(exc))
             _write_error_batch(writer, schema, exc, server_id=server_id, include_traceback=app._tracebacks)
     # Close the codec BEFORE getvalue(): the compressed frame is only complete
     # once the stream is finalised.
@@ -1345,8 +1434,7 @@ def _resolve_call_from_token(
     (
         call_state_bytes,
         call_state_type,
-        schema_bytes,
-        input_schema_bytes,
+        schemas_ref,
         token_call_id,
         stream_id,
         response_limit_bytes,
@@ -1361,6 +1449,19 @@ def _resolve_call_from_token(
             RuntimeError("State token does not belong to the supplied call token"),
             status_code=HTTPStatus.BAD_REQUEST,
         )
+
+    # Both schemas live behind a StateRef (call token v3): inline in the
+    # common case, one GET per process per stream when a very wide table
+    # stored them, then the object cache.
+    try:
+        schemas = _resolve_state_ref_bytes(
+            app._state_refs, schemas_ref, auth=auth, protocol=info.protocol_name, call_id=token_call_id
+        )
+    except InvalidStateRefError as exc:
+        raise _RpcHttpError(exc, status_code=HTTPStatus.BAD_REQUEST) from exc
+    except StateRefError as exc:
+        raise _RpcHttpError(exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR) from exc
+    schema_bytes, input_schema_bytes = _unpack_schemas(schemas)
 
     try:
         output_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
@@ -1394,4 +1495,6 @@ def _resolve_call_from_token(
                 status_code=HTTPStatus.BAD_REQUEST,
             ) from exc
 
-    return _ResolvedCall(call_state, output_schema, input_schema, stream_id, response_limit_bytes)
+    return _ResolvedCall(
+        call_state, output_schema, input_schema, stream_id, response_limit_bytes, _sealed_len(call_token)
+    )

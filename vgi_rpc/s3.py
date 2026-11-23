@@ -11,6 +11,8 @@ uploads IPC data to S3 and returns pre-signed URLs for retrieval.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import threading
 import time
@@ -21,7 +23,15 @@ from typing import Any
 
 import pyarrow as pa
 
-from vgi_rpc.external import ExternalStorage, UploadUrl, UploadUrlProvider, sha256_b64_from_hex
+from vgi_rpc.external import (
+    ExternalStorage,
+    ObjectMissingError,
+    ObjectStore,
+    UploadUrl,
+    UploadUrlProvider,
+    sha256_b64_from_hex,
+)
+from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
 
 _logger = logging.getLogger(__name__)
 
@@ -190,7 +200,71 @@ class S3Storage:
             download_url=get_url,
             expires_at=expires_at,
             headers={"x-amz-checksum-sha256": checksum},
+            object_id=key,
         )
+
+    def put_object(self, data: bytes) -> str:
+        """Store *data* under a fresh key and return the key (``ObjectStore``).
+
+        A SigV4 ``PutObject`` with ``ContentLength`` and ``ChecksumSHA256``,
+        so S3/R2 verify the body.  Objects carry no TTL: set a lifecycle rule
+        of at least one day on ``prefix``.
+
+        Args:
+            data: The bytes to store.
+
+        Returns:
+            The object key (the ``object_id``).
+
+        """
+        client = self._get_client()
+        key = f"{self.prefix}{uuid.uuid4().hex}.bin"
+        client.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=data,
+            ContentLength=len(data),
+            ChecksumSHA256=base64.b64encode(hashlib.sha256(data).digest()).decode("ascii"),
+            ContentType="application/octet-stream",
+        )
+        return key
+
+    def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
+        """Fetch the object *object_id* (a key) names (``ObjectStore``).
+
+        Args:
+            object_id: The object key.
+            max_bytes: Largest object accepted; ``None`` means 256 MiB.
+
+        Returns:
+            The object bytes.
+
+        Raises:
+            ObjectMissingError: S3 reports ``NoSuchKey`` / 404.
+            ValueError: The object is larger than *max_bytes*.
+
+        """
+        limit = max_bytes if max_bytes is not None else DEFAULT_MAX_FETCH_BYTES
+        client = self._get_client()
+        try:
+            resp = client.get_object(Bucket=self.bucket, Key=object_id)
+        except Exception as exc:
+            error = getattr(exc, "response", None)
+            code = error.get("Error", {}).get("Code") if isinstance(error, dict) else None
+            if code in ("NoSuchKey", "404", "NotFound"):
+                raise ObjectMissingError("S3 object is gone") from None
+            raise
+        body = resp["Body"]
+        try:
+            length = resp.get("ContentLength")
+            if isinstance(length, int) and length > limit:
+                raise ValueError(f"S3 object is {length} bytes, over max_fetch_bytes ({limit})")
+            data: bytes = body.read(limit + 1)
+        finally:
+            body.close()
+        if len(data) > limit:
+            raise ValueError(f"S3 object exceeds max_fetch_bytes ({limit})")
+        return data
 
 
 # Runtime check that S3Storage satisfies ExternalStorage and UploadUrlProvider protocols
@@ -198,6 +272,7 @@ def _check_protocol() -> None:
     """Verify S3Storage satisfies ExternalStorage and UploadUrlProvider at import time."""
     _inst = S3Storage(bucket="test")
     _storage: ExternalStorage = _inst
+    _objects: ObjectStore = _inst
     _provider: UploadUrlProvider = _inst
 
 

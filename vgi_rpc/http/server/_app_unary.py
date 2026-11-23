@@ -42,6 +42,7 @@ from vgi_rpc.rpc._common import (
     _current_call_stats,
     _DispatchHook,
 )
+from vgi_rpc.state_ref import StateRefScope
 from vgi_rpc.utils import new_ipc_stream
 
 from .._common import _RpcHttpError
@@ -137,6 +138,11 @@ def _run_unary_sync(
                 implementation=app._server.implementation_for(info),
                 response_limit_bytes=response_budget.response_limit_bytes,
                 preferred_response_bytes=response_budget.preferred_response_bytes,
+                # Unary: no stream, so state_ref() is refused; the runtime is
+                # here for resolve_argument_ref().
+                state_refs=StateRefScope(
+                    runtime=app._state_refs, auth=auth, protocol=info.protocol_name, method=method_name
+                ),
             )
 
         schema = info.result_schema

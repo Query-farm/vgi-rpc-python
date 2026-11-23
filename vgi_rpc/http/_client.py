@@ -2525,18 +2525,27 @@ def request_upload_urls(
                 if _dispatch_log_or_error(batch, custom_metadata):
                     continue
 
-                header_column = batch.column("upload_headers") if "upload_headers" in batch.schema.names else None
+                names = batch.schema.names
+                header_column = batch.column("upload_headers") if "upload_headers" in names else None
+                # Protocol 3.4 grant columns, read by name and optional: a
+                # server without them still answers a v2 client.
+                object_id_column = batch.column("object_id") if "object_id" in names else None
+                ref_column = batch.column("ref") if "ref" in names else None
                 for i in range(batch.num_rows):
                     upload_url = batch.column("upload_url")[i].as_py()
                     download_url = batch.column("download_url")[i].as_py()
                     expires_at = batch.column("expires_at")[i].as_py()
                     raw_headers = header_column[i].as_py() if header_column is not None else None
+                    object_id = object_id_column[i].as_py() if object_id_column is not None else None
+                    ref = ref_column[i].as_py() if ref_column is not None else None
                     urls.append(
                         UploadUrl(
                             upload_url=upload_url,
                             download_url=download_url,
                             expires_at=expires_at,
                             headers=dict(raw_headers or []),
+                            object_id=object_id or "",
+                            ref=ref or b"",
                         )
                     )
         except RpcError:

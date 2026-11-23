@@ -910,6 +910,16 @@ class _CompactPlan(NamedTuple):
     """``(name, default, default_factory)`` for transient fields."""
 
 
+def _is_binary_self_serializing(field_type: object) -> bool:
+    """Return whether *field_type* declares ``__vgi_arrow_type__ = pa.binary()`` and (de)serializes itself."""
+    return (
+        isinstance(field_type, type)
+        and getattr(field_type, "__vgi_arrow_type__", None) == pa.binary()
+        and callable(getattr(field_type, "serialize_to_bytes", None))
+        and callable(getattr(field_type, "deserialize_from_bytes", None))
+    )
+
+
 def _compact_plan(cls: "type[ArrowSerializableDataclass]") -> "_CompactPlan | None":
     """Return the compact layout for ``cls``, or ``None`` if it needs Arrow.
 
@@ -932,6 +942,13 @@ def _compact_plan(cls: "type[ArrowSerializableDataclass]") -> "_CompactPlan | No
                 transient.append((field_plan.name, field_plan.default, field_plan.default_factory))
                 continue
             runtime = _COMPACT_TYPES.get(field_plan.unwrapped_type)
+            exact = field_plan.unwrapped_type
+            if runtime is None and _is_binary_self_serializing(field_plan.unwrapped_type):
+                # A self-serializing binary field (``StateRef``): its row value
+                # is the bytes ``serialize_to_bytes`` returned, and ``exact`` is
+                # the class itself, so a decoded ``bytes`` never takes the fast
+                # path and always goes back through ``deserialize_from_bytes``.
+                runtime = (bytes,)
             if runtime is None:
                 supported = False
                 break
@@ -940,7 +957,7 @@ def _compact_plan(cls: "type[ArrowSerializableDataclass]") -> "_CompactPlan | No
                     name=field_plan.name,
                     field_type=field_plan.unwrapped_type,
                     runtime=runtime,
-                    exact=cast("type", field_plan.unwrapped_type),
+                    exact=cast("type", exact),
                 )
             )
 
@@ -1143,6 +1160,14 @@ def _infer_arrow_type(python_type: object) -> pa.DataType:
     # Handle Enum - serialize as dictionary-encoded string
     if isinstance(python_type, type) and issubclass(python_type, Enum):
         return pa.dictionary(pa.int16(), pa.string())
+
+    # A class that declares its own Arrow type (``StateRef`` declares binary).
+    # Such classes serialize through ``serialize_to_bytes`` /
+    # ``deserialize_from_bytes`` like any ``_BytesSerializable``.
+    if isinstance(python_type, type):
+        declared = getattr(python_type, "__vgi_arrow_type__", None)
+        if isinstance(declared, pa.DataType):
+            return declared
 
     # Handle ArrowSerializableDataclass - serialize as struct
     if hasattr(python_type, "ARROW_SCHEMA") and isinstance(getattr(python_type, "ARROW_SCHEMA", None), pa.Schema):

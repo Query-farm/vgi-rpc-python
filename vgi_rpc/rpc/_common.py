@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, TypeVar, cast, overload
 
 import pyarrow as pa
 
@@ -38,6 +38,9 @@ from vgi_rpc.log import Level, Message
 if TYPE_CHECKING:
     from vgi_rpc.rpc._identity import PeerEvidenceSet
     from vgi_rpc.rpc._types import RpcMethodInfo
+    from vgi_rpc.state_ref import StateRef, StateRefScope
+
+_R = TypeVar("_R")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -190,6 +193,7 @@ class CallContext:
         "_protocol_name",
         "_request_id",
         "_server_id",
+        "_state_refs",
         "auth",
         "emit_client_log",
         "implementation",
@@ -214,6 +218,7 @@ class CallContext:
         peer_evidence: PeerEvidenceSet | None = None,
         response_limit_bytes: int | None = None,
         preferred_response_bytes: int | None = None,
+        state_refs: StateRefScope | None = None,
     ) -> None:
         """Initialize with auth context, client-log callback, and optional server context fields.
 
@@ -238,9 +243,15 @@ class CallContext:
                 the transport negotiated one.
             preferred_response_bytes: Server-preferred response target,
                 clamped to ``response_limit_bytes`` when both are present.
+            state_refs: The framework's :class:`~vgi_rpc.state_ref.StateRefScope`
+                for this request: whether ``state_ref()`` is allowed (only on a
+                stream method's own context) and, on HTTP, the server's key,
+                storage and object cache.  ``None`` gives a scope that resolves
+                in-memory and inline refs and refuses ``state_ref()``.
 
         """
         self.auth = auth
+        self._state_refs = state_refs
         self.emit_client_log = emit_client_log
         self.transport_metadata: Mapping[str, Any] = transport_metadata or {}
         self.response_limit_bytes = response_limit_bytes
@@ -296,6 +307,106 @@ class CallContext:
                 extra["remote_addr"] = remote
             self._logger = _ContextLoggerAdapter(base, extra)
         return self._logger
+
+    def _state_ref_scope(self) -> StateRefScope:
+        scope = self._state_refs
+        if scope is None:
+            from vgi_rpc.state_ref import StateRefScope
+
+            scope = StateRefScope(auth=self.auth, protocol=self._protocol_name, method=self._method_name)
+            self._state_refs = scope
+        return scope
+
+    def state_ref(self, value: object) -> StateRef:
+        """Wrap a value that does not change for the life of a stream (``STATE_REF_V1.md``).
+
+        Store the returned :class:`~vgi_rpc.state_ref.StateRef` in a field of
+        the stream state annotated ``StateRef``, and read it back with
+        :meth:`resolve` on any turn.  On HTTP a large value is stored once and
+        only a ~130-byte sealed tag rides each continuation; a small one is
+        carried inline, compressed.  On pipe, stdio, Unix and TCP the value is
+        held in memory.  Worker code is the same everywhere.
+
+        Only valid on the context passed to the stream method itself -- the
+        handling of the stream's init request.  State transitions copy the
+        ref; they never call ``state_ref()`` again.  Within one init,
+        byte-equal (or identical) values share one ref and one stored object.
+        A ref belongs to its stream and must not be copied into another.
+
+        Args:
+            value: ``bytes``, or an ``ArrowSerializableDataclass``.  Treat it as
+                immutable afterwards.
+
+        Returns:
+            The ref.
+
+        Raises:
+            StateRefMisuseError: Called on a continuation (``process``,
+                ``on_cancel``) or a unary call (kind ``state_ref_misuse``,
+                code ``FAILED_PRECONDITION``).
+
+        """
+        return self._state_ref_scope().state_ref(value)
+
+    @overload
+    def resolve(self, ref: StateRef) -> bytes: ...
+    @overload
+    def resolve(self, ref: StateRef, record_type: type[_R]) -> _R: ...
+    def resolve(self, ref: StateRef, record_type: type[_R] | None = None) -> bytes | _R:
+        """Return the value a :class:`~vgi_rpc.state_ref.StateRef` names.
+
+        Valid on every turn and every transport.  A stored ref is fetched
+        through the process's object cache (one ``get`` per process per
+        object, single-flight), verified and opened.
+
+        Args:
+            ref: The ref, as read from the stream state.
+            record_type: Optional ``ArrowSerializableDataclass`` subclass to
+                deserialize into; ``None`` returns the value's bytes.
+
+        Returns:
+            The value bytes, or a *record_type* instance (the original
+            instance when the ref still holds it in memory -- treat it as
+            immutable).
+
+        Raises:
+            InvalidStateRefError: Unknown form, a tag that does not open for
+                this stream and principal, an expired tag, or a digest
+                mismatch (``invalid_state_ref``, HTTP 400).
+            StateRefMissingError: Storage reports the object gone.
+            StateRefTooLargeError: The object exceeds ``max_fetch_bytes``.
+
+        """
+        if record_type is None:
+            return self._state_ref_scope().resolve_bytes(ref)
+        return cast("_R", self._state_ref_scope().resolve(ref, record_type))
+
+    def resolve_argument_ref(self, ref: bytes, *, size: int, sha256: str) -> bytes:
+        """Resolve a sealed argument reference minted by this server's ``__upload_url__`` grant.
+
+        Opens *ref* under this request's principal (``vgi_rpc.argref.v1``),
+        checks its sealed size and SHA-256 equal *size* and *sha256*, then
+        fetches the object through the object cache and verifies it.  Only
+        an HTTP server can resolve one (it holds the key and the storage).
+
+        Args:
+            ref: The grant's ``ref`` column value.
+            size: The byte length claimed alongside the ref.
+            sha256: The SHA-256 hex claimed alongside the ref.
+
+        Returns:
+            The verified object bytes.
+
+        Raises:
+            InvalidArgumentsRefError: Malformed claim, no storage, not an
+                HTTP server, a ref that does not open for this principal, or
+                a sealed size/digest that differs from the claim.
+            ArgumentsRefIntegrityError: The fetched bytes do not match.
+            ArgumentsRefMissingError: Storage reports the object gone.
+            StorageUnavailableError: A transient storage failure.
+
+        """
+        return self._state_ref_scope().resolve_argument_ref(ref, size=size, sha256=sha256)
 
     def client_log(self, level: Level, message: str, **extra: str) -> None:
         """Emit a client-directed log message (convenience wrapper)."""

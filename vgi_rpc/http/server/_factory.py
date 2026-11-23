@@ -19,6 +19,7 @@ import falcon
 from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
 from vgi_rpc.rpc import AuthContext, PeerAuthenticationPolicy, PeerIdentityProvider, RpcServer
+from vgi_rpc.state_ref import DEFAULT_TOKEN_TTL_SECONDS, CursorRule, state_ref_inline_bytes_from_env
 
 from .._common import (
     _SESSION_ENDPOINT,
@@ -153,7 +154,7 @@ def make_wsgi_app(
     max_upload_bytes: int | None = None,
     otel_config: object | None = None,
     sentry_config: object | None = None,
-    token_ttl: int = 3600,
+    token_ttl: int = DEFAULT_TOKEN_TTL_SECONDS,
     compression_level: int | None = 1,
     enable_not_found_page: bool = True,
     enable_landing_page: bool = True,
@@ -166,6 +167,8 @@ def make_wsgi_app(
     sticky_default_ttl: float = 300.0,
     sticky_echo_headers: Mapping[str, str] | None = None,
     call_state_cache_entries: int = 4096,
+    state_ref_inline_bytes: int | None = None,
+    cursor_rule: CursorRule = "warn",
     identity_bearer: bool = True,
     strict_auth: bool = False,
     www_authenticate: str | None = None,
@@ -293,9 +296,11 @@ def make_wsgi_app(
         sentry_config: Optional ``SentryConfig`` for Sentry error reporting.
             When provided, ``instrument_server_sentry()`` is called.
             Requires ``pip install vgi-rpc[sentry]``.
-        token_ttl: Maximum age of stream state tokens in seconds.  Tokens
-            older than this are rejected with HTTP 400.  Default is 3600
-            (1 hour).  Set to ``0`` to disable expiry checking.
+        token_ttl: Maximum age of stream state tokens in seconds -- cursor
+            tokens, call tokens and stored ``StateRef`` tags, each checked
+            from its own creation time.  Older ones are rejected with HTTP
+            400.  Default is 21600 (6 hours, the maximum stream duration).
+            Set to ``0`` to disable expiry checking.
         compression_level: Zstandard compression level for HTTP request/
             response bodies.  ``1`` (the default) installs
             ``_CompressionMiddleware`` at zstd level 1 *and* gzip level 6
@@ -379,6 +384,18 @@ def make_wsgi_app(
             miss path, so a client that fails to echo
             :data:`~vgi_rpc.metadata.CALL_STATE_KEY` fails immediately
             instead of only once the cache goes cold in production.
+        state_ref_inline_bytes: Largest compressed ``StateRef`` payload kept
+            inline in a token before it is stored (``STATE_REF_V1.md`` §9);
+            the effective limit is also capped at a quarter of the turn
+            budget.  ``None`` (the default) reads
+            ``VGI_RPC_STATE_REF_INLINE_BYTES``, else 16384.  Must be positive.
+        cursor_rule: What happens when a sealed cursor exceeds the turn budget
+            (``floor((max_request_bytes - 4096) / 1.34) - call_token_bytes``):
+            ``"warn"`` (the default) logs ``cursor_large`` and sends the client
+            a WARN log; ``"error"`` refuses the turn with ``cursor_too_large``
+            (only when a request cap is set).  A framework that keeps its
+            unchanging state in ``StateRef`` should pass ``"error"``.  Below a
+            16 KiB request cap the rule is disabled with a startup warning.
         identity_bearer: When the server hosts ``vgi_rpc.Identity.v2`` with
             sealed grants configured or a ``resolve_token`` hook, accept
             those credentials as bearers after *authenticate* (WIRE_PROTOCOL.md
@@ -504,6 +521,10 @@ def make_wsgi_app(
         max_externalized_response_bytes=max_externalized_response_bytes,
         preferred_response_bytes=effective_preferred_response_bytes,
         call_state_cache_entries=call_state_cache_entries,
+        state_ref_inline_bytes=(
+            state_ref_inline_bytes if state_ref_inline_bytes is not None else state_ref_inline_bytes_from_env()
+        ),
+        cursor_rule=cursor_rule,
     )
     # Resolve the proxy-header dependency now, from the `authenticate` the
     # caller passed. The PKCE branch below rebinds `authenticate` to a chained
