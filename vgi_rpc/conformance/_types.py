@@ -31,6 +31,7 @@ from vgi_rpc.rpc import (
     ProducerState,
     StreamState,
 )
+from vgi_rpc.state_ref import StateRef
 from vgi_rpc.utils import ArrowSerializableDataclass, ArrowType
 
 # ---------------------------------------------------------------------------
@@ -870,3 +871,102 @@ class DynamicProducerState(ProducerState):
             data["score"] = [self.current * 1.5]
         out.emit_pydict(data)
         self.current += 1
+
+
+# ---------------------------------------------------------------------------
+# StateRef / object cache / argument references (STATE_REF_V1.md §15)
+# ---------------------------------------------------------------------------
+
+#: Input of ``state_ref_exchange``: an optional raw ``StateRef`` to resolve in
+#: place of the stream's own (how the shared suite presents tampered,
+#: foreign-stream and foreign-kind tags to the server).
+STATE_REF_INPUT_SCHEMA = pa.schema([pa.field("override", pa.binary(), nullable=True)])
+
+#: Output of ``state_ref_exchange``: one row per exchange.
+#:
+#: * ``size`` / ``sha256`` -- of the bytes ``ctx.resolve`` returned;
+#: * ``form`` -- the stream's own ref: ``memory`` (never encoded: pipe, or the
+#:   init turn), ``inline`` or ``stored``;
+#: * ``ref`` -- the stream's own ref's encoded bytes, null while in memory.
+_state_ref_output_fields: list[pa.Field[Any]] = [
+    pa.field("size", pa.int64(), nullable=False),
+    pa.field("sha256", pa.utf8(), nullable=False),
+    pa.field("form", pa.utf8(), nullable=False),
+    pa.field("ref", pa.binary(), nullable=True),
+]
+STATE_REF_OUTPUT_SCHEMA = pa.schema(_state_ref_output_fields)
+
+
+def state_ref_payload(size: int, compressible: bool, seed: str) -> bytes:
+    """Return the deterministic ``state_ref_exchange`` payload every port must build.
+
+    * compressible: ``unit = f"vgi-rpc StateRef conformance {seed} "`` (UTF-8)
+      repeated and truncated to *size* bytes;
+    * incompressible: ``SHA-256(seed_utf8 || u64le(i))`` for ``i = 0, 1, ...``
+      concatenated and truncated to *size* bytes.
+
+    Args:
+        size: Payload length in bytes (``>= 0``).
+        compressible: Which of the two shapes.
+        seed: Distinguishes payloads (and so stored objects) between tests.
+
+    Returns:
+        The payload.
+
+    """
+    import hashlib
+
+    if size <= 0:
+        return b""
+    if compressible:
+        unit = f"vgi-rpc StateRef conformance {seed} ".encode()
+        return (unit * (size // len(unit) + 1))[:size]
+    seed_bytes = seed.encode()
+    blocks = (size + 31) // 32
+    return b"".join(hashlib.sha256(seed_bytes + i.to_bytes(8, "little")).digest() for i in range(blocks))[:size]
+
+
+@dataclass
+class StateRefExchangeState(ExchangeState):
+    """Resolve the stream's ``StateRef`` (or a presented one) on every exchange.
+
+    ``value`` is created by ``ctx.state_ref`` in the init handler and copied
+    by every turn; ``padding`` sits in the cursor itself (to drive the cursor
+    rule); ``misuse`` makes every exchange call ``ctx.state_ref`` (refused:
+    ``state_ref_misuse``).
+    """
+
+    value: StateRef
+    padding: bytes = b""
+    misuse: bool = False
+
+    def exchange(self, input: AnnotatedBatch, out: OutputCollector, ctx: CallContext) -> None:
+        """Resolve and report."""
+        import hashlib
+
+        if self.misuse:
+            ctx.state_ref(b"a continuation may not create a StateRef")
+        override = input.batch.column("override")[0].as_py() if input.batch.num_rows else None
+        ref = StateRef.deserialize_from_bytes(override) if isinstance(override, bytes) else self.value
+        data = ctx.resolve(ref)
+        out.emit_pydict(
+            {
+                "size": [len(data)],
+                "sha256": [hashlib.sha256(data).hexdigest()],
+                "form": [self.value.form],
+                "ref": [self.value.encoded],
+            }
+        )
+
+
+@dataclass(frozen=True)
+class ObjectCacheStatsResult(ArrowSerializableDataclass):
+    """The worker process's object-cache counters (``object_cache_stats``)."""
+
+    resident_bytes: int
+    entries: int
+    max_bytes: int
+    hits: int
+    misses: int
+    evictions: int
+    fetches: int

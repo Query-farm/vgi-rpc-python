@@ -105,6 +105,12 @@ from vgi_rpc.conformance._secondary_pytest import (  # noqa: F401
     TestVersionMismatchCode,
     protocol_target,
 )
+from vgi_rpc.conformance._state_ref_pytest import (  # noqa: F401
+    TestArgumentRefs,
+    TestCursorBudget,
+    TestObjectCache,
+    TestStateRef,
+)
 from vgi_rpc.conformance._transport_lifecycle_pytest import (  # noqa: F401
     TestServeStartLifecycle,
     TestTransportKindContext,
@@ -2668,8 +2674,9 @@ class TestDescribeConformance:
         # close_counter) + 2 sticky streaming methods (stream_session_counter
         # / exchange_session_counter), added 2026-05 alongside the
         # Sticky.* conformance group, + exchange_input_metadata,
-        # + published_string (pre-published ExternalRef, added 2026-10).
-        assert len(conformance_describe.methods) == 90
+        # + published_string (pre-published ExternalRef, added 2026-10),
+        # + the four StateRef / argument-reference methods (protocol 3.4).
+        assert len(conformance_describe.methods) == 94
         assert conformance_describe.protocol_name == "ConformanceService"
         echo_str = conformance_describe.methods["echo_string"]
         assert echo_str.method_type == MethodType.UNARY

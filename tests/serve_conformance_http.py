@@ -20,6 +20,7 @@ import argparse
 import socket
 import sys
 import threading
+from typing import Any
 from urllib.parse import urlparse
 
 import falcon
@@ -81,6 +82,18 @@ def _principal_from_header(req: falcon.Request) -> AuthContext:
     if auth_time is not None:
         claims["auth_time"] = auth_time
     return AuthContext(domain="conformance", authenticated=True, principal=principal, claims=claims)
+
+
+def _required_principal_from_header(req: falcon.Request) -> AuthContext:
+    """Like :func:`_principal_from_header`, but a request without the header is refused (401).
+
+    Backs ``--require-principal``: the shared StateRef / argument-reference
+    cases need two principals and an unauthenticated grant that is refused
+    exactly like an unauthenticated method call.
+    """
+    if not req.get_header(_PRINCIPAL_HEADER):
+        raise ValueError("X-Conformance-Principal is required")
+    return _principal_from_header(req)
 
 
 class _FailServeStartOnce(ConformanceServiceImpl):
@@ -349,7 +362,45 @@ def main() -> None:
         action="store_true",
         help="Test-only: fail the first on_serve_start notification, then accept its retry.",
     )
+    parser.add_argument(
+        "--cursor-rule",
+        choices=("warn", "error"),
+        default="warn",
+        help="What an over-budget cursor does (STATE_REF_V1.md §9): log cursor_large, or refuse cursor_too_large.",
+    )
+    parser.add_argument(
+        "--token-ttl",
+        type=int,
+        default=None,
+        help="Maximum age of cursor/call tokens and stored StateRef tags, in seconds (default 21600).",
+    )
+    parser.add_argument(
+        "--object-cache-bytes",
+        type=int,
+        default=None,
+        help="Byte bound of the process's object cache (sets VGI_RPC_OBJECT_CACHE_BYTES before first use).",
+    )
+    parser.add_argument(
+        "--require-principal",
+        action="store_true",
+        help=(
+            "Authenticate every RPC route by X-Conformance-Principal and answer 401 without it. Backs the "
+            "shared StateRef / argument-reference cases, which need two principals and an unauthenticated refusal."
+        ),
+    )
     args = parser.parse_args()
+    if args.object_cache_bytes is not None:
+        import os
+
+        os.environ["VGI_RPC_OBJECT_CACHE_BYTES"] = str(args.object_cache_bytes)
+    # 0 means "no request cap" (the storage mode otherwise defaults the cap to
+    # the externalization threshold).
+    no_request_cap = args.max_request_bytes == 0
+    if no_request_cap:
+        args.max_request_bytes = None
+    state_kwargs: dict[str, Any] = {"cursor_rule": args.cursor_rule}
+    if args.token_ttl is not None:
+        state_kwargs["token_ttl"] = args.token_ttl
 
     call_state_cache_entries = 0 if args.no_call_state_cache else 4096
     # Identity is a co-hosted protocol now, not an HTTP JSON route, so it is
@@ -386,6 +437,8 @@ def main() -> None:
     compression_level = None if args.no_compression else 1
     token_key = bytes.fromhex(args.token_key) if args.token_key else None
     authenticate = _principal_from_header if (args.sticky_auth or args.identity != "off") else None
+    if args.require_principal:
+        authenticate = _required_principal_from_header
     # Mirror make_wsgi_app's own default so the plain worker keeps shipping
     # the documented value in VGI-Sticky-Default-TTL.
     sticky_default_ttl: float = 300.0 if args.sticky_ttl is None else float(args.sticky_ttl)
@@ -414,6 +467,9 @@ def main() -> None:
                 max_request_bytes=args.max_request_bytes,
                 call_state_cache_entries=call_state_cache_entries,
                 cors_origins=args.cors_origin,
+                token_key=token_key,
+                authenticate=authenticate,
+                **state_kwargs,
             )
             return
         # Sticky-enabled default path. Mirrors the externalisation branch
@@ -432,6 +488,7 @@ def main() -> None:
             sticky_default_ttl=sticky_default_ttl,
             call_state_cache_entries=call_state_cache_entries,
             cors_origins=args.cors_origin,
+            **state_kwargs,
         )
         # Test-only admin endpoint so canonical conformance tests can
         # trigger drain over the wire without sending SIGTERM.
@@ -488,6 +545,8 @@ def main() -> None:
     port = int(listener.getsockname()[1])
 
     max_request_bytes = args.max_request_bytes if args.max_request_bytes is not None else args.externalize_threshold
+    if no_request_cap:
+        max_request_bytes = None
     app = make_wsgi_app(
         server,
         upload_url_provider=backend,
@@ -497,6 +556,10 @@ def main() -> None:
         enable_sticky=enable_sticky,
         sticky_echo_headers=sticky_echo_headers,
         cors_origins=args.cors_origin,
+        token_key=token_key,
+        authenticate=authenticate,
+        call_state_cache_entries=call_state_cache_entries,
+        **state_kwargs,
     )
     # Test-only admin endpoint (see _TestDrainResource for rationale).
     app.add_route("/__test_drain__", _TestDrainResource(drain_handle(app)))

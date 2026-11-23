@@ -1765,6 +1765,12 @@ _EXPECTED_METHODS = frozenset(
         # conformance tests.
         "exchange_session_counter",
         "stream_session_counter",
+        # StateRef, the object cache and argument references (protocol 3.4,
+        # STATE_REF_V1.md §15). Every port implements all four.
+        "object_cache_age",
+        "object_cache_stats",
+        "resolve_argument_ref",
+        "state_ref_exchange",
     }
 )
 
@@ -1835,6 +1841,10 @@ _UNARY_METHODS = frozenset(
         "close_counter",
         "increment_counter",
         "open_counter",
+        # StateRef / object cache / argument references (protocol 3.4).
+        "object_cache_age",
+        "object_cache_stats",
+        "resolve_argument_ref",
     }
 )
 
@@ -1870,6 +1880,8 @@ _STREAM_METHODS = frozenset(
         # Sticky-session streaming variants — see _EXPECTED_METHODS.
         "exchange_session_counter",
         "stream_session_counter",
+        # StateRef (protocol 3.4).
+        "state_ref_exchange",
     }
 )
 
@@ -1912,8 +1924,10 @@ def _test_desc_method_count(desc: ServiceDescription) -> None:
     # close_counter) + 2 sticky streaming methods (stream_session_counter
     # / exchange_session_counter), added 2026-05 alongside the HTTP-only
     # Sticky.* conformance group, + exchange_input_metadata,
-    # + published_string (pre-published ExternalRef, added 2026-10).
-    assert len(desc.methods) == 90
+    # + published_string (pre-published ExternalRef, added 2026-10),
+    # + state_ref_exchange / object_cache_stats / object_cache_age /
+    # resolve_argument_ref (StateRef and argument references, protocol 3.4).
+    assert len(desc.methods) == 94
 
 
 # ---------------------------------------------------------------------------

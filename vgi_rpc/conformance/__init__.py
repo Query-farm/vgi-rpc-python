@@ -35,12 +35,15 @@ from vgi_rpc.conformance._types import (
     DeepNested,
     EmbeddedArrow,
     NestedContainers,
+    ObjectCacheStatsResult,
     Point,
     RichHeader,
+    StateRefExchangeState,
     Status,
     WideTypes,
     build_dynamic_schema,
     build_rich_header,
+    state_ref_payload,
 )
 
 __all__ = [
@@ -57,8 +60,10 @@ __all__ = [
     "EmbeddedArrow",
     "LogCollector",
     "NestedContainers",
+    "ObjectCacheStatsResult",
     "Point",
     "RichHeader",
+    "StateRefExchangeState",
     "Status",
     "WideTypes",
     "build_dynamic_schema",
@@ -67,4 +72,5 @@ __all__ = [
     "list_describe_conformance_tests",
     "run_conformance",
     "run_describe_conformance",
+    "state_ref_payload",
 ]

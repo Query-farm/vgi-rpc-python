@@ -28,6 +28,7 @@ from ._types import (
     DeepNested,
     EmbeddedArrow,
     NestedContainers,
+    ObjectCacheStatsResult,
     Point,
     RichHeader,
     Status,
@@ -618,5 +619,50 @@ class ConformanceService(Protocol):
 
         Each turn emits a single one-row batch with the post-update
         value of the counter bound via ``ctx.session``.
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # StateRef, the object cache and argument references (protocol 3.4)
+    # ------------------------------------------------------------------
+    #
+    # STATE_REF_V1.md §15.  Every port implements all four; the shared suite
+    # (vgi_rpc.conformance._state_ref_pytest) drives them over raw HTTP.
+
+    def state_ref_exchange(
+        self, size: int, compressible: bool, seed: str, misuse: bool, cursor_padding: int
+    ) -> Stream[ExchangeState]:
+        """Hold a ``StateRef`` of ``state_ref_payload(size, compressible, seed)`` and resolve it per exchange.
+
+        The init handler calls ``ctx.state_ref`` on the payload and keeps the
+        ref in the cursor, plus ``cursor_padding`` incompressible bytes
+        (``state_ref_payload(cursor_padding, False, seed + ":padding")``)
+        held directly in the cursor.  Input ``{override: binary}``: when a row
+        carries a non-null ``override``, that raw ``StateRef`` is resolved
+        instead of the stream's own.  Output, one row per exchange:
+        ``{size: int64, sha256: utf8, form: utf8, ref: binary}`` -- size and
+        SHA-256 of the resolved bytes, and the stream's own ref's form
+        (``memory`` / ``inline`` / ``stored``) and encoded bytes (null while
+        in memory).  With ``misuse`` every exchange calls ``ctx.state_ref``,
+        which must fail with ``state_ref_misuse``.
+        """
+        ...
+
+    def object_cache_stats(self) -> ObjectCacheStatsResult:
+        """Return this worker process's object-cache counters."""
+        ...
+
+    def object_cache_age(self, seconds: int) -> int:
+        """Move every object-cache entry's ``fetched_at`` back by ``seconds``; return how many (test hook)."""
+        ...
+
+    def resolve_argument_ref(self, ref: bytes, size: int, sha256: str) -> str:
+        """Resolve an argument reference minted by this worker's ``__upload_url__`` grant.
+
+        Opens ``ref`` under the caller's principal, checks its sealed size and
+        SHA-256 equal ``size`` and ``sha256``, fetches through the object
+        cache and verifies.  Returns the SHA-256 hex of the fetched bytes.
+        Failures carry the kinds ``invalid_arguments_ref``,
+        ``arguments_ref_integrity`` and ``arguments_ref_missing``.
         """
         ...

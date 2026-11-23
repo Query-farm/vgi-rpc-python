@@ -32,6 +32,8 @@ from ._types import (
     _SCALE_OUTPUT_SCHEMA,
     _SESSION_COUNTER_EXCHANGE_INPUT_SCHEMA,
     _SESSION_COUNTER_OUTPUT_SCHEMA,
+    STATE_REF_INPUT_SCHEMA,
+    STATE_REF_OUTPUT_SCHEMA,
     AccumulatingExchangeState,
     AllTypes,
     AnnotatedProducerState,
@@ -53,6 +55,7 @@ from ._types import (
     LoggingExchangeState,
     LoggingProducerState,
     NestedContainers,
+    ObjectCacheStatsResult,
     OversizedBatchState,
     OversizedExchangeState,
     Point,
@@ -61,6 +64,7 @@ from ._types import (
     SessionCounterExchangeState,
     SessionCounterProducerState,
     SingleProducerState,
+    StateRefExchangeState,
     Status,
     TickMetadataState,
     WideTypes,
@@ -69,6 +73,7 @@ from ._types import (
     _StickyCounter,
     build_dynamic_schema,
     build_rich_header,
+    state_ref_payload,
 )
 
 # Reusable schemas
@@ -697,3 +702,56 @@ class ConformanceServiceImpl:
             state=SessionCounterExchangeState(),
             input_schema=_SESSION_COUNTER_EXCHANGE_INPUT_SCHEMA,
         )
+
+    # ------------------------------------------------------------------
+    # StateRef, the object cache and argument references (protocol 3.4)
+    # ------------------------------------------------------------------
+
+    def state_ref_exchange(
+        self,
+        size: int,
+        compressible: bool,
+        seed: str,
+        misuse: bool,
+        cursor_padding: int,
+        ctx: CallContext | None = None,
+    ) -> Stream[StateRefExchangeState]:
+        """Wrap the payload in a ``StateRef`` here, in the init handler, and resolve it per exchange."""
+        if ctx is None:
+            raise RuntimeError("state_ref_exchange needs a CallContext")
+        value = ctx.state_ref(state_ref_payload(size, compressible, seed))
+        padding = state_ref_payload(cursor_padding, False, f"{seed}:padding")
+        return Stream(
+            output_schema=STATE_REF_OUTPUT_SCHEMA,
+            state=StateRefExchangeState(value=value, padding=padding, misuse=misuse),
+            input_schema=STATE_REF_INPUT_SCHEMA,
+        )
+
+    def object_cache_stats(self) -> ObjectCacheStatsResult:
+        """Return the process-wide object cache's counters."""
+        from vgi_rpc.object_cache import default_object_cache
+
+        stats = default_object_cache().stats()
+        return ObjectCacheStatsResult(
+            resident_bytes=stats.resident_bytes,
+            entries=stats.entries,
+            max_bytes=stats.max_bytes,
+            hits=stats.hits,
+            misses=stats.misses,
+            evictions=stats.evictions,
+            fetches=stats.fetches,
+        )
+
+    def object_cache_age(self, seconds: int) -> int:
+        """Age every object-cache entry (test hook for the one-day rule)."""
+        from vgi_rpc.object_cache import default_object_cache
+
+        return default_object_cache().age_entries(float(seconds))
+
+    def resolve_argument_ref(self, ref: bytes, size: int, sha256: str, ctx: CallContext | None = None) -> str:
+        """Resolve an argument reference through the framework primitive; return the bytes' SHA-256 hex."""
+        import hashlib
+
+        if ctx is None:
+            raise RuntimeError("resolve_argument_ref needs a CallContext")
+        return hashlib.sha256(ctx.resolve_argument_ref(ref, size=size, sha256=sha256)).hexdigest()

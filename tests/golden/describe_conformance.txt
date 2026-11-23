@@ -1,8 +1,8 @@
 # Golden reflection description — see tests/test_describe_golden.py
 protocol: ConformanceService
 protocol_version: 2.0.0
-protocol_hash: 05479410c96f34410a2b10a4f6a49d59dcfd9d6d1d45ce9a9807d060a3bd6014
-method_count: 90
+protocol_hash: 22426518ead543d7e8ca3903280815d5855b9450f46739790fe66804c7e77331
+method_count: 94
 
 add_floats
   method_type: unary
@@ -712,6 +712,28 @@ inspect_point
   result:
       result: string not null
 
+object_cache_age
+  method_type: unary
+  has_return: True
+  has_header: False
+  stream_kind: (n/a)
+  idempotency: unknown
+  params:
+      seconds: int64 not null
+  result:
+      result: int64 not null
+
+object_cache_stats
+  method_type: unary
+  has_return: True
+  has_header: False
+  stream_kind: (n/a)
+  idempotency: unknown
+  params:
+      (empty)
+  result:
+      result: binary not null
+
 open_counter
   method_type: unary
   has_return: True
@@ -960,6 +982,34 @@ reset_cancel_probe
   idempotency: unknown
   params:
       (empty)
+  result:
+      (empty)
+
+resolve_argument_ref
+  method_type: unary
+  has_return: True
+  has_header: False
+  stream_kind: (n/a)
+  idempotency: unknown
+  params:
+      ref: binary not null
+      size: int64 not null
+      sha256: string not null
+  result:
+      result: string not null
+
+state_ref_exchange
+  method_type: stream
+  has_return: False
+  has_header: False
+  stream_kind: exchange
+  idempotency: unknown
+  params:
+      size: int64 not null
+      compressible: bool not null
+      seed: string not null
+      misuse: bool not null
+      cursor_padding: int64 not null
   result:
       (empty)
 

@@ -27,6 +27,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from vgi_rpc.state_ref import StateRef
 from vgi_rpc.utils import ArrowSerializableDataclass, _is_transient_field
 
 # Import modules that define dataclasses so __subclasses__() can find them.
@@ -70,6 +71,9 @@ def _simple_batch() -> st.SearchStrategy[pa.RecordBatch]:
 
 
 def _scalar_strategy(py_type: object, at: pa.DataType) -> st.SearchStrategy[object]:
+    if py_type is StateRef:
+        # An encoded inline ref: compares by its encoded bytes, which it re-emits unchanged.
+        return st.binary(max_size=16).map(lambda b: StateRef.deserialize_from_bytes(b"\x01\x00" + b))
     if pa.types.is_dictionary(at):
         at = at.value_type
     if py_type is pa.Schema:
