@@ -63,6 +63,11 @@ test lanes in any language (e.g. read from SQL with ``read_json_auto``):
   :meth:`~FakeVendor.set_upload_fault`), so the store's checksum check
   refuses them with ``400 BadDigest``; server writes (results, function
   storage) are never touched. It also replaces any armed upload fault.
+* ``GET /__admin__/delete?origin=client_upload|state_ref`` deletes every
+  object granted with that ``origin`` (client uploads / argument objects, or
+  stored ``StateRef`` objects) and returns ``{"ok": true, "deleted": N}``:
+  a stand-in for the bucket lifecycle, so a test can make a reference
+  "missing" (``arguments_ref_missing`` / ``state_ref_missing``).
 * ``GET /__admin__/reset`` clears every fault (armed, applied and
   :meth:`~FakeVendor.fail_next`).
 
@@ -161,6 +166,8 @@ _UPLOAD_FAULT_PURPOSE = "upload"
 CLIENT_UPLOAD_ORIGIN = "client_upload"
 #: ``origin`` of a ``/v1/blobs/put`` grant for a stored ``StateRef`` object.
 STATE_REF_ORIGIN = "state_ref"
+#: Origins ``/__admin__/delete`` accepts.
+_DELETE_ORIGINS = (CLIENT_UPLOAD_ORIGIN, STATE_REF_ORIGIN)
 
 
 @dataclass
@@ -315,6 +322,32 @@ class FakeVendor:
             raise ValueError(f"count must be >= 0, got {count}")
         with self._lock:
             self._upload_corruptions = count
+
+    def delete_by_origin(self, origin: str) -> int:
+        """Delete every object granted with *origin* (stands in for bucket lifecycle).
+
+        Args:
+            origin: ``"client_upload"`` (argument / request uploads) or
+                ``"state_ref"`` (stored ``StateRef`` objects).
+
+        Returns:
+            How many objects were deleted.
+
+        Raises:
+            ValueError: On another origin.
+
+        """
+        if origin not in _DELETE_ORIGINS:
+            raise ValueError(f"origin must be one of {_DELETE_ORIGINS}, got {origin!r}")
+        with self._lock:
+            doomed = [
+                key
+                for key, obj in self._objects.items()
+                if (obj.client_upload if origin == CLIENT_UPLOAD_ORIGIN else obj.state_ref)
+            ]
+            for key in doomed:
+                del self._objects[key]
+        return len(doomed)
 
     def reset_faults(self) -> None:
         """Clear armed and applied download and upload faults and :meth:`fail_next` faults."""
@@ -533,6 +566,12 @@ class FakeVendor:
                 else:
                     self.set_download_fault(purpose, action, count)
             body = {"ok": True, "purpose": purpose, "action": action, "count": count}
+        elif path == "/__admin__/delete":
+            origin = parse_qs(str(environ.get("QUERY_STRING", ""))).get("origin", [""])[0]
+            if origin not in _DELETE_ORIGINS:
+                return _error(start_response, 400, "bad_request", "need origin=client_upload|state_ref")
+            deleted = self.delete_by_origin(origin) if effect else 0
+            body = {"ok": True, "deleted": deleted}
         else:
             return _error(start_response, 404, "not_found", "no such route")
         payload = json.dumps(body).encode()

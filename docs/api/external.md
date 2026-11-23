@@ -482,6 +482,10 @@ body padded to 1,024 bytes, and a `HEAD` has no side effects:
   next `N` objects of that purpose that are downloaded are damaged for every
   later `GET`. `corrupt` keeps the length and changes every byte; `missing`
   answers 404.
+- `GET /__admin__/delete?origin=client_upload|state_ref`: deletes every
+  object granted with that origin (argument/request uploads, or stored
+  `StateRef` objects) and returns `{"ok": true, "deleted": N}`, standing in
+  for the bucket lifecycle so a test can make a reference "missing".
 - `GET /__admin__/fault?purpose=upload&action=corrupt&count=N`: the next `N`
   signed PUTs of client uploads are damaged in transit, so the store refuses
   them with `400 BadDigest`. Server writes are never touched.

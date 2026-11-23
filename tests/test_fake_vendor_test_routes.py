@@ -349,3 +349,20 @@ def test_cli_logs_stop_signal_and_sender() -> None:
     else:
         assert "received SIGTERM" in err
     assert 'final counters {"puts":0,' in err
+
+
+def test_admin_delete_by_origin(fake: FakeVendorServer) -> None:
+    """``/__admin__/delete?origin=`` deletes exactly the objects of that origin; the object then reads missing."""
+    from vgi_rpc.external import ObjectMissingError
+
+    body = b"argument object"
+    with VendorStorage(fake.url, _TOKEN, backoff_seconds=0.0) as storage:
+        state_id = storage.put_object(b"state object")
+        pair = storage.generate_upload_url(len(body), hashlib.sha256(body).hexdigest())
+        assert storage_put(pair.upload_url, body, headers=dict(pair.headers)).status_code == 200
+        assert _get(fake, "/__admin__/delete?origin=client_upload") == {"ok": True, "deleted": 1}
+        with pytest.raises(ObjectMissingError):
+            storage.get(pair.object_id)
+        assert storage.get(state_id) == b"state object"
+        assert _get(fake, "/__admin__/delete?origin=state_ref")["deleted"] == 1
+    assert httpx2.get(fake.url + "/__admin__/delete?origin=nope", timeout=10.0).status_code == 400
