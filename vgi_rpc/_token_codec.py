@@ -22,17 +22,22 @@ other       --                                  reserved; refused
 ==========  ==================================  ====================================
 
 A reader must accept every codec its own writer can emit.  This writer emits
-``0x00`` and ``0x01``; the reader also accepts ``0x02`` so payloads from a
-DEFLATE-only writer sharing this process's key (a test, a future port of the
-same server) still open.
+``0x00`` and ``0x01`` (``0x02`` when ``zstandard`` is not installed); the
+reader accepts all three.
+
+``zstandard`` ships in the ``http`` and ``external`` extras, so it is imported
+lazily: a bare install imports ``vgi_rpc`` and runs the byte-stream
+transports (which never seal anything) without it.
 """
 
 from __future__ import annotations
 
 import threading
 import zlib
+from typing import TYPE_CHECKING, Any
 
-import zstandard
+if TYPE_CHECKING:
+    import zstandard
 
 __all__ = [
     "CODEC_DEFLATE",
@@ -69,18 +74,27 @@ class TokenCodecError(ValueError):
     """A payload carries an unknown codec tag or does not decompress."""
 
 
+def _zstandard() -> Any:
+    """Return the ``zstandard`` module, or ``None`` when it is not installed."""
+    try:
+        import zstandard as module
+    except ImportError:  # pragma: no cover - exercised by installs without [http]
+        return None
+    return module
+
+
 def _compressor() -> zstandard.ZstdCompressor:
-    codec = getattr(_codecs, "compressor", None)
+    codec: zstandard.ZstdCompressor | None = getattr(_codecs, "compressor", None)
     if codec is None:
-        codec = zstandard.ZstdCompressor(level=_ZSTD_LEVEL)
+        codec = _zstandard().ZstdCompressor(level=_ZSTD_LEVEL)
         _codecs.compressor = codec
     return codec
 
 
 def _decompressor() -> zstandard.ZstdDecompressor:
-    codec = getattr(_codecs, "decompressor", None)
+    codec: zstandard.ZstdDecompressor | None = getattr(_codecs, "decompressor", None)
     if codec is None:
-        codec = zstandard.ZstdDecompressor()
+        codec = _zstandard().ZstdDecompressor()
         _codecs.decompressor = codec
     return codec
 
@@ -92,14 +106,19 @@ def pack(plaintext: bytes) -> bytes:
         plaintext: The bytes to pack.
 
     Returns:
-        ``0x01 || zstd(plaintext)`` when that is shorter than *plaintext*,
-        else ``0x00 || plaintext`` -- so a small payload never grows by more
-        than the tag byte.
+        ``0x01 || zstd(plaintext)`` (``0x02 || deflate(plaintext)`` without
+        ``zstandard``) when that is shorter than *plaintext*, else
+        ``0x00 || plaintext`` -- so a small payload never grows by more than
+        the tag byte.
 
     """
-    packed = _compressor().compress(plaintext)
+    if _zstandard() is not None:
+        tag, packed = CODEC_ZSTD, _compressor().compress(plaintext)
+    else:
+        deflater = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+        tag, packed = CODEC_DEFLATE, deflater.compress(plaintext) + deflater.flush()
     if len(packed) < len(plaintext):
-        return bytes((CODEC_ZSTD,)) + packed
+        return bytes((tag,)) + packed
     return bytes((CODEC_RAW,)) + plaintext
 
 
@@ -126,18 +145,21 @@ def unpack(data: bytes, max_output_bytes: int = MAX_TOKEN_PLAINTEXT_BYTES) -> by
             raise TokenCodecError("payload exceeds the decompression bound")
         return bytes(body)
     if tag == CODEC_ZSTD:
+        zstd = _zstandard()
+        if zstd is None:
+            raise TokenCodecError("zstd payload, but zstandard is not installed (pip install 'vgi-rpc[http]')")
         # ``max_output_size`` bounds only frames that do not declare their
         # content size; a frame that declares one is decompressed to that size
         # whatever the bound.  So check the declared size first.
         try:
-            declared = zstandard.frame_content_size(body)
-        except zstandard.ZstdError as exc:
+            declared = zstd.frame_content_size(body)
+        except zstd.ZstdError as exc:
             raise TokenCodecError("zstd body does not decompress") from exc
         if declared > max_output_bytes:
             raise TokenCodecError("payload exceeds the decompression bound")
         try:
             out = _decompressor().decompress(body, max_output_size=max_output_bytes)
-        except zstandard.ZstdError as exc:
+        except zstd.ZstdError as exc:
             raise TokenCodecError("zstd body does not decompress") from exc
         if len(out) > max_output_bytes:
             raise TokenCodecError("payload exceeds the decompression bound")

@@ -16,6 +16,29 @@ env:
 
 
 jobs:
+  bare-install:
+    # vgi-rpc with no extras: `import vgi_rpc` and the byte-stream transports
+    # must work, and so must the fake vendor's console script (other repos'
+    # lanes run it via `uvx --from git+...` without extras).
+    name: Bare install (no extras)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+
+      - name: Install vgi-rpc without extras
+        run: |
+          uv venv --python 3.13 /tmp/bare
+          VIRTUAL_ENV=/tmp/bare uv pip install .
+
+      - name: Import, pipe stream with a StateRef, fake vendor --help
+        run: |
+          /tmp/bare/bin/python -I -c "import vgi_rpc, vgi_rpc.state_ref, vgi_rpc.object_cache"
+          /tmp/bare/bin/python -I scripts/check_bare_install.py
+          /tmp/bare/bin/vgi-rpc-fake-vendor --help
+
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     needs: lint

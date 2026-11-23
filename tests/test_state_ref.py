@@ -137,6 +137,16 @@ class TestTokenCodec:
         assert packed[0] == _token_codec.CODEC_ZSTD and len(packed) < 100
         assert _token_codec.unpack(packed) == b"a" * 4096
 
+    def test_without_zstandard_the_writer_uses_deflate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bare install (no zstandard) packs with DEFLATE and refuses zstd payloads clearly."""
+        zstd_packed = _token_codec.pack(b"c" * 4096)
+        monkeypatch.setattr(_token_codec, "_zstandard", lambda: None)
+        packed = _token_codec.pack(b"c" * 4096)
+        assert packed[0] == _token_codec.CODEC_DEFLATE and len(packed) < 100
+        assert _token_codec.unpack(packed) == b"c" * 4096
+        with pytest.raises(_token_codec.TokenCodecError, match=r"vgi-rpc\[http\]"):
+            _token_codec.unpack(zstd_packed)
+
     def test_tiny_payload_stays_raw(self) -> None:
         """Tiny payload stays raw."""
         assert _token_codec.pack(b"xy") == b"\x00xy"
