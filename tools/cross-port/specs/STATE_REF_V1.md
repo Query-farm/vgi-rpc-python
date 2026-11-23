@@ -98,6 +98,13 @@ only for that init turn; it is not a cross-stream cache. (Parallel streams
 on one large init each store their own object in 3.4; sharing across a
 query's streams is deferred.)
 
+A `StateRef` belongs to exactly one stream: its tag is bound to that stream's
+`call_id` (§4), so a ref MUST NOT be shared across streams (a ref copied into
+another stream's state fails `invalid_state_ref`). **State transitions copy
+the ref; they never call `state_ref()` again.** Frameworks MUST therefore
+build any framework-owned ref (the vgi `init`) in the init handler, and MUST
+NOT build stream state lazily on the first exchange, which is a continuation.
+
 ## 3. `StateRef`: encoding (byte layouts)
 
 A `StateRef` field serializes as a byte string. The first byte is the
@@ -116,7 +123,8 @@ payload := codec (1 byte) || body
 ```
 
 `codec` and `body` follow the token codec standard (§7): `0x00` raw,
-`0x01` zstd, `0x02` deflate. The writer MUST compress when the compressed
+`0x01` zstd, `0x02` deflate (a reader must accept every codec its own writer
+can emit). The writer MUST compress when the compressed
 form is smaller and MUST use raw otherwise. The decompressed body is the
 value's serialized bytes. Readers MUST cap decompression at 64 MiB **or**
 the server's `max_fetch_bytes`, whichever is larger (a stored value can be
@@ -168,6 +176,13 @@ object_bytes := crypto.seal_bytes(payload, token_key,
 
 uploaded once with `put_object(object_bytes)` (§10). `size` and `sha256` in
 the tag describe `object_bytes`.
+
+**Why the tag carries `size` and `sha256`:** every `StateRef` object of one
+stream is sealed under the same `STATEREF_OBJECT_AAD` (it binds the stream,
+not the individual ref). Without a digest, anyone able to write the bucket
+could swap two of a stream's objects (say, a worker's own ref and the `init`)
+and each would still open. The digest in the sealed tag pins each tag to
+exactly one object; it is checked before the object is opened (§5.3).
 
 ## 4. Sealing scopes and AAD
 
@@ -269,17 +284,31 @@ inline  otherwise
       `invalid_state_ref`), decompress the payload, insert into the cache,
       return.
 
-### 5.4 SDKs whose HTTP streams are stateful in process
+### 5.4 C#, C++ and C: single-replica in 3.4 (decided)
 
 vgi-rpc-csharp and vgi-rpc-cpp keep HTTP stream state in an in-memory
 registry and seal only a 16-byte call id into the token; vgi-c runs its
-streams stateful in process. For them, as on pipe, every `StateRef` is inline
-and held in memory, `state_ref`/`resolve` still work (so worker code is
-portable), and nothing is stored. The rest of this spec applies to them as
-soon as they serialize stream state into tokens; in particular they MUST NOT
-put an init request into the call token (vgi-rpc-c's stateless mode does,
-`src/http.c` `call_token`), and the codec rule (§7) applies to any token that
-carries serialized state.
+streams stateful in process. **They stay that way for 3.4**; stateless
+continuations are post-3.4. In 3.4, for these three SDKs:
+
+- every `StateRef` is **in-memory and inline only**, as on pipe;
+  `state_ref` / `resolve` work (so worker code is portable), nothing is ever
+  stored, sealed per turn or fetched;
+- the cursor rule (§9), tag expiry (§5.3) and the call token's `schemas_ref`
+  (§8) do not apply (there is no serialized state);
+- the shared conformance tests that need stored tags, cross-replica
+  behaviour, the cursor rule or tag expiry (§15: 1 stored half, 2, 3, 5, 10)
+  are **capability-gated skips** for them, and each lane MUST list those
+  skips with their reason in its expected-skip list (`EXPECTED_SKIP_REASONS`),
+  so a skip that is not on the list fails the lane;
+- Phase 5 claims no cross-replica behaviour for them;
+- they still implement `put_object` / `get(object_id)`, grant `object_id` /
+  `ref`, argument-reference resolution and the object cache (§10, §11).
+
+When they do go stateless (post-3.4), the whole spec applies; in particular
+they MUST NOT put an init request into the call token (vgi-rpc-c's stateless
+mode does, `src/http.c` `call_token`), and the codec rule (§7) applies to every
+token that carries serialized state.
 
 ### 5.5 Lifetime
 
@@ -312,9 +341,9 @@ payloads of §3.1) is **compressed, then sealed**: once sealed, a token is
 ciphertext and no outer codec can find its redundancy. This is the format
 Python (`_state_token.py`, `_pack_plaintext`), Go (`http_state.go`), Rust
 (`http.rs`), Java (`StateToken.java`), C (`token.c`) and the TS call token
-already use. It is now the standard, and **C# and C++ MUST adopt it** for
-every token that carries serialized state (today their tokens carry only a
-16-byte call id, §5.4, so the requirement bites when they go stateless).
+already use. It is now the standard. **C# and C++** have nothing to compress
+in 3.4: their tokens carry only a 16-byte call id and they stay single-replica
+(§5.4). They MUST adopt the codec when they go stateless (post-3.4).
 **TypeScript MUST extend it to its cursor token**: today
 vgi-rpc-typescript compresses only the call token body (`src/http/token.ts`,
 `packCallToken`) and seals the cursor raw (`packStateToken`).
@@ -327,8 +356,12 @@ sealed_payload := codec (1 byte) || body
 |---|---|---|
 | `0x00` | raw framed plaintext | MUST be used when compression does not make it smaller: a small token never grows |
 | `0x01` | zstd frame | the default; reference level 3 |
-| `0x02` | raw DEFLATE (RFC 1951) | only for runtimes without zstd |
+| `0x02` | raw DEFLATE (RFC 1951) | for runtimes without zstd |
 | other | — | reserved; MUST be rejected |
+
+**A reader MUST accept every codec its own writer can emit**, and MUST reject
+tags it does not implement. `0x02` is needed only by SDKs that emit it; an SDK
+that writes only `0x00`/`0x01` need not implement DEFLATE.
 
 Requirements (unchanged from `WIRE_PROTOCOL.md` § *Compression happens inside
 the seal*, now with fixed tag values):
@@ -337,7 +370,7 @@ the seal*, now with fixed tag values):
 - bound decompressed output (64 MiB for tokens; §3.1 for `StateRef` values);
 - an unknown codec or a body that fails to decompress is the same uniform
   `400 Bad Request` as any other token failure. (vgi-rpc-c's open path treats any
-  non-zero tag as zstd, `src/token.c`; it MUST reject unknown tags.)
+  non-zero tag as zstd, `src/token.c:97`; it MUST reject unknown tags.)
 
 No cross-SDK token compatibility is required (a token is minted and opened by
 the same server); the fixed tag values only make ports reviewable against one
@@ -406,9 +439,13 @@ state_ref_inline_bytes = min(VGI_RPC_STATE_REF_INLINE_BYTES, floor(turn_budget /
   default **16384**; must be a positive integer, else startup fails. Phase 0
   confirmed the default: typical inits compress to 2–5 KB; 16 KiB is crossed
   at about 1,300 output columns or 1,400 random 64-bit IN/join keys.
-- **Floor and sanity:** a configured `max_request_bytes` below **16384** is
-  refused at server startup with
-  `max_request_bytes (N) is below the 16384-byte minimum: stream continuations could not carry their state`.
+- **Floor:** a configured `max_request_bytes` below **16384** is not refused
+  (conformance and test servers deliberately use 900–9000-byte caps). The
+  server logs a startup **warning**,
+  `max_request_bytes (N) is below 16384: the cursor rule is disabled and stream continuations may not fit`,
+  and **disables the cursor rule** (no `cursor_large` / `cursor_too_large`) for
+  its lifetime. `state_ref_inline_bytes` is still computed by the formula
+  (floored at 0, so everything over-limit is stored when storage exists).
   vgi-rpc-cpp today advertises its externalization threshold (default 4096)
   as `VGI-Max-Request-Bytes` when no request cap is set
   (`src/http_transport.cpp`); it MUST stop doing that, since the advertised cap
@@ -482,7 +519,18 @@ The server mints `ref` from the **claimed** `(size, sha256)` without seeing the
 bytes; storage enforces them on the PUT (where it can), and the resolver
 verifies them on the GET. There is no `created_at` and no expiry check on an
 argument reference: a prepared statement may re-send it until the object is
-deleted by lifecycle (the vgi spec defines that error).
+deleted by lifecycle, or until a replica's cache entry ages out (§11; the vgi
+spec defines that error). Consequence: **on an unauthenticated worker an
+argument reference is a bearer capability for about 1–2 days** (bucket
+lifecycle ≥ 1 day, asynchronous), for anyone who obtains it.
+
+**Same principal for grant and use.** `ARGREF_AAD` is computed from the
+`AuthContext` of the `__upload_url__/init` request and again from that of the
+request presenting the ref. A server MUST authenticate `__upload_url__/init`
+exactly as it authenticates its protocol methods (same authenticators, same
+peer-evidence binding digest, same anonymous fallback), so the two
+`AuthContext`s agree for the same client. A shared conformance test (§15, 13)
+checks it.
 
 `UploadUrlProvider.generate_upload_url(size, sha256_hex)` returns the
 `object_id` alongside the URLs (Python: `UploadUrl.object_id: str`). Every
@@ -535,8 +583,14 @@ no caching.
    it up again on use. Resident bytes are then bounded by the cache alone; a
    memo that pins the value defeats the bound. (No per-turn memo is required,
    see §11.1.)
-5. Cached values are the verified, opened, decompressed bytes. Entries do not
-   expire by time; eviction is by size only.
+5. Cached values are the verified, opened, decompressed bytes. Eviction is by
+   size (LRU), plus one age rule:
+6. **`fetched_at`.** Each entry records when it was fetched. A hit on an entry
+   fetched more than **1 day** ago (the lifecycle bound, §5.5) is treated as a
+   miss and re-fetched, so a cache can never outlive the object it mirrors by
+   more than the lifecycle allows. User-visible consequence (vgi spec §5a): a
+   prepared statement's large argument may fail at any time after 1 day,
+   identically on every replica.
 
 ### 11.1 No per-turn parse memo (decision 3)
 
@@ -630,7 +684,20 @@ Added to `vgi_rpc/conformance` (and so to every SDK's runner):
 11. Grant columns: `__upload_url__/init` returns `object_id` and a `ref` that
     the server's resolve primitive accepts for the uploaded bytes and refuses
     for a wrong size/sha256 or after the object is deleted (missing).
-12. `max_request_bytes` below 16384 is refused at startup.
+12. `max_request_bytes` below 16384 starts, logs the warning, and never emits
+    `cursor_large` / `cursor_too_large`.
+13. `__upload_url__/init` is authenticated exactly like a protocol method:
+    with each authenticator the runner supports (incl. peer evidence), a ref
+    minted by the grant opens in a `bind`-style call by the same client, and is
+    refused (`invalid_arguments_ref`-equivalent) for a different principal; an
+    unauthenticated grant on a server that requires auth is refused like any
+    unauthenticated call.
+14. Object cache age: with the clock advanced past 1 day, a cached entry is
+    re-fetched (a deleted object then reports missing).
+
+Tests 1 (stored half), 2, 3, 5 and 10 need serialized stream state; SDKs that
+are single-replica in 3.4 (C#, C++, C; §5.4) skip them by capability and list
+them in their lane's expected-skip list.
 
 Language-local tests (not observable via the shared suite): the codec tag on
 the seal path, and that a stored ref re-serializes to identical bytes without a
