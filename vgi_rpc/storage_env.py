@@ -149,6 +149,18 @@ def _url_ttl(env: Mapping[str, str]) -> int:
     return value
 
 
+def _require(module: str, extra: str) -> None:
+    """Fail at startup, with the install hint, when a backend's client library is missing."""
+    import importlib.util
+
+    try:
+        found = importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:
+        found = False
+    if not found:
+        raise ImportError(f"{ENV_BACKEND}={extra} needs {module}: pip install 'vgi-rpc[{extra}]' (or 'vgi[{extra}]')")
+
+
 def _resolve(env: Mapping[str, str] | None) -> Mapping[str, str]:
     return os.environ if env is None else env
 
@@ -212,6 +224,7 @@ def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
     """
     from vgi_rpc.s3 import S3Storage
 
+    _require("boto3", "s3")
     environ = _resolve(env)
     bucket = _get(environ, ENV_S3_BUCKET)
     if not bucket:
@@ -273,6 +286,7 @@ def gcs_storage_from_env(env: Mapping[str, str] | None = None) -> GCSStorage:
     """
     from vgi_rpc.gcs import GCSStorage
 
+    _require("google.cloud.storage", "gcs")
     environ = _resolve(env)
     bucket = _get(environ, ENV_GCS_BUCKET)
     if not bucket:

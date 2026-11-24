@@ -79,6 +79,8 @@ class GCSStorage:
         credentials_file: Service-account key file; ``None`` uses
             Application Default Credentials (``GOOGLE_APPLICATION_CREDENTIALS``,
             workload identity, the metadata server).
+        verify_bucket: Check the bucket exists before first use
+            (:meth:`verify`).
         upload_floor_bytes_per_second: google-cloud-storage writes each
             upload request (at most 8 MiB) as one timed socket write, so an
             upload's read timeout is raised to cover a full request at this
@@ -98,10 +100,10 @@ class GCSStorage:
     presign_expiry_seconds: int = 3600
     project: str | None = None
     stall_timeout_seconds: float | None = None
-    upload_floor_bytes_per_second: int = STORAGE_FLOOR_BYTES_PER_SECOND
     endpoint_url: str | None = field(default=None, repr=False)
     credentials_file: str | None = field(default=None, repr=False)
     verify_bucket: bool = False
+    upload_floor_bytes_per_second: int = STORAGE_FLOOR_BYTES_PER_SECOND
     _pool: _GCSPool = field(default_factory=_GCSPool, init=False, repr=False, compare=False, hash=False)
 
     def _get_client(self) -> Any:

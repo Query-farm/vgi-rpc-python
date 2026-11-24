@@ -140,15 +140,15 @@ class S3Storage:
     presign_expiry_seconds: int = 3600
     region_name: str | None = None
     endpoint_url: str | None = field(default=None, repr=False)
-    addressing_style: Literal["auto", "path", "virtual"] | None = None
-    stall_timeout_seconds: float | None = None
     public_endpoint_url: str | None = field(default=None, repr=False)
+    addressing_style: Literal["auto", "path", "virtual"] | None = None
     access_key_id: str | None = field(default=None, repr=False)
     secret_access_key: str | None = field(default=None, repr=False)
     session_token: str | None = field(default=None, repr=False)
     checksum: Literal["sha256", "none"] = "sha256"
     request_checksum_calculation: Literal["when_supported", "when_required"] | None = None
     verify_bucket: bool = False
+    stall_timeout_seconds: float | None = None
     _pool: _S3Pool = field(default_factory=_S3Pool, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
