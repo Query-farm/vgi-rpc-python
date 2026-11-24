@@ -86,7 +86,7 @@ def test_an_unrecognised_code_reads_as_unknown(raw: object) -> None:
         (MethodNotImplementedError("x"), "method_not_implemented", Code.UNIMPLEMENTED),
         (ProtocolNotSupportedError("x"), "protocol_not_supported", Code.UNIMPLEMENTED),
         (ProtocolNotSpecifiedError("x"), "protocol_not_specified", Code.INVALID_ARGUMENT),
-        (ProtocolVersionError("x"), "protocol_version_mismatch", Code.FAILED_PRECONDITION),
+        (ProtocolVersionError("x"), "protocol_version_unsupported", Code.FAILED_PRECONDITION),
         (SessionLostError("x"), "session_lost", Code.ABORTED),
         (ServerDrainingError("x"), "server_draining", Code.UNAVAILABLE),
         (IdentityUnavailableError("x"), "identity_unavailable", Code.UNAVAILABLE),

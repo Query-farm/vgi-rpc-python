@@ -18,6 +18,7 @@ import falcon
 
 from vgi_rpc.external import UploadUrlProvider
 from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
+from vgi_rpc.protocol_versions import PROTOCOL_VERSIONS_HEADER
 from vgi_rpc.rpc import AuthContext, PeerAuthenticationPolicy, PeerIdentityProvider, RpcServer
 from vgi_rpc.state_ref import DEFAULT_TOKEN_TTL_SECONDS, CursorRule, state_ref_inline_bytes_from_env
 
@@ -642,6 +643,14 @@ def make_wsgi_app(
 
     # Build capability headers
     capability_headers: dict[str, str] = {}
+    # Protocol version negotiation (PROTOCOL_VERSIONS_V1.md §4.1): every
+    # response -- 401, 404, 413, 5xx, HEAD /health and preflights included --
+    # names the major.minor window of every protocol this server gates, so a
+    # client learns what to speak from whatever it sees first.  Emitted even
+    # when empty: present-but-empty is "negotiates, gates nothing", absent is a
+    # server released before negotiation.
+    capability_headers[PROTOCOL_VERSIONS_HEADER] = server.protocol_versions
+    cors_expose.append(PROTOCOL_VERSIONS_HEADER)
     if effective_max_request_bytes is not None:
         capability_headers[MAX_REQUEST_BYTES_HEADER] = str(effective_max_request_bytes)
         cors_expose.append(MAX_REQUEST_BYTES_HEADER)

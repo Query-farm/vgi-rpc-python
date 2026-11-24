@@ -10,6 +10,11 @@ apply is everything the secondary says about itself and about the error model,
 plus the one assertion only the worker's author can state: *which* protocols
 it hosts, in which order.
 
+It also runs the server half of protocol version negotiation
+(``PROTOCOL_VERSIONS_V1.md`` §9): the advertisement on every response and in
+reflection, and the ``protocol_version_unsupported`` refusal, against whatever
+protocols the worker gates.
+
 This module is collected by :mod:`vgi_rpc.conformance.hosted_protocols`
 (``vgi-rpc-test-hosted``), which passes its configuration through environment
 variables, so a pytest run here is one worker on one transport:
@@ -35,6 +40,11 @@ from urllib.parse import urlparse
 import pytest
 
 from vgi_rpc._command import split_command
+from vgi_rpc.conformance._protocol_versions_pytest import (  # noqa: F401 -- collected by pytest
+    TestDescribeAdvertisesVersions,
+    TestOutOfRangeRefusal,
+    TestVersionsHeader,
+)
 from vgi_rpc.conformance._secondary_pytest import (  # noqa: F401 -- collected by pytest
     ProtocolTarget,
     TestErrorModelOnTheWire,
@@ -118,6 +128,12 @@ def conformance_conn(request: pytest.FixtureRequest) -> str:
 def conformance_http_port() -> int:
     """Loopback port of the HTTP worker under test, for the raw-wire group."""
     return _loopback_port()
+
+
+@pytest.fixture(scope="session")
+def conformance_http_prefix() -> str:
+    """Return the HTTP worker's route prefix, for the protocol-versions raw-wire group."""
+    return _PREFIX
 
 
 @pytest.fixture(scope="session")

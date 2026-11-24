@@ -345,7 +345,7 @@ class TestVersionGate:
     def test_mismatch_on_one_protocol_leaves_the_other_callable(self) -> None:
         """The isolation property: a stale Alpha client does not break Beta."""
         srv = _server()
-        assert "mismatch" in self._gate(srv, "status", b"demo.Alpha.v1", b"1.4.0")
+        assert "protocol_version_unsupported" in self._gate(srv, "status", b"demo.Alpha.v1", b"1.4.0")
         assert self._gate(srv, "status", b"demo.Beta.v1", b"2.3.0") == "ok"
 
     def test_the_other_protocols_version_is_not_accepted(self) -> None:
@@ -354,7 +354,7 @@ class TestVersionGate:
         This is the failure a single shared gate would have let through in one
         direction and produced a misleading message for in the other.
         """
-        assert "mismatch" in self._gate(_server(), "status", b"demo.Alpha.v1", b"2.3.0")
+        assert "protocol_version_unsupported" in self._gate(_server(), "status", b"demo.Alpha.v1", b"2.3.0")
 
     def test_patch_still_ignored_per_binding(self) -> None:
         """The comparison rule is unchanged; only what it compares against moved."""
@@ -363,7 +363,7 @@ class TestVersionGate:
     def test_mismatch_message_names_the_protocol(self) -> None:
         """With N bindings, "Server: 1.0.0" alone does not say which server."""
         msg = self._gate(_server(), "status", b"demo.Alpha.v1", b"1.4.0")
-        assert "'demo.Alpha.v1'" in msg
+        assert "this server supports demo.Alpha.v1 1.0-1.0" in msg
 
     def test_absent_version_against_a_versioned_binding_is_an_error(self) -> None:
         """Stripping the field must not silently disable the gate."""

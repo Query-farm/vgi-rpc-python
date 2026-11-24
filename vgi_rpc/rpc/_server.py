@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import inspect
 import logging
 import sys
@@ -45,6 +46,15 @@ from vgi_rpc.metadata import (
     SHM_SEGMENT_NAME_KEY,
     SHM_SEGMENT_SIZE_KEY,
     parse_version,
+)
+from vgi_rpc.protocol_versions import (
+    CLIENT_PROTOCOL_VERSIONS_KEY,
+    PROTOCOL_VERSION_UNSUPPORTED,
+    PROTOCOL_VERSIONS_KEY,
+    VersionRange,
+    declared_range,
+    format_versions,
+    parse_versions,
 )
 from vgi_rpc.rpc._common import (
     _ANONYMOUS,
@@ -555,6 +565,11 @@ class _ProtocolBinding:
             Set for the reflection protocol, which is what a version-mismatched
             client calls to learn *what* mismatched -- gating it would deny the
             client the diagnosis it came for.
+        version_range: The ``major.minor`` window this binding accepts and
+            advertises (``PROTOCOL_VERSIONS_V1.md``): the Protocol's
+            ``protocol_version_range``, else exactly ``protocol_version``,
+            unless the server overrides it.  ``None`` when the protocol
+            declares no version.
 
     """
 
@@ -567,6 +582,7 @@ class _ProtocolBinding:
     protocol_hash: str
     ctx_methods: frozenset[str]
     version_exempt: bool = False
+    version_range: VersionRange | None = None
 
 
 class RpcServer:
@@ -586,6 +602,7 @@ class RpcServer:
         "_protocol_hash",
         "_protocol_version",
         "_protocol_version_parts",
+        "_protocol_versions",
         "_server_id",
         "_server_version",
         "_transport_capabilities",
@@ -739,6 +756,7 @@ class RpcServer:
                 raise TypeError(f"{proto.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
             version = raw_version
             version_parts = parse_version(raw_version)
+        version_range = declared_range(proto, version) if version is not None else None
 
         methods = rpc_methods(proto)
         if only is not None:
@@ -761,6 +779,7 @@ class RpcServer:
             version_parts=version_parts,
             protocol_hash=compute_protocol_hash(name, methods),
             ctx_methods=self._ctx_methods_for(impl, methods),
+            version_range=version_range,
         )
 
     def __init__(
@@ -777,6 +796,7 @@ class RpcServer:
         ipc_validation: IpcValidation | None = None,
         include_tracebacks: bool = True,
         grant_keys: GrantKeys | Literal["env"] | None = "env",
+        protocol_version_ranges: Mapping[str, str | VersionRange] | None = None,
     ) -> None:
         """Initialize with a protocol type and its implementation.
 
@@ -834,6 +854,12 @@ class RpcServer:
                 credentials.  ``None`` turns grants off regardless of the
                 environment.  A malformed key raises here: a worker refuses to
                 start rather than run with a key it misread.
+            protocol_version_ranges: Override the ``major.minor`` window a
+                hosted protocol accepts and advertises, keyed by wire name
+                (``{"vgi.v3": "3.3-3.4"}``; ``PROTOCOL_VERSIONS_V1.md`` §5).
+                Default: each Protocol's ``protocol_version_range``, else
+                exactly its ``protocol_version``.  Naming a protocol that is
+                not hosted, or that declares no version, raises.
 
         """
         self._protocol = protocol
@@ -908,6 +934,23 @@ class RpcServer:
                 self._bindings[Identity.protocol_name] = self._build_binding(
                     Identity, identity, allow_reserved=True, only=offered
                 )
+
+        if protocol_version_ranges:
+            for pname, prange in protocol_version_ranges.items():
+                target = self._bindings.get(pname)
+                if target is None or target.version is None or target.version_exempt:
+                    raise ValueError(
+                        f"protocol_version_ranges names {pname!r}, which is not a hosted protocol that "
+                        f"declares a protocol_version. Versioned protocols here: "
+                        f"{sorted(n for n, b in self._bindings.items() if b.version_range is not None)}"
+                    )
+                rng = prange if isinstance(prange, VersionRange) else VersionRange.parse(prange)
+                self._bindings[pname] = dataclasses.replace(target, version_range=rng)
+        self._protocol_versions: str = format_versions(
+            (b.name, b.version_range)
+            for b in self._bindings.values()
+            if b.version_range is not None and not b.version_exempt
+        )
 
         primary = next(iter(self._bindings.values()))
         self._protocol_version: str | None = primary.version
@@ -1123,95 +1166,128 @@ class RpcServer:
                 f"These must agree."
             )
 
-    def gate_version(self, info: RpcMethodInfo) -> None:
-        """Enforce the declared protocol_version of the binding ``info`` belongs to.
+    @property
+    def protocol_versions(self) -> str:
+        """The ``VGI-Protocol-Versions`` advertisement: every gated protocol's window.
 
-        A server hosting several protocols has a version per binding, so the
-        gate has to read the resolved method's, not the primary's.  Silently
-        gating a secondary protocol against the primary's version is the shape
-        of bug that produces a confusing mismatch message pointing at the wrong
-        protocol.
+        ``name=MIN-MAX[, name=MIN-MAX]...`` in hosting order, primary first.
+        Lists only protocols this server gates -- those that declare a
+        ``protocol_version`` -- so reflection (exempt) and unversioned
+        protocols are absent.  Empty when nothing here is versioned.
+        Advertised on every HTTP response, and as ``vgi_rpc.protocol_versions``
+        metadata on reflection responses, ``__transport_options__`` replies and
+        refusals (``PROTOCOL_VERSIONS_V1.md`` §4.1).
+        """
+        return self._protocol_versions
+
+    def response_metadata_for(self, info: RpcMethodInfo) -> dict[bytes, bytes] | None:
+        """Extra custom metadata for *info*'s unary result batch, or ``None``.
+
+        Reflection results (the describe path, exempt from the gate) carry
+        ``vgi_rpc.protocol_versions`` so a client on any transport -- pipe,
+        launch, unix, tcp, HTTP -- learns the server's windows from the call it
+        is allowed to make whatever version it speaks.  Present even when empty:
+        an empty value says "this server negotiates and gates nothing", which an
+        absent key (a pre-negotiation server) does not.
+        """
+        binding = self._bindings.get(info.protocol_name)
+        if binding is None or not binding.version_exempt:
+            return None
+        return {PROTOCOL_VERSIONS_KEY: self._protocol_versions.encode()}
+
+    def gate_version(self, info: RpcMethodInfo) -> None:
+        """Enforce the supported version window of the binding ``info`` belongs to.
+
+        A server hosting several protocols has a window per binding, so the
+        gate has to read the resolved method's, not the primary's.
 
         No-op when the binding's Protocol declares no ``protocol_version``, and
         for a binding marked version-exempt (reflection): that is the
         diagnostic path a mismatched client uses to find out *what* mismatched,
         so gating it would deny the client its own diagnosis.
 
+        Accepts a request whose ``major.minor`` lies inside the binding's
+        ``version_range`` (patch is informational).  The client's own
+        advertised windows (``vgi_rpc.protocol_versions_client``) are logged at
+        debug and quoted in a refusal; they never cause one.
+
         Args:
             info: The resolved method.  Its ``protocol_name`` selects which
-                binding's declared version the request is gated against.
+                binding's window the request is gated against.
 
         Raises:
-            ProtocolVersionError: On a major or minor mismatch, with a
-                directional message naming which side to upgrade.
+            ProtocolVersionError: ``protocol_version_unsupported`` -- the
+                version is absent, malformed, or outside the window -- with a
+                message naming both sides and which to upgrade.
 
         """
         binding = self._bindings.get(info.protocol_name)
         if binding is None or binding.version_exempt:
             return
-        server_parts = binding.version_parts
-        server_version = binding.version
-        if server_parts is None or server_version is None:
+        server_range = binding.version_range
+        if server_range is None:
             return
         md = _current_request_metadata.get()
         client_version_bytes = md.get(PROTOCOL_VERSION_KEY) if md is not None else None
+        client_ranges_bytes = md.get(CLIENT_PROTOCOL_VERSIONS_KEY) if md is not None else None
+        client_ranges = client_ranges_bytes.decode("utf-8", errors="replace") if client_ranges_bytes is not None else ""
         protocol_name = binding.name
+        if client_ranges and _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "client protocol versions for %s: %s",
+                protocol_name,
+                client_ranges,
+                extra={"server_id": self._server_id, "protocol": protocol_name},
+            )
+        server_window = f"this server supports {protocol_name} {server_range}"
+        refusal = functools.partial(
+            ProtocolVersionError,
+            protocol=protocol_name,
+            server_version=str(server_range),
+            server_versions=self._protocol_versions,
+            client_versions=client_ranges,
+        )
         if client_version_bytes is None:
-            raise ProtocolVersionError(
-                f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
-                f"  Client: <not declared>\n"
-                f"  Server: {server_version}\n"
-                f"  Direction: the client did not send a vgi_rpc.protocol_version "
-                f"metadata key. This is either a vgi-rpc framework bug or a "
-                f"non-VGI client connecting to a VGI worker.",
-                protocol=protocol_name,
-                server_version=server_version,
+            raise refusal(
+                f"{PROTOCOL_VERSION_UNSUPPORTED}: the client did not send vgi_rpc.protocol_version for "
+                f"{protocol_name}; {server_window}. This is either a vgi-rpc framework bug or a non-VGI "
+                f"client connecting to a VGI worker.",
             )
         try:
             client_version = client_version_bytes.decode()
         except UnicodeDecodeError as exc:
-            raise ProtocolVersionError(
-                f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
-                f"  Client: <undecodable bytes>\n"
-                f"  Server: {server_version}\n"
-                f"  Direction: client sent non-UTF-8 protocol_version metadata.",
-                protocol=protocol_name,
+            raise refusal(
+                f"{PROTOCOL_VERSION_UNSUPPORTED}: the client sent a non-UTF-8 protocol_version for "
+                f"{protocol_name}; {server_window}.",
                 client_version="<undecodable>",
-                server_version=server_version,
             ) from exc
         try:
             client_parts = parse_version(client_version)
         except ValueError as exc:
-            raise ProtocolVersionError(
-                f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
-                f"  Client: {client_version}\n"
-                f"  Server: {server_version}\n"
-                f"  Direction: client sent a malformed protocol_version. "
-                f"Expected canonical semver MAJOR.MINOR.PATCH.",
-                protocol=protocol_name,
+            raise refusal(
+                f"{PROTOCOL_VERSION_UNSUPPORTED}: the client sent a malformed protocol_version "
+                f"{client_version!r} for {protocol_name} (expected canonical semver MAJOR.MINOR.PATCH); "
+                f"{server_window}.",
                 client_version=client_version,
-                server_version=server_version,
             ) from exc
-        # Exact major+minor match; patch is ignored.
-        if client_parts[:2] == server_parts[:2]:
+        if client_parts in server_range:
             return
-        if (client_parts[0], client_parts[1]) < (server_parts[0], server_parts[1]):
+        client_mm = f"{client_parts[0]}.{client_parts[1]}"
+        supports = parse_versions(client_ranges).get(protocol_name)
+        speaks = f"client speaks {protocol_name} {client_mm}" + (f" (supports {supports})" if supports else "")
+        if (client_parts[0], client_parts[1]) < server_range.min:
             direction = (
-                f"client is too old; upgrade the VGI extension/client to a "
-                f"version supporting protocol_version {server_version}."
+                f"The client is too old (this server is too new for it). Upgrade the client, or use a "
+                f"worker that supports {protocol_name} {client_mm}."
             )
         else:
             direction = (
-                f"server is too old; upgrade the VGI worker to a version supporting protocol_version {client_version}."
+                f"The server is too old (the client is too new for it). Upgrade the worker, or use a "
+                f"client that supports {protocol_name} {server_range.max[0]}.{server_range.max[1]}."
             )
-        raise ProtocolVersionError(
-            f"VGI client/worker protocol_version mismatch for protocol {protocol_name!r}.\n"
-            f"  Client: {client_version}\n"
-            f"  Server: {server_version}\n"
-            f"  Direction: {direction}",
-            protocol=protocol_name,
+        raise refusal(
+            f"{PROTOCOL_VERSION_UNSUPPORTED}: {speaks}; {server_window}. {direction}",
             client_version=client_version,
-            server_version=server_version,
         )
 
     @property
@@ -1507,6 +1583,7 @@ class RpcServer:
                     REQUEST_VERSION_KEY: REQUEST_VERSION,
                     SERVER_ID_KEY: self._server_id.encode(),
                 }
+                caps_md[PROTOCOL_VERSIONS_KEY] = self._protocol_versions.encode()
                 empty = pa.RecordBatch.from_arrays([], schema=_EMPTY_SCHEMA)
                 with new_ipc_stream(transport.writer, _EMPTY_SCHEMA) as writer:
                     writer.write_batch(empty, custom_metadata=caps_md)
@@ -1688,6 +1765,7 @@ class RpcServer:
                             self._external_config,
                             shm=shm,
                             result_type=info.result_type,
+                            extra_metadata=self.response_metadata_for(info),
                         )
                 except Exception as exc:
                     _hook_exc = exc

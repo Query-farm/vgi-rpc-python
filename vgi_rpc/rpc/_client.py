@@ -18,6 +18,14 @@ from pyarrow import ipc
 from vgi_rpc.external import ExternalLocationConfig
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import CANCEL_KEY, parse_version
+from vgi_rpc.protocol_versions import (
+    PROTOCOL_VERSIONS_KEY,
+    ClientVersioning,
+    EndpointNegotiation,
+    NoCommonVersionError,
+    is_retry_safe,
+    is_version_refusal,
+)
 from vgi_rpc.rpc._common import _EMPTY_SCHEMA, MethodType, RpcError
 from vgi_rpc.rpc._debug import fmt_batch, wire_request_logger, wire_stream_logger, wire_transport_logger
 from vgi_rpc.rpc._transport import RpcTransport
@@ -320,6 +328,7 @@ class _RpcProxy:
         *,
         external_config: ExternalLocationConfig | None = None,
         ipc_validation: IpcValidation = IpcValidation.FULL,
+        negotiation: EndpointNegotiation | None = None,
     ) -> None:
         self._protocol = protocol
         self._transport = transport
@@ -347,6 +356,10 @@ class _RpcProxy:
         # The routing key this client addresses. Read from the bound Protocol,
         # so a client generated for one protocol can never address another.
         self._protocol_wire_name: str = _protocol_wire_name(protocol)
+        # Protocol version negotiation (PROTOCOL_VERSIONS_V1.md §6), shared by
+        # every proxy on this connection.
+        self._versioning = ClientVersioning.from_protocol(protocol, self._protocol_wire_name)
+        self._negotiation = negotiation if negotiation is not None else EndpointNegotiation()
 
     def _rebind_protocol(self, protocol: type) -> _RpcProxy:
         """Return a proxy for *protocol* on this proxy's connection.
@@ -363,7 +376,59 @@ class _RpcProxy:
             self._on_log,
             external_config=self._external_config,
             ipc_validation=self._ipc_validation,
+            negotiation=self._negotiation,
         )
+
+    def _wire_version(self) -> str | None:
+        """Return the ``vgi_rpc.protocol_version`` to send now.
+
+        A client whose Protocol declares a window wider than one version reads
+        the server's windows from reflection before its first call -- the
+        byte-stream transports have no response headers to learn them from.  A
+        single-version client has nothing to choose, so it sends its version
+        without the extra round trip, exactly as before negotiation existed.
+
+        Returns:
+            ``MAJOR.MINOR.PATCH``, or ``None`` for an unversioned protocol.
+
+        Raises:
+            NoCommonVersionError: The server's window and the client's do not overlap.
+
+        """
+        versioning = self._versioning
+        if versioning is None:
+            return self._protocol_version
+        negotiation = self._negotiation
+        if versioning.range.min != versioning.range.max and not negotiation.has_advertisement:
+            self._probe_versions()
+        return negotiation.wire_version(versioning)
+
+    def _probe_versions(self) -> None:
+        """Learn the server's windows from ``list_protocols``' ``vgi_rpc.protocol_versions`` metadata.
+
+        A server that does not host reflection, or predates negotiation, leaves
+        the endpoint unlearned -- the client then speaks its own newest version.
+        """
+        from vgi_rpc.rpc._reflection import Reflection
+
+        info = rpc_methods(Reflection)["list_protocols"]
+        transport = self._transport
+        try:
+            _send_request(transport.writer, info, {}, protocol=Reflection.protocol_name)
+            reader = ValidatedReader(ipc.open_stream(transport.reader), self._ipc_validation)
+            _read_unary_response(
+                reader,
+                info,
+                self._on_log,
+                self._external_config,
+                on_metadata=lambda md: self._negotiation.observe(
+                    md.get(PROTOCOL_VERSIONS_KEY) if md is not None else None
+                ),
+            )
+        except RpcError:
+            return
+        except _TRANSPORT_ERRORS as exc:
+            raise RpcError("TransportError", f"Transport failed while reading protocol versions: {exc}", "") from exc
 
     def __getattr__(self, name: str) -> Any:
         info = self._methods.get(name)
@@ -386,15 +451,22 @@ class _RpcProxy:
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
         shm = self._shm
-        protocol_version = self._protocol_version
         protocol = self._protocol_wire_name
+        client_versions = self._versioning.advertised() if self._versioning is not None else None
+        retry_safe = is_retry_safe(protocol, getattr(info, "idempotency", "unknown"))
 
-        def caller(**kwargs: object) -> object:
+        def attempt(kwargs: dict[str, object], protocol_version: str | None) -> object:
             if wire_request_logger.isEnabledFor(logging.DEBUG):
                 wire_request_logger.debug("Unary call: method=%s", info.name)
             try:
                 _send_request(
-                    transport.writer, info, kwargs, shm=shm, protocol=protocol, protocol_version=protocol_version
+                    transport.writer,
+                    info,
+                    kwargs,
+                    shm=shm,
+                    protocol=protocol,
+                    protocol_version=protocol_version,
+                    client_versions=client_versions,
                 )
                 reader = ValidatedReader(ipc.open_stream(transport.reader), ipc_validation)
                 return _read_unary_response(reader, info, on_log, ext_cfg, shm=shm)
@@ -405,6 +477,24 @@ class _RpcProxy:
                     "TransportError", f"Transport failed during unary call to '{info.name}': {exc}", ""
                 ) from exc
 
+        def caller(**kwargs: object) -> object:
+            sent = self._wire_version()
+            try:
+                return attempt(kwargs, sent)
+            except RpcError as err:
+                if not is_version_refusal(err) or self._versioning is None:
+                    raise
+                self._negotiation.observe_refusal(protocol, err)
+                # Surface the server's own refusal when there is no overlap; it
+                # names both windows, and later calls fail before sending.
+                try:
+                    renegotiated = self._wire_version()
+                except NoCommonVersionError:
+                    raise err from None
+                if not retry_safe or renegotiated == sent:
+                    raise
+                return attempt(kwargs, renegotiated)
+
         return caller
 
     def _make_stream_caller(self, info: RpcMethodInfo) -> Callable[..., StreamSession]:
@@ -413,15 +503,32 @@ class _RpcProxy:
         ext_cfg = self._external_config
         ipc_validation = self._ipc_validation
         shm = self._shm
-        protocol_version = self._protocol_version
         protocol = self._protocol_wire_name
+        client_versions = self._versioning.advertised() if self._versioning is not None else None
 
         def caller(**kwargs: object) -> StreamSession:
+            try:
+                return attempt(kwargs)
+            except RpcError as err:
+                # Never retried (stream init is not idempotent), but the refusal
+                # still teaches the connection what to speak next time.
+                if is_version_refusal(err):
+                    self._negotiation.observe_refusal(protocol, err)
+                raise
+
+        def attempt(kwargs: dict[str, object]) -> StreamSession:
+            protocol_version = self._wire_version()
             if wire_stream_logger.isEnabledFor(logging.DEBUG):
                 wire_stream_logger.debug("Stream init: method=%s", info.name)
             try:
                 _send_request(
-                    transport.writer, info, kwargs, shm=shm, protocol=protocol, protocol_version=protocol_version
+                    transport.writer,
+                    info,
+                    kwargs,
+                    shm=shm,
+                    protocol=protocol,
+                    protocol_version=protocol_version,
+                    client_versions=client_versions,
                 )
                 # _PooledTransport (pool.py) uses __slots__ and tracks stream
                 # lifecycle to detect abandoned streams.  object.__setattr__ is

@@ -135,7 +135,7 @@ class StalePrimary(Protocol):
     protocol_version: ClassVar[str] = "1.0.0"
 
     def echo_string(self, value: str) -> str:
-        """Gated: answered ``protocol_version_mismatch``."""
+        """Gated: answered ``protocol_version_unsupported``."""
         ...
 
 
@@ -348,13 +348,18 @@ class TestSecondaryRouting:
 
 
 class TestVersionMismatchCode:
-    """``protocol_version_mismatch`` carries ``FAILED_PRECONDITION`` and names the protocol."""
+    """``protocol_version_unsupported`` carries ``FAILED_PRECONDITION`` and names the protocol.
+
+    The kind was ``protocol_version_mismatch`` before protocol version
+    negotiation (``PROTOCOL_VERSIONS_V1.md`` §4.3); the class keeps its name so
+    port runners that import it by name keep collecting it.
+    """
 
     def test_a_stale_client_gets_a_precondition_failure(self, protocol_target: ProtocolTarget) -> None:
         """A ``1.0.0`` client against the ``2.0.0`` primary."""
         with protocol_target.connect(StalePrimary) as stale:
             err = _raised(lambda: stale.echo_string(value="x"))
-        assert (err.error_kind, err.error_code) == ("protocol_version_mismatch", "FAILED_PRECONDITION"), (
+        assert (err.error_kind, err.error_code) == ("protocol_version_unsupported", "FAILED_PRECONDITION"), (
             f"kind={err.error_kind!r} code={err.error_code!r}"
         )
         failure = err.precondition_failure()

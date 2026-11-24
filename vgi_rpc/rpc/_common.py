@@ -949,15 +949,19 @@ class VersionError(Exception):
 
 
 class ProtocolVersionError(VersionError):
-    """Raised when the client's declared protocol_version is incompatible with the server's.
+    """Raised when the client's declared protocol_version is outside the server's supported window.
 
     Subclass of ``VersionError`` so existing catch sites in ``serve_one``
     (and the HTTP unary/stream wrappers) write a typed error stream and
-    continue. Carries a directional message that tells whoever reads it
-    which side to upgrade.
+    continue. Carries a message naming both sides' windows and which side to
+    upgrade (``PROTOCOL_VERSIONS_V1.md`` §4.3).
+
+    The kind is ``protocol_version_unsupported``; servers released before
+    protocol version negotiation sent ``protocol_version_mismatch``, which a
+    client still recognises.
     """
 
-    error_kind: ClassVar[str] = "protocol_version_mismatch"
+    error_kind: ClassVar[str] = "protocol_version_unsupported"
     error_code: ClassVar[Code] = Code.FAILED_PRECONDITION
 
     def __init__(
@@ -967,40 +971,61 @@ class ProtocolVersionError(VersionError):
         protocol: str = "",
         client_version: str = "",
         server_version: str = "",
+        server_versions: str = "",
+        client_versions: str = "",
     ) -> None:
-        """Build the error, keeping the two versions for the precondition detail.
+        """Build the error, keeping both sides for the machine-readable details.
 
         Args:
             message: The directional, human-readable explanation.
             protocol: The protocol whose version gate refused the call.
             client_version: What the client declared, or ``""`` when it declared none.
-            server_version: What the server's binding declares.
+            server_version: The server's supported window for *protocol* (``MIN-MAX``).
+            server_versions: The server's full ``VGI-Protocol-Versions`` value,
+                carried in an ``ErrorInfo`` detail and as the
+                ``vgi_rpc.protocol_versions`` metadata key on the error batch.
+            client_versions: The client's own advertised windows, when it sent them.
 
         """
         super().__init__(message)
         self.protocol = protocol
         self.client_version = client_version
         self.server_version = server_version
+        self.server_versions = server_versions
+        self.client_versions = client_versions
 
     @property
-    def error_details(self) -> list[PreconditionFailure]:
-        """One ``protocol_version`` violation naming the protocol, when known."""
-        if not self.protocol:
-            return []
-        return [
-            PreconditionFailure(
-                violations=(
-                    PreconditionViolation(
-                        type="protocol_version",
-                        subject=self.protocol,
-                        description=(
-                            f"client declares {self.client_version or '<none>'}, "
-                            f"server requires {self.server_version}; major and minor must match"
+    def error_metadata(self) -> dict[bytes, bytes]:
+        """Extra custom metadata for the error batch: the server's windows, when known."""
+        if not self.server_versions:
+            return {}
+        return {b"vgi_rpc.protocol_versions": self.server_versions.encode()}
+
+    @property
+    def error_details(self) -> list[PreconditionFailure | ErrorInfo]:
+        """A ``protocol_version`` violation naming the protocol, and the windows as ``ErrorInfo``."""
+        details: list[PreconditionFailure | ErrorInfo] = []
+        if self.protocol:
+            details.append(
+                PreconditionFailure(
+                    violations=(
+                        PreconditionViolation(
+                            type="protocol_version",
+                            subject=self.protocol,
+                            description=(
+                                f"client declares {self.client_version or '<none>'}, "
+                                f"server supports {self.server_version or '<unknown>'}"
+                            ),
                         ),
-                    ),
+                    )
                 )
             )
-        ]
+        if self.server_versions:
+            metadata = {"vgi_rpc.protocol_versions": self.server_versions}
+            if self.client_versions:
+                metadata["vgi_rpc.protocol_versions_client"] = self.client_versions
+            details.append(ErrorInfo(metadata=metadata))
+        return details
 
 
 class MethodNotImplementedError(AttributeError):

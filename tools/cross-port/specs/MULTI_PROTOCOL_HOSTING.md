@@ -283,7 +283,7 @@ A `vgi_rpc.error_details` value that is not a JSON array decodes as `[]`.
 | `method_not_implemented` | `UNIMPLEMENTED` | |
 | `protocol_not_supported` | `UNIMPLEMENTED` | |
 | `protocol_not_specified` | `INVALID_ARGUMENT` | |
-| `protocol_version_mismatch` | `FAILED_PRECONDITION` | `PreconditionFailure{violations:[{type:"protocol_version", subject:<protocol>, …}]}` |
+| `protocol_version_unsupported` (formerly `protocol_version_mismatch`; see `PROTOCOL_VERSIONS_V1.md`) | `FAILED_PRECONDITION` | `PreconditionFailure{violations:[{type:"protocol_version", subject:<protocol>, …}]}`, `ErrorInfo{metadata:{"vgi_rpc.protocol_versions": …}}` |
 | `session_lost` | `ABORTED` | |
 | `server_draining` | `UNAVAILABLE` | `RetryInfo` |
 | `identity_unavailable` | `UNAVAILABLE` | `RetryInfo` (required) |

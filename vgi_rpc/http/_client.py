@@ -47,6 +47,15 @@ from vgi_rpc.metadata import (
     merge_metadata,
     strip_keys,
 )
+from vgi_rpc.protocol_versions import (
+    CLIENT_PROTOCOL_VERSIONS_HEADER,
+    PROTOCOL_VERSIONS_HEADER,
+    ClientVersioning,
+    EndpointNegotiation,
+    NoCommonVersionError,
+    is_retry_safe,
+    is_version_refusal,
+)
 from vgi_rpc.rpc import (
     _EMPTY_SCHEMA,
     AnnotatedBatch,
@@ -1481,6 +1490,7 @@ class _HttpProxy:
         retry_config: HttpRetryConfig | None = None,
         compression_level: int | None = None,
         accepted_max_response_bytes: int | None = _DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
+        negotiation: EndpointNegotiation | None = None,
     ) -> None:
         self._protocol = protocol
         self._client = client
@@ -1512,6 +1522,11 @@ class _HttpProxy:
                 raise TypeError(f"{protocol.__name__}.protocol_version must be a str, got {type(raw_version).__name__}")
             parse_version(raw_version)
             self._protocol_version = raw_version
+        # Protocol version negotiation (PROTOCOL_VERSIONS_V1.md §6): what this
+        # client speaks, and the per-endpoint state shared by every proxy on
+        # this HTTP client (rebinding to another protocol keeps it).
+        self._versioning = ClientVersioning.from_protocol(protocol, _protocol_wire_name(protocol))
+        self._negotiation = negotiation if negotiation is not None else EndpointNegotiation(url_prefix)
         # Capability cache populated lazily on first oversized request.
         # ``None`` = not yet probed; missing fields = server didn't advertise.
         self._capabilities: HttpServerCapabilities | None = None
@@ -1535,6 +1550,7 @@ class _HttpProxy:
             retry_config=self._retry_config,
             compression_level=self._compression_level,
             accepted_max_response_bytes=self._accepted_max_response_bytes,
+            negotiation=self._negotiation,
         )
 
     def _get_capabilities(self) -> HttpServerCapabilities:
@@ -1626,7 +1642,35 @@ class _HttpProxy:
         if encoding is not None:
             headers["Content-Encoding"] = encoding.value
             headers["Accept-Encoding"] = ", ".join(e.value for e in _client_offered_encodings())
+        if self._versioning is not None:
+            headers[CLIENT_PROTOCOL_VERSIONS_HEADER] = self._versioning.advertised()
         return headers
+
+    def _wire_version(self) -> str | None:
+        """Return the ``vgi_rpc.protocol_version`` to send now: negotiated, else the declared one.
+
+        Returns:
+            ``MAJOR.MINOR.PATCH``, or ``None`` for an unversioned protocol.
+
+        Raises:
+            NoCommonVersionError: The server advertised a window this client
+                cannot meet; nothing is sent.
+
+        """
+        if self._versioning is None:
+            return self._protocol_version
+        return self._negotiation.wire_version(self._versioning)
+
+    def _client_versions(self) -> str | None:
+        """Return the client's own windows for request metadata, or ``None`` when unversioned."""
+        return self._versioning.advertised() if self._versioning is not None else None
+
+    def _observe_versions(self, resp: httpx2.Response | _SyncTestResponse | _BufferedResponse) -> None:
+        """Cache the server's ``VGI-Protocol-Versions`` from any response."""
+        raw = resp.headers.get(PROTOCOL_VERSIONS_HEADER)
+        if raw is None:
+            raw = resp.headers.get(PROTOCOL_VERSIONS_HEADER.lower())
+        self._negotiation.observe(raw)
 
     def _prepare_body(self, content: bytes) -> bytes:
         """Compress *content* with the codec resolved from cached caps."""
@@ -1811,13 +1855,42 @@ class _HttpProxy:
 
         maybe_externalize = self._maybe_externalize_request
         externalize = self._externalize_request_body
-        protocol_version = self._protocol_version
+        observe_versions = self._observe_versions
+        retry_safe = is_retry_safe(info.protocol_name, getattr(info, "idempotency", "unknown"))
 
         def caller(**kwargs: object) -> object:
+            sent = self._wire_version()
+            try:
+                return attempt(kwargs, sent)
+            except RpcError as err:
+                if not is_version_refusal(err) or self._versioning is None:
+                    raise
+                self._negotiation.observe_refusal(info.protocol_name, err)
+                # One retry at the renegotiated version, and only for a call
+                # with nothing to repeat (§6).  When the refusal shows there is
+                # no overlap, the server's own refusal is what surfaces: it
+                # already names both windows, and later calls fail before
+                # sending with NoCommonVersionError.
+                try:
+                    renegotiated = self._wire_version()
+                except NoCommonVersionError:
+                    raise err from None
+                if not retry_safe or renegotiated == sent:
+                    raise
+                return attempt(kwargs, renegotiated)
+
+        def attempt(kwargs: dict[str, object], protocol_version: str | None) -> object:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug("HTTP unary call: %s/%s", url_prefix, info.name)
             req_buf = BytesIO()
-            _send_request(req_buf, info, kwargs, protocol=info.protocol_name, protocol_version=protocol_version)
+            _send_request(
+                req_buf,
+                info,
+                kwargs,
+                protocol=info.protocol_name,
+                protocol_version=protocol_version,
+                client_versions=self._client_versions(),
+            )
             body = maybe_externalize(req_buf.getvalue())
 
             # RPC implementations may have side effects. A gateway can lose
@@ -1861,6 +1934,7 @@ class _HttpProxy:
                     len(resp.content),
                 )
 
+            observe_versions(resp)
             content = _enforce_accepted_response_bytes(resp.content, self._accepted_max_response_bytes)
             reader = _open_response_stream(content, resp.status_code, ipc_validation)
             return _read_unary_response(reader, info, on_log, ext_cfg)
@@ -1882,14 +1956,32 @@ class _HttpProxy:
 
         maybe_externalize = self._maybe_externalize_request
         externalize = self._externalize_request_body
-        protocol_version = self._protocol_version
+        observe_versions = self._observe_versions
 
         def caller(**kwargs: object) -> HttpStreamSession:
+            # Stream init is never retried on a version refusal: it is not
+            # declared idempotent.  The refusal still teaches the endpoint, so
+            # the caller's next call speaks the renegotiated version.
+            try:
+                return attempt(kwargs)
+            except RpcError as err:
+                if is_version_refusal(err):
+                    self._negotiation.observe_refusal(info.protocol_name, err)
+                raise
+
+        def attempt(kwargs: dict[str, object]) -> HttpStreamSession:
             if wire_http_logger.isEnabledFor(logging.DEBUG):
                 wire_http_logger.debug("HTTP stream init: %s/%s/init", url_prefix, info.name)
             # Send init request
             req_buf = BytesIO()
-            _send_request(req_buf, info, kwargs, protocol=info.protocol_name, protocol_version=protocol_version)
+            _send_request(
+                req_buf,
+                info,
+                kwargs,
+                protocol=info.protocol_name,
+                protocol_version=self._wire_version(),
+                client_versions=self._client_versions(),
+            )
             body = maybe_externalize(req_buf.getvalue())
 
             resp = _post_bounded(
@@ -1923,6 +2015,7 @@ class _HttpProxy:
                     resp.status_code,
                     len(resp.content),
                 )
+            observe_versions(resp)
 
             # Read header from response before main IPC stream (if method declares one).
             # A server error is normally an IPC error stream, which

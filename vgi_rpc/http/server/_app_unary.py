@@ -203,7 +203,12 @@ def _run_unary_sync(
                             http_status = HTTPStatus.INTERNAL_SERVER_ERROR
                         else:
                             external_bytes_written = _write_result_batch(
-                                writer, schema, result, app._server.external_config, prebuilt=result_batch
+                                writer,
+                                schema,
+                                result,
+                                app._server.external_config,
+                                prebuilt=result_batch,
+                                extra_metadata=app._server.response_metadata_for(info),
                             )
                 # No narrow (TypeError, pa.ArrowInvalid) -> 400 branch here.
                 # Every *request* error is already caught above, before the

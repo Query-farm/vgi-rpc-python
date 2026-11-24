@@ -238,9 +238,10 @@ class TestComparisonRule:
         with pytest.raises(ProtocolVersionError) as exc_info:
             self._gate(srv, b"1.2.0")
         msg = str(exc_info.value)
-        assert "Client: 1.2.0" in msg
-        assert "Server: 1.5.0" in msg
-        assert "upgrade the VGI extension/client" in msg
+        assert "client speaks _Proto 1.2" in msg
+        assert "this server supports _Proto 1.5-1.5" in msg
+        assert "client is too old" in msg
+        assert "Upgrade the client" in msg
 
     def test_minor_mismatch_rejected_with_direction_server_too_old(self) -> None:
         """Client minor > server minor -> 'upgrade the worker' directive."""
@@ -248,23 +249,25 @@ class TestComparisonRule:
         with pytest.raises(ProtocolVersionError) as exc_info:
             self._gate(srv, b"1.5.0")
         msg = str(exc_info.value)
-        assert "Client: 1.5.0" in msg
-        assert "Server: 1.2.0" in msg
-        assert "upgrade the VGI worker" in msg
+        assert "client speaks _Proto 1.5" in msg
+        assert "this server supports _Proto 1.2-1.2" in msg
+        assert "server is too old" in msg
+        assert "too new" in msg
+        assert "Upgrade the worker" in msg
 
     def test_major_mismatch_client_too_old(self) -> None:
         """Client major < server major -> 'upgrade the client'."""
         srv = self._server("2.0.0")
         with pytest.raises(ProtocolVersionError) as exc_info:
             self._gate(srv, b"1.9.9")
-        assert "upgrade the VGI extension/client" in str(exc_info.value)
+        assert "Upgrade the client" in str(exc_info.value)
 
     def test_major_mismatch_server_too_old(self) -> None:
         """Client major > server major -> 'upgrade the worker'."""
         srv = self._server("1.2.0")
         with pytest.raises(ProtocolVersionError) as exc_info:
             self._gate(srv, b"2.0.0")
-        assert "upgrade the VGI worker" in str(exc_info.value)
+        assert "Upgrade the worker" in str(exc_info.value)
 
     def test_malformed_client_version_rejected(self) -> None:
         """Non-semver client metadata raises ProtocolVersionError with a 'malformed' hint."""
@@ -374,9 +377,10 @@ class TestServerWireBehaviour:
         assert err is not None
         assert isinstance(err, RpcError)
         err_text = str(err) + " " + err.error_message
-        assert "Client: 1.0.0" in err_text
-        assert "Server: 2.0.0" in err_text
-        assert "upgrade the VGI extension/client" in err_text
+        assert err.error_kind == "protocol_version_unsupported"
+        assert "client speaks demo.Greeter 1.0 (supports 1.0-1.0)" in err_text
+        assert "this server supports demo.Greeter 2.0-2.0" in err_text
+        assert "Upgrade the client" in err_text
 
     def test_undeclared_server_does_not_check(self) -> None:
         """Server without protocol_version -> no check fires, even when client sends one."""
@@ -466,9 +470,10 @@ class TestHttpTransportVersionCheck:
             with http_connect(_ProtoV100, client=client) as proxy, pytest.raises(RpcError) as exc_info:
                 proxy.greet(name="x")
             err_text = str(exc_info.value) + " " + exc_info.value.error_message
-            assert "Client: 1.0.0" in err_text
-            assert "Server: 2.0.0" in err_text
-            assert "upgrade the VGI extension/client" in err_text
+            assert exc_info.value.error_kind == "protocol_version_unsupported"
+            assert "client speaks demo.Greeter 1.0 (supports 1.0-1.0)" in err_text
+            assert "this server supports demo.Greeter 2.0-2.0" in err_text
+            assert "Upgrade the client" in err_text
         finally:
             client.close()
 

@@ -50,12 +50,14 @@ For more control, use `RpcServer` and `RpcConnection` directly.
 
 ::: vgi_rpc.rpc.ProtocolVersionError
 
-`ProtocolVersionError` (a `VersionError` subclass) is raised at the dispatch
-boundary when the client's `vgi_rpc.protocol_version` differs from the
-server's on the major+minor components (patch is ignored). It is only active
-when the Protocol class declares a `protocol_version`; otherwise the check is
-disabled. `__describe__` is exempt so a mismatched client can still introspect
-to discover the server's version.
+`ProtocolVersionError` (a `VersionError` subclass, kind
+`protocol_version_unsupported`) is raised at the dispatch boundary when the
+client's `vgi_rpc.protocol_version` is outside the server's supported window
+for that protocol (major.minor; patch is ignored). It is only active when the
+Protocol class declares a `protocol_version`; otherwise the check is disabled.
+Reflection is exempt so a mismatched client can still introspect to discover
+the server's window. See `vgi_rpc.protocol_versions` and
+`tools/cross-port/specs/PROTOCOL_VERSIONS_V1.md` for negotiation.
 
 ### Typed marker errors
 

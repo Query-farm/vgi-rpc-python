@@ -91,6 +91,15 @@ from vgi_rpc.conformance._lifecycle_tests import (
     assert_producer_error_recovery,
     assert_unary_error_recovery,
 )
+from vgi_rpc.conformance._protocol_versions_pytest import (  # noqa: F401
+    TestClientNegotiation,
+    TestDescribeAdvertisesVersions,
+    TestOutOfRangeRefusal,
+    TestVersionsHeader,
+    TestVersionsHeaderIsCorsExposed,
+    TestVersionsHeaderOn5xx,
+    TestVersionsHeaderOnRejections,
+)
 from vgi_rpc.conformance._request_limits_pytest import TestCompressedHttpRequestCap  # noqa: F401
 from vgi_rpc.conformance._resource_soak_pytest import TestResourceSoak  # noqa: F401
 from vgi_rpc.conformance._secondary_pytest import (  # noqa: F401

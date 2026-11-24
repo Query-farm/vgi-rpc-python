@@ -65,7 +65,8 @@ where they appear, and their semantics:
 | `vgi_rpc.method` | UTF-8 method name | Target RPC method to invoke. **Required.** |
 | `vgi_rpc.protocol` | UTF-8 protocol name | Which protocol the method belongs to — the routing key. **Required**, including against a server hosting exactly one protocol. See [Section 3.1](#31-protocol-routing). |
 | `vgi_rpc.request_version` | `"1"` (ASCII `0x31`) | Wire protocol version. **Required.** |
-| `vgi_rpc.protocol_version` | Canonical semver `MAJOR.MINOR.PATCH` | Application protocol surface version. **Required when the peer Protocol declares one**, absent otherwise. See [Section 13](#protocol-version-negotiation). |
+| `vgi_rpc.protocol_version` | Canonical semver `MAJOR.MINOR.PATCH` | The version the client speaks on this request: the negotiated major.minor plus the client's patch. **Required when the peer Protocol declares one**, absent otherwise. See [Section 13](#protocol-version-negotiation). |
+| `vgi_rpc.protocol_versions_client` | `name=MIN-MAX[, ...]` | The client's own supported windows. Informational: logged and quoted in refusals, never a reason to refuse. Optional. See [Section 13](#negotiating-a-version-protocol_versions_v1). |
 | `vgi_rpc.request_id` | UTF-8 string (16-char hex) | Per-request correlation ID. Optional; if absent, the server generates a new 16-char hex ID. |
 | `vgi_rpc.cancel` | `"1"` — presence is the signal | Client-initiated stream cancellation, on a stream input batch. See [Section 9](#client-initiated-cancellation). Optional. |
 | `traceparent` | W3C Trace Context string | OpenTelemetry trace propagation. Optional. |
@@ -91,6 +92,7 @@ table below.
 | `vgi_rpc.server_id` | UTF-8 string (12-char hex) | Server instance identifier for distributed tracing. |
 | `vgi_rpc.request_id` | UTF-8 string | Echoed request correlation ID. |
 | `vgi_rpc.transport.shm` | `"true"` / `"false"` | Server's shared-memory capability, on the `__transport_options__` response. See [Section 15](#15-transport-capability-negotiation-__transport_options__). |
+| `vgi_rpc.protocol_versions` | `name=MIN-MAX[, ...]` (may be empty) | The server's supported window for every protocol it gates. On every reflection result batch, the `__transport_options__` response, and every `protocol_version_unsupported` error batch. See [Section 13](#negotiating-a-version-protocol_versions_v1). |
 
 ### Stream state (HTTP transport)
 
@@ -545,7 +547,7 @@ defined, and the code is required whenever the kind is set. Well-known values:
 | `method_not_implemented` | `UNIMPLEMENTED` | | The named protocol is hosted but has no such method (old server vs. new client, or a method that was removed). The intended signal for capability detection with fallback. |
 | `protocol_not_specified` | `INVALID_ARGUMENT` | | The request carried no `vgi_rpc.protocol` routing key. Required even against a single-protocol server — see [Section 3.1](#31-protocol-routing). |
 | `protocol_not_supported` | `UNIMPLEMENTED` | | This server does not host the named protocol, or the path and the metadata named different ones. Also the answer for an incompatible **major**, since the major is part of the name. |
-| `protocol_version_mismatch` | `FAILED_PRECONDITION` | `PreconditionFailure` | The client's `vgi_rpc.protocol_version` is incompatible with the server's for **the protocol the resolved method belongs to** (see [Section 13](#protocol-version-negotiation)). The violation has `type` `"protocol_version"` and `subject` the protocol's name. |
+| `protocol_version_unsupported` | `FAILED_PRECONDITION` | `PreconditionFailure`, `ErrorInfo` | The client's `vgi_rpc.protocol_version` is absent, malformed, or outside the server's window for **the protocol the resolved method belongs to** (see [Section 13](#negotiating-a-version-protocol_versions_v1)). The violation has `type` `"protocol_version"` and `subject` the protocol's name; the `ErrorInfo` metadata carries `vgi_rpc.protocol_versions` (and `vgi_rpc.protocol_versions_client` when sent). Servers before negotiation sent `protocol_version_mismatch` with the `PreconditionFailure` only; clients still recognise it. |
 | `session_lost` | `ABORTED` | | An HTTP sticky-session token could not be honoured — expired, evicted, misrouted, or presented under a different principal (see [Section 17](#17-sticky-sessions-http-optional)). Retry the whole session, not the call. |
 | `server_draining` | `UNAVAILABLE` | `RetryInfo` | The server is shutting down and refuses new sticky-session opens. |
 | `identity_unavailable` | `UNAVAILABLE` | `RetryInfo` (required) | See [Section 16](#16-identity-vgi_rpcidentityv1). |
@@ -982,6 +984,7 @@ from every client. There is no Arrow IPC body on any of them.
 | `VGI-Max-Request-Bytes` | Integer | when configured | Maximum request body size the server accepts inline. Exceeding it is `413` (see [Section 13](#http-status-code-mapping)). |
 | `VGI-Max-Response-Bytes` | Integer | when configured | Decoded Arrow IPC body cap, before HTTP content coding. Hard for every response shape. |
 | `VGI-Accept-Max-Response-Bytes-Support` | `"true"` | always | Server honors the strict client response-limit request header. |
+| `VGI-Protocol-Versions` | `name=MIN-MAX[, ...]` (may be empty) | always — every response, including 4xx/5xx, `HEAD /health` and preflights | The `major.minor` window of every protocol this server gates. Absent means a server released before negotiation. See [Section 13](#negotiating-a-version-protocol_versions_v1). |
 | `VGI-Max-Externalized-Response-Bytes` | Integer | when configured | Cap on total bytes uploaded to external storage during one response. Always *hard*. |
 | `VGI-Externalization-Enabled` | `"true"` / `"false"` | always | Whether a storage backend is wired up, i.e. whether the client should expect pointer batches at all. |
 | `VGI-Supported-Encodings` | Comma-separated codec tokens | always | Content codings this server will *produce*. See [Content-encoding negotiation](#content-encoding-negotiation). |
@@ -1196,7 +1199,9 @@ Every response carries the capability headers from
 
 Servers that enable CORS expose `WWW-Authenticate`, `X-Request-ID`,
 `X-VGI-Content-Encoding`, `X-VGI-RPC-Error`, `VGI-Auth-Reason`, and every
-advertised capability header, so a browser client can read them cross-origin.
+advertised capability header (`VGI-Protocol-Versions` included), so a browser
+client can read them cross-origin. A preflight MUST also allow the request
+header `VGI-Client-Protocol-Versions`.
 A server need not name `GET` or `HEAD` in `Access-Control-Allow-Methods` for
 the capability probe ([Section 10](#capability-discovery)) to reach it: both are
 CORS-safelisted and pass a preflight regardless. `OPTIONS` is not, which is why
@@ -2071,7 +2076,7 @@ two of the three has a silent failure mode:
 |---|---|---|
 | Incompatible **major** version | **routing** — the major is part of the protocol name, so this is a different protocol | `protocol_not_supported`, HTTP 404 |
 | Method **absent** on the server | method resolution within the named protocol | `method_not_implemented`, HTTP 404 |
-| **Signature changed** under an unchanged method name | the `protocol_version` gate | `ProtocolVersionError` |
+| **Signature changed** under an unchanged method name | the `protocol_version` gate | `ProtocolVersionError` (`protocol_version_unsupported`) |
 
 The third row is the one nothing else covers, and it is why the gate exists
 despite no mainstream RPC framework having one. That advice reasons by analogy
@@ -2106,7 +2111,7 @@ metadata with the value `"1"`.
 |-----------|-------|
 | `vgi_rpc.request_version` missing | `VersionError` — server writes an error stream on the empty schema. |
 | `vgi_rpc.request_version` != `"1"` | `VersionError` — server writes an error stream on the empty schema. |
-| `vgi_rpc.protocol_version` missing or mismatched (when enforced) | `ProtocolVersionError` — see below. |
+| `vgi_rpc.protocol_version` missing, malformed or outside the window (when enforced) | `ProtocolVersionError` (`protocol_version_unsupported`) — see below. |
 | `vgi_rpc.method` missing | `RpcError` (ProtocolError) — server writes an error stream. |
 | Unknown method name | `RpcError` (AttributeError) — error stream includes available method names. |
 | Request batch has wrong row count (not 1, on non-empty schema) | `RpcError` (ProtocolError). |
@@ -2134,21 +2139,79 @@ entirely, and the key never appears on the wire.
 - **Server obligation**: when its own Protocol declares a version, the server
   MUST check the client's at the dispatch boundary — before parameter
   deserialization, so a mismatch cannot be mistaken for a schema problem.
-- **Comparison rule**: exact **major and minor** match. Patch is ignored, so a
-  `1.4.0` client and a `1.4.9` server interoperate.
-- **`__describe__` is exempt.** It is the diagnostic path a version-mismatched
+- **Comparison rule**: the request's **major.minor** must lie inside the
+  server's supported window for that protocol; patch is ignored. In protocol
+  3.4 every server's window is exactly its declared major.minor
+  (`3.4-3.4`), so this is the old exact-match rule — but the window is
+  advertised, so a client can choose what to speak. See
+  [Negotiating a version](#negotiating-a-version-protocol_versions_v1).
+- **Reflection is exempt.** It is the diagnostic path a version-mismatched
   client uses to discover what the server actually speaks, so gating it would
-  make the mismatch undiagnosable.
+  make the mismatch undiagnosable. A reflection request carrying an out-of-range
+  `vgi_rpc.protocol_version` MUST succeed.
 
-Every failure — absent key, undecodable bytes, malformed semver, or a genuine
-major/minor difference — raises `ProtocolVersionError`, a subclass of
+Every failure — absent key, undecodable bytes, malformed semver, or a version
+outside the window — raises `ProtocolVersionError`, a subclass of
 `VersionError`, and is written as an ordinary error stream carrying
-`error_kind = "protocol_version_mismatch"`. The message MUST state both
-versions and which side to upgrade; a bare "mismatch" leaves the reader to
-guess, which is the whole failure this key exists to prevent.
+`error_kind = "protocol_version_unsupported"` (formerly
+`protocol_version_mismatch`). The message MUST state both sides' versions or
+windows and which side to upgrade, and keeps the substring `too old` / `too
+new`; a bare "mismatch" leaves the reader to guess, which is the whole failure
+this key exists to prevent.
 
-The server also emits its `protocol_version` in the `__describe__` response
-metadata, so a client can read it without triggering a failure.
+#### Negotiating a version (`PROTOCOL_VERSIONS_V1`)
+
+Normative in
+[`tools/cross-port/specs/PROTOCOL_VERSIONS_V1.md`](../tools/cross-port/specs/PROTOCOL_VERSIONS_V1.md);
+this is the wire summary.
+
+**Syntax.** `name=MIN-MAX[, name=MIN-MAX]...`, where `name` is the protocol's
+routing key (`vgi.v3`, `vgi.secret.v1`, ...) and `MIN`/`MAX` are `MAJOR.MINOR`.
+Writers emit both ends and list protocols in hosting order; readers ignore
+order and whitespace and skip an entry they cannot parse.
+
+**Server advertisement.** The server lists every protocol it gates — each one
+that declares a `protocol_version`, minus reflection — with its window:
+
+| Where | Carrier |
+|---|---|
+| Every HTTP response (200, 4xx, 5xx, `HEAD`/`OPTIONS /health`, preflights) | `VGI-Protocol-Versions: vgi.v3=3.4-3.4, vgi.secret.v1=1.0-1.0` |
+| Reflection results (`list_protocols`, `describe`), every transport | batch metadata `vgi_rpc.protocol_versions` |
+| `__transport_options__` reply | batch metadata `vgi_rpc.protocol_versions` |
+| `protocol_version_unsupported` error batch | batch metadata `vgi_rpc.protocol_versions`, and an `ErrorInfo` detail |
+
+A server gating nothing sends the header / key with an empty value; absent
+means a server released before negotiation.
+
+**Client advertisement.** Informational: `vgi_rpc.protocol_versions_client`
+request metadata and, on HTTP, `VGI-Client-Protocol-Versions`, same syntax.
+Never a reason to refuse.
+
+**Refusal.** `protocol_version_unsupported` / `FAILED_PRECONDITION`, HTTP 400:
+
+```
+protocol_version_unsupported: client speaks vgi.v3 3.6 (supports 3.5-3.6); this server supports
+vgi.v3 3.4-3.4. The server is too old (the client is too new for it). Upgrade the worker, or use
+a client that supports vgi.v3 3.4.
+```
+
+`error_details` = `[PreconditionFailure{violations: [{type: "protocol_version",
+subject: "vgi.v3", ...}]}, ErrorInfo{metadata: {"vgi_rpc.protocol_versions":
+"vgi.v3=3.4-3.4", "vgi_rpc.protocol_versions_client": "vgi.v3=3.5-3.6"}}]`.
+
+**Client rules.** Per endpoint, cache the windows from every response. Before
+anything is learned, send the newest version you speak. Once a window is known,
+send the highest common major.minor (plus your own patch); if there is none,
+fail without sending, naming both windows. On a refusal, learn from it and
+retry **once**, only if the call is idempotent (reflection, or a method
+declared `no_side_effects`/`idempotent`). On a byte-stream transport, read the
+windows from reflection before the first call. A server that advertises
+nothing is assumed to speak exactly the version its refusal names (`Server:
+X.Y.Z`), else exactly your own.
+
+The server also emits each protocol's declared `protocol_version` in
+reflection's `ProtocolList`/`ServiceDescription`, so a client can read it
+without triggering a failure.
 
 > **Relationship to `protocol_hash`**: the hash is a fingerprint of the
 > protocol's *decoded* description, canonicalised as RFC 8785 JSON, so it **is**
@@ -2191,7 +2254,7 @@ batch.
 | Error condition | HTTP status |
 |----------------|-------------|
 | Bad IPC, missing metadata, request-version mismatch, param validation | 400 Bad Request |
-| `protocol_version` mismatch | 400 Bad Request |
+| `protocol_version` outside the window (`protocol_version_unsupported`) | 400 Bad Request |
 | Expired, tampered, or unresolvable state token | 400 Bad Request |
 | Request body fails to decompress | 400 Bad Request |
 | Path and `vgi_rpc.protocol` name different protocols | 400 Bad Request |

@@ -305,9 +305,16 @@ def _write_error_batch(
             type(exc).__name__,
             exception_str(exc)[:200],
         )
-    _write_message_batch(
-        writer, schema, Message.from_exception(exc, include_traceback=include_traceback), server_id=server_id
-    )
+    md = _encode_message_metadata(Message.from_exception(exc, include_traceback=include_traceback), server_id)
+    # An exception may carry machine-readable batch metadata of its own --
+    # ProtocolVersionError's ``vgi_rpc.protocol_versions`` -- which rides on the
+    # error batch beside the log keys.  The log keys win on a collision.
+    extra = getattr(exc, "error_metadata", None)
+    if isinstance(extra, dict) and extra:
+        merged = {k: v for k, v in extra.items() if isinstance(k, bytes) and isinstance(v, bytes)}
+        merged.update(md.to_dict())
+        md = pa.KeyValueMetadata(merged)
+    _write_encoded_message_batch(writer, schema, md)
 
 
 def _write_error_stream(
@@ -394,6 +401,7 @@ def _write_result_batch(
     shm: ShmSegment | None = None,
     prebuilt: pa.RecordBatch | None = None,
     result_type: object | None = None,
+    extra_metadata: Mapping[bytes, bytes] | None = None,
 ) -> int:
     """Write a unary result batch to an already-open IPC stream writer.
 
@@ -408,6 +416,9 @@ def _write_result_batch(
             batch eagerly to pre-flight the external-channel cap.
         result_type: Declared Python return annotation, used for recursive
             conversion of container elements.
+        extra_metadata: Custom metadata to carry on the result batch (the
+            reflection results' ``vgi_rpc.protocol_versions``), merged under
+            any route metadata so a pointer's own keys win.
 
     Returns:
         Bytes uploaded to external storage during this call.  ``0`` when no
@@ -418,23 +429,36 @@ def _write_result_batch(
     """
     batch = prebuilt if prebuilt is not None else _build_result_batch(result_schema, value, result_type)
     _record_output(batch)
+
+    def _with_extra(cm: pa.KeyValueMetadata | None) -> pa.KeyValueMetadata | None:
+        if not extra_metadata:
+            return cm
+        merged: dict[bytes, bytes] = dict(extra_metadata)
+        if cm is not None:
+            merged.update(cm.to_dict())
+        return pa.KeyValueMetadata(merged)
+
     if shm is not None:
         batch, cm = maybe_write_to_shm(batch, None, shm)
         if cm is not None:
             if wire_response_logger.isEnabledFor(logging.DEBUG):
                 wire_response_logger.debug("Write result batch: %s, route=shm", fmt_batch(batch))
-            writer.write_batch(batch, custom_metadata=cm)
+            writer.write_batch(batch, custom_metadata=_with_extra(cm))
             return 0
     elif external_config is not None:
         batch, cm, external_bytes = maybe_externalize_batch(batch, None, external_config)
         if cm is not None:
             if wire_response_logger.isEnabledFor(logging.DEBUG):
                 wire_response_logger.debug("Write result batch: %s, route=external", fmt_batch(batch))
-            writer.write_batch(batch, custom_metadata=cm)
+            writer.write_batch(batch, custom_metadata=_with_extra(cm))
             return external_bytes
     if wire_response_logger.isEnabledFor(logging.DEBUG):
         wire_response_logger.debug("Write result batch: %s, route=inline", fmt_batch(batch))
-    writer.write_batch(batch)
+    extra = _with_extra(None)
+    if extra is not None:
+        writer.write_batch(batch, custom_metadata=extra)
+    else:
+        writer.write_batch(batch)
     return 0
 
 
@@ -1161,14 +1185,19 @@ def _send_request(
     shm: ShmSegment | None = None,
     protocol: str | None = None,
     protocol_version: str | None = None,
+    client_versions: str | None = None,
 ) -> None:
     """Merge defaults, validate, and write a request IPC stream.
 
-    *protocol_version*: the application protocol surface version declared by
-    the Protocol class the client was constructed against, or ``None`` for
+    *protocol_version*: the version the client speaks on this request -- the
+    negotiated major.minor plus the client's patch -- or ``None`` for
     Protocols that have not opted in. Plumbed through to ``_write_request``
     where it is added to the request batch's custom_metadata under
     ``vgi_rpc.protocol_version``.
+
+    *client_versions*: the client's own supported windows, sent as the
+    informational ``vgi_rpc.protocol_versions_client`` key
+    (``PROTOCOL_VERSIONS_V1.md`` §4.2).
     """
     merged = {**info.param_defaults, **kwargs}
     if wire_request_logger.isEnabledFor(logging.DEBUG):
@@ -1188,6 +1217,7 @@ def _send_request(
         protocol=protocol,
         protocol_version=protocol_version,
         param_types=info.param_types,
+        extra_metadata={b"vgi_rpc.protocol_versions_client": client_versions.encode()} if client_versions else None,
     )
 
 
@@ -1234,6 +1264,7 @@ def _read_unary_response(
     external_config: AnyExternalConfig | None = None,
     *,
     shm: ShmSegment | None = None,
+    on_metadata: Callable[[pa.KeyValueMetadata | None], None] | None = None,
 ) -> object:
     """Read a unary response: skip logs, extract result, deserialize.
 
@@ -1243,6 +1274,8 @@ def _read_unary_response(
         on_log: Optional callback for log batches preceding the result.
         external_config: Optional config for resolving externalized results.
         shm: Optional shared-memory segment the result may arrive in.
+        on_metadata: Optional callback handed the result batch's custom
+            metadata (the reflection results' ``vgi_rpc.protocol_versions``).
 
     Returns:
         The deserialized result, or ``None`` for a void or null return.
@@ -1268,6 +1301,8 @@ def _read_unary_response(
         raise
     try:
         _drain_stream(reader)
+        if on_metadata is not None:
+            on_metadata(batch.custom_metadata)
         if not info.has_return:
             if wire_response_logger.isEnabledFor(logging.DEBUG):
                 wire_response_logger.debug("Read unary response: method=%s, void return", info.name)

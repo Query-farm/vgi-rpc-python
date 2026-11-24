@@ -1333,6 +1333,22 @@ def conformance_conn(
 
 
 @pytest.fixture(scope="session")
+def conformance_negotiating_client() -> Callable[..., contextlib.AbstractContextManager[Any]]:
+    """Return the Python client, bound to a negotiating Protocol (``_protocol_versions_pytest`` hook)."""
+    from vgi_rpc.conformance._protocol_versions_pytest import negotiated_protocol
+    from vgi_rpc.http import http_connect
+
+    def factory(
+        base_url: str, protocol: str, version: str, version_range: str
+    ) -> contextlib.AbstractContextManager[Any]:
+        proto = negotiated_protocol(version, version_range)
+        assert proto.protocol_name == protocol  # type: ignore[attr-defined]
+        return http_connect(proto, base_url)
+
+    return factory
+
+
+@pytest.fixture(scope="session")
 def conformance_protocol_connector(
     conformance_http_port: int,
     conformance_subprocess: SubprocessTransport,
