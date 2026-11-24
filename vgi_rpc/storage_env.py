@@ -34,7 +34,7 @@ import logging
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from vgi_rpc.external import ObjectStore, ServerExternalConfig, UploadUrlProvider
@@ -80,6 +80,7 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 
 StorageBackend = Literal["vendor", "s3", "gcs", "none"]
+_BACKENDS: tuple[StorageBackend, ...] = ("vendor", "s3", "gcs", "none")
 
 ENV_BACKEND = "VGI_STORAGE_BACKEND"
 ENV_VENDOR_URL = "VGI_BLOB_VENDOR_URL"
@@ -182,9 +183,10 @@ def storage_backend_from_env(env: Mapping[str, str] | None = None) -> StorageBac
     environ = _resolve(env)
     explicit = _get(environ, ENV_BACKEND).lower()
     if explicit:
-        if explicit not in ("vendor", "s3", "gcs", "none"):
-            raise ValueError(f"{ENV_BACKEND} must be vendor, s3, gcs or none, got {explicit!r}")
-        return cast("StorageBackend", explicit)
+        for choice in _BACKENDS:
+            if explicit == choice:
+                return choice
+        raise ValueError(f"{ENV_BACKEND} must be vendor, s3, gcs or none, got {explicit!r}")
     present = [name for name in (ENV_VENDOR_URL, ENV_S3_BUCKET, ENV_GCS_BUCKET) if _get(environ, name)]
     if len(present) > 1:
         raise ValueError(
@@ -238,9 +240,10 @@ def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
         or "us-east-1"
     )
     path_style = _bool(environ, ENV_S3_FORCE_PATH_STYLE, endpoint is not None)
-    checksum = _get(environ, ENV_S3_CHECKSUM).lower() or "sha256"
-    if checksum not in ("sha256", "none"):
-        raise ValueError(f"{ENV_S3_CHECKSUM} must be sha256 or none, got {checksum!r}")
+    raw_checksum = _get(environ, ENV_S3_CHECKSUM).lower() or "sha256"
+    if raw_checksum not in ("sha256", "none"):
+        raise ValueError(f"{ENV_S3_CHECKSUM} must be sha256 or none, got {raw_checksum!r}")
+    checksum: Literal["sha256", "none"] = "none" if raw_checksum == "none" else "sha256"
     key_id = _get(environ, ENV_S3_ACCESS_KEY_ID) or None
     secret = _get(environ, ENV_S3_SECRET_ACCESS_KEY) or None
     token = _get(environ, ENV_S3_SESSION_TOKEN) or None
@@ -251,7 +254,7 @@ def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
     # botocore >= 1.36 adds a CRC32 to every PutObject ("when_supported"),
     # which several S3-compatible stores reject.  Off for custom endpoints
     # unless the operator chose via AWS_REQUEST_CHECKSUM_CALCULATION.
-    request_checksum = None
+    request_checksum: Literal["when_required"] | None = None
     if endpoint is not None and not _get(environ, _ENV_AWS_REQUEST_CHECKSUM):
         request_checksum = "when_required"
     return S3Storage(
@@ -265,8 +268,8 @@ def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
         access_key_id=key_id,
         secret_access_key=secret,
         session_token=token,
-        checksum=cast("Literal['sha256', 'none']", checksum),
-        request_checksum_calculation=cast("Literal['when_required'] | None", request_checksum),
+        checksum=checksum,
+        request_checksum_calculation=request_checksum,
         verify_bucket=True,
     )
 
