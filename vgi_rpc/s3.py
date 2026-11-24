@@ -123,6 +123,10 @@ class S3Storage:
         verify_bucket: HEAD the bucket before first use and fail with an
             actionable :class:`StorageConfigError` (missing bucket, access
             denied, wrong region).  :meth:`verify` runs it explicitly.
+        session_expires: When explicit temporary keys (``session_token``)
+            expire.  Pre-signed URLs are capped at it minus 60 s; ``None``
+            means unknown, so URLs signed with explicit temporary keys cannot
+            be capped.
         stall_timeout_seconds: Fail an S3 request when no bytes move for this
             long (botocore ``read_timeout``, applied to each socket read and
             write).  ``None`` reads ``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS``
@@ -148,6 +152,7 @@ class S3Storage:
     checksum: Literal["sha256", "none"] = "sha256"
     request_checksum_calculation: Literal["when_supported", "when_required"] | None = None
     verify_bucket: bool = False
+    session_expires: datetime | None = None
     stall_timeout_seconds: float | None = None
     _pool: _S3Pool = field(default_factory=_S3Pool, init=False, repr=False, compare=False, hash=False)
 
@@ -247,6 +252,9 @@ class S3Storage:
         # Gives botocore the chance to do its own (advisory) refresh.
         credentials.get_frozen_credentials()
         remaining = _remaining_seconds(credentials)
+        if remaining is None and self.session_expires is not None and self.access_key_id is not None:
+            expires = self.session_expires if self.session_expires.tzinfo else self.session_expires.replace(tzinfo=UTC)
+            remaining = (expires - datetime.now(UTC)).total_seconds()
         if remaining is None:
             return ttl
         needed = max(min_seconds, 1) + _CREDENTIAL_EXPIRY_MARGIN_SECONDS
@@ -481,6 +489,18 @@ class S3Storage:
         key = f"{self.prefix}{uuid.uuid4().hex}.bin"
         self._put(key, data)
         return key
+
+    def delete_object(self, object_id: str) -> None:
+        """Delete the object *object_id* (a key); best effort, failures are logged and ignored.
+
+        Args:
+            object_id: The object key.
+
+        """
+        try:
+            self._get_client().delete_object(Bucket=self.bucket, Key=object_id)
+        except Exception as exc:
+            _logger.debug("S3 delete failed (ignored): key=%s %s", object_id, type(exc).__name__)
 
     def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
         """Fetch the object *object_id* (a key) names (``ObjectStore``).

@@ -34,6 +34,7 @@ import logging
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
@@ -64,7 +65,11 @@ __all__ = [
     "ENV_S3_REGION",
     "ENV_S3_SECRET_ACCESS_KEY",
     "ENV_S3_SESSION_TOKEN",
+    "ENV_S3_SESSION_EXPIRES",
     "ENV_S3_VERIFY",
+    "ENV_GCS_VERIFY",
+    "StorageArea",
+    "function_blob_client_from_env",
     "ENV_URL_TTL",
     "DirectStorageConfig",
     "ObjectStoreBlobClient",
@@ -80,6 +85,10 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 
 StorageBackend = Literal["vendor", "s3", "gcs", "none"]
+#: Key area under the configured prefix (contract Addendum A.4): ``rpc/`` for
+#: results, upload grants, StateRef and argument objects (lifecycle: 1 day);
+#: ``fs/`` for function storage (lifecycle: 2 days).
+StorageArea = Literal["rpc", "fs"]
 _BACKENDS: tuple[StorageBackend, ...] = ("vendor", "s3", "gcs", "none")
 
 ENV_BACKEND = "VGI_STORAGE_BACKEND"
@@ -95,6 +104,8 @@ ENV_S3_ACCESS_KEY_ID = "VGI_STORAGE_S3_ACCESS_KEY_ID"
 ENV_S3_SECRET_ACCESS_KEY = "VGI_STORAGE_S3_SECRET_ACCESS_KEY"
 ENV_S3_SESSION_TOKEN = "VGI_STORAGE_S3_SESSION_TOKEN"
 ENV_S3_VERIFY = "VGI_STORAGE_S3_VERIFY"
+ENV_S3_SESSION_EXPIRES = "VGI_STORAGE_S3_SESSION_EXPIRES"
+ENV_GCS_VERIFY = "VGI_STORAGE_GCS_VERIFY"
 ENV_GCS_BUCKET = "VGI_STORAGE_GCS_BUCKET"
 ENV_GCS_PREFIX = "VGI_STORAGE_GCS_PREFIX"
 ENV_GCS_ENDPOINT = "VGI_STORAGE_GCS_ENDPOINT"
@@ -211,11 +222,29 @@ def plain_http_allowed(env: Mapping[str, str] | None = None) -> bool:
     return _bool(_resolve(env), ENV_ALLOW_PLAIN_HTTP, False)
 
 
-def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
+def _session_expires(env: Mapping[str, str]) -> datetime | None:
+    raw = _get(env, ENV_S3_SESSION_EXPIRES)
+    if not raw:
+        return None
+    try:
+        if raw.isdigit():
+            return datetime.fromtimestamp(int(raw), tz=UTC)
+        parsed = datetime.fromisoformat(raw)
+    except (ValueError, OverflowError):
+        raise ValueError(
+            f"{ENV_S3_SESSION_EXPIRES} must be an RFC 3339 timestamp or epoch seconds, got {raw!r}"
+        ) from None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def s3_storage_from_env(env: Mapping[str, str] | None = None, *, area: StorageArea = "rpc") -> S3Storage:
     """Build an :class:`~vgi_rpc.s3.S3Storage` from the ``VGI_STORAGE_S3_*`` variables (contract §2-§4).
+
+    Keys go under ``<VGI_STORAGE_S3_PREFIX><area>/``.
 
     Args:
         env: Environment mapping (defaults to ``os.environ``).
+        area: ``"rpc"`` (default) or ``"fs"`` (function storage).
 
     Returns:
         The storage; it HEADs the bucket before first use.
@@ -251,6 +280,7 @@ def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
         raise ValueError(f"{ENV_S3_ACCESS_KEY_ID} and {ENV_S3_SECRET_ACCESS_KEY} must be set together")
     if token is not None and key_id is None:
         raise ValueError(f"{ENV_S3_SESSION_TOKEN} needs {ENV_S3_ACCESS_KEY_ID} and {ENV_S3_SECRET_ACCESS_KEY}")
+    session_expires = _session_expires(environ)
     # botocore >= 1.36 adds a CRC32 to every PutObject ("when_supported"),
     # which several S3-compatible stores reject.  Off for custom endpoints
     # unless the operator chose via AWS_REQUEST_CHECKSUM_CALCULATION.
@@ -259,7 +289,7 @@ def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
         request_checksum = "when_required"
     return S3Storage(
         bucket=bucket,
-        prefix=_get(environ, ENV_S3_PREFIX),
+        prefix=f"{_get(environ, ENV_S3_PREFIX)}{area}/",
         presign_expiry_seconds=_url_ttl(environ),
         region_name=region,
         endpoint_url=endpoint,
@@ -271,14 +301,18 @@ def s3_storage_from_env(env: Mapping[str, str] | None = None) -> S3Storage:
         checksum=checksum,
         request_checksum_calculation=request_checksum,
         verify_bucket=True,
+        session_expires=session_expires,
     )
 
 
-def gcs_storage_from_env(env: Mapping[str, str] | None = None) -> GCSStorage:
+def gcs_storage_from_env(env: Mapping[str, str] | None = None, *, area: StorageArea = "rpc") -> GCSStorage:
     """Build a :class:`~vgi_rpc.gcs.GCSStorage` from the ``VGI_STORAGE_GCS_*`` variables (contract §5).
+
+    Keys go under ``<VGI_STORAGE_GCS_PREFIX><area>/``.
 
     Args:
         env: Environment mapping (defaults to ``os.environ``).
+        area: ``"rpc"`` (default) or ``"fs"`` (function storage).
 
     Returns:
         The storage; it checks the bucket before first use.
@@ -296,7 +330,7 @@ def gcs_storage_from_env(env: Mapping[str, str] | None = None) -> GCSStorage:
         raise ValueError(f"{ENV_BACKEND}=gcs needs {ENV_GCS_BUCKET}")
     return GCSStorage(
         bucket=bucket,
-        prefix=_get(environ, ENV_GCS_PREFIX),
+        prefix=f"{_get(environ, ENV_GCS_PREFIX)}{area}/",
         presign_expiry_seconds=_url_ttl(environ),
         endpoint_url=_url(environ, ENV_GCS_ENDPOINT),
         credentials_file=_get(environ, ENV_GCS_CREDENTIALS_FILE) or None,
@@ -355,6 +389,18 @@ class DirectStorageConfig:
     upload_url_provider: UploadUrlProvider | None
     verify_at_startup: bool
 
+    def startup_warnings(self) -> list[str]:
+        """Return configuration warnings to log at startup (never containing secrets)."""
+        s = self.storage
+        warnings: list[str] = []
+        if getattr(s, "session_token", None) and getattr(s, "session_expires", None) is None:
+            warnings.append(
+                f"{ENV_S3_SESSION_TOKEN} is set without {ENV_S3_SESSION_EXPIRES}: pre-signed URL lifetimes cannot be "
+                "capped at the token's expiry, so URLs may stop working early; set it, or use credential_process "
+                "or the standard AWS chain, which report expiry"
+            )
+        return warnings
+
     def describe(self) -> str:
         """Return a one-line, secret-free description for startup logs."""
         s = self.storage
@@ -406,19 +452,20 @@ def direct_storage_from_env(env: Mapping[str, str] | None = None) -> DirectStora
     storage: S3Storage | GCSStorage
     if backend == "s3":
         storage = s3_storage_from_env(environ)
-        signed_endpoint = storage.presign_endpoint_url
+        endpoints = [storage.endpoint_url, storage.public_endpoint_url]
         provider: UploadUrlProvider | None = storage if storage.checksum == "sha256" else None
         verify = _bool(environ, ENV_S3_VERIFY, False)
     else:
         storage = gcs_storage_from_env(environ)
-        signed_endpoint = storage.endpoint_url
+        endpoints = [storage.endpoint_url]
         provider = storage
-        verify = False
-    if signed_endpoint and urlsplit(signed_endpoint).scheme == "http" and not allow_http:
-        raise ValueError(
-            f"Storage URLs would use plain http ({redact_url(signed_endpoint)}); set {ENV_ALLOW_PLAIN_HTTP}=1 "
-            "to allow it (the extension needs its vgi_storage_allow_plain_http setting too), or use https"
-        )
+        verify = _bool(environ, ENV_GCS_VERIFY, False)
+    for endpoint in endpoints:
+        if endpoint and urlsplit(endpoint).scheme == "http" and not allow_http:
+            raise ValueError(
+                f"Storage endpoint uses plain http ({redact_url(endpoint)}); set {ENV_ALLOW_PLAIN_HTTP}=1 "
+                "to allow it (the extension needs its vgi_storage_allow_plain_http setting too), or use https"
+            )
     external = ServerExternalConfig(
         storage=storage,
         externalize_threshold_bytes=threshold,
@@ -435,14 +482,38 @@ def direct_storage_from_env(env: Mapping[str, str] | None = None) -> DirectStora
     )
 
 
+def function_blob_client_from_env(env: Mapping[str, str] | None = None) -> ObjectStoreBlobClient | None:
+    """Function-storage blob client for the ``s3`` / ``gcs`` backends (keys under ``<prefix>fs/``).
+
+    Args:
+        env: Environment mapping (defaults to ``os.environ``).
+
+    Returns:
+        The client, or ``None`` when the backend is not ``s3`` / ``gcs``.
+
+    Raises:
+        ValueError: A variable is missing or malformed, or the backends conflict.
+
+    """
+    environ = _resolve(env)
+    backend = storage_backend_from_env(environ)
+    if backend == "s3":
+        return ObjectStoreBlobClient(s3_storage_from_env(environ, area="fs"))
+    if backend == "gcs":
+        return ObjectStoreBlobClient(gcs_storage_from_env(environ, area="fs"))
+    return None
+
+
 class ObjectStoreBlobClient:
     """A :class:`~vgi_rpc.vendor.VendorBlobClient`-compatible client over an ``ObjectStore``.
 
     Lets code written for the vendor's ``put_bytes`` / ``get_bytes`` (e.g.
     function-storage externalization) use a direct S3 / GCS bucket.  Reads
     verify the size and SHA-256 recorded in the :class:`BlobRef`.  Deletes
-    are no-ops: the worker never deletes from the operator's bucket (its
-    lifecycle rule does).
+    are best effort (contract Addendum A.4): a DELETE is issued when the store
+    supports it and failures are ignored; the bucket's lifecycle rule removes
+    the rest.  Per-scope deletes are no-ops (objects are not indexed by
+    scope).
 
     The store's key prefix (``prefix``, e.g. ``vgi/``) is stripped from the
     returned ``object_id`` and added back on read, so ids stay within the
@@ -510,20 +581,33 @@ class ObjectStoreBlobClient:
         return data
 
     def delete(self, refs: Iterable[object]) -> int:
-        """Do nothing: the bucket's lifecycle rule removes objects.
+        """Delete *refs*, best effort: failures are ignored.
 
         Args:
-            refs: Ignored.
+            refs: :class:`BlobRef` objects or object ids from :meth:`put_bytes`.
 
         Returns:
-            ``0``.
+            The number of DELETEs issued.
 
         """
-        del refs
-        return 0
+        delete = getattr(self._store, "delete_object", None)
+        if not callable(delete):
+            return 0
+        issued = 0
+        for ref in refs:
+            object_id = getattr(ref, "object_id", ref)
+            if not isinstance(object_id, str):
+                continue
+            try:
+                delete(self._prefix + object_id)
+            except Exception as exc:
+                _logger.debug("blob delete failed (ignored): %s", type(exc).__name__)
+                continue
+            issued += 1
+        return issued
 
     def delete_scope(self, shard: str, execution_id: str) -> int:
-        """Do nothing: the bucket's lifecycle rule removes objects.
+        """Do nothing: objects are not indexed by scope; the bucket's lifecycle rule removes them.
 
         Args:
             shard: Ignored.

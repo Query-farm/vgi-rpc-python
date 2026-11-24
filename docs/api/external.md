@@ -408,16 +408,29 @@ same variables every VGI SDK reads:
 | `VGI_STORAGE_S3_PUBLIC_ENDPOINT` | Endpoint used only in pre-signed URLs handed to clients | the endpoint |
 | `VGI_STORAGE_S3_CHECKSUM` | `sha256`, or `none` for stores that don't enforce `x-amz-checksum-sha256` (no upload grants then) | `sha256` |
 | `VGI_STORAGE_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_SESSION_TOKEN` | Explicit credentials; otherwise the AWS chain (env, profile incl. `credential_process` / `role_arn`, web identity, container, instance metadata) | AWS chain |
+| `VGI_STORAGE_S3_SESSION_EXPIRES` | Expiry of an explicit session token (RFC 3339 or epoch seconds); caps pre-signed URL lifetimes. Without it, an explicit token logs a startup warning | |
 | `VGI_STORAGE_S3_VERIFY` | `1`: HEAD the bucket at startup (otherwise on first use) | off |
 | `VGI_STORAGE_GCS_BUCKET` / `_PREFIX` / `_ENDPOINT` / `_CREDENTIALS_FILE` | GCS bucket, prefix, custom endpoint, service-account key (else ADC) | |
+| `VGI_STORAGE_GCS_VERIFY` | `1`: check the bucket at startup (otherwise on first use) | off |
 | `VGI_STORAGE_URL_TTL_SECONDS` | Pre-signed URL lifetime; never longer than the signing credentials' remaining life minus 60 s | 3600 |
-| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | Allow `http://` pre-signed URLs (the extension needs `vgi_storage_allow_plain_http` too) | off |
+| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | Allow `http://` endpoints and pre-signed URLs; without it an http endpoint or public endpoint refuses to start (the extension needs `vgi_storage_allow_plain_http` too) | off |
 
 With a custom endpoint, botocore's automatic CRC32 on `PutObject` is turned
 off (`request_checksum_calculation="when_required"`), because several
 S3-compatible stores reject it; set `AWS_REQUEST_CHECKSUM_CALCULATION` to
-override. The worker never deletes objects: add a lifecycle rule expiring the
-prefix after one to two days.
+override.
+
+Keys go under `<prefix>rpc/` (results, upload grants, StateRef and argument
+objects) and `<prefix>fs/` (function-storage blobs). Add lifecycle rules
+expiring `rpc/` after 1 day and `fs/` after 2 days, as the blob vendor does.
+Function storage deletes its blobs best effort (failures are ignored); nothing
+else is deleted by the worker.
+
+With `VGI_STORAGE_S3_PUBLIC_ENDPOINT`, the worker must be able to reach the
+public endpoint too: client request uploads come back as pointer URLs on the
+public host, and the signature covers the host, so they can't be rewritten.
+Argument references and StateRefs are fetched by object id through the
+internal endpoint.
 
 ### Storage timeouts
 

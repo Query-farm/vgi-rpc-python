@@ -13,6 +13,7 @@ need ``VGI_TEST_S3_TLS_ENDPOINT`` and ``VGI_TEST_S3_CA_FILE``.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import uuid
@@ -35,6 +36,7 @@ from vgi_rpc.storage_env import (
 
 pytest.importorskip("boto3")
 
+from vgi_rpc.external import ObjectMissingError
 from vgi_rpc.s3 import S3Storage, StorageConfigError
 
 _SHA = "0" * 64
@@ -85,7 +87,7 @@ class TestS3FromEnv:
     def test_defaults_aws(self) -> None:
         """No endpoint: AWS, virtual-hosted, sha256, region chain default us-east-1, empty prefix."""
         s = s3_storage_from_env({"VGI_STORAGE_S3_BUCKET": "b"})
-        assert (s.bucket, s.prefix, s.region_name, s.endpoint_url) == ("b", "", "us-east-1", None)
+        assert (s.bucket, s.prefix, s.region_name, s.endpoint_url) == ("b", "rpc/", "us-east-1", None)
         assert s.addressing_style == "virtual"
         assert s.checksum == "sha256"
         assert s.presign_expiry_seconds == 3600
@@ -113,7 +115,8 @@ class TestS3FromEnv:
         assert s.public_endpoint_url == "https://s3.example.com"
         assert s.addressing_style == "path"
         assert s.request_checksum_calculation == "when_required"
-        assert (s.prefix, s.presign_expiry_seconds) == ("vgi/", 900)
+        assert (s.prefix, s.presign_expiry_seconds) == ("vgi/rpc/", 900)
+        assert s3_storage_from_env(env, area="fs").prefix == "vgi/fs/"
         assert s3_storage_from_env({**env, "VGI_STORAGE_S3_FORCE_PATH_STYLE": "false"}).addressing_style == "virtual"
         chosen = s3_storage_from_env({**env, "AWS_REQUEST_CHECKSUM_CALCULATION": "when_supported"})
         assert chosen.request_checksum_calculation is None
@@ -173,18 +176,56 @@ class TestDirectStorage:
         cfg = direct_storage_from_env({**env, "VGI_STORAGE_ALLOW_PLAIN_HTTP": "1"})
         assert cfg is not None and cfg.backend == "s3"
 
-    def test_internal_http_public_https_is_fine(self) -> None:
-        """Only the URLs handed to clients matter: an http internal endpoint behind an https public one is allowed."""
-        cfg = direct_storage_from_env(
-            {
-                "VGI_STORAGE_S3_BUCKET": "b",
-                "VGI_STORAGE_S3_ENDPOINT": "http://minio:9000",
-                "VGI_STORAGE_S3_PUBLIC_ENDPOINT": "https://s3.example.com",
-            }
-        )
+    def test_internal_http_also_needs_opt_in(self) -> None:
+        """Addendum A.8: an http endpoint refuses to start without the opt-in even behind an https public one."""
+        env = {
+            "VGI_STORAGE_S3_BUCKET": "b",
+            "VGI_STORAGE_S3_ENDPOINT": "http://minio:9000",
+            "VGI_STORAGE_S3_PUBLIC_ENDPOINT": "https://s3.example.com",
+        }
+        with pytest.raises(ValueError, match="http://minio:9000"):
+            direct_storage_from_env(env)
+        cfg = direct_storage_from_env({**env, "VGI_STORAGE_ALLOW_PLAIN_HTTP": "1"})
         assert cfg is not None
         assert cfg.upload_url_provider is cfg.storage
         assert "s3.example.com" in cfg.describe()
+
+    def test_session_expires(self) -> None:
+        """VGI_STORAGE_S3_SESSION_EXPIRES (RFC 3339 or epoch) caps URLs; a token without it warns at startup."""
+        base = {
+            "VGI_STORAGE_S3_BUCKET": "b",
+            "VGI_STORAGE_S3_ACCESS_KEY_ID": "AKID",
+            "VGI_STORAGE_S3_SECRET_ACCESS_KEY": "secret",
+            "VGI_STORAGE_S3_SESSION_TOKEN": "tok",
+        }
+        cfg = direct_storage_from_env(base)
+        assert cfg is not None and "VGI_STORAGE_S3_SESSION_EXPIRES" in " ".join(cfg.startup_warnings())
+        soon = datetime.now(UTC) + timedelta(seconds=1200)
+        for raw in (str(int(soon.timestamp())), soon.isoformat().replace("+00:00", "Z")):
+            # No network: skip the first-use bucket check.
+            storage = dataclasses.replace(
+                s3_storage_from_env({**base, "VGI_STORAGE_S3_SESSION_EXPIRES": raw}), verify_bucket=False
+            )
+            assert storage.session_expires is not None
+            assert 1200 - 60 - 5 <= _expires(storage.generate_upload_url(1, _SHA).upload_url) <= 1200 - 60
+            capped = direct_storage_from_env({**base, "VGI_STORAGE_S3_SESSION_EXPIRES": raw})
+            assert capped is not None and capped.startup_warnings() == []
+        with pytest.raises(ValueError, match="RFC 3339"):
+            s3_storage_from_env({**base, "VGI_STORAGE_S3_SESSION_EXPIRES": "tomorrow"})
+
+    def test_gcs_verify_variable(self) -> None:
+        """VGI_STORAGE_GCS_VERIFY=1 asks for the startup bucket check."""
+        pytest.importorskip("google.cloud.storage")
+        cfg = direct_storage_from_env({"VGI_STORAGE_GCS_BUCKET": "g", "VGI_STORAGE_GCS_VERIFY": "1"})
+        assert cfg is not None and cfg.backend == "gcs" and cfg.verify_at_startup
+
+    def test_function_storage_uses_the_fs_area(self) -> None:
+        """Function-storage blobs go under <prefix>fs/."""
+        from vgi_rpc.storage_env import function_blob_client_from_env
+
+        client = function_blob_client_from_env({"VGI_STORAGE_S3_BUCKET": "b", "VGI_STORAGE_S3_PREFIX": "p/"})
+        assert client is not None and client._prefix == "p/fs/"
+        assert function_blob_client_from_env({}) is None
 
     def test_checksum_none_disables_grants(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """checksum=none: results still externalize, but no upload-URL provider (no grants advertised)."""
@@ -244,7 +285,7 @@ class TestDirectStorage:
         )
         assert (g.bucket, g.prefix, g.endpoint_url, g.credentials_file, g.presign_expiry_seconds) == (
             "gb",
-            "x/",
+            "x/rpc/",
             "http://127.0.0.1:4443",
             "/etc/sa.json",
             600,
@@ -363,8 +404,27 @@ def test_object_store_blob_client() -> None:
         store.objects[ref.object_id] = b"HELLO"
         with pytest.raises(VendorError, match="SHA-256"):
             blobs.get_bytes(ref)
-        assert blobs.delete([ref]) == 0 and blobs.delete_scope("s", "e") == 0
+        assert blobs.delete_scope("s", "e") == 0
+        assert blobs.delete([ref]) == 0  # the memory store has no delete_object: nothing issued
         assert ref.object_id in store.objects
+
+
+def test_object_store_blob_client_deletes_best_effort() -> None:
+    """Deletes are issued with the prefix and failures are ignored."""
+    store = _MemoryStore(prefix="p/fs/")
+    deleted: list[str] = []
+
+    def delete_object(key: str) -> None:
+        if key.endswith("boom.bin"):
+            raise RuntimeError("storage down")
+        deleted.append(key)
+        store.objects.pop(key, None)
+
+    store.delete_object = delete_object  # type: ignore[attr-defined]
+    blobs = ObjectStoreBlobClient(store)
+    ref = blobs.put_bytes(b"x")
+    assert blobs.delete([ref, "boom.bin"]) == 1
+    assert deleted == [f"p/fs/{ref.object_id}"]
 
 
 def test_object_store_blob_client_strips_the_prefix() -> None:
@@ -464,7 +524,11 @@ class TestS3CompatHttp:
         storage.verify()
         with httpx2.Client() as http:
             _exercise(storage, http)
-        assert urlsplit(storage.generate_upload_url(1, _SHA).upload_url).path.startswith(f"/{bucket}/vgi/")
+        assert urlsplit(storage.generate_upload_url(1, _SHA).upload_url).path.startswith(f"/{bucket}/vgi/rpc/")
+        storage.delete_object(key := storage.put_object(b"gone"))
+        with pytest.raises(ObjectMissingError):
+            storage.get(key)
+        storage.delete_object("vgi/rpc/never-existed.bin")  # best effort: no error
 
     def test_session_token_from_sts(self, bucket: str) -> None:
         """Temporary keys + session token from STS AssumeRole, all roles."""

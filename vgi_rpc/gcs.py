@@ -328,6 +328,18 @@ class GCSStorage:
         )
         return blob_name
 
+    def delete_object(self, object_id: str) -> None:
+        """Delete the object *object_id* (a blob name); best effort, failures are logged and ignored.
+
+        Args:
+            object_id: The blob name.
+
+        """
+        try:
+            self._get_client().bucket(self.bucket).blob(object_id).delete(timeout=self._read_timeout())
+        except Exception as exc:
+            _logger.debug("GCS delete failed (ignored): name=%s %s", object_id, type(exc).__name__)
+
     def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
         """Fetch the object *object_id* (a blob name) names (``ObjectStore``).
 
