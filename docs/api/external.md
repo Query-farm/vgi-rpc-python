@@ -390,6 +390,35 @@ with VendorBlobClient.from_env() as blobs:
 | `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS` | Stall timeout for every storage transfer (vendor signed-URL PUT/GET, `storage_put`, `fetch_url`, `S3Storage`, `GCSStorage`): a transfer fails when no bytes move for this many seconds. Default 30. |
 | `VGI_RPC_MAX_REQUEST_BYTES` | Request-body cap for `run_server --http` (`--max-request-bytes`); clients send larger requests through vendor upload URLs. Without a cap, clients never upload. |
 
+### Direct S3 / GCS storage (no vendor)
+
+A self-hosted server can keep large values in the operator's own bucket
+instead of the blob vendor. `vgi_rpc.storage_env.direct_storage_from_env()`
+builds the server config (`external_location`, `upload_url_provider`) from the
+same variables every VGI SDK reads:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `VGI_STORAGE_BACKEND` | `vendor`, `s3`, `gcs` or `none`. Unset: `vendor` if `VGI_BLOB_VENDOR_URL` is set, else `s3` if `VGI_STORAGE_S3_BUCKET`, else `gcs` if `VGI_STORAGE_GCS_BUCKET`, else `none`. Two of those set without this is a startup error. | inferred |
+| `VGI_STORAGE_S3_BUCKET` | Bucket (required for `s3`) | |
+| `VGI_STORAGE_S3_PREFIX` | Key prefix | empty |
+| `VGI_STORAGE_S3_ENDPOINT` | Custom endpoint (MinIO, Ceph, R2, Wasabi, B2, LocalStack), `https://` or `http://` | AWS |
+| `VGI_STORAGE_S3_REGION` | Signing region (`auto` for R2) | `AWS_REGION`, `AWS_DEFAULT_REGION`, `us-east-1` |
+| `VGI_STORAGE_S3_FORCE_PATH_STYLE` | Bucket in the path | `true` with an endpoint |
+| `VGI_STORAGE_S3_PUBLIC_ENDPOINT` | Endpoint used only in pre-signed URLs handed to clients | the endpoint |
+| `VGI_STORAGE_S3_CHECKSUM` | `sha256`, or `none` for stores that don't enforce `x-amz-checksum-sha256` (no upload grants then) | `sha256` |
+| `VGI_STORAGE_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_SESSION_TOKEN` | Explicit credentials; otherwise the AWS chain (env, profile incl. `credential_process` / `role_arn`, web identity, container, instance metadata) | AWS chain |
+| `VGI_STORAGE_S3_VERIFY` | `1`: HEAD the bucket at startup (otherwise on first use) | off |
+| `VGI_STORAGE_GCS_BUCKET` / `_PREFIX` / `_ENDPOINT` / `_CREDENTIALS_FILE` | GCS bucket, prefix, custom endpoint, service-account key (else ADC) | |
+| `VGI_STORAGE_URL_TTL_SECONDS` | Pre-signed URL lifetime; never longer than the signing credentials' remaining life minus 60 s | 3600 |
+| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | Allow `http://` pre-signed URLs (the extension needs `vgi_storage_allow_plain_http` too) | off |
+
+With a custom endpoint, botocore's automatic CRC32 on `PutObject` is turned
+off (`request_checksum_calculation="when_required"`), because several
+S3-compatible stores reject it; set `AWS_REQUEST_CHECKSUM_CALCULATION` to
+override. The worker never deletes objects: add a lifecycle rule expiring the
+prefix after one to two days.
+
 ### Storage timeouts
 
 Storage transfers have no whole-request deadline, so a large object on a slow

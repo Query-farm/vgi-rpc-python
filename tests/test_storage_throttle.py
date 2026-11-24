@@ -464,27 +464,27 @@ class TestBackendTimeouts:
 
 
 # ---------------------------------------------------------------------------
-# Custom S3 endpoint (MinIO), opt-in
+# Custom S3 endpoint (RustFS, MinIO, ...), opt-in
 # ---------------------------------------------------------------------------
 
-_MINIO = os.environ.get("VGI_TEST_MINIO_ENDPOINT", "")
+_MINIO = os.environ.get("VGI_TEST_S3_ENDPOINT", "")
 
 
-@pytest.mark.skipif(not _MINIO, reason="set VGI_TEST_MINIO_ENDPOINT (+ _ACCESS_KEY, _SECRET_KEY) to run")
-class TestMinioEndpoint:
+@pytest.mark.skipif(not _MINIO, reason="set VGI_TEST_S3_ENDPOINT (+ _ACCESS_KEY, _SECRET_KEY) to run")
+class TestS3CompatEndpoint:
     """S3Storage against a real S3-compatible server on a custom (http) endpoint."""
 
     @pytest.fixture
     def minio(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[object]:
-        """S3Storage on MinIO, path-style, with a fresh bucket."""
+        """S3Storage on the S3-compatible server, path-style, with a fresh bucket."""
         boto3 = pytest.importorskip("boto3")
         import uuid
 
         from vgi_rpc.s3 import S3Storage
 
         monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
-        monkeypatch.setenv("AWS_ACCESS_KEY_ID", os.environ["VGI_TEST_MINIO_ACCESS_KEY"])
-        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", os.environ["VGI_TEST_MINIO_SECRET_KEY"])
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", os.environ["VGI_TEST_S3_ACCESS_KEY"])
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", os.environ["VGI_TEST_S3_SECRET_KEY"])
         bucket = f"vgi-rpc-test-{uuid.uuid4().hex[:12]}"
         boto3.client("s3", endpoint_url=_MINIO, region_name="us-east-1").create_bucket(Bucket=bucket)
         yield S3Storage(bucket=bucket, endpoint_url=_MINIO, region_name="us-east-1", addressing_style="path")

@@ -90,6 +90,68 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  s3-compat:
+    # Direct S3 storage against a real, SigV4-validating S3-compatible server:
+    # RustFS (the same image vgi-rpc-java's storage-integration job uses) over
+    # plain http (path-style) and over TLS, with static keys and with STS
+    # AssumeRole session tokens (tests/test_storage_env.py, plus the throttle
+    # suite's S3 case). Skipped S3 cases fail the job.
+    name: Direct S3 (RustFS)
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      RUSTFS_IMAGE: ghcr.io/rustfs/rustfs@sha256:29c02251c085cb04edce556304a9ec0f8fba0c40300266cf4f3d953783fe2450
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+
+      - name: Start RustFS (http :9000, TLS :9443)
+        run: |
+          mkdir -p "$RUNNER_TEMP/certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 \
+            -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" \
+            -keyout "$RUNNER_TEMP/certs/rustfs_key.pem" -out "$RUNNER_TEMP/certs/rustfs_cert.pem"
+          chmod 644 "$RUNNER_TEMP"/certs/*
+          common=(-e RUSTFS_ACCESS_KEY=vgitestadmin -e RUSTFS_SECRET_KEY=vgitestsecret123 -e RUSTFS_CONSOLE_ENABLE=false)
+          docker run -d --name rustfs-http -p 127.0.0.1:9000:9000 "${common[@]}" "$RUSTFS_IMAGE"
+          docker run -d --name rustfs-tls -p 127.0.0.1:9443:9000 -v "$RUNNER_TEMP/certs:/certs:ro" \
+            -e RUSTFS_TLS_PATH=/certs "${common[@]}" "$RUSTFS_IMAGE"
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9000/health >/dev/null \
+              && curl -sf --cacert "$RUNNER_TEMP/certs/rustfs_cert.pem" https://127.0.0.1:9443/health >/dev/null \
+              && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:9000/health
+          curl -sf --cacert "$RUNNER_TEMP/certs/rustfs_cert.pem" https://127.0.0.1:9443/health
+
+      - name: Install dependencies
+        run: uv sync --all-extras --python 3.13
+
+      - name: Run direct-storage tests against RustFS
+        env:
+          VGI_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          VGI_TEST_S3_TLS_ENDPOINT: https://127.0.0.1:9443
+          VGI_TEST_S3_ACCESS_KEY: vgitestadmin
+          VGI_TEST_S3_SECRET_KEY: vgitestsecret123
+        run: |
+          export VGI_TEST_S3_CA_FILE="$RUNNER_TEMP/certs/rustfs_cert.pem"
+          set -o pipefail
+          # -rs lists skips: an S3 case that skips here is a lane failure in disguise.
+          uv run pytest -o addopts= -p no:cacheprovider -rs --timeout=120 \
+            tests/test_storage_env.py tests/test_storage_throttle.py 2>&1 | tee "$RUNNER_TEMP/pytest.out"
+          if grep -E "^SKIPPED.*VGI_TEST_S3" "$RUNNER_TEMP/pytest.out"; then
+            echo "::error::S3-compatible server tests skipped"; exit 1
+          fi
+
+      - name: RustFS logs
+        if: failure()
+        run: |
+          docker logs rustfs-http 2>&1 | tail -40
+          docker logs rustfs-tls 2>&1 | tail -40
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

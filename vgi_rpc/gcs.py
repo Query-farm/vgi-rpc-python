@@ -51,6 +51,7 @@ class _GCSPool:
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     client: Any = None
+    verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,12 @@ class GCSStorage:
         stall_timeout_seconds: Read timeout (no bytes arriving) for GCS
             requests.  ``None`` reads ``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS``
             (default 30).  Connect is bounded by 30 s.
+        endpoint_url: Custom JSON-API endpoint (an emulator such as
+            fake-gcs-server, or a GCS-compatible service); signed URLs
+            use it too.  ``None`` = Google.
+        credentials_file: Service-account key file; ``None`` uses
+            Application Default Credentials (``GOOGLE_APPLICATION_CREDENTIALS``,
+            workload identity, the metadata server).
         upload_floor_bytes_per_second: google-cloud-storage writes each
             upload request (at most 8 MiB) as one timed socket write, so an
             upload's read timeout is raised to cover a full request at this
@@ -92,6 +99,9 @@ class GCSStorage:
     project: str | None = None
     stall_timeout_seconds: float | None = None
     upload_floor_bytes_per_second: int = STORAGE_FLOOR_BYTES_PER_SECOND
+    endpoint_url: str | None = field(default=None, repr=False)
+    credentials_file: str | None = field(default=None, repr=False)
+    verify_bucket: bool = False
     _pool: _GCSPool = field(default_factory=_GCSPool, init=False, repr=False, compare=False, hash=False)
 
     def _get_client(self) -> Any:
@@ -101,8 +111,58 @@ class GCSStorage:
             if pool.client is None:
                 from google.cloud import storage
 
-                pool.client = storage.Client(project=self.project)
+                kwargs: dict[str, Any] = {"project": self.project}
+                if self.endpoint_url:
+                    kwargs["client_options"] = {"api_endpoint": self.endpoint_url}
+                if self.credentials_file:
+                    pool.client = storage.Client.from_service_account_json(self.credentials_file, **kwargs)
+                else:
+                    pool.client = storage.Client(**kwargs)
             return pool.client
+
+    def _signed_url(self, blob: Any, **kwargs: Any) -> str:
+        """Return a V4 signed URL on this storage's endpoint."""
+        if self.endpoint_url:
+            kwargs["api_access_endpoint"] = self.endpoint_url
+        url: str = blob.generate_signed_url(version="v4", **kwargs)
+        return url
+
+    def presign_hosts(self) -> frozenset[str]:
+        """Return the ``host[:port]`` values this storage's signed URLs use (for URL pinning)."""
+        from urllib.parse import urlsplit
+
+        return frozenset({urlsplit(self.endpoint_url or "https://storage.googleapis.com").netloc.lower()})
+
+    def verify(self) -> None:
+        """Check the bucket exists and is reachable; raise an actionable error otherwise.
+
+        Raises:
+            vgi_rpc.s3.StorageConfigError: The bucket is missing, access is
+                denied, or the endpoint is unreachable.
+
+        """
+        from vgi_rpc.s3 import StorageConfigError
+
+        where = f"endpoint {self.endpoint_url}" if self.endpoint_url else "Google Cloud Storage"
+        try:
+            exists = self._get_client().bucket(self.bucket).exists(timeout=self._read_timeout())
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code == 403:
+                raise StorageConfigError(
+                    f"Access denied to GCS bucket {self.bucket!r} at {where}: grant storage.objects.create/get "
+                    "and storage.buckets.get"
+                ) from None
+            raise StorageConfigError(
+                f"GCS bucket {self.bucket!r} check failed at {where}: {type(exc).__name__}"
+            ) from None
+        if not exists:
+            raise StorageConfigError(f"GCS bucket {self.bucket!r} does not exist at {where}")
+
+    def _ensure_verified(self) -> None:
+        if self.verify_bucket and not self._pool.verified:
+            self.verify()
+            self._pool.verified = True
 
     def _stall(self) -> float:
         return self.stall_timeout_seconds if self.stall_timeout_seconds is not None else storage_stall_timeout()
@@ -129,6 +189,7 @@ class GCSStorage:
             A signed URL that can be used to download the data.
 
         """
+        self._ensure_verified()
         client = self._get_client()
         bucket = client.bucket(self.bucket)
         ext = ".arrow.zst" if content_encoding == "zstd" else ".arrow"
@@ -157,8 +218,8 @@ class GCSStorage:
             raise
         duration_ms = (time.monotonic() - t0) * 1000
 
-        url: str = blob.generate_signed_url(
-            version="v4",
+        url: str = self._signed_url(
+            blob,
             expiration=timedelta(seconds=self.presign_expiry_seconds),
             method="GET",
         )
@@ -202,6 +263,7 @@ class GCSStorage:
         """
         if not is_sha256_hex(sha256_hex):
             raise ValueError("sha256 must be 64 lowercase hex characters")
+        self._ensure_verified()
         client = self._get_client()
         bucket = client.bucket(self.bucket)
         blob_name = f"{self.prefix}{uuid.uuid4().hex}.arrow"
@@ -210,15 +272,15 @@ class GCSStorage:
         expires_at = datetime.now(UTC) + expiration
         put_headers = {"x-goog-content-length-range": f"{size},{size}"}
 
-        put_url: str = blob.generate_signed_url(
-            version="v4",
+        put_url: str = self._signed_url(
+            blob,
             expiration=expiration,
             method="PUT",
             content_type="application/octet-stream",
             headers=put_headers,
         )
-        get_url: str = blob.generate_signed_url(
-            version="v4",
+        get_url: str = self._signed_url(
+            blob,
             expiration=expiration,
             method="GET",
         )
@@ -252,6 +314,7 @@ class GCSStorage:
             The blob name (the ``object_id``).
 
         """
+        self._ensure_verified()
         client = self._get_client()
         blob_name = f"{self.prefix}{uuid.uuid4().hex}.bin"
         blob = client.bucket(self.bucket).blob(blob_name, chunk_size=_UPLOAD_CHUNK_BYTES)
@@ -278,6 +341,7 @@ class GCSStorage:
             ValueError: The object is larger than *max_bytes*.
 
         """
+        self._ensure_verified()
         limit = max_bytes if max_bytes is not None else DEFAULT_MAX_FETCH_BYTES
         blob = self._get_client().bucket(self.bucket).get_blob(object_id, timeout=self._read_timeout())
         if blob is None:
