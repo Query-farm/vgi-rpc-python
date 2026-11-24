@@ -440,6 +440,11 @@ class ObjectStoreBlobClient:
     verify the size and SHA-256 recorded in the :class:`BlobRef`.  Deletes
     are no-ops: the worker never deletes from the operator's bucket (its
     lifecycle rule does).
+
+    The store's key prefix (``prefix``, e.g. ``vgi/``) is stripped from the
+    returned ``object_id`` and added back on read, so ids stay within the
+    vendor's object-id charset (``[A-Za-z0-9._:-]``, no ``/``) that stored
+    function-storage pointers use in every SDK.
     """
 
     def __init__(self, store: ObjectStore, *, max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES) -> None:
@@ -452,6 +457,8 @@ class ObjectStoreBlobClient:
         """
         self._store = store
         self._max = max_fetch_bytes
+        prefix = getattr(store, "prefix", "")
+        self._prefix = prefix if isinstance(prefix, str) else ""
 
     def put_bytes(self, data: bytes, *, scope: object = None, idempotency_key: str | None = None) -> BlobRef:
         """Store *data*; return its reference (``scope`` / ``idempotency_key`` are vendor-only, ignored).
@@ -468,7 +475,8 @@ class ObjectStoreBlobClient:
         from vgi_rpc.vendor import BlobRef
 
         del scope, idempotency_key
-        object_id = self._store.put_object(data)
+        key = self._store.put_object(data)
+        object_id = key[len(self._prefix) :] if self._prefix and key.startswith(self._prefix) else key
         return BlobRef(object_id=object_id, size=len(data), sha256=hashlib.sha256(data).hexdigest())
 
     def get_bytes(self, ref: BlobRef) -> bytes:
@@ -489,7 +497,7 @@ class ObjectStoreBlobClient:
 
         if ref.size > self._max:
             raise VendorError(f"Blob {ref.object_id} is {ref.size} bytes, over max_fetch_bytes ({self._max})")
-        data = self._store.get(ref.object_id, max_bytes=self._max)
+        data = self._store.get(self._prefix + ref.object_id, max_bytes=self._max)
         if len(data) != ref.size:
             raise VendorError(
                 f"Blob {ref.object_id} size mismatch: expected {ref.size}, got {len(data)}", code="size_mismatch"

@@ -338,11 +338,12 @@ class TestUrlLifetime:
 
 
 class _MemoryStore:
-    def __init__(self) -> None:
+    def __init__(self, prefix: str = "") -> None:
+        self.prefix = prefix
         self.objects: dict[str, bytes] = {}
 
     def put_object(self, data: bytes) -> str:
-        key = uuid.uuid4().hex
+        key = f"{self.prefix}{uuid.uuid4().hex}.bin"
         self.objects[key] = data
         return key
 
@@ -364,6 +365,15 @@ def test_object_store_blob_client() -> None:
             blobs.get_bytes(ref)
         assert blobs.delete([ref]) == 0 and blobs.delete_scope("s", "e") == 0
         assert ref.object_id in store.objects
+
+
+def test_object_store_blob_client_strips_the_prefix() -> None:
+    """Ids carry no prefix (function-storage pointers forbid '/'); reads add it back."""
+    store = _MemoryStore(prefix="vgi/fs/")
+    blobs = ObjectStoreBlobClient(store)
+    ref = blobs.put_bytes(b"abc")
+    assert "/" not in ref.object_id and f"vgi/fs/{ref.object_id}" in store.objects
+    assert blobs.get_bytes(ref) == b"abc"
 
 
 # ---------------------------------------------------------------------------
