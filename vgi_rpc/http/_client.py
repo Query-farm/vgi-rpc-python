@@ -12,7 +12,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import random
 import struct
+import time
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -31,7 +33,12 @@ from vgi_rpc.external import (
     make_external_location_batch,
     resolve_external_location,
 )
-from vgi_rpc.external_fetch import redact_httpx_logging
+from vgi_rpc.external_fetch import (
+    DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+    iter_upload_chunks,
+    redact_httpx_logging,
+    storage_stall_timeout,
+)
 from vgi_rpc.log import Message
 from vgi_rpc.metadata import (
     CALL_STATE_KEY,
@@ -206,8 +213,28 @@ def _prepare_request_body(
     return _compress_with_encoding(encoding, content, level=level)
 
 
-#: Timeout for a PUT to a pre-signed storage URL when no RPC client timeout applies.
-DEFAULT_STORAGE_TIMEOUT = 300.0
+#: Attempts for a PUT to a pre-signed storage URL (transport errors, 429 and
+#: 5xx are retried with capped exponential backoff).
+STORAGE_PUT_ATTEMPTS = 3
+_STORAGE_PUT_BACKOFF_SECONDS = 0.25
+_STORAGE_PUT_MAX_BACKOFF_SECONDS = 5.0
+
+
+def storage_timeout() -> httpx2.Timeout:
+    """Connect + stall timeouts for a storage request (no whole-request deadline).
+
+    Connect (and pool wait) is 30 s; each socket read and write is bounded by
+    the stall timeout (``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS``, default
+    30 s), so a slow but progressing transfer is never cut off.
+    """
+    stall = storage_stall_timeout()
+    return httpx2.Timeout(
+        connect=DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+        read=stall,
+        write=stall,
+        pool=DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+    )
+
 
 #: Content-Type for PUTs to server-vended upload URLs.  application/octet-stream,
 #: not the Arrow media type: a pre-signed URL that signs the content type
@@ -220,7 +247,7 @@ def storage_put(
     body: bytes,
     *,
     headers: Mapping[str, str] | None = None,
-    timeout: httpx2.Timeout | float | None = DEFAULT_STORAGE_TIMEOUT,
+    timeout: httpx2.Timeout | float | None = None,
 ) -> httpx2.Response:
     """PUT *body* to a pre-signed storage URL on a bare, single-use client.
 
@@ -232,22 +259,50 @@ def storage_put(
     ``Content-Type: application/octet-stream``) plus what HTTP itself needs,
     and does not follow redirects.
 
+    The body is written in 64 KiB pieces with an explicit ``Content-Length``,
+    so the stall timeout bounds each write rather than the whole body.
+    Transport errors (connect, stall), 429 and 5xx are retried up to
+    :data:`STORAGE_PUT_ATTEMPTS` times; a retry resends the whole body (a
+    pre-signed PUT cannot resume), but a transfer that is still moving bytes
+    is never interrupted.
+
     Args:
         url: The pre-signed upload URL.
         body: The bytes to upload.
         headers: Exact headers to send; defaults to the octet-stream
             Content-Type.
-        timeout: Request timeout.
+        timeout: httpx timeout (applies per connect / read / write).  ``None``
+            uses :func:`storage_timeout`.
 
     Returns:
-        The response (already read and closed).
+        The response (already read and closed); after the last attempt, the
+        last 429/5xx response.
+
+    Raises:
+        httpx2.TransportError: Every attempt failed in transport.
 
     """
     redact_httpx_logging()
     request_headers = dict(headers) if headers is not None else {"Content-Type": _UPLOAD_CONTENT_TYPE}
-    with httpx2.Client(timeout=timeout, follow_redirects=False) as bare:
-        request = httpx2.Request("PUT", url, headers=request_headers, content=body)
-        return bare.send(request, auth=None)
+    if not any(k.lower() == "content-length" for k in request_headers):
+        request_headers["Content-Length"] = str(len(body))
+    with httpx2.Client(timeout=storage_timeout() if timeout is None else timeout, follow_redirects=False) as bare:
+        for attempt in range(STORAGE_PUT_ATTEMPTS):
+            if attempt:
+                delay = min(_STORAGE_PUT_BACKOFF_SECONDS * (2 ** (attempt - 1)), _STORAGE_PUT_MAX_BACKOFF_SECONDS)
+                time.sleep(delay * (0.5 + random.random() / 2))
+            last = attempt + 1 == STORAGE_PUT_ATTEMPTS
+            request = httpx2.Request("PUT", url, headers=request_headers, content=iter_upload_chunks(body))
+            try:
+                resp = bare.send(request, auth=None)
+            except httpx2.TransportError:
+                if last:
+                    raise
+                continue
+            if (resp.status_code == 429 or resp.status_code >= 500) and not last:
+                continue
+            return resp
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _require_upload_url_v2(capabilities: HttpServerCapabilities) -> None:
@@ -327,7 +382,7 @@ def _externalize_via_upload_url(
     if url_validator is not None:
         url_validator(vended.upload_url)
         url_validator(vended.download_url)
-    put_resp = storage_put(vended.upload_url, body, headers=upload_put_headers(vended), timeout=client.timeout)
+    put_resp = storage_put(vended.upload_url, body, headers=upload_put_headers(vended))
     if not (200 <= put_resp.status_code < 300):
         code = _storage_error_code(put_resp.content)
         raise RpcError(

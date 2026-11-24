@@ -197,7 +197,9 @@ fetch_config = FetchConfig(
     parallel_threshold_bytes=64 * 1024 * 1024,  # 64 MiB
     chunk_size_bytes=8 * 1024 * 1024,            # 8 MiB chunks
     max_parallel_requests=8,                      # concurrent fetches
-    timeout_seconds=60.0,                         # overall deadline
+    connect_timeout_seconds=30.0,                 # TCP + TLS connect
+    stall_timeout_seconds=None,                   # no bytes for N s fails; None = env / 30 s
+    timeout_seconds=None,                         # optional per-request deadline (none by default)
     max_fetch_bytes=256 * 1024 * 1024,            # 256 MiB hard cap
     speculative_retry_multiplier=2.0,             # hedge at 2x median
     max_speculative_hedges=4,                     # max hedge requests
@@ -385,7 +387,23 @@ with VendorBlobClient.from_env() as blobs:
 | `VGI_RPC_EXTERNAL_COMPRESSION` | `none` (default), `zstd` or `gzip`, optionally `:<level>`. |
 | `VGI_RPC_MAX_UPLOAD_BYTES` | Largest client upload, advertised as `VGI-Max-Upload-Bytes`. Unset: the inbound fetch cap below, so a server that vends upload URLs always advertises a limit. |
 | `VGI_RPC_MAX_FETCH_BYTES` | Largest request the server fetches from an inbound pointer (`max_fetch_bytes`). Default 256 MiB, raised to `VGI_RPC_MAX_UPLOAD_BYTES` when that is larger; setting both with the upload cap above the fetch cap is a startup error. |
+| `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS` | Stall timeout for every storage transfer (vendor signed-URL PUT/GET, `storage_put`, `fetch_url`, `S3Storage`, `GCSStorage`): a transfer fails when no bytes move for this many seconds. Default 30. |
 | `VGI_RPC_MAX_REQUEST_BYTES` | Request-body cap for `run_server --http` (`--max-request-bytes`); clients send larger requests through vendor upload URLs. Without a cap, clients never upload. |
+
+### Storage timeouts
+
+Storage transfers have no whole-request deadline, so a large object on a slow
+but working link is never cut off. Each request is bounded by a 30 s connect
+timeout and a stall timeout (`VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`, default
+30 s): it fails only when no bytes move for that long. Upload bodies are
+written in 64 KiB pieces so the stall timeout applies to each piece. Connect
+errors, stalls, 429 and 5xx get 3 attempts with exponential backoff (0.25 s
+base, 5 s cap, jittered); a retried PUT resends the whole body, since
+pre-signed uploads cannot resume. Vendor API calls (`/v1/info`, grants) keep
+their per-phase `timeout` (default 30 s). `GCSStorage` is the one exception to
+"no deadline": google-cloud-storage writes each upload request (at most
+8 MiB) as one timed write, so its read timeout is raised to cover that request
+at `upload_floor_bytes_per_second` (default 64 KiB/s, i.e. 128 s).
 
 A server never advertises an upload size it would then refuse to fetch:
 `make_wsgi_app` / `serve_http` default `max_upload_bytes` to the server's

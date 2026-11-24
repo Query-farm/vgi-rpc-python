@@ -29,11 +29,20 @@ from vgi_rpc.external import (
     UploadUrlProvider,
     is_sha256_hex,
 )
-from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
+from vgi_rpc.external_fetch import (
+    DEFAULT_MAX_FETCH_BYTES,
+    DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+    STORAGE_FLOOR_BYTES_PER_SECOND,
+    storage_stall_timeout,
+)
 
 _logger = logging.getLogger(__name__)
 
 __all__ = ["GCSStorage"]
+
+#: Upload request size: uploads over 8 MiB go resumable in 8 MiB chunks (a
+#: multiple of 256 KiB, as GCS requires), so no single request is larger.
+_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 
 
 @dataclass
@@ -60,6 +69,17 @@ class GCSStorage:
         presign_expiry_seconds: Lifetime of signed GET URLs.
         project: GCS project ID (``None`` uses Application Default
             Credentials default project).
+        stall_timeout_seconds: Read timeout (no bytes arriving) for GCS
+            requests.  ``None`` reads ``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS``
+            (default 30).  Connect is bounded by 30 s.
+        upload_floor_bytes_per_second: google-cloud-storage writes each
+            upload request (at most 8 MiB) as one timed socket write, so an
+            upload's read timeout is raised to cover a full request at this
+            rate (default 64 KiB/s: 128 s for an 8 MiB chunk).
+
+    Uploads are retried on transient errors with the library's default retry
+    (429, 5xx, connection errors); every object name is fresh, so a retried
+    upload cannot overwrite another object.
 
     .. _Object Lifecycle Management:
        https://cloud.google.com/storage/docs/lifecycle
@@ -70,6 +90,8 @@ class GCSStorage:
     prefix: str = "vgi-rpc/"
     presign_expiry_seconds: int = 3600
     project: str | None = None
+    stall_timeout_seconds: float | None = None
+    upload_floor_bytes_per_second: int = STORAGE_FLOOR_BYTES_PER_SECOND
     _pool: _GCSPool = field(default_factory=_GCSPool, init=False, repr=False, compare=False, hash=False)
 
     def _get_client(self) -> Any:
@@ -81,6 +103,18 @@ class GCSStorage:
 
                 pool.client = storage.Client(project=self.project)
             return pool.client
+
+    def _stall(self) -> float:
+        return self.stall_timeout_seconds if self.stall_timeout_seconds is not None else storage_stall_timeout()
+
+    def _read_timeout(self) -> tuple[float, float]:
+        """``(connect, read)`` for downloads and metadata calls."""
+        return (DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS, self._stall())
+
+    def _upload_timeout(self, size: int) -> tuple[float, float]:
+        """``(connect, read)`` for an upload: the read timeout covers one request at the floor rate."""
+        per_request = min(size, _UPLOAD_CHUNK_BYTES) / max(1, self.upload_floor_bytes_per_second)
+        return (DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS, max(self._stall(), per_request))
 
     def upload(self, data: bytes, schema: pa.Schema, *, content_encoding: str | None = None) -> str:
         """Upload IPC data to GCS and return a signed GET URL.
@@ -99,12 +133,19 @@ class GCSStorage:
         bucket = client.bucket(self.bucket)
         ext = ".arrow.zst" if content_encoding == "zstd" else ".arrow"
         blob_name = f"{self.prefix}{uuid.uuid4().hex}{ext}"
-        blob = bucket.blob(blob_name)
+        blob = bucket.blob(blob_name, chunk_size=_UPLOAD_CHUNK_BYTES)
         if content_encoding is not None:
             blob.content_encoding = content_encoding
         t0 = time.monotonic()
         try:
-            blob.upload_from_string(data, content_type="application/octet-stream")
+            from google.cloud.storage.retry import DEFAULT_RETRY
+
+            blob.upload_from_string(
+                data,
+                content_type="application/octet-stream",
+                timeout=self._upload_timeout(len(data)),
+                retry=DEFAULT_RETRY,
+            )
         except Exception as exc:
             _logger.error(
                 "GCS upload failed: bucket=%s key=%s",
@@ -213,8 +254,13 @@ class GCSStorage:
         """
         client = self._get_client()
         blob_name = f"{self.prefix}{uuid.uuid4().hex}.bin"
-        blob = client.bucket(self.bucket).blob(blob_name)
-        blob.upload_from_string(data, content_type="application/octet-stream", if_generation_match=0)
+        blob = client.bucket(self.bucket).blob(blob_name, chunk_size=_UPLOAD_CHUNK_BYTES)
+        blob.upload_from_string(
+            data,
+            content_type="application/octet-stream",
+            if_generation_match=0,
+            timeout=self._upload_timeout(len(data)),
+        )
         return blob_name
 
     def get(self, object_id: str, *, max_bytes: int | None = None) -> bytes:
@@ -233,12 +279,12 @@ class GCSStorage:
 
         """
         limit = max_bytes if max_bytes is not None else DEFAULT_MAX_FETCH_BYTES
-        blob = self._get_client().bucket(self.bucket).get_blob(object_id)
+        blob = self._get_client().bucket(self.bucket).get_blob(object_id, timeout=self._read_timeout())
         if blob is None:
             raise ObjectMissingError("GCS object is gone")
         if blob.size is not None and blob.size > limit:
             raise ValueError(f"GCS object is {blob.size} bytes, over max_fetch_bytes ({limit})")
-        data: bytes = blob.download_as_bytes(raw_download=True)
+        data: bytes = blob.download_as_bytes(raw_download=True, timeout=self._read_timeout())
         if len(data) > limit:
             raise ValueError(f"GCS object exceeds max_fetch_bytes ({limit})")
         return data

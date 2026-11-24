@@ -1585,7 +1585,13 @@ class TestGCSStorage:
 
         assert url == "https://storage.googleapis.com/signed-url"
         mock_client.bucket.assert_called_once_with("test-bucket")
-        mock_blob.upload_from_string.assert_called_once_with(ipc_bytes, content_type="application/octet-stream")
+        from google.cloud.storage.retry import DEFAULT_RETRY
+
+        # Connect 30 s; read 30 s (the stall timeout) -- a small object needs
+        # no floor-rate allowance.  Transient failures retry.
+        mock_blob.upload_from_string.assert_called_once_with(
+            ipc_bytes, content_type="application/octet-stream", timeout=(30.0, 30.0), retry=DEFAULT_RETRY
+        )
         mock_blob.generate_signed_url.assert_called_once()
         call_kwargs = mock_blob.generate_signed_url.call_args
         assert call_kwargs.kwargs["version"] == "v4"
@@ -1619,7 +1625,7 @@ class TestGCSStorage:
         _, _, _, mock_blob = _gcs_mocks
         uploaded: dict[str, bytes] = {}
 
-        def capture_upload(data: bytes, content_type: str = "") -> None:
+        def capture_upload(data: bytes, content_type: str = "", **_kwargs: object) -> None:
             uploaded["data"] = data
 
         mock_blob.upload_from_string.side_effect = capture_upload

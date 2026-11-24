@@ -76,7 +76,7 @@ import os
 import random
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
@@ -93,10 +93,13 @@ from vgi_rpc.external import (
 )
 from vgi_rpc.external_fetch import (
     DEFAULT_MAX_FETCH_BYTES,
+    DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
     FetchConfig,
     fetch_url,
+    iter_upload_chunks,
     redact_httpx_logging,
     redact_url,
+    storage_stall_timeout,
 )
 
 if TYPE_CHECKING:
@@ -520,6 +523,7 @@ class _VendorApi:
         session: httpx2.Client | None,
         max_attempts: int,
         backoff_seconds: float,
+        stall_timeout: float | None = None,
     ) -> None:
         parts = urlsplit(url)
         if parts.scheme not in ("https", "http") or not parts.hostname:
@@ -535,6 +539,8 @@ class _VendorApi:
         self.base_url = url.rstrip("/")
         self._token = token
         self._timeout = timeout
+        # Storage transfers get a stall timeout, never a whole-request one.
+        self._stall_timeout = stall_timeout if stall_timeout is not None else storage_stall_timeout()
         self._max_attempts = max_attempts
         self._backoff = backoff_seconds
         self._own_session = session is None
@@ -558,7 +564,7 @@ class _VendorApi:
         # session: that may carry default headers, cookies, an auth flow or
         # event hooks, all of which would reach the storage host.
         if self._storage is None:
-            self._storage = _new_storage_client(self._timeout)
+            self._storage = _new_storage_client(self._stall_timeout)
         return self._storage
 
     def close(self) -> None:
@@ -595,7 +601,16 @@ class _VendorApi:
                 delay = min(self._backoff * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
                 time.sleep(delay * (0.5 + random.random() / 2))
             try:
-                request = httpx2.Request(method, url, headers=dict(headers), content=content)
+                request_headers = dict(headers)
+                body: bytes | Iterator[bytes] | None = content
+                if storage and content is not None:
+                    # Hand the body over in small pieces so the stall timeout
+                    # bounds each write; one write of the whole body over TLS
+                    # would carry one deadline for all of it.
+                    if not any(k.lower() == "content-length" for k in request_headers):
+                        request_headers["Content-Length"] = str(len(content))
+                    body = iter_upload_chunks(content)
+                request = httpx2.Request(method, url, headers=request_headers, content=body)
                 resp = client.send(request, auth=None, follow_redirects=False)
             except httpx2.TransportError as exc:
                 # Never str(exc): httpx messages can embed the full URL.
@@ -820,10 +835,58 @@ def _download_capped(api: _VendorApi, url: str, max_bytes: int) -> bytes:
     )
 
 
-def _new_storage_client(timeout: float) -> httpx2.Client:
-    """Build the bare client used for storage-host (signed URL) requests."""
+def _is_transient_fetch_error(exc: BaseException) -> bool:
+    """Whether a :func:`fetch_url` failure is worth retrying (connect, stall, 429, 5xx)."""
+    import aiohttp
+
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return exc.status == 429 or exc.status >= 500
+    return isinstance(exc, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError, ConnectionError))
+
+
+def _fetch_with_retries(
+    api: _VendorApi, url: str, config: FetchConfig, url_validator: Callable[[str], None] | None
+) -> bytes:
+    """:func:`fetch_url` with the vendor retry policy for transient failures.
+
+    A transfer that is still moving bytes is never interrupted (the fetch has
+    no total deadline by default); only a failed attempt is retried.
+    """
+    for attempt in range(api._max_attempts):
+        if attempt:
+            delay = min(api._backoff * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
+            time.sleep(delay * (0.5 + random.random() / 2))
+        try:
+            return fetch_url(url, config, url_validator=url_validator)
+        except Exception as exc:
+            if attempt + 1 >= api._max_attempts or not _is_transient_fetch_error(exc):
+                raise
+            _logger.debug(
+                "Blob download transient failure (attempt %d/%d): %s %s",
+                attempt + 1,
+                api._max_attempts,
+                type(exc).__name__,
+                redact_url(url),
+            )
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _new_storage_client(stall_timeout: float) -> httpx2.Client:
+    """Build the bare client used for storage-host (signed URL) requests.
+
+    Connect is bounded by :data:`DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS`;
+    each socket read and write by *stall_timeout* (no bytes moving).  httpx
+    has no whole-request deadline, so a slow but progressing transfer runs to
+    completion.
+    """
     import httpx2
 
+    timeout = httpx2.Timeout(
+        connect=DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+        read=stall_timeout,
+        write=stall_timeout,
+        pool=DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+    )
     return httpx2.Client(timeout=timeout, follow_redirects=False)
 
 
@@ -882,6 +945,7 @@ class _VendorClientBase:
         max_attempts: int,
         backoff_seconds: float,
         info_ttl_seconds: float,
+        stall_timeout: float | None = None,
     ) -> None:
         self._api = _VendorApi(
             url,
@@ -890,6 +954,7 @@ class _VendorClientBase:
             session=session,
             max_attempts=max_attempts,
             backoff_seconds=backoff_seconds,
+            stall_timeout=stall_timeout,
         )
         self._validator = _VendorHostsValidator(self._api, info_ttl_seconds)
 
@@ -960,6 +1025,7 @@ class VendorStorage(_VendorClientBase):
         backoff_seconds: float = 0.25,
         info_ttl_seconds: float = _DEFAULT_INFO_TTL,
         pin_hosts: bool = True,
+        stall_timeout: float | None = None,
     ) -> None:
         """Create a vendor-backed storage.
 
@@ -968,7 +1034,8 @@ class VendorStorage(_VendorClientBase):
             token: Bearer token.
             purpose: Object purpose; ``"rpc"`` (default) gets a download URL
                 and the short lifecycle.
-            timeout: Per-request timeout in seconds.
+            timeout: Timeout in seconds for each phase (connect, read,
+                write) of a vendor API request (``/v1/info``, grants).
             session: Optional ``httpx2.Client`` for vendor API requests
                 (its transport only: requests carry exactly the vendor
                 headers, never its default headers, cookies or auth).
@@ -979,6 +1046,10 @@ class VendorStorage(_VendorClientBase):
             info_ttl_seconds: How long the ``/v1/info`` host pin is cached.
             pin_hosts: Check vended upload/download URLs against the
                 vendor's hosts before using them.
+            stall_timeout: Fail a storage transfer (signed-URL PUT or GET)
+                when no bytes move for this many seconds.  ``None`` reads
+                ``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`` (default 30).
+                Transfers have no total deadline.
 
         """
         super().__init__(
@@ -989,6 +1060,7 @@ class VendorStorage(_VendorClientBase):
             max_attempts=max_attempts,
             backoff_seconds=backoff_seconds,
             info_ttl_seconds=info_ttl_seconds,
+            stall_timeout=stall_timeout,
         )
         self._purpose: Purpose = purpose
         self._pin = pin_hosts
@@ -1176,6 +1248,7 @@ class VendorBlobClient(_VendorClientBase):
         backoff_seconds: float = 0.25,
         info_ttl_seconds: float = _DEFAULT_INFO_TTL,
         fetch_config: FetchConfig | None = None,
+        stall_timeout: float | None = None,
     ) -> None:
         """Create a blob client.
 
@@ -1183,7 +1256,8 @@ class VendorBlobClient(_VendorClientBase):
             url: Vendor base URL (``https``; ``http`` only for loopback).
             token: Bearer token.
             purpose: Object purpose (default ``"fs"``).
-            timeout: Per-request timeout in seconds.
+            timeout: Timeout in seconds for each phase (connect, read,
+                write) of a vendor API request (``/v1/info``, grants).
             session: Optional ``httpx2.Client`` for vendor API requests
                 (transport only; storage requests use a separate bare client).
             max_attempts: Attempts per vendor request.
@@ -1192,6 +1266,10 @@ class VendorBlobClient(_VendorClientBase):
             fetch_config: Download settings; ``max_fetch_bytes`` caps the
                 size of a blob ``get_bytes`` will fetch.  A config created
                 here is closed by :meth:`close`.
+            stall_timeout: Fail a signed-URL upload when no bytes move for
+                this many seconds.  ``None`` reads
+                ``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`` (default 30).
+                Downloads use ``fetch_config``'s stall timeout.
 
         """
         super().__init__(
@@ -1202,6 +1280,7 @@ class VendorBlobClient(_VendorClientBase):
             max_attempts=max_attempts,
             backoff_seconds=backoff_seconds,
             info_ttl_seconds=info_ttl_seconds,
+            stall_timeout=stall_timeout,
         )
         self._purpose: Purpose = purpose
         self._own_fetch = fetch_config is None
@@ -1289,7 +1368,7 @@ class VendorBlobClient(_VendorClientBase):
                 code="size_mismatch",
             )
         try:
-            data = fetch_url(location.download_url, self._fetch, url_validator=self._validator)
+            data = _fetch_with_retries(self._api, location.download_url, self._fetch, self._validator)
         except ValueError as exc:
             raise VendorError(f"Blob {ref.object_id} download rejected: {exc}") from None
         except RuntimeError as exc:

@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import pyarrow as pa
 
@@ -31,7 +32,11 @@ from vgi_rpc.external import (
     UploadUrlProvider,
     sha256_b64_from_hex,
 )
-from vgi_rpc.external_fetch import DEFAULT_MAX_FETCH_BYTES
+from vgi_rpc.external_fetch import (
+    DEFAULT_MAX_FETCH_BYTES,
+    DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+    storage_stall_timeout,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -62,7 +67,18 @@ class S3Storage:
         presign_expiry_seconds: Lifetime of pre-signed GET URLs.
         region_name: AWS region (``None`` uses boto3 default).
         endpoint_url: Custom endpoint for S3-compatible services
-            (e.g. MinIO, LocalStack).
+            (e.g. MinIO, LocalStack, Cloudflare R2's S3 API); ``http://``
+            endpoints work.  Pre-signed URLs use this host.
+        addressing_style: ``"path"`` (``endpoint/bucket/key``, needed by
+            MinIO and Ceph without wildcard DNS), ``"virtual"``
+            (``bucket.endpoint/key``) or ``"auto"``; ``None`` keeps
+            botocore's default.
+        stall_timeout_seconds: Fail an S3 request when no bytes move for this
+            long (botocore ``read_timeout``, applied to each socket read and
+            write).  ``None`` reads ``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS``
+            (default 30).  Connect is bounded by 30 s.  Requests have no
+            total deadline; transient failures (connect errors, stalls, 429,
+            5xx) get 3 attempts (botocore "standard" retry mode).
 
     .. _S3 Lifecycle Policy:
        https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html
@@ -74,6 +90,8 @@ class S3Storage:
     presign_expiry_seconds: int = 3600
     region_name: str | None = None
     endpoint_url: str | None = field(default=None, repr=False)
+    addressing_style: Literal["auto", "path", "virtual"] | None = None
+    stall_timeout_seconds: float | None = None
     _pool: _S3Pool = field(default_factory=_S3Pool, init=False, repr=False, compare=False, hash=False)
 
     def _get_client(self) -> Any:
@@ -88,11 +106,20 @@ class S3Storage:
                 # (e.g. in us-east-1), which signs neither Content-Length nor
                 # x-amz-checksum-sha256 as headers, so a sized upload URL
                 # would not bind its body.
+                stall = (
+                    self.stall_timeout_seconds if self.stall_timeout_seconds is not None else storage_stall_timeout()
+                )
                 pool.client = boto3.client(
                     "s3",
                     region_name=self.region_name,
                     endpoint_url=self.endpoint_url,
-                    config=Config(signature_version="s3v4"),
+                    config=Config(
+                        signature_version="s3v4",
+                        connect_timeout=DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS,
+                        read_timeout=stall,
+                        retries={"total_max_attempts": 3, "mode": "standard"},
+                        s3={"addressing_style": self.addressing_style} if self.addressing_style else None,
+                    ),
                 )
             return pool.client
 
@@ -114,10 +141,13 @@ class S3Storage:
         ext = ".arrow.zst" if content_encoding == "zstd" else ".arrow"
         key = f"{self.prefix}{uuid.uuid4().hex}{ext}"
 
-        put_kwargs: dict[str, str | bytes] = {
+        put_kwargs: dict[str, Any] = {
             "Bucket": self.bucket,
             "Key": key,
-            "Body": data,
+            # A file object, not bytes: botocore then writes the body in small
+            # blocks, so the stall timeout bounds each write.  A bytes body
+            # over TLS is one write under one timeout for the whole object.
+            "Body": io.BytesIO(data),
             "ContentType": "application/octet-stream",
         }
         if content_encoding is not None:
@@ -222,7 +252,7 @@ class S3Storage:
         client.put_object(
             Bucket=self.bucket,
             Key=key,
-            Body=data,
+            Body=io.BytesIO(data),
             ContentLength=len(data),
             ChecksumSHA256=base64.b64encode(hashlib.sha256(data).digest()).decode("ascii"),
             ContentType="application/octet-stream",

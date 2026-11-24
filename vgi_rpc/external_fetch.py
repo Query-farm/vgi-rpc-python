@@ -29,10 +29,11 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 import re
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -46,8 +47,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_MAX_FETCH_BYTES",
+    "DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS",
+    "DEFAULT_STORAGE_STALL_TIMEOUT_SECONDS",
+    "ENV_STORAGE_STALL_TIMEOUT",
+    "STORAGE_FLOOR_BYTES_PER_SECOND",
+    "STORAGE_UPLOAD_CHUNK_BYTES",
     "FetchConfig",
     "fetch_url",
+    "iter_upload_chunks",
+    "storage_stall_timeout",
     "redact_httpx_logging",
     "redact_url",
 ]
@@ -60,6 +68,90 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 #: also the default inbound request cap for upload-URL pointers, and so the
 #: default ``VGI-Max-Upload-Bytes`` it advertises.
 DEFAULT_MAX_FETCH_BYTES = 256 * 1024 * 1024
+
+# ---------------------------------------------------------------------------
+# Storage transfer timeouts
+#
+# Every storage HTTP request (blob-vendor calls, PUT/GET on signed URLs, the
+# S3/GCS backends, ExternalLocation fetches) is bounded by a connect timeout
+# and a *stall* timeout: it fails when no bytes move, in either direction, for
+# that long.  There is no whole-request deadline, so a large transfer on a slow
+# but working link is never cut off -- and never retried from scratch.
+# ---------------------------------------------------------------------------
+
+#: Connect timeout (TCP + TLS) for every storage request, in seconds.
+DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS = 30.0
+
+#: Default stall timeout, in seconds: a storage transfer fails when no bytes
+#: are sent or received for this long.  Override with
+#: :data:`ENV_STORAGE_STALL_TIMEOUT`.
+DEFAULT_STORAGE_STALL_TIMEOUT_SECONDS = 30.0
+
+#: Environment variable overriding :data:`DEFAULT_STORAGE_STALL_TIMEOUT_SECONDS`
+#: (a positive number of seconds).
+ENV_STORAGE_STALL_TIMEOUT = "VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS"
+
+#: Upload bodies are written in pieces of at most this many bytes, so the
+#: stall timeout applies to each piece.  A single write of a whole body over
+#: TLS would carry one deadline for all of it (CPython's ``SSLSocket.send``
+#: writes the entire buffer under one timeout).
+STORAGE_UPLOAD_CHUNK_BYTES = 64 * 1024
+
+#: Slowest transfer rate assumed where a client library can only bound a whole
+#: request (the GCS backend): such a deadline is at least
+#: ``request bytes / STORAGE_FLOOR_BYTES_PER_SECOND``.
+STORAGE_FLOOR_BYTES_PER_SECOND = 64 * 1024
+
+
+def storage_stall_timeout(env: Mapping[str, str] | None = None) -> float:
+    """Return the storage stall timeout in seconds.
+
+    Reads :data:`ENV_STORAGE_STALL_TIMEOUT`; an unset, empty, non-numeric or
+    non-positive value gives :data:`DEFAULT_STORAGE_STALL_TIMEOUT_SECONDS`
+    (an invalid value is logged).
+
+    Args:
+        env: Environment mapping (defaults to ``os.environ``).
+
+    Returns:
+        The stall timeout in seconds.
+
+    """
+    raw = (os.environ if env is None else env).get(ENV_STORAGE_STALL_TIMEOUT, "").strip()
+    if not raw:
+        return DEFAULT_STORAGE_STALL_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if math.isfinite(value) and value > 0:
+        return value
+    _logger.warning(
+        "Ignoring %s=%r: expected a positive number of seconds; using %.0f",
+        ENV_STORAGE_STALL_TIMEOUT,
+        raw,
+        DEFAULT_STORAGE_STALL_TIMEOUT_SECONDS,
+    )
+    return DEFAULT_STORAGE_STALL_TIMEOUT_SECONDS
+
+
+def iter_upload_chunks(data: bytes, chunk_bytes: int = STORAGE_UPLOAD_CHUNK_BYTES) -> Iterator[bytes]:
+    """Yield *data* in pieces of at most *chunk_bytes*.
+
+    Passed as an HTTP request body (with an explicit ``Content-Length``) so
+    each piece is a separate socket write under the stall timeout.
+
+    Args:
+        data: The whole body.
+        chunk_bytes: Largest piece.
+
+    Yields:
+        Consecutive slices of *data*.
+
+    """
+    view = memoryview(data)
+    for start in range(0, len(view), chunk_bytes):
+        yield bytes(view[start : start + chunk_bytes])
 
 
 def redact_url(url: str) -> str:
@@ -161,7 +253,14 @@ class FetchConfig:
         parallel_threshold_bytes: Below this size, use a single GET.
         chunk_size_bytes: Size of each Range request chunk.
         max_parallel_requests: Semaphore limit on concurrent requests.
-        timeout_seconds: Overall deadline for the fetch.
+        timeout_seconds: Optional deadline for each request (probe, GET or
+            Range GET).  ``None`` (the default) sets none: a request is bounded
+            by ``connect_timeout_seconds`` and ``stall_timeout_seconds``
+            instead, so a slow but progressing download is never cut off.
+        connect_timeout_seconds: Connect timeout (TCP + TLS) per request.
+        stall_timeout_seconds: Fail a request when no bytes arrive for this
+            long.  ``None`` reads ``VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS``
+            (default 30 s).
         max_fetch_bytes: Hard cap on encoded/on-wire download size
             (default :data:`DEFAULT_MAX_FETCH_BYTES`, 256 MiB).  In a
             :class:`~vgi_rpc.external.ServerExternalConfig` it is the largest
@@ -187,7 +286,9 @@ class FetchConfig:
     parallel_threshold_bytes: int = 64 * 1024 * 1024
     chunk_size_bytes: int = 8 * 1024 * 1024
     max_parallel_requests: int = 8
-    timeout_seconds: float = 60.0
+    timeout_seconds: float | None = None
+    connect_timeout_seconds: float = DEFAULT_STORAGE_CONNECT_TIMEOUT_SECONDS
+    stall_timeout_seconds: float | None = None
     max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES
     max_decompressed_bytes: int | None = None
     max_redirects: int = 5
@@ -263,17 +364,25 @@ def _ensure_pool(config: FetchConfig) -> _FetchPool:
             pool.session = None  # will be created below
 
         if pool.session is None:
-            import aiohttp
-
             if pool.loop is None:  # pragma: no cover — unreachable after block above
                 raise RuntimeError("FetchPool event loop not initialized")
-            timeout = aiohttp.ClientTimeout(total=config.timeout_seconds)
+            timeout = _client_timeout(config)
             future = asyncio.run_coroutine_threadsafe(
                 _create_session(timeout),
                 pool.loop,
             )
             pool.session = future.result(timeout=5)
     return pool
+
+
+def _client_timeout(config: FetchConfig) -> aiohttp.ClientTimeout:
+    """Connect + stall (``sock_read``) timeouts; a total only when configured."""
+    import aiohttp
+
+    stall = config.stall_timeout_seconds if config.stall_timeout_seconds is not None else storage_stall_timeout()
+    return aiohttp.ClientTimeout(
+        total=config.timeout_seconds, sock_connect=config.connect_timeout_seconds, sock_read=stall
+    )
 
 
 async def _create_session(timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSession:
@@ -291,8 +400,6 @@ def _reset_session(config: FetchConfig, *, url: str = "") -> None:
     Used after ``ServerDisconnectedError`` to recover from stale pooled
     connections.
     """
-    import aiohttp
-
     _logger.warning(
         "Resetting aiohttp session due to stale connection",
         extra={"url": redact_url(url)},
@@ -304,7 +411,7 @@ def _reset_session(config: FetchConfig, *, url: str = "") -> None:
         if pool.session is not None:
             asyncio.run_coroutine_threadsafe(pool.session.close(), pool.loop).result(timeout=5)
             pool.session = None
-        timeout = aiohttp.ClientTimeout(total=config.timeout_seconds)
+        timeout = _client_timeout(config)
         future = asyncio.run_coroutine_threadsafe(
             _create_session(timeout),
             pool.loop,

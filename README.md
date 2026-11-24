@@ -1468,7 +1468,9 @@ storage = GCSStorage(
 | `parallel_threshold_bytes` | 64 MiB | Below this, use a single GET |
 | `chunk_size_bytes` | 8 MiB | Size of each Range request chunk |
 | `max_parallel_requests` | 8 | Concurrent request limit |
-| `timeout_seconds` | 60.0 | Overall fetch deadline |
+| `timeout_seconds` | `None` | Optional deadline per request; `None` sets none |
+| `connect_timeout_seconds` | 30.0 | Connect (TCP + TLS) timeout per request |
+| `stall_timeout_seconds` | `None` | Fail when no bytes arrive for this long; `None` reads `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS` (default 30) |
 | `max_fetch_bytes` | 256 MiB | Hard cap on total download size |
 | `speculative_retry_multiplier` | 2.0 | Hedge threshold (multiplier of median chunk time) |
 | `max_speculative_hedges` | 4 | Maximum number of hedge requests per fetch |
