@@ -2162,7 +2162,7 @@ this key exists to prevent.
 #### Negotiating a version (`PROTOCOL_VERSIONS_V1`)
 
 Normative in
-[`tools/cross-port/specs/PROTOCOL_VERSIONS_V1.md`](../tools/cross-port/specs/PROTOCOL_VERSIONS_V1.md);
+[`tools/cross-port/specs/PROTOCOL_VERSIONS_V1.md`](https://github.com/Query-farm/vgi-rpc-python/blob/main/tools/cross-port/specs/PROTOCOL_VERSIONS_V1.md);
 this is the wire summary.
 
 **Syntax.** `name=MIN-MAX[, name=MIN-MAX]...`, where `name` is the protocol's
